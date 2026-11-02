@@ -25,7 +25,7 @@ examples/lua/
   three_hour_clock.lua clock：距上次唤醒满 N 小时开一轮（默认 3）
   stop_command.lua     route：管理员 /stop，打断当前房间的轮次
   send_command.lua     route：管理员 /send，直接发消息、不叫醒 AI
-  b23_video.lua        route：匹配 b23/B 站链接，后台 yt-dlp 下载后发回原房间
+  b23_video.lua        route：匹配 b23/B 站链接，后台 yt-dlp 下载后发回原房间（先视频，不支持再发文件）
 ```
 
 路由按连接配置、按顺序执行，`pass` 才轮到下一个：

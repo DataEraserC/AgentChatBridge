@@ -515,6 +515,25 @@ fn parse_call_response(method: &str, value: Value) -> Result<Value, CallError> {
 
 /// 房间写法决定调哪个动作。路径是「段/段」，第一段说场所类型。
 fn action_of(room: &RoomId, elements: &[Element]) -> Result<(&'static str, Value), OutboundError> {
+    // OneBot 11 没有标准的 file 消息段，文件要走平台的上传动作；而且上传动作
+    // 只能单独发一个文件，不能和文字/图片混在一条消息里。
+    if let [Element::File { url, name }] = elements {
+        return match room.path.as_slice() {
+            [kind, id] if kind == "group" => Ok((
+                "upload_group_file",
+                json!({"group_id": id, "file": url, "name": name}),
+            )),
+            [kind, id] if kind == "private" => Ok((
+                "upload_private_file",
+                json!({"user_id": id, "file": url, "name": name}),
+            )),
+            _ => Err(OutboundError::Unsupported(format!(
+                "不认识的房间写法：{}（QQ 要写成 group/群号 或 private/号码）",
+                room.key()
+            ))),
+        };
+    }
+
     let message =
         to_onebot(elements).map_err(|error| OutboundError::Unsupported(error.to_string()))?;
 
@@ -588,6 +607,55 @@ mod tests {
         let (action, params) = action_of(&room, &[Element::text("hi")]).expect("能编");
         assert_eq!(action, "send_private_msg");
         assert_eq!(params["user_id"], "10001");
+    }
+
+    #[test]
+    fn group_file_maps_to_upload_group_file() {
+        let room = RoomId::new("qq", "group/456").expect("合法");
+        let (action, params) = action_of(
+            &room,
+            &[Element::File {
+                url: "/tmp/a.mp4".into(),
+                name: "a.mp4".into(),
+            }],
+        )
+        .expect("单个文件走上传");
+        assert_eq!(action, "upload_group_file");
+        assert_eq!(params["group_id"], "456");
+        assert_eq!(params["file"], "/tmp/a.mp4");
+        assert_eq!(params["name"], "a.mp4");
+    }
+
+    #[test]
+    fn private_file_maps_to_upload_private_file() {
+        let room = RoomId::new("qq", "private/10001").expect("合法");
+        let (action, params) = action_of(
+            &room,
+            &[Element::File {
+                url: "/tmp/a.zip".into(),
+                name: "a.zip".into(),
+            }],
+        )
+        .expect("单个文件走上传");
+        assert_eq!(action, "upload_private_file");
+        assert_eq!(params["user_id"], "10001");
+    }
+
+    #[test]
+    fn file_mixed_with_text_is_refused() {
+        let room = RoomId::new("qq", "group/456").expect("合法");
+        let error = action_of(
+            &room,
+            &[
+                Element::text("看这个"),
+                Element::File {
+                    url: "/tmp/a.zip".into(),
+                    name: "a.zip".into(),
+                },
+            ],
+        )
+        .expect_err("文件不能和文字混在一条消息");
+        assert!(matches!(error, OutboundError::Unsupported(_)));
     }
 
     #[test]

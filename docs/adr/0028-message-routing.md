@@ -23,6 +23,10 @@ AI 写 Lua 插件处理 `/send`、b23 链接等消息，这类触发不一定是
 路由判定本身在 core 锁内、必须快（Lua 50ms）。`send` / `task` 的准备在锁内完成，
 I/O 和执行在 `RouteWorker` 线程里，不挡入站队列，也不占全局锁。
 
+`task` 的产物可以给一串候选（如 `video → file`）：只有平台在编码阶段明确返回
+`Unsupported`（还没发出去）才换下一个；已经交给平台后的超时、拒收都不重试，
+避免同一条消息发两遍。
+
 `/stop` 因此从 core 移出：示例配置挂 `lua.stop_command`，它检查 `context.is_admin`
 和命令文本，返回 `interrupt(scope="room")`。命令不写流水；被主动停掉的轮次不按
 `on_turn_error` 发失败通知。非管理员发 `/stop` 只是普通消息。

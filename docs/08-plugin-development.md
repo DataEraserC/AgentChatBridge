@@ -204,6 +204,9 @@ return { decision = "wake", reason = "只有 @，等后续内容", delay_ms = 50
   - `interrupt`：`scope = "room"`（默认）/ `"connection"`，或 `sessions = { "main" }`。
   - `send`：`text` 或 `elements`，可选 `room`；发出去走正常发送钩子和文件中继。
   - `task`：`handler`（目前 `exec`）和 `params`；后台 worker 执行，完成后按结果发送。
+    `exec` 的 `params.send` 可以是字符串，也可以是候选数组（`send = { "video", "file" }`）：
+    按顺序尝试，只有平台在编码阶段返回 `Unsupported`（还没发出去）才换下一个；超时、
+    拒收不重试，避免同一条消息发两遍。OneBot 11 的 `file` 会走上传动作，只能单独发。
 - `store` 默认 `false`；`wake` 默认 `false`。`store=true, wake=false` 的记录会标成
   suppressed：归档备查，但不算未读、不叫醒 AI。`wake=true` 隐含 `store=true`。
 

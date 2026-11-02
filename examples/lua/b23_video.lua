@@ -46,7 +46,8 @@ return {
         cwd = dir,
         create_dir = true,
         timeout_ms = extra.timeout_ms or 600000,
-        send = "video",
+        -- 先试视频；平台不支持 video 时，worker 会在编码阶段换成文件再试。
+        send = { "video", "file" },
       },
     }
   end,
