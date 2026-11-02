@@ -1,10 +1,5 @@
-# graph-memory 是 profile 级插件，会看所有会话；ACB 的 preset 不要它。
-# 这里把顶层行关掉（patch 会整条替换，所以 name/config 也重述一遍）。
-- id: graph-memory
-  name: 'graph-memory/dsh'
-  disabled: true
-  config:
-    dbPath: !!js dshHomePath('graph-memory/graph-memory.db')
-
+# 一个 ACB 会话一条 preset，外加各自指向本地 MCP 端口的 client。
+# 这里只放 ACB 自己的 preset；profile 级的插件取舍（例如 graph-memory）
+# 属于部署侧，由 nix-config 的 profile patch 决定。
 - insert:
 @ROWS@
