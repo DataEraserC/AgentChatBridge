@@ -28,11 +28,10 @@
 - id: agent-default-model
   name: "@deepseek-ai/dsh-agent-default-model"
   config:
-    # trae 这个 provider 不是这里声明的，是 dsh-our-free-model 插件装进来的
-    # （它带 trae-adapter，模型名 deepseek-v4.1-flash 也由它引入）。
-    # 之前指到 new-api 网关的 1AgentRouter/gpt-5.6-sol，那个渠道回 content-blocked。
-    provider: trae
-    model: deepseek-v4.1-flash
+    # 统一走 new-api 网关，provider 在下面的 llm-pi-ai 里声明。
+    # 旧的 trae/deepseek-v4.1-flash 是 dsh-our-free-model 插件装进来的默认，不再使用。
+    provider: new-api-y9000p2025-openai-responses
+    model: 1Agent2Api/glm-5.3-flash
     reasoningEffort: high
 
 # 关键：内置 web 模板的 llm-pi-ai 是空配置，必须在这里把 new-api 的 provider
@@ -46,8 +45,12 @@
         apiKeyEnv: NEW_API_Y9000P2025_OPENAI_RESPONSES_API_KEY
         baseURL: http://localhost:1100/v1
         models:
-          - id: 1AgentRouter/gpt-5.6-sol
-            name: 1AgentRouter/gpt-5.6-sol
+          - id: 1Agent2Api/glm-5.3-flash
+            name: 1Agent2Api/glm-5.3-flash
+            # GLM 上游只认 system/user/assistant/tool；pi-ai 在 reasoning 模型上
+            # 默认用 developer 角色，new-api 会转成上游 400「角色信息不正确」。
+            compat:
+              supportsDeveloperRole: false
             reasoningEfforts:
               "off": null
               low: low

@@ -16,19 +16,19 @@
   // 格式干净规范，能稳定跑通。baseURL 直连 http://127.0.0.1:1100/v1 即可，无需 tls_proxy。
   "model": {
     "providerID": "arc",
-    "model": "1AgentRouter/gpt-5.6-sol"
+    "model": "1Agent2Api/glm-5.3-flash"
   },
   "provider": {
     "arc": {
       "npm": "@ai-sdk/openai",
-      "name": "AgentRouter (OpenAI Responses)",
+      "name": "New API (OpenAI Responses)",
       "options": {
         "baseURL": "http://127.0.0.1:1100/v1",
         "apiKey": "<模型网关的 apiKey>"
       },
       "models": {
-        "1AgentRouter/gpt-5.6-sol": {
-          "name": "gpt-5.6-sol",
+        "1Agent2Api/glm-5.3-flash": {
+          "name": "glm-5.3-flash",
           "limit": {
             "context": 200000,
             "output": 4096
