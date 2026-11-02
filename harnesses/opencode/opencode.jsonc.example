@@ -44,7 +44,10 @@
       "options": {
         "token": "<会话令牌，见 config.toml>",
         "harness": "opencode",
-        "endpoint": "127.0.0.1:7700"
+        "endpoint": "127.0.0.1:7700",
+        // opencode 没有 web，这行是看「它到底在干什么」的唯一窗口：
+        // 每轮的开轮/模型等待/收工/失败都会追加到这里（也可以设 ACB_OPENCODE_LOG）。
+        "logFile": "/path/to/agent-chat-bridge/state/logs/opencode-plugin.log"
       }
     }
   ]

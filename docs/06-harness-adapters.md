@@ -98,17 +98,46 @@ export ACB_ENDPOINT=127.0.0.1:7700  # 可选，默认就是这个
 
 几个刻意的做法：
 
-- **会话按记忆一份**，标题 `acb:<记忆名>`。会话 id 记在插件自己的 storage 里，重开接上，
-  找不到才新建；每次用前确认它还活着（用户在 TUI 里删了会话也能自愈）。
-  会话就是那份记忆（[ADR-0002](adr/0002-subscription-model.md)），重开 harness 不能失忆。桥在投递里带 `memory`，插件按它找会话，所以两台设备共用一份记忆时它们落在同一个会话里。
+- **一个 acb 会话一份 opencode 会话**，标题 `acb:<会话 id>`。会话 id 记在插件自己的 storage 里，
+  重开接上，找不到才新建；每次用前确认它还活着（用户在 TUI 里删了会话也能自愈）。
+  一个 acb 会话订两个房间时，两个房间共享同一份 opencode 上下文——这是「同一会话管多个群」
+  的代价，回复的默认房间由当前轮次的票决定，不会因为上下文里有别的群就发错。
 - **`prompt` 排话、`wait` 等它说完**，两个连起来才是一轮。v2 的 `prompt` 只保证把话排进
   会话，模型随后才跑；只看 `prompt` 返回就收工，会把票提前作废，工具调用全成
   `unauthorized`（假宿主测试里踩过这个）。
+- **同一连接的多个轮次必须串行**。桥允许一条 harness 连接同时跑多个 acb 会话（ADR-0019），
+  但工具调用只认「当前这一轮的票」。插件把 `turn_start` 排进队列，`endTurn` 之后才换下一张票；
+  不这样的话，后到的轮次会覆盖正在跑的票，工具调用就可能把话发到另一个房间（真实踩过的
+  「串群」就是这么来的）。
 - **工具只在轮次内可用**。没有票的调用一律 `unauthorized`。这样人在 TUI 里手动跟同一个实例
   聊天，也不会把话发到别人的房间里。
 - **失败也回 `turn_end`**。`prompt` 抛错、会话被删、连接断了，都带着错误收工——桥靠
   `turn_end` 或断连释放会话，不回就一直占着。
 - **断线自己重连**，退避 1 秒起、最长 10 秒。桥比 opencode 晚启动也能接上。
+
+### 没有 web 时怎么看它在干什么
+
+opencode 不像 dsh 有界面。插件选项里配了 `logFile` 之后（示例见
+[`opencode.jsonc.example`](../harnesses/opencode/opencode.jsonc.example)），
+它会把这些动作逐行追加进去：
+
+```bash
+tail -f state/logs/opencode-plugin.log
+```
+
+```
+2026-11-02T03:31:02Z info 插件加载 endpoint=127.0.0.1:7700 …
+2026-11-02T03:31:02Z info 已接入桥，绑定会话组 opencode-1093015329、opencode-1124995534
+2026-11-02T03:31:02Z info turn_start a-1 会话 … 房间 qq:group/…（队列 1）
+2026-11-02T03:31:02Z info 开轮 …：qq:group/…，3 条，opencode 会话 ses_…，模型 …
+2026-11-02T03:31:03Z info prompt 已发出 …，等待模型
+2026-11-02T03:31:09Z info 本轮完成 …，用时 6.2 秒，调用桥工具 2 次
+2026-11-02T03:31:09Z info turn_end …
+```
+
+看到「prompt 已发出」但很久没有「本轮完成」，就是模型还在跑；看到「本轮完成，
+调用桥工具 0 次」则是模型没说任何话（可能是会话坏了，控制台重置一下映射）。
+失败会直接写 `error` 行，带原因和耗时。
 
 ### 写 v2 插件绕不过去的几个坑（都是实测）
 
@@ -117,7 +146,7 @@ export ACB_ENDPOINT=127.0.0.1:7700  # 可选，默认就是这个
 | 插件放进去没反应，日志里连「loading plugin」都没有 | `.opencode/plugins/` 只自动发现**直接的 `.js` / `.ts` 文件**和**插件目录**；`.mjs` 文件不认。入口用 `index.js` |
 | `Cannot find package '@opencode/plugin'` | 本地插件不自动带这个包。不用它就行：直接 `export default { id, setup }`，功能一样（`Plugin.define` 只是语法糖） |
 | 插件一加载，opencode 报 `Transport: The socket connection was closed unexpectedly` | 插件里 `console.log` 写到了 **stdout**，而 `serve --stdio` 用 stdout 当 RPC 通道，协议被污染。日志只能走 `ctx.app.log` 或 `console.error` |
-| 插件明明连上了，日志里却一个字都没有，查不到「已接入桥」 | 实测 2.0.22 在 `serve --stdio` 下 `ctx.app.log` **不落盘**（`~/.local/share/opencode/log/opencode.log` 里搜不到任何 `service=` 的行），所以日志必须**同时**写一份 `console.error`（stderr 安全，stdout 不行） |
+| 插件明明连上了，日志里却一个字都没有，查不到「已接入桥」 | 实测 2.0.22 在 `serve --stdio` 下 `ctx.app.log` **不落盘**（`~/.local/share/opencode/log/opencode.log` 里搜不到任何 `service=` 的行）。插件现在**同时**写 `console.error`（stderr 安全，stdout 不行）和插件选项里的 `logFile`；后一个就是没有 web 时看「它到底在干什么」的窗口 |
 | 模型照你说的直呼 `send_message`，报 `No tool named "send_message" is currently available` | v2 里插件注册的工具进的是「Code Mode」目录，**不在**模型的原生工具表里；必须用 `execute` 跑一行 JS：`await tools.send_message({ text: "…" })`。插件现在会在投递末尾附这条提示，免得模型白失败一次 |
 | 配置写 `"plugin": ["./acb.js"]` 报 `configured plugin path must be a directory` | v2 的键叫 `plugins`（复数），且本地路径必须是**目录**，指向单个文件会被跳过 |
 | 模型能绕过桥直接 `fetch` 平台端口：不校验订阅、不记水位、不进归档，桥一声不知道 | `execute` 的运行时**提供 `fetch`**（官方原文 "It provides fetch for HTTP requests"）——这是 Code Mode 的设计，不是漏配。桥在另一个进程，拦不住。做法：投递末尾把 `platform_methods` / `platform_call` 指给它，并说清绕过去之后「消息不归档，下一轮对这段对话就失忆」。真要堵死只能走网络层（平台端口只监听本机 / 配 access_token）或 harness 侧权限规则。**已实测（2026-10-31，opencode2 2.0.22）**：execute 里 `fetch("http://127.0.0.1:4097/")` 返回 `200\|<!doctype html>`，本机端口随便敲；敲 53000 拿到 `unauthorized`（401），说明连得通、只是缺 token |
@@ -127,10 +156,10 @@ export ACB_ENDPOINT=127.0.0.1:7700  # 可选，默认就是这个
 四层，越往下越真：
 
 ```bash
-# 1. 协议层：假桥，验握手 / 开轮 / 工具配对 / 错误码 / 渲染（15 个）
+# 1. 协议层：假桥，验握手 / 开轮 / 工具配对 / 错误码 / 渲染（28 个）
 node --test harnesses/opencode/test/wire.test.mjs
 
-# 2. 插件逻辑：假桥 + 模拟的 v2 宿主，验工具注册 / 一轮的完整动作 / 会话复用 / 卸载（8 个）
+# 2. 插件逻辑：假桥 + 模拟的 v2 宿主，验工具注册 / 一轮的完整动作 / 会话复用 / 卸载（11 个）
 node --test harnesses/opencode/test/plugin.test.mjs
 
 # 3. 对着真桥（不用 opencode）：握手成不成

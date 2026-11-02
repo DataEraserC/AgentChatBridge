@@ -67,6 +67,13 @@ export class BridgeLink {
     this.sessionMaps = []
     /** 当前这一轮的票；没有票就没有进行中的轮次。 */
     this.ticket = null
+    /** 已收到、还没开始跑的轮次。一条连接可能同时管多个 acb 会话，必须串行。 */
+    this.queue = []
+    this.busy = false
+    /** 当前轮的收工信号；`endTurn` 兑现它，队列才会进下一轮。 */
+    this.resolveTurn = null
+    /** 当前轮调用了多少个桥工具；给日志判断「模型到底动没动」用。 */
+    this.turnCalls = 0
     this.socket = null
     this.buffer = ""
     this.pending = new Map()
@@ -125,6 +132,9 @@ export class BridgeLink {
     }
     this.socket?.destroy()
     this.socket = null
+    this.ticket = null
+    this.queue = []
+    this.#releaseTurn()
     this.#rejectPending(new BridgeError("internal", "连接已关闭"))
   }
 
@@ -141,6 +151,7 @@ export class BridgeLink {
       throw new BridgeError("unauthorized", "现在没有进行中的轮次，工具调不动")
     }
     const id = `c-${++this.seq}`
+    this.turnCalls += 1
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
@@ -156,7 +167,14 @@ export class BridgeLink {
   endTurn(ticket = this.ticket, error = null) {
     if (!ticket) return
     this.#write({ frame: "turn_end", ticket, ...(error ? { error } : {}) })
-    this.ticket = null
+    this.log(
+      error ? "warn" : "info",
+      `turn_end ${ticket}${error ? `：${error}` : ""}`,
+    )
+    if (ticket === this.ticket) {
+      this.ticket = null
+      this.#releaseTurn()
+    }
   }
 
   /**
@@ -228,16 +246,16 @@ export class BridgeLink {
         this.handshake?.resolve()
         return
       case "turn_start":
-        this.ticket = frame.delivery.ticket
-        // 不 await：读循环得继续跑，否则这一轮里的工具结果全卡在这里。
-        Promise.resolve()
-          .then(() => this.onTurn(frame.delivery))
-          .catch((error) => {
-            this.log("error", `这一轮跑挂了：${error?.message ?? error}`)
-            const ticket = this.ticket
-            this.ticket = null
-            if (ticket) this.endTurn(ticket, String(error?.message ?? error))
-          })
+        // 一条连接可能代表多个 acb 会话（同一 harness + 令牌），桥会并行推多轮。
+        // 但工具调用只认「当前这一轮的票」，所以这里必须排队串行，不能让后到的
+        // turn_start 覆盖还在跑的那张票——否则工具会拿错票，发到别的房间去。
+        this.queue.push(frame.delivery)
+        this.log(
+          "info",
+          `turn_start ${frame.delivery.ticket} 会话 ${frame.delivery.session} ` +
+            `房间 ${roomText(frame.delivery.room)}（队列 ${this.queue.length}）`,
+        )
+        this.#drainTurns()
         return
       case "tool_result": {
         const waiting = this.pending.get(frame.id)
@@ -284,10 +302,53 @@ export class BridgeLink {
     }
   }
 
+  /**
+   * 串行跑队列里的轮次：一次只让一张票生效，跑完（`endTurn`）再换下一张。
+   *
+   * 不 await `onTurn` 的返回就放过——它可能只是把活排出去，真正的收工信号是
+   * `endTurn`。这样「同一连接管多个会话」也不会串票。
+   */
+  #drainTurns() {
+    if (this.busy) return
+    this.busy = true
+    void (async () => {
+      try {
+        while (this.queue.length) {
+          const delivery = this.queue.shift()
+          this.ticket = delivery.ticket
+          this.turnCalls = 0
+          const done = new Promise((resolve) => {
+            this.resolveTurn = resolve
+          })
+          try {
+            await this.onTurn(delivery)
+          } catch (error) {
+            const message = error?.message ?? String(error)
+            this.log("error", `这一轮跑挂了：${message}`)
+            this.endTurn(delivery.ticket, message)
+          }
+          await done
+          this.ticket = null
+        }
+      } finally {
+        this.busy = false
+        this.resolveTurn = null
+      }
+    })()
+  }
+
+  #releaseTurn() {
+    const resolve = this.resolveTurn
+    this.resolveTurn = null
+    resolve?.()
+  }
+
   #onClose() {
     this.socket = null
     this.ticket = null
+    this.queue = []
     this.buffer = ""
+    this.#releaseTurn()
     this.#rejectPending(new BridgeError("internal", "和桥的连接断了"))
     if (this.closed) return
     this.#failHandshake(new BridgeError("internal", "连接在握手阶段就断了"))

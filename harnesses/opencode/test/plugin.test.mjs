@@ -277,8 +277,8 @@ test("没有令牌就不启用：不注册工具、不连桥", async (t) => {
   const cleanup = await plugin.setup(host.ctx)
 
   assert.equal(host.tools.size, 0, "没令牌就别往模型面前摆工具")
-  assert.equal(host.logs.length, 1)
-  assert.equal(host.logs[0].level, "warn")
+  assert.equal(host.logs.at(-1).level, "warn", "最后一条应该是没令牌的警告")
+  assert.match(host.logs.at(-1).message, /没有令牌/)
 
   await new Promise((resolve) => setTimeout(resolve, 150))
   assert.equal(bridge.socket, null, "没令牌就不该连桥")
