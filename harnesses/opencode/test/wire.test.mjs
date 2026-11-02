@@ -30,13 +30,14 @@ import {
 // ---------------------------------------------------------------------------
 
 /** 起一个假桥 + 一个客户端，测完保证都收掉（不然 node 不退出）。 */
-async function setup(t, { onTurn } = {}) {
+async function setup(t, { onTurn, log } = {}) {
   const bridge = await new FakeBridge().start()
   const link = new BridgeLink({
     endpoint: bridge.endpoint,
     token: "t-main",
     harness: "opencode",
     onTurn,
+    log,
   })
   t.after(async () => {
     link.close()
@@ -146,6 +147,59 @@ test("没有进行中的轮次时，工具调不动", async (t) => {
     assert.equal(error.code, "unauthorized")
     return true
   })
+})
+
+test("同一连接上多个会话的轮次串行，不会串票", async (t) => {
+  const seen = []
+  let releaseFirst
+  const blocked = new Promise((resolve) => {
+    releaseFirst = resolve
+  })
+  const { bridge, link } = await setup(t, {
+    onTurn: async (turn) => {
+      seen.push(`start:${turn.session}`)
+      if (turn.session === "a") await blocked
+      const pending = link.call("send_message", { text: `回复 ${turn.session}` })
+      let call = await bridge.next()
+      // 上一轮的 turn_end 可能还排在队列里，只挑 tool_call。
+      while (call.frame !== "tool_call") call = await bridge.next()
+      seen.push(`call:${call.ticket}`)
+      await bridge.send({ frame: "tool_result", id: call.id, result: {} })
+      await pending
+      link.endTurn(turn.ticket)
+      seen.push(`end:${turn.session}`)
+    },
+  })
+
+  await bridge.send({
+    frame: "turn_start",
+    delivery: delivery({
+      ticket: "a-1",
+      session: "a",
+      room: { connection: "qq", path: ["group", "1"] },
+    }),
+  })
+  await bridge.send({
+    frame: "turn_start",
+    delivery: delivery({
+      ticket: "b-1",
+      session: "b",
+      room: { connection: "qq", path: ["group", "2"] },
+    }),
+  })
+
+  await waitFor(() => seen.includes("start:a"), "第一轮应该先跑")
+  assert.equal(link.ticket, "a-1", "后到的轮次不能覆盖正在跑的那张票")
+  releaseFirst()
+  await waitFor(() => seen.includes("end:b"), "两轮都应该跑完")
+  assert.deepEqual(seen, [
+    "start:a",
+    "call:a-1",
+    "end:a",
+    "start:b",
+    "call:b-1",
+    "end:b",
+  ])
 })
 
 test("收工发 turn_end，票随之作废", async (t) => {

@@ -21,8 +21,11 @@ import {
   personaSignature,
   renderPersona,
   renderTurn,
+  roomText,
 } from "./acb-wire.mjs"
 import { TOOLS } from "../../shared/tools.mjs"
+import fs from "node:fs"
+import path from "node:path"
 
 const SERVICE = "acb"
 
@@ -31,7 +34,12 @@ export default {
 
   async setup(ctx) {
     const config = readConfig(ctx)
-    const log = makeLogger(ctx)
+    const log = makeLogger(ctx, config.logFile)
+    log(
+      "info",
+      `插件加载 endpoint=${config.endpoint} harness=${config.harness} ` +
+        `会话=${config.session || "(按 acb 会话映射)"} 日志=${config.logFile}`,
+    )
 
     if (!config.token) {
       log("warn", "没有令牌（ctx.options.token 或 ACB_TOKEN），acb 不启用")
@@ -103,6 +111,7 @@ const CODE_MODE_HINT = [
   "---",
   "（opencode 提示：上列工具不在原生工具列表里，要用 execute 跑一行 JS：",
   '  发消息 `await tools.send_message({ text: "收到" })`；',
+  "  不带 `to` 就是发到本轮房间；不要因为上下文里聊过别的群，就自己补一个 `to`。",
   "  确认 `await tools.ack_messages({ ids: [1, 2] })`；",
   "  先想清楚要发什么，再一次调用，别先用原生工具名硬调。",
   "",
@@ -203,6 +212,7 @@ class TurnDriver {
 
   async #one(delivery, link) {
     let failure = null
+    const started = Date.now()
     try {
       const sessionID = await this.#session(delivery.session)
       // 映射（新建或接上的）报给桥，控制台才看得到 harness 侧映射。
@@ -221,17 +231,33 @@ class TurnDriver {
       const info = delivery.session_info ?? {}
       const model = info.model ?? "(opencode 默认)"
       this.log(
-        "debug",
-        `开轮 ${delivery.ticket}：${delivery.room.connection}:${delivery.room.path.join("/")}，${delivery.records.length} 条，模型 ${model}`,
+        "info",
+        `开轮 ${delivery.ticket}：${roomText(delivery.room)}，${delivery.records.length} 条，` +
+          `opencode 会话 ${sessionID}，模型 ${model}`,
       )
       // prompt 把话排进会话；wait 等这一轮助手真正说完。
       await this.ctx.session.prompt({ sessionID, text })
+      this.log("info", `prompt 已发出 ${delivery.ticket}，等待模型`)
       if (typeof this.ctx.session.wait === "function") {
         await this.ctx.session.wait({ sessionID })
       }
+      this.log(
+        "info",
+        `本轮完成 ${delivery.ticket}，用时 ${((Date.now() - started) / 1000).toFixed(1)} 秒，` +
+          `调用桥工具 ${link.turnCalls ?? 0} 次`,
+      )
+      if (delivery.records.length > 0 && (link.turnCalls ?? 0) === 0) {
+        this.log(
+          "warn",
+          `本轮没有调用任何桥工具：模型可能没真正回复（${delivery.ticket}）`,
+        )
+      }
     } catch (error) {
       failure = error?.message ?? String(error)
-      this.log("error", `这一轮失败了：${failure}`)
+      this.log(
+        "error",
+        `这一轮失败了 ${delivery.ticket}：${failure}（用时 ${((Date.now() - started) / 1000).toFixed(1)} 秒）`,
+      )
       // 会话可能被删了：下次重建，别一直往一个死会话里灌。
       this.#forget(delivery.session)
     } finally {
@@ -374,11 +400,16 @@ function readConfig(ctx) {
       "opencode",
     session:
       (typeof options.session === "string" && options.session.trim()) || "",
+    logFile:
+      (typeof options.logFile === "string" && options.logFile.trim()) ||
+      process.env.ACB_OPENCODE_LOG?.trim() ||
+      "",
   }
 }
 
-function makeLogger(ctx) {
+function makeLogger(ctx, logFile) {
   const line = `[${SERVICE}]`
+  let ready = false
   return (level, message) => {
     // 固定写一份到 stderr：实测 2.0.22 在 `serve --stdio` 下 `app.log` 不落盘
     // （opencode.log 里搜不到任何 service= 的行），只靠它等于把诊断信息扔掉。
@@ -387,6 +418,22 @@ function makeLogger(ctx) {
       console.error(`${line} ${level} ${message}`)
     } catch {
       // 连 stderr 都不可用就算了，日志绝不能把插件弄挂。
+    }
+    // opencode 没有 web，插件自己的文件日志是「它到底在干什么」最直接的窗口。
+    // 没配 logFile 就不写文件——测试和临时实例不该往仓库里留垃圾。
+    try {
+      if (logFile) {
+        if (!ready) {
+          fs.mkdirSync(path.dirname(logFile), { recursive: true })
+          ready = true
+        }
+        fs.appendFileSync(
+          logFile,
+          `${new Date().toISOString()} ${level} ${message}\n`,
+        )
+      }
+    } catch {
+      // 写不了文件也不能影响轮次。
     }
     const app = ctx?.app
     if (typeof app?.log === "function") {
