@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# opencode-keeper.sh —— acb-opencode-keeper.service 的入口。
+# opencode-keeper.sh —— **旧方案**（保留备用，不再默认启用）。
+#
+# 新方案是 deploy/opencode-serve.sh：systemd 直接跑 `opencode2 serve`，再用
+# `/api/plugin` 触发插件加载，连接常驻。这个 keeper 只是用 `opencode2 run`
+# 反复踢一脚，run 退出后连接会断，已经不再使用。
 #
 # opencode 的插件只在「项目被打开过」的 server 里加载，所以用 opencode2 run
 # 踢一脚让它 spawn server + 加载 acb 插件 + 连桥。判活标准 = 桥 7700 上的

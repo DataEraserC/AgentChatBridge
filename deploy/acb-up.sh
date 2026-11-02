@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# acb-up.sh —— 起 acb 全链路。顺序固定：dsh → 桥 → 驱动 → opencode keeper。
+# acb-up.sh —— 起 acb 全链路。顺序固定：dsh → 桥 → 驱动 → opencode serve。
 #
 # 常驻进程绝不能挂在 AI 会话里：会话沙箱一撤，进程活着却开不出新 socket。
 # 这里用 **仓库里的持久 systemd 单元**（deploy/systemd/），只在
@@ -17,7 +17,7 @@ REPO=$(cd "$HERE/.." && pwd)
 LOGDIR=${ACB_LOG_DIR:-$REPO/state/logs}
 UNITDIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 BRIDGE=$REPO/result/bin/acb-bridge
-UNITS=(dsh-acb.service acb-bridge.service acb-drivers.service acb-opencode-keeper.service)
+UNITS=(dsh-acb.service acb-bridge.service acb-drivers.service acb-opencode-serve.service)
 
 mkdir -p "$LOGDIR" "$UNITDIR"
 
@@ -29,7 +29,7 @@ fail() { echo "✗ $*" >&2; exit 1; }
 [[ -f $REPO/config.toml ]] || fail "没有 $REPO/config.toml"
 [[ -f $HERE/start-dsh.sh ]] || fail "没有 deploy/start-dsh.sh"
 [[ -f $HERE/start-drivers.sh ]] || fail "没有 deploy/start-drivers.sh"
-[[ -f $HERE/opencode-keeper.sh ]] || fail "没有 deploy/opencode-keeper.sh"
+[[ -f $HERE/opencode-serve.sh ]] || fail "没有 deploy/opencode-serve.sh"
 
 # dsh-real 不是 dsh：`dsh` 是 dsh-seed-profile 的包装器，会按模板重建 profile，
 # 把 --patch 注入的东西洗掉；dsh-real 才是直连二进制。这里只做前置检查，
@@ -51,7 +51,7 @@ fi
 # ---- 安装仓库里的单元文件 ---------------------------------------------------
 # 先把旧的 transient / 旧单元停掉，避免同名单元拦着新文件生效。
 echo "→ 停旧单元（如果有）"
-for unit in acb-opencode-keeper.service acb-drivers.service acb-bridge.service dsh-acb.service; do
+for unit in acb-opencode-serve.service acb-opencode-keeper.service acb-drivers.service acb-bridge.service dsh-acb.service; do
   systemctl --user stop "$unit" 2>/dev/null || true
 done
 
@@ -87,7 +87,7 @@ wait_port() {
 start_unit dsh-acb.service "dsh（3080）" 3080
 start_unit acb-bridge.service "桥（7700 + 控制台 3100）" 7700
 start_unit acb-drivers.service "驱动（3101 / 3102）" ""
-start_unit acb-opencode-keeper.service "opencode keeper" ""
+start_unit acb-opencode-serve.service "opencode serve（4097）" 4097
 
 sleep 3
 
@@ -97,7 +97,7 @@ echo "=== 结果 ==="
 printf '%-24s %s\n' "dsh"    "$(systemctl --user is-active dsh-acb 2>/dev/null || true)"
 printf '%-24s %s\n' "桥"     "$(systemctl --user is-active acb-bridge 2>/dev/null || true)"
 printf '%-24s %s\n' "驱动"   "$(systemctl --user is-active acb-drivers 2>/dev/null || true)"
-printf '%-24s %s\n' "opencode" "$(systemctl --user is-active acb-opencode-keeper 2>/dev/null || true)"
+printf '%-24s %s\n' "opencode" "$(systemctl --user is-active acb-opencode-serve 2>/dev/null || true)"
 
 token_line=$(grep -o 'http://127\.0\.0\.1:3080/?token=[A-Za-z0-9_-]*' "$LOGDIR/dsh.log" 2>/dev/null | tail -1)
 [[ -n $token_line ]] && echo "dsh UI： $token_line"

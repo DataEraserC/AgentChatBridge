@@ -1,0 +1,18 @@
+[Unit]
+Description=ACB opencode v2 server (serve)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/state/opencode-1093015329
+Environment=PATH=/run/current-system/sw/bin:/etc/profiles/per-user/nixos/bin:/run/wrappers/bin
+# 新方案：serve 常驻，启动后用 /api/plugin 初始化 location，加载插件并连桥。
+# 旧的 acb-opencode-keeper.service（opencode2 run 踢一脚）保留但不再启用。
+ExecStart=/run/current-system/sw/bin/bash /home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/deploy/opencode-serve.sh
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/state/logs/opencode-serve.log
+StandardError=append:/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/state/logs/opencode-serve.log
+
+[Install]
+WantedBy=default.target
