@@ -916,6 +916,10 @@ fn access_request_table(lua: &Lua, request: &AccessRequest<'_>) -> mlua::Result<
     table.set("session", request.session)?;
     table.set("connection", request.connection)?;
     table.set("room", request.room.map(|room| room.to_string()))?;
+    table.set(
+        "origin_room",
+        request.origin_room.map(|room| room.to_string()),
+    )?;
     table.set("action", request.action.as_str())?;
     let subscriptions = lua.create_table()?;
     for (index, room) in request.subscriptions.iter().enumerate() {

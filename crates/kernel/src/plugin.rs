@@ -68,6 +68,10 @@ pub const ALL_ROOMS_ACCESS_PROVIDER: &str = "acb.access.all_rooms";
 /// 但可以照常读、发、调平台方法。
 pub const ELEVATED_ACCESS_PROVIDER: &str = "acb.access.elevated_in_rooms";
 
+/// 按轮次来源提权：`access.origins` 里的房间触发的轮次可以访问任意房间；
+/// 其它来源仍按订阅边界。用来把「私聊随便发、群聊只发订阅」这类规则写进配置。
+pub const PRIVILEGED_ORIGINS_ACCESS_PROVIDER: &str = "acb.access.privileged_origins";
+
 /// 内置 provider 的保留 namespace；树外 manager 不能占用。
 pub const BUILTIN_NAMESPACE: &str = "acb";
 
@@ -124,6 +128,11 @@ impl ProviderId {
     /// 内置 access provider：指定房间提权。
     pub fn builtin_elevated_access() -> Self {
         Self::parse(ELEVATED_ACCESS_PROVIDER).expect("内置 provider id 必须合法")
+    }
+
+    /// 内置 access provider：指定来源房间提权。
+    pub fn builtin_privileged_origins_access() -> Self {
+        Self::parse(PRIVILEGED_ORIGINS_ACCESS_PROVIDER).expect("内置 provider id 必须合法")
     }
 
     /// 内置投递 composer。
@@ -509,7 +518,12 @@ impl AccessAction {
 pub struct AccessRequest<'a> {
     pub session: &'a str,
     pub connection: &'a str,
+    /// 这次要访问的目标房间；连接级请求为 `None`。
     pub room: Option<&'a RoomId>,
+    /// 当前轮次是从哪个房间触发的。工具调用时一定有；连接级请求也保留。
+    ///
+    /// 和目标 `room` 分开：`send_message_to` 的目标可以是别的房间，来源仍是本轮房间。
+    pub origin_room: Option<&'a RoomId>,
     pub action: AccessAction,
     /// 这个会话自己订阅的房间。provider 只读，不写。
     pub subscriptions: &'a [RoomId],
@@ -608,6 +622,23 @@ impl AccessProvider for ElevatedInRoomsAccessProvider {
                 }
             }
         }
+    }
+}
+
+/// 按轮次来源提权：`access.origins` 里的房间触发的轮次可以访问任意房间；
+/// 其它来源回到内置「只认订阅」。
+#[derive(Debug, Default)]
+pub struct PrivilegedOriginsAccessProvider;
+
+impl AccessProvider for PrivilegedOriginsAccessProvider {
+    fn check(&self, options: &AccessPolicy, request: &AccessRequest<'_>) -> AccessDecision {
+        let privileged = request
+            .origin_room
+            .is_some_and(|origin| options.origins.iter().any(|listed| listed == origin));
+        if privileged {
+            return AccessDecision::Allow;
+        }
+        SubscribedAccessProvider.check(options, request)
     }
 }
 
@@ -1086,6 +1117,20 @@ impl PluginLoader for NativeLoader {
                 &[],
             )),
             Arc::new(ElevatedInRoomsAccessProvider),
+        )?;
+        manager.register_access(
+            ProviderDescriptor::new(
+                ProviderId::builtin_privileged_origins_access(),
+                ExtensionPoint::Access,
+                PLUGIN_API_VERSION,
+                vec![Capability::AccessDecision],
+            )
+            .with_metadata(native_meta(
+                "按来源房间提权",
+                "从 origins 列表里的房间触发的轮次可访问任意房间；其它来源仍按订阅",
+                &[],
+            )),
+            Arc::new(PrivilegedOriginsAccessProvider),
         )?;
         manager.register_delivery(
             ProviderDescriptor::new(
@@ -2089,6 +2134,7 @@ mod tests {
             ProviderId::builtin_access(),
             ProviderId::builtin_all_rooms_access(),
             ProviderId::builtin_elevated_access(),
+            ProviderId::builtin_privileged_origins_access(),
         ] {
             manager
                 .resolve_access(&id, &AccessPolicy::default())
@@ -2100,7 +2146,7 @@ mod tests {
                 .iter()
                 .filter(|descriptor| descriptor.extension_point == ExtensionPoint::Access)
                 .count(),
-            3
+            4
         );
     }
 
@@ -2119,6 +2165,7 @@ mod tests {
                 session: "main",
                 connection: "qq",
                 room: Some(room),
+                origin_room: Some(room),
                 action,
                 subscriptions,
             }
@@ -2173,6 +2220,54 @@ mod tests {
     }
 
     #[test]
+    fn privileged_origins_only_when_the_turn_started_there() {
+        let origin = RoomId::new("qq", "private/7").expect("合法");
+        let subscribed = test_room();
+        let target = RoomId::new("qq", "group/999").expect("合法");
+        let subscriptions = vec![subscribed.clone()];
+        let policy = AccessPolicy {
+            provider: ProviderId::builtin_privileged_origins_access(),
+            origins: vec![origin.clone()],
+            ..Default::default()
+        };
+        let request = AccessRequest {
+            session: "main",
+            connection: "qq",
+            room: Some(&target),
+            origin_room: Some(&origin),
+            action: AccessAction::Send,
+            subscriptions: &subscriptions,
+        };
+        assert_eq!(
+            PrivilegedOriginsAccessProvider.check(&policy, &request),
+            AccessDecision::Allow,
+            "提权来源可以发到没订阅的房间"
+        );
+
+        // 同样的目标、不同的来源：回到订阅边界，拒绝。
+        let denied = AccessRequest {
+            origin_room: Some(&subscribed),
+            ..request
+        };
+        assert_eq!(
+            PrivilegedOriginsAccessProvider.check(&policy, &denied),
+            AccessDecision::Deny,
+            "非提权来源不能发到订阅外的房间"
+        );
+
+        // 非提权来源发自己订阅的房间照常允许。
+        let own = AccessRequest {
+            room: Some(&subscribed),
+            origin_room: Some(&subscribed),
+            ..request
+        };
+        assert_eq!(
+            PrivilegedOriginsAccessProvider.check(&policy, &own),
+            AccessDecision::Allow
+        );
+    }
+
+    #[test]
     fn connection_access_follows_the_same_policy() {
         let subscribed = test_room();
         let subscriptions = vec![subscribed];
@@ -2180,6 +2275,7 @@ mod tests {
             session: "main",
             connection: "dc",
             room: None,
+            origin_room: None,
             action: AccessAction::Connection,
             subscriptions: &subscriptions,
         };

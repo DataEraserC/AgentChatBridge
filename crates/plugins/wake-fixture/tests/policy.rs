@@ -112,6 +112,7 @@ fn decision_providers_use_the_shared_wire() {
             session: "main",
             connection: "qq",
             room: Some(&room),
+            origin_room: Some(&room),
             action: AccessAction::Read,
             subscriptions: std::slice::from_ref(&room),
         };

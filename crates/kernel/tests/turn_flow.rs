@@ -6,7 +6,8 @@
 use std::sync::{Arc, Mutex};
 
 use acb_kernel::{
-    Bridge, Capability, Cursor, DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest,
+    AccessAction, AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Bridge, Capability,
+    Cursor, DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest,
     Element, ErrorCode, ExtensionPoint, Feedbacks, Ingest, ManagerManifest, ManagerPlugin,
     MemoryStore, NoteKey, NoteKind, Notes, Omitted, Outbound, OutboundError, PluginError,
     PluginManager, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision,
@@ -866,6 +867,93 @@ fn all_rooms_access_policy_reaches_unsubscribed_rooms() {
             }),
         )
         .expect("全豁免策略下，没订阅的房间也能发");
+    assert_eq!(result["room"], "qq:group/999");
+    assert_eq!(sends.lock().expect("没被毒死")[0].0, room("qq:group/999"));
+}
+
+/// 来源房间要传进 access provider：同样的目标房间，来源不同时策略可以不同。
+#[test]
+fn access_provider_sees_the_turn_origin_room() {
+    struct OriginGate;
+    impl AccessProvider for OriginGate {
+        fn check(&self, _options: &AccessPolicy, request: &AccessRequest<'_>) -> AccessDecision {
+            if request.action == AccessAction::Connection {
+                return AccessDecision::Allow;
+            }
+            let origin = request.origin_room.map(|room| room.to_string());
+            let target = request.room.map(|room| room.to_string());
+            if origin.as_deref() == Some("qq:group/123")
+                && target.as_deref() == Some("qq:group/999")
+            {
+                AccessDecision::Allow
+            } else {
+                AccessDecision::Deny
+            }
+        }
+    }
+
+    let mut plugins = PluginManager::with_native_builtins();
+    let id = ProviderId::parse("test.origin_gate").expect("合法");
+    plugins
+        .register_access(
+            ProviderDescriptor::new(
+                id,
+                ExtensionPoint::Access,
+                PLUGIN_API_VERSION,
+                vec![Capability::AccessDecision],
+            ),
+            Arc::new(OriginGate),
+        )
+        .expect("能注册自定义 access provider");
+    let text = config_with("        [sessions.access]\n        provider = \"test.origin_gate\"");
+    let (mut bridge, sends) = bridge_with_plugins(&text, plugins);
+
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let result = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message_to",
+            json!({
+                "to": "qq:group/999",
+                "elements": [{"type": "text", "text": "来源是群 123，放行"}]
+            }),
+        )
+        .expect("provider 应该看到来源房间是 qq:group/123");
+    assert_eq!(result["room"], "qq:group/999");
+    assert_eq!(sends.lock().expect("没被毒死")[0].0, room("qq:group/999"));
+}
+
+/// 内置 `privileged_origins`：配置声明来源房间，群里的轮次回到订阅边界。
+#[test]
+fn privileged_origins_policy_is_wired_from_config() {
+    let text = config_with(
+        r#"        [sessions.access]
+        provider = "acb.access.privileged_origins"
+        origins = ["qq:group/123"]"#,
+    );
+    let (mut bridge, sends) = bridge_with_plugins(&text, PluginManager::with_native_builtins());
+
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let result = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message_to",
+            json!({
+                "to": "qq:group/999",
+                "elements": [{"type": "text", "text": "提权来源，放行"}]
+            }),
+        )
+        .expect("来源在 origins 列表里，应该放行");
     assert_eq!(result["room"], "qq:group/999");
     assert_eq!(sends.lock().expect("没被毒死")[0].0, room("qq:group/999"));
 }

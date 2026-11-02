@@ -195,8 +195,12 @@ pub struct WireWakeRequest {
 pub struct WireAccessRequest {
     pub session: String,
     pub connection: String,
+    /// 要访问的目标房间；连接级请求为 `null`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room: Option<String>,
+    /// 当前轮次是从哪个房间触发的；旧插件不读这个字段时按 `null` 处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_room: Option<String>,
     pub action: String,
     #[serde(default)]
     pub subscriptions: Vec<String>,
