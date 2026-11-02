@@ -33,6 +33,10 @@
           };
         };
 
+        # ACB 的 dsh preset bundle：默认没有会话，部署侧用
+        # `.override { sessions = [ { preset = "..."; port = 3101; } ]; }` 注入。
+        dsh-bundle = pkgs.callPackage ./nix/dsh-bundle { };
+
         # 仅供当前测试环境使用：把 Lua 目录固化在 store 路径里，
         # 不依赖手工 drop-in 或宿主环境变量。实际部署应另行决定用户、权限和配置来源。
         acb-bridge-test = pkgs.writeShellApplication {
