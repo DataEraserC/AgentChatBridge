@@ -270,6 +270,7 @@ mod tests {
             admin_qqs: Vec::new(),
             allow_destructive: crate::config::DestructivePolicy::None,
             receive: Default::default(),
+            routes: Vec::new(),
         }
     }
 

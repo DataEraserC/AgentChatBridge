@@ -19,7 +19,7 @@ use acb_adapter_dynamic::DynamicLoader;
 use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::{
     AdapterHost, AdapterInstance, Bridge, Config, ControlRegistry, EventQueue, FileRelay,
-    Outbounds, PluginManager, SqliteStore, drain_events, serve,
+    Outbounds, PluginManager, RouteWorker, SqliteStore, drain_events, serve,
 };
 use acb_plugin_lua::LuaLoader;
 use acb_plugin_trusted::TrustedLoader;
@@ -127,11 +127,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         guard.validate_plugins()?;
     }
 
+    // 控制指令注册表：控制台和路由插件（如 /stop）都靠它把 control 帧推给
+    // 管理某会话的 harness 连接。drain 线程要先拿到它，所以建在启动线程之前。
+    let controls = ControlRegistry::new();
+
+    // 路由动作的后台执行者：发送/任务在锁外跑，不挡入站队列。
+    let route_worker = RouteWorker::spawn(Arc::clone(&bridge), Arc::clone(&shutdown));
+
     // core 的入站 drain 线程：所有适配器的事件都从这里进流水，顺序由队列保证。
     {
         let bridge = Arc::clone(&bridge);
         let shutdown = Arc::clone(&shutdown);
-        std::thread::spawn(move || drain_events(bridge, event_rx, shutdown));
+        let controls = controls.clone();
+        let route_worker = route_worker.clone();
+        std::thread::spawn(move || {
+            drain_events(bridge, event_rx, shutdown, controls, route_worker)
+        });
     }
 
     for launch in launches {
@@ -141,9 +152,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
         std::thread::spawn(move || launch(host));
     }
-
-    // 控制指令注册表：控制台靠它把 control 帧推给管理某会话的 harness 连接。
-    let controls = ControlRegistry::new();
 
     match &config.endpoint {
         Some(endpoint) => {

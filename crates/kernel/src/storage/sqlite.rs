@@ -408,6 +408,7 @@ impl Transcript for SqliteStore {
                 tags,
                 payload,
                 summary,
+                body,
             } => (
                 "event",
                 Some(event.clone()),
@@ -416,6 +417,7 @@ impl Transcript for SqliteStore {
                         tags: tags.clone(),
                         payload: payload.clone(),
                         summary: summary.clone(),
+                        body: *body,
                     })
                     .map_err(|error| backend(format!("事件元数据存不进库：{error}")))?,
                 ),
@@ -752,7 +754,7 @@ fn role_from_str(text: &str) -> Option<SenderRole> {
 }
 
 /// 事件记录附加的语义信息（`event_meta` 列）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredEventMeta {
     #[serde(default)]
     tags: Vec<String>,
@@ -760,6 +762,24 @@ struct StoredEventMeta {
     payload: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
+    /// 旧记录没有这个字段，按「有正文」读；新写入的拍一拍会明确写 `false`。
+    #[serde(default = "body_default")]
+    body: bool,
+}
+
+fn body_default() -> bool {
+    true
+}
+
+impl Default for StoredEventMeta {
+    fn default() -> Self {
+        Self {
+            tags: Vec::new(),
+            payload: None,
+            summary: None,
+            body: true,
+        }
+    }
 }
 
 /// 从库里读出来的一行，还没变回 [`Record`]。
@@ -797,6 +817,7 @@ impl RawRow {
                     tags: meta.tags,
                     payload: meta.payload,
                     summary: meta.summary,
+                    body: meta.body,
                 }
             }
             other => return Err(backend(format!("库里有不认识的记录种类：{other}"))),

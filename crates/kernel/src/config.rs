@@ -230,6 +230,8 @@ pub struct Connection {
     pub allow_destructive: DestructivePolicy,
     /// 入站策略（ADR-0026）：决定这条连接上的记录收不收。默认全部接收。
     pub receive: ReceivePolicy,
+    /// 消息路由：入库前交给代码处理（命令、链接、任务）。默认空 = 全部交给 AI。
+    pub routes: Vec<RoutePolicy>,
 }
 
 /// 破坏性方法的放行策略。
@@ -487,6 +489,14 @@ pub struct ReceivePolicy {
     pub options: serde_json::Value,
 }
 
+/// 一条连接的消息路由策略。按配置顺序执行；前一个 `pass` 才轮到下一个。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutePolicy {
+    pub provider: ProviderId,
+    /// 插件专属配置；形状由 provider 自己定义。
+    pub options: serde_json::Value,
+}
+
 impl Default for ReceivePolicy {
     fn default() -> Self {
         Self {
@@ -507,6 +517,9 @@ pub struct WakeInput<'a> {
     pub at_self: bool,
     /// 这条是不是引用了我发的某条消息。
     pub reply_to_self: bool,
+    /// 有没有正文。只有 @ / 引用 / 空的纯文本时是 false，图片、文件等算 true。
+    /// 跨平台判断「触发消息是否只是一句 @」，策略不用认识平台名。
+    pub has_body: bool,
     /// 平台事件类型；普通消息为 `None`。
     pub event: Option<&'a str>,
     /// 这条连接所属平台（`qq` / `discord` …），用于匹配 `qq.poke` 这种限定事件名。
@@ -529,6 +542,11 @@ pub enum WakeDecision {
 pub struct WakeVerdict {
     pub decision: WakeDecision,
     pub reason: Option<String>,
+    /// 命中后先等多久再真正开轮。0 = 立即。
+    ///
+    /// 这段时间里同房间的新消息照常入库；到点 `open_turn` 会一起取走。
+    /// 给「只有 @、没有正文」的场景留出等后续内容的时间。
+    pub delay_ms: u64,
 }
 
 impl WakeVerdict {
@@ -536,6 +554,16 @@ impl WakeVerdict {
         Self {
             decision: WakeDecision::Wake,
             reason: Some(reason.into()),
+            delay_ms: 0,
+        }
+    }
+
+    /// 命中后延迟 `delay_ms` 再开轮。
+    pub fn wake_after(reason: impl Into<String>, delay_ms: u64) -> Self {
+        Self {
+            decision: WakeDecision::Wake,
+            reason: Some(reason.into()),
+            delay_ms,
         }
     }
 
@@ -543,6 +571,7 @@ impl WakeVerdict {
         Self {
             decision: WakeDecision::Stay,
             reason: None,
+            delay_ms: 0,
         }
     }
 }
@@ -850,6 +879,12 @@ pub enum ConfigError {
         provider: String,
         detail: String,
     },
+    #[error("连接 {connection} 的路由 provider 不合法：{provider}（{detail}）")]
+    BadRouteProvider {
+        connection: String,
+        provider: String,
+        detail: String,
+    },
     #[error("存储路径不能为空（不配就用默认的 {DEFAULT_STORAGE_PATH}）")]
     EmptyStoragePath,
     #[error("worktree 根目录不能为空（不配就用默认的 {DEFAULT_WORKTREES_ROOT}）")]
@@ -933,7 +968,10 @@ impl Config {
                         detail: "控制台可远程访问，token 不能为空".into(),
                     });
                 }
-                Some(ConsoleConfig { listen: address, token })
+                Some(ConsoleConfig {
+                    listen: address,
+                    token,
+                })
             }
             None => None,
         };
@@ -1175,7 +1213,12 @@ impl Config {
                     });
                 };
                 // 唤醒事件里带平台前缀的，必须属于这个房间所属的平台。
-                validate_wake_events(&id, &subscription.room, &subscription.wake, &connection.platform)?;
+                validate_wake_events(
+                    &id,
+                    &subscription.room,
+                    &subscription.wake,
+                    &connection.platform,
+                )?;
                 if seen_rooms.iter().any(|room| room == &subscription.room) {
                     return Err(ConfigError::DuplicateRoom {
                         session: id.clone(),
@@ -1407,6 +1450,7 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
     })?;
 
     let receive = build_receive(&id, raw.receive)?;
+    let routes = build_routes(&id, raw.routes)?;
     Ok(Connection {
         id,
         platform,
@@ -1430,25 +1474,51 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
             .map(RawDestructive::into_policy)
             .unwrap_or_default(),
         receive,
+        routes,
     })
 }
 
-fn build_receive(
-    connection: &str,
-    raw: RawReceive,
-) -> Result<ReceivePolicy, ConfigError> {
+fn build_routes(connection: &str, raw: Vec<RawRoute>) -> Result<Vec<RoutePolicy>, ConfigError> {
+    let mut routes = Vec::with_capacity(raw.len());
+    for (index, route) in raw.into_iter().enumerate() {
+        let provider = match route
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            Some(text) => ProviderId::parse(text).map_err(|error| ConfigError::BadRouteProvider {
+                connection: connection.to_owned(),
+                provider: text.to_owned(),
+                detail: error.to_string(),
+            })?,
+            None => {
+                return Err(ConfigError::BadRouteProvider {
+                    connection: connection.to_owned(),
+                    provider: format!("routes[{index}]"),
+                    detail: "provider 不能为空".to_owned(),
+                });
+            }
+        };
+        routes.push(RoutePolicy {
+            provider,
+            options: policy_options(route.options, "路由策略")?,
+        });
+    }
+    Ok(routes)
+}
+
+fn build_receive(connection: &str, raw: RawReceive) -> Result<ReceivePolicy, ConfigError> {
     let provider = match raw
         .provider
         .as_deref()
         .map(str::trim)
         .filter(|text| !text.is_empty())
     {
-        Some(text) => ProviderId::parse(text).map_err(|error| {
-            ConfigError::BadReceiveProvider {
-                connection: connection.to_owned(),
-                provider: text.to_owned(),
-                detail: error.to_string(),
-            }
+        Some(text) => ProviderId::parse(text).map_err(|error| ConfigError::BadReceiveProvider {
+            connection: connection.to_owned(),
+            provider: text.to_owned(),
+            detail: error.to_string(),
         })?,
         None => ProviderId::builtin_receive_all(),
     };
@@ -1633,13 +1703,13 @@ fn build_turn_error(session: &str, raw: RawTurnError) -> Result<TurnErrorPolicy,
         .map(str::trim)
         .filter(|text| !text.is_empty())
     {
-        Some(text) => ProviderId::parse(text).map_err(|error| {
-            ConfigError::BadTurnErrorProvider {
+        Some(text) => {
+            ProviderId::parse(text).map_err(|error| ConfigError::BadTurnErrorProvider {
                 session: session.to_owned(),
                 provider: text.to_owned(),
                 detail: error.to_string(),
-            }
-        })?,
+            })?
+        }
         None => ProviderId::builtin_turn_error(),
     };
     Ok(TurnErrorPolicy {
@@ -1684,9 +1754,8 @@ fn build_wake(session: &str, room: &RoomId, raw: RawWake) -> Result<WakePolicy, 
         accumulate: raw.accumulate.map(Some).unwrap_or(default.accumulate),
         event_tags: normalize_list(raw.event_tags.unwrap_or(default.event_tags)),
         ignore_event_tags: {
-            let mut tags = normalize_list(
-                raw.ignore_event_tags.unwrap_or(default.ignore_event_tags),
-            );
+            let mut tags =
+                normalize_list(raw.ignore_event_tags.unwrap_or(default.ignore_event_tags));
             // 旧配置 `poke = false` 的语法糖：不再因为 `poke` 标签/拍我而醒。
             // `poke = true` 不必再做事——at_mention 默认就覆盖「冲我来的事件」。
             if raw.poke == Some(false) && !tags.iter().any(|tag| tag == "poke") {
@@ -1940,6 +2009,17 @@ struct RawConnection {
     /// 入站策略（默认全部接收）。
     #[serde(default)]
     receive: RawReceive,
+    /// 消息路由链：`[[connections.routes]]`，按顺序执行。
+    #[serde(default)]
+    routes: Vec<RawRoute>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawRoute {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    options: toml::value::Table,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2113,9 +2193,7 @@ mod tests {
     fn session_with_access(access: &str) -> String {
         ONE_SESSION.replacen(
             "        [[sessions.subscriptions]]",
-            &format!(
-                "        [sessions.access]\n{access}\n\n        [[sessions.subscriptions]]"
-            ),
+            &format!("        [sessions.access]\n{access}\n\n        [[sessions.subscriptions]]"),
             1,
         )
     }
@@ -2171,9 +2249,7 @@ mod tests {
             Err(ConfigError::UnknownAccessConnection { .. })
         ));
 
-        let duplicate = session_with_access(
-            "        rooms = [\"qq:group/999\", \"qq:group/999\"]",
-        );
+        let duplicate = session_with_access("        rooms = [\"qq:group/999\", \"qq:group/999\"]");
         assert!(matches!(
             Config::parse(&config_with(ONE_CONNECTION, &duplicate)),
             Err(ConfigError::DuplicateAccessRoom { .. })
@@ -2313,8 +2389,7 @@ mod tests {
             Err(ConfigError::DuplicatePluginPath { .. })
         ));
 
-        let empty = config_with(ONE_CONNECTION, ONE_SESSION)
-            + "\n[[plugins]]\npath = \"  \"\n";
+        let empty = config_with(ONE_CONNECTION, ONE_SESSION) + "\n[[plugins]]\npath = \"  \"\n";
         assert!(matches!(
             Config::parse(&empty),
             Err(ConfigError::EmptyPluginPath)
@@ -2677,6 +2752,7 @@ mod tests {
             text: "接着说",
             at_self: false,
             reply_to_self: true,
+            has_body: true,
             event: None,
             platform: "qq",
             tags: &[],
@@ -2696,6 +2772,7 @@ mod tests {
             text: "接着说",
             at_self: false,
             reply_to_self: true,
+            has_body: true,
             event: None,
             platform: "qq",
             tags: &[],
@@ -2717,6 +2794,7 @@ mod tests {
             text: "这个桥能不能重启一下",
             at_self: false,
             reply_to_self: false,
+            has_body: true,
             event: None,
             platform: "qq",
             tags: &[],
@@ -2741,6 +2819,7 @@ mod tests {
             text: "闲聊",
             at_self: false,
             reply_to_self: false,
+            has_body: true,
             event: None,
             platform: "qq",
             tags: &[],
@@ -2763,6 +2842,7 @@ mod tests {
             text: "闲聊",
             at_self: false,
             reply_to_self: false,
+            has_body: true,
             event: None,
             platform: "qq",
             tags: &[],
@@ -2783,6 +2863,7 @@ mod tests {
             text: "小桥你说说看",
             at_self: false,
             reply_to_self: false,
+            has_body: true,
             event: None,
             platform: "qq",
             tags: &[],
@@ -2806,6 +2887,7 @@ mod tests {
             text: "",
             at_self: true,
             reply_to_self: false,
+            has_body: true,
             event: Some("poke"),
             platform: "qq",
             tags: &["poke", "notice"],
@@ -2841,6 +2923,7 @@ mod tests {
             text: "",
             at_self: false,
             reply_to_self: false,
+            has_body: true,
             event: Some("reaction_add"),
             platform: "discord",
             tags: &["reaction", "notice"],
@@ -2887,6 +2970,7 @@ mod tests {
             text: "群里日常闲聊",
             at_self: false,
             reply_to_self: false,
+            has_body: true,
             event: None,
             platform: "qq",
             tags: &[],
@@ -2907,6 +2991,7 @@ mod tests {
             text: "@bot",
             at_self: true,
             reply_to_self: true,
+            has_body: true,
             event: None,
             platform: "qq",
             tags: &[],

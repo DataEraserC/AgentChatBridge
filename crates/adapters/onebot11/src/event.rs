@@ -147,7 +147,8 @@ fn notice(
                 vec!["poke".to_owned(), "notice".to_owned()],
                 Some(event.clone()),
                 Some(body),
-            ),
+            )
+            .without_body(),
         ));
     }
 
@@ -465,6 +466,10 @@ mod tests {
         ));
         assert!(draft.at_self);
         assert_eq!(draft.elements, vec![Element::text("[拍了拍我]")]);
+        assert!(
+            matches!(&draft.kind, acb_proto::RecordKind::Event { body: false, .. }),
+            "拍一拍只是触发，没有正文；描述仍在 elements 里"
+        );
     }
 
     #[test]

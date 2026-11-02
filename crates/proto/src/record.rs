@@ -64,12 +64,27 @@ pub enum RecordKind {
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
+        /// 这条事件有没有正文。适配器判定：拍一拍这类纯触发事件为 `false`；
+        /// 入群、上传、请求等带信息的事件保持默认 `true`。
+        ///
+        /// 缺省为 `true`：旧记录和没声明这个字段的第三方适配器按「有正文」处理，
+        /// 不会因为新字段突然变成延迟唤醒。
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        body: bool,
     },
 }
 
 /// `false` 不写进 JSON：内部标记，默认值就够了。
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 投递给 harness 的最小单位。
@@ -133,6 +148,19 @@ impl Record {
         matches!(&self.kind, RecordKind::Event { event, .. } if event == kind)
     }
 
+    /// 这条记录有没有「正文」。
+    ///
+    /// 消息只看内容元素：只有 `At` / `Quote` 或空白文本算没有正文；图片、语音、
+    /// 文件、表情、平台卡片都算有。事件由适配器在 `RecordKind::Event::body` 里
+    /// 显式声明——拍一拍是纯触发，标 `false`；入群、上传、请求等带信息的事件
+    /// 默认 `true`。唤醒策略据此判断「这只是个 @ / poke，先等后续内容」。
+    pub fn has_body(&self) -> bool {
+        match &self.kind {
+            RecordKind::Message => self.elements.iter().any(Element::is_body),
+            RecordKind::Event { body, .. } => *body,
+        }
+    }
+
     /// 这条消息引用的是哪条平台消息（取第一个引用段）。
     ///
     /// 一条消息里理论上可以有多个引用段，实际上平台只允许一个；取第一个就够了，
@@ -173,6 +201,52 @@ mod tests {
     }
 
     #[test]
+    fn body_is_about_content_not_triggers() {
+        let mut record = sample();
+        record.elements = vec![Element::At {
+            target: "10002".into(),
+            all: false,
+        }];
+        assert!(!record.has_body(), "只有 @ 不算正文");
+
+        record.elements.push(Element::text("  "));
+        assert!(!record.has_body(), "空白文本不算正文");
+
+        record.elements.push(Element::text("在吗"));
+        assert!(record.has_body(), "有文字就算正文");
+
+        record.elements = vec![Element::Quote {
+            message_id: "123".into(),
+        }];
+        assert!(!record.has_body(), "只有引用不算正文");
+
+        record.elements = vec![Element::Image {
+            url: "http://example/a.png".into(),
+            alt: None,
+        }];
+        assert!(record.has_body(), "图片算正文");
+
+        record.kind = RecordKind::Event {
+            event: "poke".into(),
+            tags: vec!["poke".into()],
+            payload: None,
+            summary: Some("拍了拍我".into()),
+            body: false,
+        };
+        assert!(!record.has_body(), "拍一拍这类纯触发事件不算正文");
+
+        // 其它事件带信息，默认算正文；不该因为「是个事件」就一律延迟。
+        record.kind = RecordKind::Event {
+            event: "group_increase".into(),
+            tags: vec!["notice".into(), "member_join".into()],
+            payload: None,
+            summary: Some("[group_increase] 10001 加入".into()),
+            body: true,
+        };
+        assert!(record.has_body(), "带信息的平台事件算正文");
+    }
+
+    #[test]
     fn message_record_round_trips() {
         let record = sample();
         let json = serde_json::to_string(&record).expect("可序列化");
@@ -195,6 +269,7 @@ mod tests {
             tags: vec!["poke".into()],
             payload: None,
             summary: Some("拍了拍我".into()),
+            body: false,
         };
         record.at_self = true;
         assert!(record.is_event("poke"));

@@ -17,8 +17,14 @@ use crate::forward;
 use crate::link::{Action, LinkError, LinkSlot};
 use crate::segment::{from_onebot, to_onebot};
 
-/// 等平台回话的上限。超了就报错，不无限挂着。
+/// 普通消息等平台回话的上限。超了就报错，不无限挂着。
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 带媒体/文件的消息和平台调用等回话的上限。
+///
+/// 50 MB 的视频走 NapCat 上传，10 秒根本不够；以前超时被当成「发送失败」，
+/// agent 会重发，群里就出现两条。45 秒留在 harness 的 60 秒工具超时以内。
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(45);
 
 // 平台方法表在 `catalog.rs`：那里的每一行都是「人也做得到的事」。
 
@@ -28,6 +34,7 @@ pub struct OneBotOutbound {
     /// 这条连接的连接名，别的连接发过来直接拒。
     connection: String,
     timeout: Duration,
+    upload_timeout: Duration,
     seq: u64,
 }
 
@@ -37,6 +44,7 @@ impl OneBotOutbound {
             slot,
             connection: connection.into(),
             timeout: SEND_TIMEOUT,
+            upload_timeout: UPLOAD_TIMEOUT,
             seq: 0,
         }
     }
@@ -44,7 +52,36 @@ impl OneBotOutbound {
     /// 换一个等回话的时限（测试用）。
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self.upload_timeout = timeout;
         self
+    }
+
+    /// 这条出站要等多久：带媒体/文件/平台卡片的消息要上传，给更长的窗口。
+    fn send_timeout(&self, elements: &[Element]) -> Duration {
+        let may_upload = elements.iter().any(|element| {
+            matches!(
+                element,
+                Element::Image { .. }
+                    | Element::Audio { .. }
+                    | Element::Video { .. }
+                    | Element::File { .. }
+                    | Element::Opaque { .. }
+            )
+        });
+        if may_upload {
+            self.upload_timeout
+        } else {
+            self.timeout
+        }
+    }
+
+    /// 超时不是明确失败：请求可能还在上传/处理，也可能已经执行。
+    fn timeout_detail(timeout: Duration) -> String {
+        format!(
+            "请求已经交给适配器，但平台在 {} 秒内没有回话；可能还在处理，也可能已经执行。\
+             不要直接重发；先用 get_history / fetch_records 确认是否已经发出。",
+            timeout.as_secs()
+        )
     }
 }
 
@@ -75,9 +112,10 @@ impl Outbound for OneBotOutbound {
             })
             .map_err(|_| OutboundError::Unavailable("连接刚断了".into()))?;
 
+        let timeout = self.send_timeout(elements);
         let response = reply_rx
-            .recv_timeout(self.timeout)
-            .map_err(|_| OutboundError::Unavailable("等平台回话超时".into()))?
+            .recv_timeout(timeout)
+            .map_err(|_| OutboundError::Timeout(Self::timeout_detail(timeout)))?
             .map_err(|error: LinkError| OutboundError::Unavailable(error.to_string()))?;
 
         parse_response(response)
@@ -115,7 +153,7 @@ impl Outbound for OneBotOutbound {
 
         let action = action_of_route(route, room)?;
         let payload = call_payload(route, room, params)?;
-        let response = self.dispatch(action, payload)?;
+        let response = self.dispatch(action, payload, self.upload_timeout)?;
         let value = parse_call_response(method, response)?;
         let record = outgoing_record(method, params, &value);
         Ok(CallOutcome { value, record })
@@ -154,14 +192,20 @@ impl OneBotOutbound {
             .unwrap_or(forward::DEFAULT_MAX_NODES);
 
         let mut fetch = |id: &str| {
-            let raw = self.dispatch("get_forward_msg", json!({ "id": id }))?;
+            // 展开是一层层读，单层用普通时限：别让一次深转发的总耗时撞上 harness 超时。
+            let raw = self.dispatch("get_forward_msg", json!({ "id": id }), self.timeout)?;
             parse_call_response("message.forward_content", raw)
         };
         forward::expand(&id, depth, max_nodes, &mut fetch)
     }
 
-    /// 塞一个动作进队列、等平台按 echo 回话。`send` 和 `call` 共用这一条通道。
-    fn dispatch(&mut self, action: &str, params: Value) -> Result<Value, CallError> {
+    /// 塞一个动作进队列、等平台按 echo 回话。`call` 和转发展开共用这一条通道。
+    fn dispatch(
+        &mut self,
+        action: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, CallError> {
         let Some(sender) = self.slot.current() else {
             return Err(CallError::Unavailable(format!(
                 "{} 还没连上",
@@ -180,8 +224,8 @@ impl OneBotOutbound {
             .map_err(|_| CallError::Unavailable("连接刚断了".into()))?;
 
         reply_rx
-            .recv_timeout(self.timeout)
-            .map_err(|_| CallError::Unavailable("等平台回话超时".into()))?
+            .recv_timeout(timeout)
+            .map_err(|_| CallError::Timeout(Self::timeout_detail(timeout)))?
             .map_err(|error: LinkError| CallError::Unavailable(error.to_string()))
     }
 }
@@ -551,6 +595,24 @@ mod tests {
         let room = RoomId::new("qq", "123").expect("合法");
         let error = action_of(&room, &[Element::text("hi")]).expect_err("认不出房间");
         assert!(matches!(error, OutboundError::Unsupported(_)));
+    }
+
+    #[test]
+    fn uploads_get_a_longer_timeout_and_timeouts_say_result_is_unknown() {
+        let outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        assert_eq!(outbound.send_timeout(&[Element::text("hi")]), SEND_TIMEOUT);
+        assert_eq!(
+            outbound.send_timeout(&[Element::Image {
+                url: "/tmp/a.png".into(),
+                alt: None,
+            }]),
+            UPLOAD_TIMEOUT
+        );
+
+        let detail = OneBotOutbound::timeout_detail(UPLOAD_TIMEOUT);
+        assert!(detail.contains("45 秒"), "{detail}");
+        assert!(detail.contains("可能已经执行"), "{detail}");
+        assert!(detail.contains("不要直接重发"), "{detail}");
     }
 
     #[test]

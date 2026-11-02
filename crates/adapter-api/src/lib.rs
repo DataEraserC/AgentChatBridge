@@ -156,7 +156,9 @@ pub struct WireConnection {
 #[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireInstanceConfig {
-    Adapter { connection: WireConnection },
+    Adapter {
+        connection: WireConnection,
+    },
     Provider {
         provider: String,
         extension: String,
@@ -178,6 +180,9 @@ pub struct WireWakeRequest {
     pub at_self: bool,
     #[serde(default)]
     pub reply_to_self: bool,
+    /// 有没有正文。只有 @ / 引用 / 空白文本时为 false；平台事件恒为 false。
+    #[serde(default)]
+    pub has_body: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
     #[serde(default)]
@@ -389,13 +394,27 @@ pub enum WireError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         suggestion: Option<String>,
     },
-    UnsupportedPlatform { detail: String },
-    NotImplemented { detail: String },
-    Forbidden { detail: String },
-    BadParams { detail: String },
-    Unavailable { detail: String },
-    Rejected { detail: String },
-    Unsupported { detail: String },
+    UnsupportedPlatform {
+        detail: String,
+    },
+    NotImplemented {
+        detail: String,
+    },
+    Forbidden {
+        detail: String,
+    },
+    BadParams {
+        detail: String,
+    },
+    Unavailable {
+        detail: String,
+    },
+    Rejected {
+        detail: String,
+    },
+    Unsupported {
+        detail: String,
+    },
 }
 
 /// core → 适配器。
@@ -445,6 +464,9 @@ pub enum WireResult {
         decision: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// wake 判定：命中后先等多久再开轮（毫秒）。0 / 不写 = 立即。
+        #[serde(default, skip_serializing_if = "is_zero")]
+        delay_ms: u64,
     },
     /// 投递批次：本轮的编号与跳过的中段；`plan = null` 表示用内置默认选批。
     Delivery {
@@ -528,6 +550,10 @@ pub fn decode_line<T: DeserializeOwned>(line: &str) -> Result<T, serde_json::Err
 
 fn default_extension() -> String {
     "platform_adapter".to_owned()
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 fn default_param_type() -> String {

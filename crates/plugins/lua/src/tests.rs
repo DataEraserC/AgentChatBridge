@@ -6,9 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use acb_kernel::{
     AccessAction, AccessRequest, ClockContext, ClockPolicy, Config, DeliveryPolicy,
-    DeliveryRequest, Element, Omitted, PluginManager, ProviderId, ReceiveDecision, ReceivePolicy,
-    ReceiveRequest, Record, RecordKind, ReloadScope, RoomId, SendContext, SendOrigin, Sender, Sent,
-    TurnErrorAction, TurnErrorPolicy, TurnErrorRequest, WakeContext, WakeDecision, WakePolicy,
+    DeliveryRequest, Element, InterruptScope, Omitted, PluginManager, ProviderId, ReceiveDecision,
+    ReceivePolicy, ReceiveRequest, Record, RecordKind, ReloadScope, RoomId, RouteAction,
+    RouteContext, RouteDecision, RoutePolicy, SendContext, SendOrigin, Sender, Sent, TurnErrorAction,
+    TurnErrorPolicy, TurnErrorRequest, WakeContext, WakeDecision, WakePolicy,
 };
 
 use super::*;
@@ -21,10 +22,8 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "acb-lua-{tag}-{}-{nanos}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("acb-lua-{tag}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&dir).expect("建临时目录");
         Self(dir)
     }
@@ -62,6 +61,7 @@ fn wake_context<'a>(room: &'a RoomId, at_self: bool, text: &'a str) -> WakeConte
         text,
         at_self,
         reply_to_self: false,
+        has_body: true,
         event: None,
         tags: &[],
         unread: 1,
@@ -133,7 +133,10 @@ return {
         "@ 到我就醒"
     );
     assert_eq!(
-        provider.decide(&WakePolicy::default(), &wake_context(&room, false, "随便说说")),
+        provider.decide(
+            &WakePolicy::default(),
+            &wake_context(&room, false, "随便说说")
+        ),
         WakeDecision::Stay,
         "没 @、未读也不够就不醒"
     );
@@ -163,10 +166,8 @@ return {
         .expect("脚本 provider 应当可解析");
 
     let room = RoomId::new("qq", "group/1").expect("合法");
-    let verdict = provider.decide_with_reason(
-        &WakePolicy::default(),
-        &wake_context(&room, true, "在吗"),
-    );
+    let verdict =
+        provider.decide_with_reason(&WakePolicy::default(), &wake_context(&room, true, "在吗"));
     assert_eq!(verdict.decision, WakeDecision::Wake);
     assert_eq!(verdict.reason.as_deref(), Some("脚本：被 @ 了"));
 }
@@ -349,7 +350,11 @@ return {
             .reload_managers(&ReloadScope::Namespace(LUA_NAMESPACE.to_owned()))
             .is_empty()
     );
-    assert_eq!(decision(&plugins), WakeDecision::Wake, "reload 后换成新实现");
+    assert_eq!(
+        decision(&plugins),
+        WakeDecision::Wake,
+        "reload 后换成新实现"
+    );
 
     // 新增脚本会改变 descriptor 集合，reload 应拒绝并提示重启。
     dir.write(
@@ -410,7 +415,9 @@ return {
         provider = "lua.mention"
     "#;
     let config = Config::parse(text).expect("配置合法");
-    plugins.validate_config(&config).expect("lua provider 应当能解析");
+    plugins
+        .validate_config(&config)
+        .expect("lua provider 应当能解析");
 }
 
 #[test]
@@ -507,7 +514,9 @@ return {
     );
     let plugins = loaded(&dir);
     let id = ProviderId::parse("lua.sign").expect("合法");
-    let hook = plugins.resolve_send_hook(&id).expect("Lua send hook 应当可解析");
+    let hook = plugins
+        .resolve_send_hook(&id)
+        .expect("Lua send hook 应当可解析");
 
     let room = RoomId::new("qq", "group/1").expect("合法");
     let context = SendContext {
@@ -548,7 +557,9 @@ return {
     );
     let plugins = loaded(&dir);
     let id = ProviderId::parse("lua.after_fail").expect("合法");
-    let hook = plugins.resolve_send_hook(&id).expect("Lua send hook 应当可解析");
+    let hook = plugins
+        .resolve_send_hook(&id)
+        .expect("Lua send hook 应当可解析");
 
     let room = RoomId::new("qq", "group/1").expect("合法");
     let context = SendContext {
@@ -841,24 +852,34 @@ fn shipped_examples_load_and_behave() {
         text: "闲聊",
         at_self: false,
         reply_to_self: false,
+        has_body: true,
         event: None,
         tags: &[],
         unread: 10,
         last_wake_at: 0,
         now: 0,
     };
-    assert_eq!(wake.decide(&WakePolicy::default(), &day), WakeDecision::Wake);
+    assert_eq!(
+        wake.decide(&WakePolicy::default(), &day),
+        WakeDecision::Wake
+    );
 
     let night = WakeContext {
         now: 15 * 3_600_000, // UTC 15:00 = UTC+8 的 23:00
         ..day
     };
-    assert_eq!(wake.decide(&WakePolicy::default(), &night), WakeDecision::Stay);
+    assert_eq!(
+        wake.decide(&WakePolicy::default(), &night),
+        WakeDecision::Stay
+    );
     let aimed = WakeContext {
         at_self: true,
         ..night
     };
-    assert_eq!(wake.decide(&WakePolicy::default(), &aimed), WakeDecision::Wake);
+    assert_eq!(
+        wake.decide(&WakePolicy::default(), &aimed),
+        WakeDecision::Wake
+    );
 
     // allow_read_only：读放行，发和连接级拒绝。
     let read_only = ProviderId::parse("lua.allow_read_only").expect("合法");
@@ -1007,10 +1028,7 @@ fn shipped_examples_load_and_behave() {
         error: "boom",
         ..timed_out
     };
-    assert_eq!(
-        provider.decide(&turn_error_policy, &failed),
-        configured
-    );
+    assert_eq!(provider.decide(&turn_error_policy, &failed), configured);
 
     // options 在第二个参数：会话没配动作时发到 ops_room。
     let with_ops = TurnErrorPolicy {
@@ -1058,6 +1076,7 @@ fn shipped_examples_load_and_behave() {
         text: "闲聊",
         at_self: false,
         reply_to_self: false,
+        has_body: true,
         event: None,
         tags: &[],
         unread: 0,
@@ -1089,13 +1108,27 @@ fn shipped_examples_load_and_behave() {
     let poked = WakeContext {
         event: Some("poke"),
         tags: &["poke"],
+        has_body: false,
         ..base
     };
     assert_eq!(wake.decide(&policy, &poked), WakeDecision::Wake);
-    let busy = WakeContext {
-        unread: 30,
+
+    // 裸 @：先等后续内容，所以 verdict 带 5 秒延迟；带正文的 @ 立即开轮。
+    let bare = WakeContext {
+        at_self: true,
+        has_body: false,
+        text: "",
         ..base
     };
+    let verdict = wake.decide_with_reason(&policy, &bare);
+    assert_eq!(verdict.decision, WakeDecision::Wake);
+    assert_eq!(verdict.delay_ms, 5000, "裸 @ 应该等后续内容");
+    assert_eq!(
+        wake.decide_with_reason(&policy, &aimed).delay_ms,
+        0,
+        "带正文的 @ 不应该延迟"
+    );
+    let busy = WakeContext { unread: 30, ..base };
     assert_eq!(wake.decide(&policy, &busy), WakeDecision::Wake);
     let idle = WakeContext {
         now: 3 * 3_600_000,
@@ -1259,10 +1292,193 @@ return {
         text,
         at_self: false,
     };
-    assert_eq!(provider.decide(&ReceivePolicy::default(), &request), ReceiveDecision::Drop);
+    assert_eq!(
+        provider.decide(&ReceivePolicy::default(), &request),
+        ReceiveDecision::Drop
+    );
     let request = ReceiveRequest {
         sender: &human,
         ..request
     };
-    assert_eq!(provider.decide(&ReceivePolicy::default(), &request), ReceiveDecision::Record);
+    assert_eq!(
+        provider.decide(&ReceivePolicy::default(), &request),
+        ReceiveDecision::Record
+    );
+}
+
+#[test]
+fn route_provider_parses_commands_actions_and_admin_flag() {
+    let dir = TempDir::new("route");
+    dir.write(
+        "routes.lua",
+        r#"
+return {
+  extension = "route",
+  decide = function(options, context)
+    if context.is_admin and context.text == "/stop" then
+      return { action = "interrupt", scope = "room" }
+    end
+    if context.is_admin and context.text == "/stopall" then
+      return { action = "interrupt", sessions = { "main" } }
+    end
+    if context.text == "/send hi" then
+      return { action = "send", text = "hi", store = true }
+    end
+    if context.text == "/task" then
+      return { action = "task", handler = "exec", params = {
+        command = { "echo", "x" }, send = "none", count = 3
+      } }
+    end
+    if context.text == "/drop" then
+      return "drop"
+    end
+    return "pass"
+  end,
+}
+"#,
+    );
+    let plugins = loaded(&dir);
+    let id = ProviderId::parse("lua.routes").expect("合法");
+    let policy = RoutePolicy {
+        provider: id.clone(),
+        options: serde_json::json!({}),
+    };
+    let provider = plugins
+        .resolve_route(&id, &policy)
+        .expect("Lua route provider 应当可解析");
+
+    let room = RoomId::new("qq", "group/1").expect("合法");
+    let sender = Sender {
+        id: "10001".to_owned(),
+        name: "老王".to_owned(),
+        role: None,
+    };
+    let kind = RecordKind::Message;
+    let sessions = vec!["main".to_owned()];
+    let decide = |text: &str, is_admin: bool| {
+        let elements = vec![Element::text(text)];
+        let context = RouteContext {
+            connection: "qq",
+            platform: "qq",
+            room: &room,
+            sender: &sender,
+            is_admin,
+            kind: &kind,
+            elements: &elements,
+            text,
+            at_self: false,
+            reply_to_self: false,
+            has_body: true,
+            event: None,
+            tags: &[],
+            sessions: &sessions,
+        };
+        provider.decide(&policy, &context)
+    };
+
+    assert_eq!(decide("闲聊", false), RouteDecision::Pass);
+    assert_eq!(decide("/stop", false), RouteDecision::Pass, "非管理员不处理");
+    assert_eq!(
+        decide("/stop", true),
+        RouteDecision::Handle {
+            store: false,
+            wake: false,
+            actions: vec![RouteAction::Interrupt {
+                scope: InterruptScope::Room
+            }],
+        }
+    );
+    assert_eq!(
+        decide("/stopall", true),
+        RouteDecision::Handle {
+            store: false,
+            wake: false,
+            actions: vec![RouteAction::Interrupt {
+                scope: InterruptScope::Sessions(vec!["main".to_owned()])
+            }],
+        }
+    );
+    assert_eq!(
+        decide("/send hi", false),
+        RouteDecision::Handle {
+            store: true,
+            wake: false,
+            actions: vec![RouteAction::Send {
+                room: None,
+                elements: vec![Element::text("hi")]
+            }],
+        }
+    );
+    let task = decide("/task", false);
+    assert!(
+        matches!(
+            &task,
+            RouteDecision::Handle { actions, .. }
+                if actions == &vec![RouteAction::Task {
+                    handler: "exec".into(),
+                    params: serde_json::json!({
+                        "command": ["echo", "x"],
+                        "send": "none",
+                        "count": 3
+                    }),
+                }]
+        ),
+        "task 参数要原样转成 JSON，实际 {task:?}"
+    );
+    assert_eq!(decide("/drop", false), RouteDecision::Drop { reason: None });
+}
+
+#[test]
+fn bundled_stop_command_handles_admin_stop_only() {
+    let dir = TempDir::new("stop-command");
+    dir.write(
+        "stop_command.lua",
+        include_str!("../../../../examples/lua/stop_command.lua"),
+    );
+    let plugins = loaded(&dir);
+    let id = ProviderId::parse("lua.stop_command").expect("合法");
+    let policy = RoutePolicy {
+        provider: id.clone(),
+        options: serde_json::json!({}),
+    };
+    let provider = plugins
+        .resolve_route(&id, &policy)
+        .expect("示例 stop_command 应当可解析");
+
+    let room = RoomId::new("qq", "group/1").expect("合法");
+    let sender = Sender {
+        id: "10001".to_owned(),
+        name: "老王".to_owned(),
+        role: None,
+    };
+    let kind = RecordKind::Message;
+    let sessions = vec!["main".to_owned()];
+    let decide = |text: &str, is_admin: bool| {
+        let elements = vec![Element::text(text)];
+        let context = RouteContext {
+            connection: "qq",
+            platform: "qq",
+            room: &room,
+            sender: &sender,
+            is_admin,
+            kind: &kind,
+            elements: &elements,
+            text,
+            at_self: false,
+            reply_to_self: false,
+            has_body: true,
+            event: None,
+            tags: &[],
+            sessions: &sessions,
+        };
+        provider.decide(&policy, &context)
+    };
+
+    let expected = RouteDecision::handle(RouteAction::Interrupt {
+        scope: InterruptScope::Room,
+    });
+    assert_eq!(decide("/stop", false), RouteDecision::Pass);
+    assert_eq!(decide("/stop", true), expected);
+    assert_eq!(decide("/stop@bot 别说了", true), expected);
+    assert_eq!(decide("闲聊", true), RouteDecision::Pass);
 }

@@ -144,6 +144,24 @@ false 是「这次没查」，不是「这条没这个值」，要的话把它�
     },
   },
   {
+    name: "wait_message",
+    description: `在当前轮次的房间里等新消息，最多等 timeout_ms（默认 10000，上限 60000）。
+返回这段时间新到的记录；它们会记成本轮读过的编号，可以直接用 ack_messages 确认。
+到点没有新消息就返回 timed_out=true 和空 records，不要空转重试。
+等待不会卡住其他会话；但同一连接同一时刻只能处理一个工具调用，所以只在确实需要
+等后续内容时用。只能等当前轮次房间；要看别的房间用 get_history / fetch_records。`,
+    schema: {
+      type: "object",
+      properties: {
+        room: ROOM_SCHEMA,
+        timeout_ms: { type: "number", description: "最多等多少毫秒，默认 10000，上限 60000" },
+        limit: { type: "number", description: "最多返回几条，默认 20，上限 200" },
+        columns: COLUMNS_SCHEMA,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "list_rooms",
     description:
       "你当前会话订阅了哪些房间、各自未读多少。每条还带连接（connection）、平台（platform）、适配器 kind 和方法数（method_count），多平台会话能一眼看出哪个房间属于哪个平台。想发消息前先看能发到哪。同一实例上别的会话订阅的房间不在这里，也发不过去。",

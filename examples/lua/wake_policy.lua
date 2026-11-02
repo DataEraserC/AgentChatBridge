@@ -9,6 +9,7 @@
 --        at_mention = true
 --        poke = true
 --        reply = true
+--        empty_body_hold_ms = 5000
 --        accumulate = 30
 --        idle_hours = 3
 --
@@ -30,14 +31,31 @@ return {
   decide = function(options, context)
     local extra = options.extra or {}
 
+    -- 裸 @ / 裸引用 / poke：没有正文时先等一会儿，给后续内容留出时间。
+    -- has_body 是桥给的跨平台判断：只有 At / Quote / 空白文本时为 false。
+    local function defer(reason)
+      local wait = extra.empty_body_hold_ms
+      if wait == nil then
+        wait = 5000
+      end
+      if context.has_body == false and wait > 0 then
+        return {
+          decision = "wake",
+          reason = reason .. "，等后续内容；不够时可 wait_message",
+          delay_ms = wait,
+        }
+      end
+      return { decision = "wake", reason = reason }
+    end
+
     -- @ 到我
     if extra.at_mention ~= false and context.at_self then
-      return { decision = "wake", reason = "@ 到我" }
+      return defer("@ 到我")
     end
 
     -- 回复我（可选，默认关闭）
     if extra.reply and context.reply_to_self then
-      return { decision = "wake", reason = "回复了我" }
+      return defer("回复了我")
     end
 
     -- 叫名字（可选，默认关闭）
@@ -58,7 +76,7 @@ return {
         end
       end
       if poked then
-        return { decision = "wake", reason = "被拍了一下" }
+        return defer("被拍了一下")
       end
     end
 

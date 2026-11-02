@@ -119,6 +119,24 @@ allow_destructive = false
 # [connections.receive]
 # provider = "acb.receive.all"
 
+# 消息路由（ADR-0028）：入库前把命令/链接交给插件。按顺序执行，pass 才轮到下一个。
+# 下面三条需要 ACB_LUA_DIR 指向 examples/lua（或在部署层另外挂载）。
+# [[connections.routes]]
+# provider = "lua.stop_command"
+# [connections.routes.options]
+# commands = ["/stop"]
+# scope = "room"
+# admin_only = true
+#
+# [[connections.routes]]
+# provider = "lua.send_command"
+#
+# [[connections.routes]]
+# provider = "lua.b23_video"
+# [connections.routes.options]
+# dir = "/tmp/acb-b23"
+# timeout_ms = 600000
+
 # 同一个平台的第二个号：id 换个名字就行。它看到的群是 qq2:group/123，
 # 跟 qq:group/123 是两个房间，各记各的水位，永远不会重复收。
 [[connections]]

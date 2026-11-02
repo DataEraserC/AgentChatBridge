@@ -51,6 +51,7 @@ fn connection() -> Connection {
         admin_qqs: Vec::new(),
         allow_destructive: Default::default(),
         receive: Default::default(),
+        routes: Vec::new(),
     }
 }
 

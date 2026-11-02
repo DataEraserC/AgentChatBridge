@@ -175,9 +175,13 @@ access / receive / clock / delivery / turn_error 的策略配置也有同名的 
 Lua 的 `turn_error` 收到 `decide(request, options)`；动态库的 `turn_error` 每次 `Decide` 也带最新 options。
 
 动态库插件通过 `CoreMessage::Decide` 收到 `WireWakeRequest`（发送者、正文、@/引用/拍、
-标签、未读数、上次唤醒时间），返回 `WireResult::Decision { decision = "wake" | "stay" }`。
+`has_body`、标签、未读数、上次唤醒时间），返回 `WireResult::Decision { decision = "wake" | "stay", delay_ms }`。
 解析失败或插件报错按 `stay` 兜底，不会误把会话叫醒。wake 判定在 core 的入库路径里，
 所以只开放进程内载体（动态库与 Lua）；外置进程会在 core 锁内做 I/O，等以后有异步判定再开。
+
+`route`（入库前的命令/链接路由）同理：判定本身必须在进程内、且快；它返回的
+`send` / `task` 动作在锁外由后台 worker 执行，所以路由 provider 目前只支持 Lua / native。
+协议形状见 [08 插件开发](08-plugin-development.md#路由入库前的命令--链接处理)。
 
 ## Agent 怎么知道插件在做什么
 
@@ -203,7 +207,7 @@ Lua 的 `turn_error` 收到 `decide(request, options)`；动态库的 `turn_erro
 |-------------|----------|------|
 | `post_type=message`，`message_type=group` | 一条消息，房间 `qq:group/<群号>`（连接名是 `qq` 时）| 发送者名字优先用群名片，其次昵称 |
 | `post_type=message`，`message_type=private` | 一条消息，房间 `qq:private/<号>`（同理） | |
-| `post_type=notice`，`notice_type=notify`，`sub_type=poke` | 平台事件 `poke`，tags `["poke", "notice"]`，payload 原始事件，正文「[拍了拍我]」 | 拍的是我则标记「冲我来」，唤醒策略据此判定 |
+| `post_type=notice`，`notice_type=notify`，`sub_type=poke` | 平台事件 `poke`，tags `["poke", "notice"]`，payload 原始事件，正文「[拍了拍我]」，`body=false` | 拍的是我则标记「冲我来」；`body=false` 表示它只是触发、没有正文，唤醒策略可以据此延迟开轮 |
 | `post_type=notice`，`notice_type=group_recall` / `friend_recall` | 平台事件，tags `["notice", notice_type, "recall"]`，`target_platform_id` 指向被撤回的消息 | 事件本身声明为 `suppressed`：只进流水备查，不进未读/投递、不唤醒；同时给原消息追加 `target_labels: ["recall"]` |
 | 其它 `notice` | 平台事件（事件类型就是 `notice_type`），tags `["notice", notice_type]` | 进退群、禁言等，正文是一句人话，原始事件进 payload |
 | `post_type=request` | 平台事件 `request_<类型>`，tags `["request", request_type]` | 加好友、加群邀请 |
@@ -287,7 +291,7 @@ QQ 的「聊天记录」卡片是一条消息里嵌一个转发 id，展开一�
 - **连不上**：每 5 秒重试一次，不退出进程。OneBot 后开也能连上。
 - **断了**：自动重连；断在轮次中间的那一轮作废，没确认的消息仍是未读，下一轮重投。
 - **发消息时没连上**：工具调用直接返回错误，不假装成功。
-- **发消息等回话超时**：10 秒没回就报错。平台真的卡住时，AI 知道这次没发出去。
+- **发消息等回话超时**：普通文本 10 秒；带媒体/文件的消息和平台调用 45 秒（要给上传留时间）。超时不等于明确失败：请求可能还在处理，也可能已经执行，所以报错里会写「结果未知，先查流水/历史再决定要不要重发」。
 
 连上之后适配器会问一次「你登录的是哪个号」（`get_login_info`）。如果这个号和连接里
 配的 `account` 对不上，会打一行提醒——因为对不上就意味着自己说的话会被当成别人

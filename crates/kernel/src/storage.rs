@@ -95,6 +95,7 @@ impl RecordDraft {
                 tags: Vec::new(),
                 payload: None,
                 summary: None,
+                body: true,
             },
             sender,
             at,
@@ -106,6 +107,26 @@ impl RecordDraft {
             target_labels: Vec::new(),
             suppressed: false,
         }
+    }
+
+    /// 这条草稿有没有正文（入库前的判断，和 [`Record::has_body`] 同义）。
+    pub fn has_body(&self) -> bool {
+        match &self.kind {
+            RecordKind::Message => self.elements.iter().any(Element::is_body),
+            RecordKind::Event { body, .. } => *body,
+        }
+    }
+
+    /// 标记这个事件只带触发、没有正文（拍一拍这类）。对消息记录无效果。
+    ///
+    /// 事件的可读描述仍然留在 `elements` 里给人和模型看；这里只影响
+    /// [`Record::has_body`] 的判断，进而影响唤醒策略要不要延迟开轮。
+    #[must_use]
+    pub fn without_body(mut self) -> Self {
+        if let RecordKind::Event { body, .. } = &mut self.kind {
+            *body = false;
+        }
+        self
     }
 
     /// 给事件补语义标签、原始载荷和一句人话。对消息记录无效果。

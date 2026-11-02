@@ -304,7 +304,7 @@ ESTAB 127.0.0.1:44758  127.0.0.1:7700   users:((".opencode2-wrap",pid=169923,fd=
   这个行为没写进任何文档，属于实测观察。
 - ~~Code Mode 的目录预算是 2000 token，acb 的 25 个工具塞不塞得下没量过~~ → **已验（2026-10-31，当时 25 个）**：
   实测让模型「把这类工具名全部列出来」，它一次列了 25 个、一个不差（`send_message` … `set_note`）。
-  目录装得下，不用靠 `$codemode.search` 兜。之后又加了记忆工具，当前工具面是 26 个。
+  目录装得下，不用靠 `$codemode.search` 兜。之后又加了记忆工具和 `wait_message`，当前工具面是 27 个。
 - **原生工具调用要过权限**（实测）：让模型用原生 `read` 读 `config.toml`，工具停在 `status: "running"`、
   没执行——`serve` 模式没人批准就不动。但 `execute` 里的 `fetch` **不受这道门管**（它不是工具）。
   所以「读 token」这一步有阻力，「用 token 敲端口」这一步没有。开 `--auto` 时前者也没了。
@@ -440,7 +440,7 @@ dsh 跟 opencode 是**完全不同的接入方式**：opencode 走插件（进�
 ```
 桥(acb) ──turn_start/tool_call──> dsh 驱动器(harnesses/dsh/src/driver.mjs)
                                     ├─ acb 客户端：BridgeLink 接桥（复用 opencode 的 acb-wire.mjs）
-                                    ├─ MCP server：stdio，被 dsh 拉起，暴露整套工具（当前 26 个）
+                                    ├─ MCP server：stdio，被 dsh 拉起，暴露整套工具（当前 27 个）
                                     └─ dsh 客户端：调 webui HTTP/WS API 驱动会话
 ```
 
@@ -458,7 +458,7 @@ dsh 跟 opencode 是**完全不同的接入方式**：opencode 走插件（进�
 - `harnesses/dsh/src/mcp-server.mjs` — 最小 MCP server（stdio，newline JSON-RPC），
   只实现 initialize / tools/list / tools/call / ping，零依赖。
 - `harnesses/dsh/src/driver.mjs` — 主进程：三件事合一。
-- `harnesses/shared/tools.mjs` — 整套工具（当前 26 个）的名字/描述/JSON Schema（opencode 和 dsh 共用）。
+- `harnesses/shared/tools.mjs` — 整套工具（当前 27 个）的名字/描述/JSON Schema（opencode 和 dsh 共用）。
 
 ### 实测探通的协议（隔离 DSH_HOME，真实跑过）
 

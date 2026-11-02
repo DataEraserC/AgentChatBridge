@@ -174,13 +174,33 @@ class TurnDriver {
   }
 
   /**
-   * 桥推来的控制指令。目前只认 `reset`：忘掉旧映射（storage 一起清），
-   * 立刻新建一条干净的 opencode 会话并把新 id 报回桥——桥删旧映射、
-   * 存新映射，控制台马上能看到换好的映射。
+   * 桥推来的控制指令。
+   *
+   * - `interrupt`：打断当前正在跑的轮次（管理员 `/stop` 或控制台的「打断」按钮）。
+   * - `reset`：忘掉旧映射（storage 一起清），立刻新建一条干净的 opencode 会话
+   *   并把新 id 报回桥——桥删旧映射、存新映射，控制台马上能看到换好的映射。
    */
   async handleControl(frame, link) {
     const { id, session, command } = frame
     try {
+      if (command === "interrupt") {
+        const sessionID = this.pinned || this.sessions.get(session)
+        if (!sessionID) {
+          throw new Error(`会话 ${session} 还没有 opencode 映射（没开过轮）`)
+        }
+        if (typeof this.ctx.session.interrupt !== "function") {
+          throw new Error("这个 opencode 版本没有 ctx.session.interrupt，无法打断")
+        }
+        await this.ctx.session.interrupt({ sessionID })
+        link.controlResult({
+          id,
+          session,
+          command,
+          result: { ok: true, session_id: sessionID },
+        })
+        this.log("info", `已打断会话 ${session}（opencode ${sessionID}）`)
+        return
+      }
       if (command !== "reset") throw new Error(`不认识的指令 ${command}`)
       this.#forget(session)
       let newId = ""
