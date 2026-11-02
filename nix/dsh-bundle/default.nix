@@ -14,10 +14,12 @@ let
       [ session.preset (toString session.port) ]
       rowTemplate
   ) sessions;
-  patch = lib.replaceStrings
-    [ "@ROWS@" ]
-    [ rows ]
-    (builtins.readFile ./presets.patch.yml.tmpl);
+  patch =
+    if sessions == [ ] then
+      # 没有会话时也要是合法 YAML（空 entry list）。
+      "[]\n"
+    else
+      lib.replaceStrings [ "@ROWS@" ] [ rows ] (builtins.readFile ./presets.patch.yml.tmpl);
 in
 pkgs.runCommand "acb-presets-0.1.0" { } ''
   pkg=$out/lib/node_modules/acb-presets
