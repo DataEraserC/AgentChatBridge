@@ -237,7 +237,7 @@ Lua 的 `turn_error` 收到 `decide(request, options)`；动态库的 `turn_erro
 | quote | `reply` | |
 | image / audio / video | `image` / `record` / `video` | `file` 接受三种：http(s) 直链、`base64://…`（原始内容 750 KB 内，走协议帧）、桥文件中继给的 URL |
 | face | `face` | |
-| file | **报错** | OneBot 11 没有标准文件段，明确报错而不是悄悄丢 |
+| file | 单文件走上传动作 `upload_group_file` / `upload_private_file` | OneBot 11 没有标准文件段；只能单独发一个文件，和文字/图片混在一起明确报错 |
 | opaque（platform=qq） | 原样送出 | 平台特有内容照搬 |
 | opaque（别的平台） | **报错** | 别处的内容发不到 QQ |
 

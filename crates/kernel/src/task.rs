@@ -16,8 +16,9 @@ use serde_json::Value;
 pub(crate) enum TaskOutcome {
     /// 没有要发的东西。
     Nothing,
-    /// 发到触发任务的那个房间。
-    Send(Vec<Element>),
+    /// 发到触发任务的那个房间。外层是候选，按顺序试；只有平台返回
+    /// `Unsupported`（编码阶段、还没发出去）才换下一个。
+    Send(Vec<Vec<Element>>),
 }
 
 /// 按 handler 名字执行任务。未知 handler 明确报错，不静默成功。
@@ -63,14 +64,9 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
         .and_then(Value::as_u64)
         .unwrap_or(600_000)
         .min(1_800_000);
-    let send = params
-        .get("send")
-        .and_then(Value::as_str)
-        .unwrap_or("none");
-    if !matches!(send, "none" | "text" | "file" | "video") {
-        return Err(format!(
-            "exec 的 send 只支持 none / text / file / video，收到 {send:?}"
-        ));
+    let send = send_kinds(params)?;
+    if send.is_empty() {
+        return Ok(TaskOutcome::Nothing);
     }
 
     let mut command = Command::new(&parts[0]);
@@ -109,47 +105,94 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
     }
     let stdout = stdout.trim();
 
-    match send {
-        "none" => Ok(TaskOutcome::Nothing),
-        "text" => {
-            if stdout.is_empty() {
-                return Err("任务没有输出，发不了 text".to_owned());
-            }
-            Ok(TaskOutcome::Send(vec![Element::text(stdout)]))
-        }
-        "file" | "video" => {
-            let path = stdout
-                .lines()
-                .rev()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .ok_or_else(|| "任务没有输出文件路径（最后一行 stdout 要是产物路径）".to_owned())?;
-            if !Path::new(path).is_file() {
-                return Err(format!("任务说产物是 {path}，但文件不存在"));
-            }
-            let name = params
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| {
-                    Path::new(path)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .map(str::to_owned)
-                })
-                .unwrap_or_else(|| "file".to_owned());
-            let element = if send == "video" {
-                Element::Video {
-                    url: path.to_owned(),
+    let mut candidates = Vec::with_capacity(send.len());
+    let mut file_path: Option<String> = None;
+    for kind in &send {
+        match kind.as_str() {
+            "text" => {
+                if stdout.is_empty() {
+                    return Err("任务没有输出，发不了 text".to_owned());
                 }
-            } else {
-                Element::File {
-                    url: path.to_owned(),
-                    name,
+                candidates.push(vec![Element::text(stdout)]);
+            }
+            "file" | "video" => {
+                let path = match &file_path {
+                    Some(path) => path.clone(),
+                    None => {
+                        let path = stdout
+                            .lines()
+                            .rev()
+                            .map(str::trim)
+                            .find(|line| !line.is_empty())
+                            .ok_or_else(|| {
+                                "任务没有输出文件路径（最后一行 stdout 要是产物路径）".to_owned()
+                            })?
+                            .to_owned();
+                        if !Path::new(&path).is_file() {
+                            return Err(format!("任务说产物是 {path}，但文件不存在"));
+                        }
+                        file_path = Some(path.clone());
+                        path
+                    }
+                };
+                let name = params
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        Path::new(&path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "file".to_owned());
+                if kind == "video" {
+                    candidates.push(vec![Element::Video { url: path }]);
+                } else {
+                    candidates.push(vec![Element::File { url: path, name }]);
                 }
-            };
-            Ok(TaskOutcome::Send(vec![element]))
+            }
+            other => {
+                return Err(format!(
+                    "exec 的 send 只支持 none / text / file / video，收到 {other:?}"
+                ));
+            }
         }
-        _ => unreachable!("send 已在上面校验"),
     }
+    Ok(TaskOutcome::Send(candidates))
+}
+
+/// `send` 可以是一个字符串，也可以是按优先级排列的数组，例如
+/// `send = { "video", "file" }`：先试视频，平台不支持再试文件。
+fn send_kinds(params: &Value) -> Result<Vec<String>, String> {
+    let mut kinds = Vec::new();
+    match params.get("send") {
+        None => return Ok(kinds),
+        Some(Value::String(kind)) => kinds.push(kind.clone()),
+        Some(Value::Array(items)) => {
+            for item in items {
+                let kind = item
+                    .as_str()
+                    .ok_or_else(|| "exec 的 send 数组里每一项都要是字符串".to_owned())?;
+                kinds.push(kind.to_owned());
+            }
+        }
+        Some(_) => {
+            return Err("exec 的 send 要是字符串或字符串数组".to_owned());
+        }
+    }
+    if kinds.iter().any(|kind| kind == "none") {
+        if kinds.len() > 1 {
+            return Err("send 里的 none 不能和其他值混用".to_owned());
+        }
+        return Ok(Vec::new());
+    }
+    // 去重但保留顺序：video, file, video 第二个 video 没有意义。
+    let mut unique = Vec::with_capacity(kinds.len());
+    for kind in kinds {
+        if !unique.contains(&kind) {
+            unique.push(kind);
+        }
+    }
+    Ok(unique)
 }

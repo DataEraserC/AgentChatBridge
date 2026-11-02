@@ -37,7 +37,9 @@ fn one_to_onebot(element: &Element) -> Result<Value, SegmentError> {
         Element::Face { id, .. } => json!({"type": "face", "data": {"id": id}}),
         Element::File { .. } => {
             return Err(SegmentError::Unsupported(
-                "OneBot 11 没有标准的文件段，QQ 这边发不了文件".into(),
+                "OneBot 11 没有标准的 file 消息段；单个文件走上传动作，\
+                 文件和文字/图片不能混在同一条消息里"
+                    .into(),
             ));
         }
         // QQ 自己的段，原样送回去。

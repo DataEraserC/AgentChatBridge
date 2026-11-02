@@ -1018,8 +1018,10 @@ fn stop_from_non_admin_is_a_normal_message() {
     );
 }
 
-fn bridge_with_route(provider: Arc<dyn RouteProvider>) -> (Bridge<MemoryStore>, Sends) {
-    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+fn bridge_with_route_and_outbound(
+    provider: Arc<dyn RouteProvider>,
+    outbound: Box<dyn Outbound>,
+) -> Bridge<MemoryStore> {
     let text = config().replace(
         "        account = \"bot\"",
         "        account = \"bot\"\n\n        [[connections.routes]]\n        provider = \"test.route\"",
@@ -1037,13 +1039,21 @@ fn bridge_with_route(provider: Arc<dyn RouteProvider>) -> (Bridge<MemoryStore>, 
             provider,
         )
         .expect("能注册路由 provider");
-    let bridge = Bridge::with_plugins(
+    Bridge::with_plugins(
         acb_kernel::Config::parse(&text).expect("配置合法"),
         MemoryStore::new(),
+        outbound,
+        plugins,
+    )
+}
+
+fn bridge_with_route(provider: Arc<dyn RouteProvider>) -> (Bridge<MemoryStore>, Sends) {
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let bridge = bridge_with_route_and_outbound(
+        provider,
         Box::new(Recorder {
             sends: sends.clone(),
         }),
-        plugins,
     );
     (bridge, sends)
 }
@@ -1208,6 +1218,99 @@ fn route_task_runs_exec_and_sends_the_file() {
     queue.submit(message("qq:group/123", "20002", "/task", false));
     let got = wait_for_sends(&sends, Duration::from_secs(3));
     assert_eq!(got.len(), 1, "任务完成后应当发出一条");
+    assert_eq!(
+        got[0].1,
+        vec![Element::File {
+            url: path.display().to_string(),
+            name: "out.txt".into(),
+        }]
+    );
+
+    shutdown.store(true, Ordering::Relaxed);
+    drain.join().expect("drain 线程能收工");
+    let _ = std::fs::remove_file(path);
+}
+
+struct VideoRejectingOutbound {
+    sends: Sends,
+}
+
+impl Outbound for VideoRejectingOutbound {
+    fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
+        if elements.iter().any(|element| matches!(element, Element::Video { .. })) {
+            return Err(OutboundError::Unsupported("这个平台不发视频".into()));
+        }
+        let mut sends = self.sends.lock().expect("没被毒死");
+        sends.push((room.clone(), elements.to_vec()));
+        Ok(Sent {
+            platform_id: "file-1".into(),
+            at: AT,
+        })
+    }
+}
+
+struct VideoThenFileTaskRoute {
+    path: String,
+}
+
+impl RouteProvider for VideoThenFileTaskRoute {
+    fn decide(&self, _options: &RoutePolicy, context: &RouteContext<'_>) -> RouteDecision {
+        if context.text != "/task" {
+            return RouteDecision::Pass;
+        }
+        RouteDecision::handle(RouteAction::Task {
+            handler: "exec".into(),
+            params: json!({
+                "command": ["printf", "%s", self.path],
+                "send": ["video", "file"],
+                "name": "out.txt",
+            }),
+        })
+    }
+}
+
+#[test]
+fn task_send_candidates_fall_back_only_on_unsupported() {
+    let path = std::env::temp_dir().join(format!(
+        "acb-route-fallback-{}-{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::write(&path, "hi").expect("写临时文件");
+
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let bridge = bridge_with_route_and_outbound(
+        Arc::new(VideoThenFileTaskRoute {
+            path: path.display().to_string(),
+        }),
+        Box::new(VideoRejectingOutbound {
+            sends: sends.clone(),
+        }),
+    );
+    let bridge = Arc::new(Mutex::new(bridge));
+    let (queue, receiver) = EventQueue::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker = RouteWorker::spawn(Arc::clone(&bridge), Arc::clone(&shutdown));
+    let drain = {
+        let bridge = Arc::clone(&bridge);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            drain_events(
+                bridge,
+                receiver,
+                shutdown,
+                ControlRegistry::new(),
+                worker,
+            )
+        })
+    };
+
+    queue.submit(message("qq:group/123", "20002", "/task", false));
+    let got = wait_for_sends(&sends, Duration::from_secs(3));
+    assert_eq!(got.len(), 1, "视频被拒后应当退到文件，且只发一次");
     assert_eq!(
         got[0].1,
         vec![Element::File {
@@ -2081,7 +2184,6 @@ fn a_room_outside_the_group_is_still_refused() {
     assert_eq!(error.code, ErrorCode::RoomNotSubscribed);
 }
 
-#[test]
 /// 工具面按会话圈，不按会话组圈（2026-11-01 用户裁定，推翻旧的「组内能读」设计：
 /// 一条连接挂的多个会话是各自独立的大脑——opencode 一个实例带多条独立会话，
 /// 不是同一个大脑的分身，兄弟会话的房间不该出现在自己的可见域里）。

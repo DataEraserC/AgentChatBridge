@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::engine::{Bridge, PreparedRouteAction, PreparedTask};
+use crate::outbound::OutboundError;
 use crate::storage::Store;
 use crate::task;
 
@@ -73,26 +74,53 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
             return;
         }
     };
-    let elements = match outcome {
+    let candidates = match outcome {
         task::TaskOutcome::Nothing => return,
-        task::TaskOutcome::Send(elements) => elements,
+        task::TaskOutcome::Send(candidates) => candidates,
     };
+    let total = candidates.len();
 
-    let prepared = {
-        let mut guard = lock(bridge);
-        guard.prepare_route_send(task.config, &task.session, task.room, elements)
-    };
-    let prepared = match prepared {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("路由任务的结果组装成发送失败：{error:?}");
-            return;
+    // 候选按顺序试：只有平台在编码阶段返回 Unsupported（还没发出去）才换下一个。
+    // 超时、拒收都不重试，避免把同一条消息发两遍。
+    for (index, elements) in candidates.into_iter().enumerate() {
+        let prepared = {
+            let mut guard = lock(bridge);
+            guard.prepare_route_send(
+                task.config.clone(),
+                &task.session,
+                task.room.clone(),
+                elements,
+            )
+        };
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                eprintln!("路由任务的结果组装成发送失败：{error:?}");
+                return;
+            }
+        };
+        match prepared.execute() {
+            Ok(sent) => {
+                let mut guard = lock(bridge);
+                if let Err(error) = guard.finish_send(prepared, Ok(sent)) {
+                    eprintln!("路由任务的结果发送失败：{error:?}");
+                }
+                return;
+            }
+            Err(OutboundError::Unsupported(detail)) if index + 1 < total => {
+                eprintln!(
+                    "路由任务候选 {} 不被平台支持：{detail}；试下一个",
+                    index + 1
+                );
+            }
+            Err(error) => {
+                let mut guard = lock(bridge);
+                if let Err(error) = guard.finish_send(prepared, Err(error)) {
+                    eprintln!("路由任务的结果发送失败：{error:?}");
+                }
+                return;
+            }
         }
-    };
-    let result = prepared.execute();
-    let mut guard = lock(bridge);
-    if let Err(error) = guard.finish_send(prepared, result) {
-        eprintln!("路由任务的结果发送失败：{error:?}");
     }
 }
 
