@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 use acb_adapter_api::abi::{ABI_VERSION, AdapterV1, ENTRY_SYMBOL, EntryFn, HostV1};
 use acb_adapter_api::{
     AdapterMessage, CoreMessage, WireAccessRequest, WireClockRequest, WireConnection,
-    WireDeliveryRequest, WireInstanceConfig, WireManifest, WireReceiveRequest, WireResult,
-    WireSendRequest, WireTurnErrorAction, WireTurnErrorRequest, WireWakeRequest, WireError,
+    WireDeliveryRequest, WireError, WireInstanceConfig, WireManifest, WireReceiveRequest,
+    WireResult, WireSendRequest, WireTurnErrorAction, WireTurnErrorRequest, WireWakeRequest,
     decode_line, encode_line,
 };
 use acb_kernel::wire::{call_error, convert_catalog, send_error};
@@ -39,12 +39,12 @@ use acb_kernel::{
     ClockContext, ClockPolicy, ClockProvider, Connection, DefaultTurnErrorProvider,
     DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest, Element, EventQueue,
     ExtensionPoint, Health, LoaderKind, LoaderManifest, ManagerManifest, ManagerPlugin, MethodSpec,
-    Outbound, OutboundError, OutgoingRecord, PluginConfig, PluginError, PluginLoader, PluginManager,
-    PluginMetadata, PluginSource, ProviderDescriptor, ProviderId, ProviderInstance,
-    ProviderOptions, ReceiveDecision, ReceivePolicy, ReceiveProvider, ReceiveRequest, RoomId,
-    SendContext, SendHook, Sent, TurnErrorAction, TurnErrorPolicy, TurnErrorProvider,
-    TurnErrorRequest, WakeContext, WakeDecision, WakePolicy, WakeProvider, WakeVerdict,
-    PLUGIN_API_VERSION, default_delivery_plan, validate_manifest,
+    Outbound, OutboundError, OutgoingRecord, PLUGIN_API_VERSION, PluginConfig, PluginError,
+    PluginLoader, PluginManager, PluginMetadata, PluginSource, ProviderDescriptor, ProviderId,
+    ProviderInstance, ProviderOptions, ReceiveDecision, ReceivePolicy, ReceiveProvider,
+    ReceiveRequest, RoomId, SendContext, SendHook, Sent, TurnErrorAction, TurnErrorPolicy,
+    TurnErrorProvider, TurnErrorRequest, WakeContext, WakeDecision, WakePolicy, WakeProvider,
+    WakeVerdict, default_delivery_plan, validate_manifest,
 };
 use libloading::Library;
 use serde_json::{Value, json};
@@ -88,8 +88,8 @@ impl PluginLoader for DynamicLoader {
 
     fn install(&self, manager: &mut PluginManager) -> Result<(), PluginError> {
         for plugin in &self.plugins {
-            let loaded = LoadedPlugin::load(&plugin.path, plugin.kind.as_deref())
-                .map_err(|detail| {
+            let loaded =
+                LoadedPlugin::load(&plugin.path, plugin.kind.as_deref()).map_err(|detail| {
                     PluginError::Loader(format!("加载 {} 失败：{detail}", plugin.path))
                 })?;
             match loaded {
@@ -116,11 +116,14 @@ enum LoadedPlugin {
 
 impl LoadedPlugin {
     fn load(path: &str, expected_kind: Option<&str>) -> Result<Self, String> {
-        let library = unsafe { Library::new(path) }
-            .map_err(|error| format!("打不开动态库：{error}"))?;
+        let library =
+            unsafe { Library::new(path) }.map_err(|error| format!("打不开动态库：{error}"))?;
         let entry: libloading::Symbol<'_, EntryFn> =
             unsafe { library.get(ENTRY_SYMBOL) }.map_err(|error| {
-                format!("没有导出 {}：{error}", String::from_utf8_lossy(ENTRY_SYMBOL))
+                format!(
+                    "没有导出 {}：{error}",
+                    String::from_utf8_lossy(ENTRY_SYMBOL)
+                )
             })?;
         let table_ptr = unsafe { entry() };
         if table_ptr.is_null() {
@@ -139,7 +142,9 @@ impl LoadedPlugin {
             || table.destroy.is_none()
             || table.free_string.is_none()
         {
-            return Err("插件函数表不完整（manifest/create/invoke/destroy/free_string 都要有）".into());
+            return Err(
+                "插件函数表不完整（manifest/create/invoke/destroy/free_string 都要有）".into(),
+            );
         }
 
         let wire = read_manifest(&table)?;
@@ -333,14 +338,7 @@ impl DylibAdapterFactory {
         let stop = Arc::clone(&context.stop);
         let connection_id = connection.id.clone();
         let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
-            monitor(
-                host.shutdown,
-                stop,
-                table,
-                handle,
-                context,
-                connection_id,
-            );
+            monitor(host.shutdown, stop, table, handle, context, connection_id);
         });
 
         Ok(AdapterInstance {
@@ -412,14 +410,16 @@ impl ManagerPlugin for DylibWakeManager {
     }
 
     fn descriptors(&self) -> Vec<ProviderDescriptor> {
-        vec![ProviderDescriptor::new(
-            self.provider.clone(),
-            ExtensionPoint::Wake,
-            PLUGIN_API_VERSION,
-            vec![Capability::WakeDecision],
-        )
-        .with_metadata(self.metadata.clone())
-        .with_source(PluginSource::Dynamic)]
+        vec![
+            ProviderDescriptor::new(
+                self.provider.clone(),
+                ExtensionPoint::Wake,
+                PLUGIN_API_VERSION,
+                vec![Capability::WakeDecision],
+            )
+            .with_metadata(self.metadata.clone())
+            .with_source(PluginSource::Dynamic),
+        ]
     }
 
     fn instantiate(
@@ -557,11 +557,7 @@ impl WakeProvider for DylibWakeProvider {
         self.decide_with_reason(options, context).decision
     }
 
-    fn decide_with_reason(
-        &self,
-        options: &WakePolicy,
-        context: &WakeContext<'_>,
-    ) -> WakeVerdict {
+    fn decide_with_reason(&self, options: &WakePolicy, context: &WakeContext<'_>) -> WakeVerdict {
         let id = self.seq.fetch_add(1, Ordering::Relaxed);
         let request = WireWakeRequest {
             session: context.session.to_owned(),
@@ -572,6 +568,7 @@ impl WakeProvider for DylibWakeProvider {
             text: context.text.to_owned(),
             at_self: context.at_self,
             reply_to_self: context.reply_to_self,
+            has_body: context.has_body,
             event: context.event.map(str::to_owned),
             tags: context.tags.iter().map(|tag| (*tag).to_owned()).collect(),
             unread: context.unread,
@@ -588,12 +585,18 @@ impl WakeProvider for DylibWakeProvider {
 
         match invoke(&self.table, &self.handle, &message) {
             Ok(AdapterMessage::Reply {
-                result: WireResult::Decision { decision, reason },
+                result:
+                    WireResult::Decision {
+                        decision,
+                        reason,
+                        delay_ms,
+                    },
                 ..
             }) => match decision.as_str() {
                 "wake" => WakeVerdict {
                     decision: WakeDecision::Wake,
                     reason,
+                    delay_ms,
                 },
                 "stay" => WakeVerdict::stay(),
                 other => {
@@ -720,14 +723,16 @@ impl ManagerPlugin for DylibDecisionManager {
     }
 
     fn descriptors(&self) -> Vec<ProviderDescriptor> {
-        vec![ProviderDescriptor::new(
-            self.provider.clone(),
-            self.point,
-            PLUGIN_API_VERSION,
-            vec![self.capability()],
-        )
-        .with_metadata(self.metadata.clone())
-        .with_source(PluginSource::Dynamic)]
+        vec![
+            ProviderDescriptor::new(
+                self.provider.clone(),
+                self.point,
+                PLUGIN_API_VERSION,
+                vec![self.capability()],
+            )
+            .with_metadata(self.metadata.clone())
+            .with_source(PluginSource::Dynamic),
+        ]
     }
 
     fn instantiate(
@@ -869,17 +874,15 @@ impl DecisionChannel {
             extension: extension.to_owned(),
             options,
         };
-        let config_json = CString::new(encode_line(&config).map_err(|error| {
-            format!("{extension} 配置序列化失败：{error}")
-        })?)
+        let config_json = CString::new(
+            encode_line(&config).map_err(|error| format!("{extension} 配置序列化失败：{error}"))?,
+        )
         .map_err(|_| format!("{extension} 配置里含有 NUL"))?;
 
         let create = table.create.ok_or("没有 create 函数")?;
         let handle_ptr = unsafe { create(config_json.as_ptr(), &host) };
         if handle_ptr.is_null() {
-            return Err(format!(
-                "{extension} 插件 {plugin_id} create 返回空 handle"
-            ));
+            return Err(format!("{extension} 插件 {plugin_id} create 返回空 handle"));
         }
 
         Ok(Self {
@@ -1029,11 +1032,7 @@ impl TurnErrorProvider for DylibTurnErrorProvider {
             session: request.session.to_owned(),
             room: request.room.to_string(),
             error: request.error.to_owned(),
-            actions: request
-                .actions
-                .iter()
-                .map(wire_turn_error_action)
-                .collect(),
+            actions: request.actions.iter().map(wire_turn_error_action).collect(),
             default_actions: request
                 .default_actions
                 .iter()
@@ -1120,7 +1119,10 @@ impl SendHook for DylibSendHook {
         };
         match self.channel.call(&message) {
             Ok(AdapterMessage::Reply {
-                result: WireResult::Elements { elements: replacement },
+                result:
+                    WireResult::Elements {
+                        elements: replacement,
+                    },
                 ..
             }) => {
                 *elements = replacement;
@@ -1132,7 +1134,10 @@ impl SendHook for DylibSendHook {
                 ..
             }) if decision == "keep" || decision == "ok" => Ok(()),
             Ok(AdapterMessage::Reply {
-                result: WireResult::Error { error: WireError::Unsupported { .. } },
+                result:
+                    WireResult::Error {
+                        error: WireError::Unsupported { .. },
+                    },
                 ..
             }) => Ok(()),
             Ok(AdapterMessage::Reply {
@@ -1413,10 +1418,9 @@ fn invoke(
     handle: &Arc<Mutex<AdapterHandle>>,
     message: &CoreMessage,
 ) -> Result<AdapterMessage, String> {
-    let request = CString::new(
-        encode_line(message).map_err(|error| format!("请求序列化失败：{error}"))?,
-    )
-    .map_err(|_| "请求里含有 NUL".to_owned())?;
+    let request =
+        CString::new(encode_line(message).map_err(|error| format!("请求序列化失败：{error}"))?)
+            .map_err(|_| "请求里含有 NUL".to_owned())?;
 
     let guard = handle
         .lock()
@@ -1433,8 +1437,7 @@ fn invoke(
         return Err("适配器没有返回结果".into());
     }
     let json = take_owned_string(pointer, table)?;
-    decode_line::<AdapterMessage>(&json)
-        .map_err(|error| format!("回执不是合法 JSON：{error}"))
+    decode_line::<AdapterMessage>(&json).map_err(|error| format!("回执不是合法 JSON：{error}"))
 }
 
 fn invoke_with_timeout(

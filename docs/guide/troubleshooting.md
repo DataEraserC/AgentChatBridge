@@ -42,6 +42,7 @@ ss -tln | grep -E "7700|3080|3100|3131|4097"
 | `未分组`（dsh 网页里会话不进工作区） | 旧版建会话只传了 cwd，dsh 不按 cwd 分组 | 控制台断开重置一次映射，新会话会归到「ACB」工作区 |
 | opencode 不回复，插件日志里也没有 `prompt 已发出` | 插件没收到轮次：检查 `acb-opencode-serve` 是否 active、7700 的 ESTAB、`logFile` 是否配置 | 重启 `acb-opencode-serve`；看插件日志里的 `插件加载 / 已接入桥` |
 | opencode 报 `The requested item was created under a different Azure OpenAI resource` | 模型网关换了上游资源，旧会话里的 Responses item 失效 | 控制台重置该会话映射，下一轮会新建 opencode 会话；长期解法是固定网关渠道 |
+| `platform_call` / 发消息报「等平台回话超时」 | 平台没在时限内回话（普通文本 10 秒；带媒体/文件和平台调用 45 秒）。大文件上传时经常还没传完 | **不代表失败**：请求可能已经发出或还在处理。先看群里有没有发出，或在流水里查；确认没有再重试，别让 agent 直接重发 |
 
 ## 数据安全
 

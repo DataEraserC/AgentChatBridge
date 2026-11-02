@@ -50,10 +50,21 @@ HTTP 地址也可以给，但要保证**平台那边**访问得到，否则平�
 ## 管理员的特权
 
 连接上的 `admin_qqs` 里列的 QQ 号会在记录里标成系统管理员（`sender.role = system_admin`），
-agent 在流水里看得到这个身份；桥的默认策略不会因此改变行为。它本身也不代表任何自动通知。
+agent 在流水里看得到这个身份；桥的默认唤醒策略不会因此改变行为。它本身也不代表任何自动通知。
 agent 的运行反馈（失败原因、异常通知）
 发给哪个房间，由会话的 `on_turn_error` / 全局 `default_on_turn_error` 决定。
 想让 agent 帮你做点危险操作（踢人、改群名），在连接上开 `allow_destructive`，并想清楚后果。
+
+`/stop` 由消息路由插件 [`lua.stop_command`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/stop_command.lua) 提供（示例配置里已经挂上）。管理员在订阅房间发 `/stop`（也认
+`/stop@机器人名`）可以**提前结束当前轮次**：插件会打断这个房间里正在跑的轮次，并清掉
+排队中的轮次，避免刚停下又立刻开下一轮。命令本身不写流水，也不叫醒 agent；被停掉的
+消息仍留在流水里，下一次唤醒会照常带上。被主动停掉的轮次不会触发 `on_turn_error`
+失败通知。`/stop` 只对 `admin_qqs` 里的号生效，非管理员发的 `/stop` 只是一条普通消息。
+没挂这个 route provider 时，`/stop` 不会生效——它不再是内核写死的命令。
+
+同一套路由还挂着 `/send`（示例插件 `lua.send_command`）和 b23/B 站链接处理
+（`lua.b23_video`：后台下载，完成后发回原房间）。路由的配置和作用域见
+[配置](./config#消息路由命令和链接交给代码)。
 
 ## 换会话、重置上下文
 

@@ -17,6 +17,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "ack_messages",
     "get_history",
     "fetch_records",
+    "wait_message",
     "list_rooms",
     "get_notes",
     "set_note",
@@ -114,6 +115,28 @@ pub struct FetchRecordsArgs {
     #[serde(default)]
     pub columns: Option<Vec<String>>,
 }
+
+/// 在当前轮次房间里等新消息。
+#[derive(Debug, Default, Deserialize)]
+pub struct WaitMessageArgs {
+    /// 房间；不填就是当前轮次的房间。只允许当前轮次房间，因为读到的编号
+    /// 要能直接 `ack_messages`。
+    #[serde(default)]
+    pub room: Option<String>,
+    /// 最多等多久，默认 10 秒、上限 60 秒。到点没有新消息就返回空。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// 最多返回几条，默认 20、上限 200。
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// 只返回这些列，规则同 `get_history`。
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
+}
+
+/// `wait_message` 的默认超时与上限。
+pub const DEFAULT_WAIT_TIMEOUT_MS: u64 = 10_000;
+pub const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 
 /// 一条记录能按需取的全部列。顺序即文档/错误提示里的列出顺序。
 pub const RECORD_COLUMNS: &[&str] = &[

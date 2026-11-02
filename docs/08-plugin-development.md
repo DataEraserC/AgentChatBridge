@@ -157,6 +157,7 @@ return {
 | turn_error | `decide(request, options)` |
 | clock | `is_due(options, context)` |
 | receive | `decide(request, options)` |
+| route | `decide(options, context)`（按连接配置，可能挂多个，按顺序执行） |
 
 access 的 `request` 字段：`session`、`connection`、`room`（这次要访问的目标房间；
 连接级请求为 `nil`）、`origin_room`（当前轮次是从哪个房间触发的）、`action`
@@ -168,18 +169,51 @@ Lua / 动态库也可以拿它做自己的「按来源房间授权」。
 
 | 扩展点 | `context` / `request` 里的字段 |
 |--------|------------------------------|
-| wake | `session`、`room`、`connection`、`platform`、`sender_id`、`text`、`at_self`、`reply_to_self`、`event`（消息为 `nil`）、`tags`、`unread`、`last_wake_at`、`now` |
+| wake | `session`、`room`、`connection`、`platform`、`sender_id`、`text`、`at_self`、`reply_to_self`、`has_body`、`event`（消息为 `nil`）、`tags`、`unread`、`last_wake_at`、`now` |
 | clock | `session`、`room`、`now`、`last_clock_at`、`last_wake_at`、`last_record_at`（房间没记录时为 `nil`） |
 | delivery | `session`、`room`、`limit`；`records` 是投递候选数组，每条带 `id`、`room`、`at`、`at_self`、`reply_to_self`、`redelivery`、`note`、`platform_id`、`text`、`sender`（`id`/`name`/`role`）、`kind`、`event`、`elements`、`quote_ref`。完整 wire 形状（含 `labels`、`suppressed`、事件的 `tags`/`payload`/`summary`）见 [04-protocol](04-protocol.md)；Lua table 只暴露上面这些字段，动态库插件拿到的是完整 JSON |
-| send | `context` 是 `session`、`room`、`origin`（`message` 或 `turn_failure`）；`before` 收到可改写的 `elements`，`after` 收到 `sent`（`platform_id`、`at`） |
+| send | `context` 是 `session`、`room`、`origin`（`message` / `turn_failure` / `route`）；`before` 收到可改写的 `elements`，`after` 收到 `sent`（`platform_id`、`at`） |
 | turn_error | `session`、`room`、`error`、`actions`、`default_actions`；动作是 `{kind="log"}` 或 `{kind="send", room="qq:group/123"}` |
 | receive | `connection`、`platform`、`room`、`sender`、`kind`、`elements`、`text`、`at_self` |
+| route | `connection`、`platform`、`room`、`sender`、`is_admin`、`kind`、`elements`、`text`（只拼 Text 段）、`at_self`、`reply_to_self`、`has_body`、`event`、`tags`、`sessions`（订阅这个房间的会话） |
 
+`has_body` 是跨平台的“有没有正文”：消息里只有 `At` / `Quote` / 空白文本时为 `false`，
+图片、文件、表情等为 `true`；事件由适配器在事件记录的 `body` 字段声明（拍一拍这类纯
+触发事件为 `false`，入群、上传、请求等带信息的事件默认 `true`，旧记录缺省也按 `true`）。
+策略可以用它判断“这只是个裸 @ / 裸引用 / poke”，返回带 `delay_ms` 的 wake 表让 core
+等一会儿再开轮，等待期间的新消息会在开轮时一起投递：
+
+```lua
+return { decision = "wake", reason = "只有 @，等后续内容", delay_ms = 5000 }
+```
+
+动态库的 `WireResult::Decision` 也接受同一个 `delay_ms`（默认 0）。
 `WakeContext` 和 `ClockContext` 都带 `last_wake_at`（这个会话×房间上一次因任何原因
 开轮的时间）。做「多久没醒就醒一次」时，wake 端只能覆盖「有入站记录时」的判定；
 没人说话也要到点开轮，必须再配一个 clock provider。参考
 [`examples/lua/wake_policy.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/wake_policy.lua) 和
 [`examples/lua/three_hour_clock.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/three_hour_clock.lua)。
+
+### 路由：入库前的命令 / 链接处理
+
+`route` 在订阅检查之后、receive/入库/唤醒之前执行。它返回：
+
+- `"pass"`：继续下一个 route provider，最后走正常入库/唤醒。
+- `"drop"`：吃掉，不写流水、不叫醒。
+- 动作 table：`{ action = "interrupt" | "send" | "task" ... }`，或者 `{ store=…, wake=…, actions={…} }`。
+  - `interrupt`：`scope = "room"`（默认）/ `"connection"`，或 `sessions = { "main" }`。
+  - `send`：`text` 或 `elements`，可选 `room`；发出去走正常发送钩子和文件中继。
+  - `task`：`handler`（目前 `exec`）和 `params`；后台 worker 执行，完成后按结果发送。
+- `store` 默认 `false`；`wake` 默认 `false`。`store=true, wake=false` 的记录会标成
+  suppressed：归档备查，但不算未读、不叫醒 AI。`wake=true` 隐含 `store=true`。
+
+路由回调必须快（Lua 上限 50ms）：匹配 b23 链接只返回 `task`，真正的下载/转码在
+`exec` 任务里跑，不挡入站队列。`exec` 直接跑参数数组（不经过 shell），但仍是高权限
+动作——只挂你信任的脚本。示例：
+[`stop_command.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/stop_command.lua)、
+[`send_command.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/send_command.lua)、
+[`b23_video.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/b23_video.lua)。
+路由目前只支持进程内载体（Lua / native），不支持外置进程插件。
 
 每次调用最多 50ms，超时按安全侧兜底；脚本拿不到 Store / Bridge / 配置写入。
 脚本和 provider 集合在桥启动时加载：改脚本内容或增删 `.lua` 文件都要重启桥才生效。

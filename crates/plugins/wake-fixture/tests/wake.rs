@@ -60,7 +60,11 @@ fn wake_provider_uses_the_shared_wire() {
     assert_eq!(info.metadata.title.as_deref(), Some("wake 夹具"));
     assert_eq!(info.source, PluginSource::Dynamic);
     assert_eq!(
-        info.metadata.effects.iter().map(|effect| effect.as_str()).collect::<Vec<_>>(),
+        info.metadata
+            .effects
+            .iter()
+            .map(|effect| effect.as_str())
+            .collect::<Vec<_>>(),
         vec!["may_wake", "may_stay_silent"]
     );
 
@@ -78,6 +82,7 @@ fn wake_provider_uses_the_shared_wire() {
         text: "在吗",
         at_self: false,
         reply_to_self: false,
+        has_body: true,
         event: None,
         tags: &[],
         unread: 1,

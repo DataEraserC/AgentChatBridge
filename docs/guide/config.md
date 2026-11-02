@@ -30,7 +30,7 @@ transport = "ws-client"    # 桥主动连平台的 WS 服务端
 url = "ws://127.0.0.1:3001"
 token = ""                 # OneBot 的 access token，没设就空着
 account = "10001"          # 这个号自己的 QQ 号——桥靠它认出「哪句是 agent 自己说的」
-admin_qqs = []             # 这些号在记录里标成 system_admin；只影响 sender.role
+admin_qqs = []             # 这些号在记录里标成 system_admin；lua.stop_command 据此放行 /stop
 allow_destructive = false  # 见下
 ```
 
@@ -54,6 +54,42 @@ provider = "acb.receive.all"   # 默认：全收
 - 返回 `drop` 的记录**不写流水、不叫醒、不占水位**；桥就当它从没来过。
 - 适合丢机器人、丢刷屏号；示例见 `examples/lua/drop_noise.lua`。
 - 网关层（`receive`）是脏数据的第一道门；别拿它替代访问策略或唤醒策略。
+
+### 消息路由：命令和链接交给代码
+
+路由在**入库前**执行，按配置顺序一条条问；前一个返回 `pass` 才轮到下一个，返回
+`drop` / `handle` 就停下。它挂在连接上：
+
+```toml
+# 管理员 /stop：打断当前房间正在跑的轮次
+[[connections.routes]]
+provider = "lua.stop_command"
+[connections.routes.options]
+commands = ["/stop"]
+scope = "room"          # room / connection
+admin_only = true
+
+# 管理员 /send：直接由插件发出去，不叫醒 AI
+[[connections.routes]]
+provider = "lua.send_command"
+[connections.routes.options]
+command = "/send"
+
+# b23.tv / bilibili 链接：后台 yt-dlp 下载，完成后发回原房间
+[[connections.routes]]
+provider = "lua.b23_video"
+[connections.routes.options]
+dir = "/tmp/acb-b23"
+timeout_ms = 600000
+```
+
+- `handle` 可以指定 `store`（命令写不写流水，默认不写）和 `wake`（要不要让 AI 也看到，
+  默认不看）。`store=true, wake=false` 的记录会标成 suppressed：归档备查，不算未读。
+- 动作：`interrupt`（room / sessions / connection）、`send`（文本或 elements）、
+  `task`（后台任务，目前内置 `exec`，跑一条命令并把产物发回来）。
+- 路由 provider 只在进程内跑（Lua / native）；路由回调必须快（Lua 上限 50ms），
+  下载/上传这类慢活放进 `task`，由后台 worker 执行。
+- 路由插件能发消息、打断轮次、跑任务，属于高权限代码；只挂你信任的脚本。
 
 ## 插件：适配器与策略放到 core 外
 
@@ -108,7 +144,7 @@ ignore_speakers = []   # 这些人的发言不叫醒（但照样记账）
 - **上面这些是内置唤醒策略的字段**。如果 `provider` 换成 Lua / 动态库，参数写在
   `[sessions.subscriptions.wake.options]`，形状由插件自己定义（Lua 里是 `options.extra`）。
   例如 `provider = "lua.wake_policy"` 时写 `at_mention` / `poke` / `reply` /
-  `accumulate` / `idle_hours`，见
+  `empty_body_hold_ms` / `accumulate` / `idle_hours`，见
   [`examples/lua/wake_policy.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/wake_policy.lua) 和
   [插件开发](../08-plugin-development.md)。
 - **唤醒配置是按房间存的**：同一个会话订阅 QQ 房间和 Discord 房间时，QQ 房间写
@@ -116,6 +152,8 @@ ignore_speakers = []   # 这些人的发言不叫醒（但照样记账）
   配错平台会在启动时直接报错，不会「配了却永远不生效」。
 - **`event_tags` 是跨平台维度**：适配器把平台事件翻译成语义标签（`poke`、`reaction`、
   `notice` …），换个平台只要标签名一样，策略照旧生效。`events` 里也可以写 `qq.*` 匹配该平台全部事件。
+- Lua 示例的 `empty_body_hold_ms`（默认 5000）：裸 @ / 裸引用 / poke 没有正文时，
+  先等这么久再开轮；等待期间到达的新消息会一起投递。带正文的 @ 不受影响。
 - **私聊建议只留 `at_mention`/`reply`**（示例配置就是这么写的），不然对方每句话都叫醒；
 - `accumulate` 调小反应快但费 token，调大省钱但「攒话」；
 - 两个会话订同一个群完全合法（比如一个主会话 + 一个备用），各自的水位互不干扰。

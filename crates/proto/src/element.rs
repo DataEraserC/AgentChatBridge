@@ -58,10 +58,26 @@ impl Element {
     /// 媒体段（带 url 的那些）的 URL 列表。出站失败时用来补提示。
     pub fn media_urls(&self) -> Vec<&str> {
         match self {
-            Self::Image { url, .. } | Self::Audio { url } | Self::Video { url } | Self::File { url, .. } => {
+            Self::Image { url, .. }
+            | Self::Audio { url }
+            | Self::Video { url }
+            | Self::File { url, .. } => {
                 vec![url.as_str()]
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// 这一段算不算「正文」。
+    ///
+    /// `At` / `Quote` 只是触发动作（@ 我、引用我），空白的 `Text` 也不算正文；
+    /// 图片、语音、文件、表情、平台卡片都算。核心和策略靠这个判断跨平台的
+    /// 「只有 @ / 引用、没有实际内容」，不需要认识平台名。
+    pub fn is_body(&self) -> bool {
+        match self {
+            Self::Text { text } => !text.trim().is_empty(),
+            Self::At { .. } | Self::Quote { .. } => false,
+            _ => true,
         }
     }
 }
@@ -72,7 +88,11 @@ impl Element {
 /// `file`，换来一句干巴巴的 `missing field url`，反复试错三轮才发出去）。
 /// 既然两边都在上下文里，桥把 `file`/`path`/`src` 当 `url` 的别名收下。
 fn normalize_element(value: &mut serde_json::Value) {
-    let kind = value.get("type").and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
+    let kind = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     let aliases: &[&str] = match kind.as_str() {
         "image" | "audio" | "video" => &["file", "path", "src"],
         "file" => &["path", "src"],
@@ -105,7 +125,10 @@ pub fn parse_elements(value: serde_json::Value) -> Result<Vec<Element>, String> 
     for (index, mut item) in items.into_iter().enumerate() {
         normalize_element(&mut item);
         let element: Element = serde_json::from_value(item.clone()).map_err(|error| {
-            let kind = item.get("type").and_then(serde_json::Value::as_str).unwrap_or("?");
+            let kind = item
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
             format!(
                 "第 {index} 段（{kind}）解析失败：{error}。\
                  image/audio/video/file 段要 url 字段——可以是 http(s) 地址，\
@@ -238,20 +261,39 @@ mod compat_tests {
     #[test]
     fn file_field_alias_is_accepted_for_media() {
         // 平台原生写法（file 字段）：要能直接收下，别让人对着 missing field url 试错。
-        let elements: Vec<Element> =
-            parse_elements(serde_json::json!([
-                {"type": "image", "file": "/tmp/a.png"},
-                {"type": "image", "path": "https://e/b.png"},
-                {"type": "audio", "file": "/tmp/a.mp3"},
-                {"type": "file", "path": "/tmp/a.zip", "name": "a.zip"}
-            ]))
-            .expect("别名要认");
-        assert_eq!(elements[0], Element::Image { url: "/tmp/a.png".into(), alt: None });
-        assert_eq!(elements[1], Element::Image { url: "https://e/b.png".into(), alt: None });
-        assert_eq!(elements[2], Element::Audio { url: "/tmp/a.mp3".into() });
+        let elements: Vec<Element> = parse_elements(serde_json::json!([
+            {"type": "image", "file": "/tmp/a.png"},
+            {"type": "image", "path": "https://e/b.png"},
+            {"type": "audio", "file": "/tmp/a.mp3"},
+            {"type": "file", "path": "/tmp/a.zip", "name": "a.zip"}
+        ]))
+        .expect("别名要认");
+        assert_eq!(
+            elements[0],
+            Element::Image {
+                url: "/tmp/a.png".into(),
+                alt: None
+            }
+        );
+        assert_eq!(
+            elements[1],
+            Element::Image {
+                url: "https://e/b.png".into(),
+                alt: None
+            }
+        );
+        assert_eq!(
+            elements[2],
+            Element::Audio {
+                url: "/tmp/a.mp3".into()
+            }
+        );
         assert_eq!(
             elements[3],
-            Element::File { url: "/tmp/a.zip".into(), name: "a.zip".into() }
+            Element::File {
+                url: "/tmp/a.zip".into(),
+                name: "a.zip".into()
+            }
         );
     }
 
@@ -262,7 +304,13 @@ mod compat_tests {
             {"type": "image", "url": "https://e/a.png", "file": "/tmp/x.png"}
         ]))
         .expect("能解析");
-        assert_eq!(elements[0], Element::Image { url: "https://e/a.png".into(), alt: None });
+        assert_eq!(
+            elements[0],
+            Element::Image {
+                url: "https://e/a.png".into(),
+                alt: None
+            }
+        );
 
         // 缺 url：报错要说清给什么、认哪些别名、原文是什么。
         let error = parse_elements(serde_json::json!([
@@ -279,8 +327,13 @@ mod compat_tests {
     fn media_urls_lists_every_bearing_element() {
         let elements = vec![
             Element::text("看"),
-            Element::Image { url: "a.png".into(), alt: None },
-            Element::Video { url: "b.mp4".into() },
+            Element::Image {
+                url: "a.png".into(),
+                alt: None,
+            },
+            Element::Video {
+                url: "b.mp4".into(),
+            },
         ];
         let urls: Vec<&str> = elements.iter().flat_map(|e| e.media_urls()).collect();
         assert_eq!(urls, vec!["a.png", "b.mp4"]);

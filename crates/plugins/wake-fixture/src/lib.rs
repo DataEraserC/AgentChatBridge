@@ -5,8 +5,8 @@
 //! 每次判定走 `CoreMessage::Decide`，返回 `WireResult::Decision`。
 
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use acb_adapter_api::abi::{ABI_VERSION, AdapterV1, HostV1};
 use acb_adapter_api::{
@@ -82,9 +82,7 @@ unsafe extern "C" fn wake_manifest() -> *mut c_char {
         },
     };
     let json = serde_json::to_string(&manifest).expect("manifest 可序列化");
-    CString::new(json)
-        .expect("manifest 没有 NUL")
-        .into_raw()
+    CString::new(json).expect("manifest 没有 NUL").into_raw()
 }
 
 unsafe extern "C" fn wake_create(config_json: *const c_char, _host: *const HostV1) -> *mut c_void {
@@ -139,6 +137,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                     WireResult::Decision {
                         decision: if wake { "wake" } else { "stay" }.into(),
                         reason: wake.then(|| format!("fixture：@ 或关键词 {keyword} 命中")),
+                        delay_ms: 0,
                     }
                 }
                 "access" => {
@@ -151,6 +150,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                     WireResult::Decision {
                         decision: if allow { "allow" } else { "deny" }.into(),
                         reason: None,
+                        delay_ms: 0,
                     }
                 }
                 "receive" => {
@@ -163,6 +163,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                     WireResult::Decision {
                         decision: if drop { "drop" } else { "record" }.into(),
                         reason: None,
+                        delay_ms: 0,
                     }
                 }
                 "delivery" => {
@@ -227,6 +228,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                         WireResult::Decision {
                             decision: "ok".into(),
                             reason: None,
+                            delay_ms: 0,
                         }
                     }
                 }
@@ -240,6 +242,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                     WireResult::Decision {
                         decision: if due { "due" } else { "skip" }.into(),
                         reason: None,
+                        delay_ms: 0,
                     }
                 }
                 other => WireResult::Error {

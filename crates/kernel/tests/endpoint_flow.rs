@@ -126,7 +126,7 @@ fn message_in(room_id: &str, text: &str) -> RecordDraft {
         Sender {
             id: "10001".into(),
             name: "老王".into(),
-                role: None,
+            role: None,
         },
         AT,
         vec![Element::text(text)],
@@ -144,7 +144,7 @@ fn message(text: &str) -> RecordDraft {
         Sender {
             id: "10001".into(),
             name: "老王".into(),
-                role: None,
+            role: None,
         },
         AT,
         vec![Element::text(text)],
@@ -312,15 +312,25 @@ fn session_answers_ping_and_ends_turns() {
 fn one_connection_runs_two_sessions_in_parallel() {
     let mut bridge = multi_session_bridge();
     // 两个会话各来一条消息。
-    bridge.ingest(message_in("qq:group/123", "在吗")).expect("main 有活");
-    bridge.ingest(message_in("qq:group/456", "hello")).expect("group2 有活");
+    bridge
+        .ingest(message_in("qq:group/123", "在吗"))
+        .expect("main 有活");
+    bridge
+        .ingest(message_in("qq:group/456", "hello"))
+        .expect("group2 有活");
 
     // 一条连接同时代表 main + group2（同一令牌）。
     let mut conn = Conn::new(vec!["main".to_owned(), "group2".to_owned()]);
 
     // 连领两轮：main 和 group2 各一轮，谁也不挡谁。
-    let main_delivery = conn.take_delivery(&mut bridge).expect("能领").expect("main 有轮");
-    let group2_delivery = conn.take_delivery(&mut bridge).expect("能领").expect("group2 有轮");
+    let main_delivery = conn
+        .take_delivery(&mut bridge)
+        .expect("能领")
+        .expect("main 有轮");
+    let group2_delivery = conn
+        .take_delivery(&mut bridge)
+        .expect("能领")
+        .expect("group2 有轮");
 
     // 两个会话同时在跑。
     assert_eq!(conn.active_turns(), 2, "两个会话应当同时各有活跃轮次");
@@ -395,14 +405,26 @@ fn one_connection_runs_two_sessions_in_parallel() {
 fn one_connection_takes_only_one_turn_per_session_at_a_time() {
     let mut bridge = multi_session_bridge();
     // main 在两个房间各来一条（两个独立的轮），group2 来一条。
-    bridge.ingest(message_in("qq:group/123", "一")).expect("main 房间一");
-    bridge.ingest(message_in("qq:group/789", "二")).expect("main 房间二");
-    bridge.ingest(message_in("qq:group/456", "hi")).expect("group2 一条");
+    bridge
+        .ingest(message_in("qq:group/123", "一"))
+        .expect("main 房间一");
+    bridge
+        .ingest(message_in("qq:group/789", "二"))
+        .expect("main 房间二");
+    bridge
+        .ingest(message_in("qq:group/456", "hi"))
+        .expect("group2 一条");
 
     let mut conn = Conn::new(vec!["main".to_owned(), "group2".to_owned()]);
 
-    let first = conn.take_delivery(&mut bridge).expect("能领").expect("有活");
-    let second = conn.take_delivery(&mut bridge).expect("能领").expect("有活");
+    let first = conn
+        .take_delivery(&mut bridge)
+        .expect("能领")
+        .expect("有活");
+    let second = conn
+        .take_delivery(&mut bridge)
+        .expect("能领")
+        .expect("有活");
 
     // 两个活跃轮次应当分属 main 和 group2——同一会话同时只能占一轮（main 的第二个
     // 房间不会在 main 还 busy 时被领走），group2 能并行领自己的轮。
@@ -428,7 +450,10 @@ fn one_connection_takes_only_one_turn_per_session_at_a_time() {
         },
     )
     .expect("能收工");
-    let third = conn.take_delivery(&mut bridge).expect("能领").expect("main 第二房间有活");
+    let third = conn
+        .take_delivery(&mut bridge)
+        .expect("能领")
+        .expect("main 第二房间有活");
     assert_eq!(third.session, "main", "收工后 main 另一个房间的未读接着投");
 }
 
@@ -454,7 +479,13 @@ impl TestServer {
         let thread_bridge = Arc::clone(&bridge);
         let thread_shutdown = Arc::clone(&shutdown);
         let handle = thread::spawn(move || {
-            serve(listener, thread_bridge, thread_shutdown, ControlRegistry::new()).expect("服务能跑");
+            serve(
+                listener,
+                thread_bridge,
+                thread_shutdown,
+                ControlRegistry::new(),
+            )
+            .expect("服务能跑");
         });
 
         Self {
@@ -569,6 +600,174 @@ fn a_real_connection_carries_a_whole_turn() {
         thread::sleep(Duration::from_millis(20));
     }
 
+    drop(reader);
+    drop(stream);
+    server.stop();
+}
+
+/// `wait_message` 必须在锁外等：等待期间新消息能入库，别的会话也能干活。
+#[test]
+fn wait_message_waits_outside_the_core_lock() {
+    let server = TestServer::start();
+    let bridge = Arc::clone(&server.bridge);
+
+    let mut stream = TcpStream::connect(server.address).expect("能连上");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("能设超时");
+    let mut reader = BufReader::new(stream.try_clone().expect("能复制"));
+    write_frame(
+        &mut stream,
+        &Frame::Hello {
+            version: PROTOCOL_VERSION,
+            harness: "dsh".into(),
+            token: Some(TOKEN.into()),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 ready") {
+        Frame::Ready { .. } => {}
+        other => panic!("应当是 ready，实际是 {}", other.kind()),
+    }
+
+    {
+        let mut guard = bridge.lock().expect("没被毒死");
+        guard.ingest(message("第一条")).expect("能记下来");
+    }
+    let delivery = match read_frame(&mut reader).expect("能读到 turn_start") {
+        Frame::TurnStart { delivery } => delivery,
+        other => panic!("应当是 turn_start，实际是 {}", other.kind()),
+    };
+    let ticket = delivery.ticket;
+
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "wait-1".into(),
+            ticket: ticket.clone(),
+            tool: "wait_message".into(),
+            args: json!({"timeout_ms": 1000}),
+        },
+    );
+
+    // 等工具调用进入锁外等待，再喂第二条消息。如果 wait_message 还拿着 core 锁，
+    // 这里会卡住，测试会超时。
+    thread::sleep(Duration::from_millis(150));
+    {
+        let mut guard = bridge.lock().expect("没被毒死");
+        let second = RecordDraft::message(
+            room("qq:group/123"),
+            Sender {
+                id: "10001".into(),
+                name: "老王".into(),
+                role: None,
+            },
+            AT + 1,
+            vec![Element::text("第二条")],
+            false,
+        );
+        guard.ingest(second).expect("等待期间也能入库");
+    }
+
+    match read_frame(&mut reader).expect("能读到 wait 结果") {
+        Frame::ToolResult { result, error, .. } => {
+            assert!(error.is_none(), "不该有错");
+            let result = result.expect("有结果");
+            assert_eq!(result["timed_out"], false);
+            assert_eq!(result["records"][0]["id"], 2);
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    }
+
+    // wait_message 读到的编号记进本轮 read，可以 ack。
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "ack-1".into(),
+            ticket: ticket.clone(),
+            tool: "ack_messages".into(),
+            args: json!({"ids": [1, 2]}),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 ack 结果") {
+        Frame::ToolResult { result, error, .. } => {
+            assert!(error.is_none(), "不该有错");
+            assert_eq!(result.expect("有结果")["watermark"], 2);
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    }
+
+    write_frame(
+        &mut stream,
+        &Frame::TurnEnd {
+            ticket: ticket.clone(),
+            error: None,
+        },
+    );
+
+    drop(reader);
+    drop(stream);
+    server.stop();
+}
+
+/// 到点没有新消息：返回空 + timed_out，不报错。
+#[test]
+fn wait_message_times_out_without_new_records() {
+    let server = TestServer::start();
+    let bridge = Arc::clone(&server.bridge);
+
+    let mut stream = TcpStream::connect(server.address).expect("能连上");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("能设超时");
+    let mut reader = BufReader::new(stream.try_clone().expect("能复制"));
+    write_frame(
+        &mut stream,
+        &Frame::Hello {
+            version: PROTOCOL_VERSION,
+            harness: "dsh".into(),
+            token: Some(TOKEN.into()),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 ready") {
+        Frame::Ready { .. } => {}
+        other => panic!("应当是 ready，实际是 {}", other.kind()),
+    }
+    {
+        let mut guard = bridge.lock().expect("没被毒死");
+        guard.ingest(message("唯一一条")).expect("能记下来");
+    }
+    let delivery = match read_frame(&mut reader).expect("能读到 turn_start") {
+        Frame::TurnStart { delivery } => delivery,
+        other => panic!("应当是 turn_start，实际是 {}", other.kind()),
+    };
+    let ticket = delivery.ticket;
+
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "wait-timeout".into(),
+            ticket: ticket.clone(),
+            tool: "wait_message".into(),
+            args: json!({"timeout_ms": 50}),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 wait 结果") {
+        Frame::ToolResult { result, error, .. } => {
+            assert!(error.is_none(), "超时不是错误");
+            let result = result.expect("有结果");
+            assert_eq!(result["timed_out"], true);
+            assert_eq!(result["returned"], 0);
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    }
+
+    write_frame(
+        &mut stream,
+        &Frame::TurnEnd {
+            ticket: ticket.clone(),
+            error: None,
+        },
+    );
     drop(reader);
     drop(stream);
     server.stop();

@@ -3,17 +3,23 @@
 //! 这里用内存存储 + 一个记账用的出站通道，把 harness 那侧换成直接调桥的方法——
 //! 链路本身和真接 harness 时一模一样：票、工具、水位都是真的。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use acb_kernel::{
     AccessAction, AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Bridge, Capability,
-    Cursor, DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest,
-    Element, ErrorCode, ExtensionPoint, Feedbacks, Ingest, ManagerManifest, ManagerPlugin,
-    MemoryStore, NoteKey, NoteKind, Notes, Omitted, Outbound, OutboundError, PluginError,
-    PluginManager, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision,
-    ReceiveProvider, ReceiveRequest, RecordDraft, RoomId, SendContext, SendHook, Sender, Sent,
-    Transcript, TurnErrorAction, TurnErrorPolicy, TurnErrorProvider,
-    TurnErrorRequest, TurnReason, Watermarks, unread, PLUGIN_API_VERSION,
+    ControlRegistry, Cursor, DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest,
+    Element, ErrorCode, EventQueue, ExtensionPoint, Feedbacks, Ingest, ManagerManifest,
+    ManagerPlugin, MemoryStore, NoteKey,
+    NoteKind, Notes, Omitted, Outbound, OutboundError, PLUGIN_API_VERSION, PluginError,
+    PluginManager, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions,
+    ReceiveDecision, ReceiveProvider, ReceiveRequest, RecordDraft, RoomId, RouteAction,
+    RouteContext, RouteDecision, RoutePolicy, RouteProvider, RouteWorker, SendContext, SendHook,
+    Sender, Sent, Transcript, TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest,
+    TurnReason, WakeContext, WakeDecision, WakePolicy, WakeProvider, WakeVerdict, Watermarks,
+    drain_events, unread,
 };
 use serde_json::{Value, json};
 
@@ -304,7 +310,11 @@ impl ManagerPlugin for RedirectTurnErrorManager {
 struct DropAds;
 
 impl ReceiveProvider for DropAds {
-    fn decide(&self, _options: &acb_kernel::ReceivePolicy, request: &ReceiveRequest<'_>) -> ReceiveDecision {
+    fn decide(
+        &self,
+        _options: &acb_kernel::ReceivePolicy,
+        request: &ReceiveRequest<'_>,
+    ) -> ReceiveDecision {
         if request.text.contains("广告") {
             ReceiveDecision::Drop
         } else {
@@ -500,8 +510,7 @@ fn mention_wakes_then_reply_and_ack_advance_the_watermark() {
 fn recall_notice_is_not_unread_but_marks_the_original() {
     let (mut bridge, _sends) = bridge();
 
-    let original = message("qq:group/123", "10001", "会被撤回的话", false)
-        .with_platform_id("m-1");
+    let original = message("qq:group/123", "10001", "会被撤回的话", false).with_platform_id("m-1");
     assert_eq!(
         bridge.ingest(original).expect("能记下来"),
         Ingest::Recorded {
@@ -789,7 +798,12 @@ fn out_of_order_acks_are_not_delivered_again() {
 
     // 只确认后面那条：水位被 #1 挡着，但 #2 已经处理完了。
     bridge
-        .tool_call(&first.ticket, &sessions(), "ack_messages", json!({"ids": [2]}))
+        .tool_call(
+            &first.ticket,
+            &sessions(),
+            "ack_messages",
+            json!({"ids": [2]}),
+        )
         .expect("能确认");
     bridge.end_turn(&first.ticket, None).expect("能收工");
 
@@ -869,6 +883,407 @@ fn all_rooms_access_policy_reaches_unsubscribed_rooms() {
         .expect("全豁免策略下，没订阅的房间也能发");
     assert_eq!(result["room"], "qq:group/999");
     assert_eq!(sends.lock().expect("没被毒死")[0].0, room("qq:group/999"));
+}
+
+struct AdminStopRoute;
+
+impl RouteProvider for AdminStopRoute {
+    fn decide(&self, _options: &RoutePolicy, context: &RouteContext<'_>) -> RouteDecision {
+        if !context.is_admin {
+            return RouteDecision::Pass;
+        }
+        let Some(first) = context.text.split_whitespace().next() else {
+            return RouteDecision::Pass;
+        };
+        let command = first.split('@').next().unwrap_or("");
+        if command.eq_ignore_ascii_case("/stop") {
+            RouteDecision::handle(RouteAction::Interrupt {
+                scope: acb_kernel::InterruptScope::Room,
+            })
+        } else {
+            RouteDecision::Pass
+        }
+    }
+}
+
+fn bridge_with_admin() -> (Bridge<MemoryStore>, Sends) {
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    // admin_qqs 必须写在连接表里；失败通知也配到同一个房间，方便断言「主动停止不发通知」。
+    let text = config()
+        .replacen(
+            "        [[connections]]",
+            "default_on_turn_error = [\"send:qq:group/123\"]\n\n        [[connections]]",
+            1,
+        )
+        .replace(
+            "        account = \"bot\"",
+            "        account = \"bot\"\n        admin_qqs = [\"10001\"]\n\n        [[connections.routes]]\n        provider = \"test.stop\"",
+        );
+    let mut plugins = PluginManager::with_native_builtins();
+    let id = ProviderId::parse("test.stop").expect("合法");
+    plugins
+        .register_route(
+            ProviderDescriptor::new(
+                id,
+                ExtensionPoint::Route,
+                PLUGIN_API_VERSION,
+                vec![Capability::RouteDecision],
+            ),
+            Arc::new(AdminStopRoute),
+        )
+        .expect("能注册路由 provider");
+    let bridge = Bridge::with_plugins(
+        acb_kernel::Config::parse(&text).expect("配置合法"),
+        MemoryStore::new(),
+        Box::new(Recorder {
+            sends: sends.clone(),
+        }),
+        plugins,
+    );
+    (bridge, sends)
+}
+
+#[test]
+fn admin_stop_interrupts_the_active_turn_and_drops_pending() {
+    let (mut bridge, sends) = bridge_with_admin();
+
+    bridge
+        .ingest(message("qq:group/123", "20002", "先问一句", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn().expect("能检查队列").expect("有活");
+
+    // 轮次在跑时又来一条：它会排进 pending，等这一轮结束再开。
+    bridge
+        .ingest(message("qq:group/123", "20002", "还有一句", true))
+        .expect("能记下来");
+
+    // 管理员用群里常见的 /stop@机器人 写法；后面跟字也照样停。
+    let stopped = bridge
+        .ingest(message("qq:group/123", "10001", "/stop@bot 别说了", false))
+        .expect("能处理命令");
+    assert!(
+        matches!(
+            &stopped,
+            Ingest::Handled {
+                stored: None,
+                ..
+            }
+        ),
+        "应当由路由插件处理且不写流水，实际 {stopped:?}"
+    );
+
+    // 控制命令不写流水：流水里最后一条仍是第二条消息。
+    assert_eq!(
+        bridge
+            .store()
+            .latest(&room("qq:group/123"))
+            .expect("能读"),
+        Some(2),
+        "/stop 不该写进流水"
+    );
+
+    // harness 被打断后通常回一个失败；这轮是被管理员停的，不该再发失败通知。
+    bridge
+        .end_turn(&delivery.ticket, Some("这一轮被中止了"))
+        .expect("能收工");
+    bridge.flush_notices();
+    assert!(
+        sends.lock().expect("没被毒死").is_empty(),
+        "主动 /stop 不该按 on_turn_error 发失败通知"
+    );
+
+    // 收工后不能马上又开一个排队轮次——/stop 已经把它清掉了。
+    assert!(
+        bridge.poll_turn().expect("能检查队列").is_none(),
+        "排队轮次应当被 /stop 清掉"
+    );
+}
+
+#[test]
+fn stop_from_non_admin_is_a_normal_message() {
+    let (mut bridge, _) = bridge();
+    let ingested = bridge
+        .ingest(message("qq:group/123", "20002", "/stop", true))
+        .expect("能记下来");
+    assert!(
+        matches!(ingested, Ingest::Recorded { .. }),
+        "非管理员发的 /stop 只是普通消息"
+    );
+    assert_eq!(
+        bridge
+            .store()
+            .latest(&room("qq:group/123"))
+            .expect("能读"),
+        Some(1)
+    );
+}
+
+fn bridge_with_route(provider: Arc<dyn RouteProvider>) -> (Bridge<MemoryStore>, Sends) {
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let text = config().replace(
+        "        account = \"bot\"",
+        "        account = \"bot\"\n\n        [[connections.routes]]\n        provider = \"test.route\"",
+    );
+    let mut plugins = PluginManager::with_native_builtins();
+    let id = ProviderId::parse("test.route").expect("合法");
+    plugins
+        .register_route(
+            ProviderDescriptor::new(
+                id,
+                ExtensionPoint::Route,
+                PLUGIN_API_VERSION,
+                vec![Capability::RouteDecision],
+            ),
+            provider,
+        )
+        .expect("能注册路由 provider");
+    let bridge = Bridge::with_plugins(
+        acb_kernel::Config::parse(&text).expect("配置合法"),
+        MemoryStore::new(),
+        Box::new(Recorder {
+            sends: sends.clone(),
+        }),
+        plugins,
+    );
+    (bridge, sends)
+}
+
+fn wait_for_sends(sends: &Sends, timeout: Duration) -> Vec<(RoomId, Vec<Element>)> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        {
+            let guard = sends.lock().expect("没被毒死");
+            if !guard.is_empty() {
+                return guard.clone();
+            }
+        }
+        if Instant::now() >= deadline {
+            return Vec::new();
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+struct SendRoute;
+
+impl RouteProvider for SendRoute {
+    fn decide(&self, _options: &RoutePolicy, context: &RouteContext<'_>) -> RouteDecision {
+        if context.text == "/send" {
+            RouteDecision::handle(RouteAction::Send {
+                room: None,
+                elements: vec![Element::text("route reply")],
+            })
+        } else {
+            RouteDecision::Pass
+        }
+    }
+}
+
+#[test]
+fn route_send_goes_through_the_action_worker() {
+    let (bridge, sends) = bridge_with_route(Arc::new(SendRoute));
+    let bridge = Arc::new(Mutex::new(bridge));
+    let (queue, receiver) = EventQueue::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker = RouteWorker::spawn(Arc::clone(&bridge), Arc::clone(&shutdown));
+    let drain = {
+        let bridge = Arc::clone(&bridge);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            drain_events(
+                bridge,
+                receiver,
+                shutdown,
+                ControlRegistry::new(),
+                worker,
+            )
+        })
+    };
+
+    queue.submit(message("qq:group/123", "20002", "/send", false));
+    let got = wait_for_sends(&sends, Duration::from_secs(2));
+    assert_eq!(got.len(), 1, "应当由路由 worker 发出一条");
+    assert_eq!(got[0].0, room("qq:group/123"));
+    assert_eq!(got[0].1, vec![Element::text("route reply")]);
+
+    shutdown.store(true, Ordering::Relaxed);
+    drain.join().expect("drain 线程能收工");
+}
+
+struct StoreOnlyRoute;
+
+impl RouteProvider for StoreOnlyRoute {
+    fn decide(&self, _options: &RoutePolicy, context: &RouteContext<'_>) -> RouteDecision {
+        if context.text == "/store" {
+            RouteDecision::Handle {
+                store: true,
+                wake: false,
+                actions: Vec::new(),
+            }
+        } else {
+            RouteDecision::Pass
+        }
+    }
+}
+
+#[test]
+fn route_store_without_wake_is_archived_but_not_unread() {
+    let (mut bridge, _) = bridge_with_route(Arc::new(StoreOnlyRoute));
+    let stored = bridge
+        .ingest(message("qq:group/123", "20002", "/store", false))
+        .expect("能处理");
+    assert!(
+        matches!(stored, Ingest::Handled { stored: Some(1), .. }),
+        "命令要存进流水，实际 {stored:?}"
+    );
+
+    bridge
+        .ingest(message("qq:group/123", "20002", "在吗", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn().expect("能检查队列").expect("有活");
+    assert_eq!(
+        delivery.records.len(),
+        1,
+        "只存不叫醒的命令不该混进下一轮的未读"
+    );
+    assert_eq!(
+        delivery.records[0].elements,
+        vec![Element::text("在吗")]
+    );
+}
+
+struct TaskRoute {
+    path: String,
+}
+
+impl RouteProvider for TaskRoute {
+    fn decide(&self, _options: &RoutePolicy, context: &RouteContext<'_>) -> RouteDecision {
+        if context.text != "/task" {
+            return RouteDecision::Pass;
+        }
+        RouteDecision::handle(RouteAction::Task {
+            handler: "exec".into(),
+            params: json!({
+                "command": ["printf", "%s", self.path],
+                "send": "file",
+                "name": "out.txt",
+            }),
+        })
+    }
+}
+
+#[test]
+fn route_task_runs_exec_and_sends_the_file() {
+    let path = std::env::temp_dir().join(format!(
+        "acb-route-task-{}-{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::write(&path, "hi").expect("写临时文件");
+
+    let (bridge, sends) = bridge_with_route(Arc::new(TaskRoute {
+        path: path.display().to_string(),
+    }));
+    let bridge = Arc::new(Mutex::new(bridge));
+    let (queue, receiver) = EventQueue::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker = RouteWorker::spawn(Arc::clone(&bridge), Arc::clone(&shutdown));
+    let drain = {
+        let bridge = Arc::clone(&bridge);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            drain_events(
+                bridge,
+                receiver,
+                shutdown,
+                ControlRegistry::new(),
+                worker,
+            )
+        })
+    };
+
+    queue.submit(message("qq:group/123", "20002", "/task", false));
+    let got = wait_for_sends(&sends, Duration::from_secs(3));
+    assert_eq!(got.len(), 1, "任务完成后应当发出一条");
+    assert_eq!(
+        got[0].1,
+        vec![Element::File {
+            url: path.display().to_string(),
+            name: "out.txt".into(),
+        }]
+    );
+
+    shutdown.store(true, Ordering::Relaxed);
+    drain.join().expect("drain 线程能收工");
+    let _ = std::fs::remove_file(path);
+}
+
+/// 唤醒判定可以要求「先等一会儿」：到点之前不开轮，等待期间的新消息在开轮时一起投。
+#[test]
+fn wake_delay_holds_the_turn_until_due() {
+    struct Hold;
+    impl WakeProvider for Hold {
+        fn decide(&self, _options: &WakePolicy, _context: &WakeContext<'_>) -> WakeDecision {
+            WakeDecision::Wake
+        }
+        fn decide_with_reason(
+            &self,
+            _options: &WakePolicy,
+            _context: &WakeContext<'_>,
+        ) -> WakeVerdict {
+            WakeVerdict::wake_after("先等后续内容", 100)
+        }
+    }
+
+    let mut plugins = PluginManager::with_native_builtins();
+    let id = ProviderId::parse("test.hold").expect("合法");
+    plugins
+        .register_wake(
+            ProviderDescriptor::new(
+                id.clone(),
+                ExtensionPoint::Wake,
+                PLUGIN_API_VERSION,
+                vec![Capability::WakeDecision],
+            ),
+            Arc::new(Hold),
+        )
+        .expect("能注册自定义 wake provider");
+    let text = config().replacen(
+        "        room = \"group/123\"",
+        &format!(
+            "        room = \"group/123\"\n\n        [sessions.subscriptions.wake]\n        provider = \"{id}\""
+        ),
+        1,
+    );
+    let (mut bridge, _) = bridge_with_plugins(&text, plugins);
+
+    bridge
+        .ingest(message("qq:group/123", "10001", "第一条", false))
+        .expect("能记下来");
+    assert!(
+        bridge.poll_turn().expect("能检查队列").is_none(),
+        "延迟没到，不能开轮"
+    );
+
+    // 等过延迟窗口；这段时间里到达的消息会在 open_turn 时一起取走。
+    std::thread::sleep(Duration::from_millis(150));
+    bridge
+        .ingest(message("qq:group/123", "10001", "第二条", false))
+        .expect("能记下来");
+    let delivery = bridge
+        .poll_turn()
+        .expect("能开轮")
+        .expect("延迟到了应该有活");
+    let texts: Vec<String> = delivery
+        .records
+        .iter()
+        .filter_map(|record| record.elements.first().and_then(Element::as_text))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(texts, vec!["第一条", "第二条"], "等待期间的消息应一起投递");
 }
 
 /// 来源房间要传进 access provider：同样的目标房间，来源不同时策略可以不同。
@@ -1104,7 +1519,12 @@ fn ack_accepts_records_read_this_turn_but_not_delivered() {
 
     // 补读跳过的两条；读到的编号进本轮 read set。
     let fetched = bridge
-        .tool_call(&ticket, &sessions(), "fetch_records", json!({"ids": [1, 2]}))
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "fetch_records",
+            json!({"ids": [1, 2]}),
+        )
         .expect("能补读");
     assert_eq!(fetched["returned"], 2);
 
@@ -2843,18 +3263,12 @@ fn send_hooks_can_rewrite_and_observe() {
     drop(sends);
 
     let after = hook.after.lock().expect("没被毒死");
-    assert_eq!(
-        after.as_slice(),
-        ["main:p-1"],
-        "发送后钩子应当拿到回执"
-    );
+    assert_eq!(after.as_slice(), ["main:p-1"], "发送后钩子应当拿到回执");
 }
 
 #[test]
 fn custom_turn_error_provider_decides_notifications() {
-    let text = config_with(
-        "        [sessions.turn_error]\n        provider = \"test.failure\"",
-    );
+    let text = config_with("        [sessions.turn_error]\n        provider = \"test.failure\"");
     let mut plugins = PluginManager::with_native_builtins();
     plugins
         .install_manager(Arc::new(RedirectTurnErrorManager))

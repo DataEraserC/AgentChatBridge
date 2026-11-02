@@ -16,7 +16,7 @@ use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use acb_proto::frame::{decode, encode};
 use acb_proto::{Delivery, Frame, LogLevel, Ticket};
@@ -278,6 +278,16 @@ impl Conn {
                             }
                         }
                     }
+                    "interrupt" => match error {
+                        Some(err) => Ok(vec![Frame::Log {
+                            level: LogLevel::Warn,
+                            message: format!("会话 {session} 打断失败：{err}"),
+                        }]),
+                        None => Ok(vec![Frame::Log {
+                            level: LogLevel::Info,
+                            message: format!("会话 {session} 已打断"),
+                        }]),
+                    },
                     "report_map" => {
                         // harness 主动回报映射（比如新建会话后）。
                         match error {
@@ -295,7 +305,9 @@ impl Conn {
                                         let _ = bridge.upsert_session_map(
                                             session.clone(),
                                             session_id.to_owned(),
-                                            map.get("meta").cloned().unwrap_or(serde_json::json!({})),
+                                            map.get("meta")
+                                                .cloned()
+                                                .unwrap_or(serde_json::json!({})),
                                         );
                                     }
                                 }
@@ -331,10 +343,7 @@ impl Conn {
 }
 
 /// 工具成功/失败都走 `tool_result`，不关连接。
-fn tool_reply(
-    id: String,
-    result: Result<serde_json::Value, acb_proto::ToolError>,
-) -> Frame {
+fn tool_reply(id: String, result: Result<serde_json::Value, acb_proto::ToolError>) -> Frame {
     match result {
         Ok(result) => Frame::ToolResult {
             id,
@@ -483,6 +492,44 @@ pub fn run_connection<S: Store>(
                                 let result = guard
                                     .finish_send(prepared, result)
                                     .map(|value| guard.fit_tool_result(&tool, value));
+                                vec![tool_reply(id, result)]
+                            }
+                            Ok(ToolCallStart::Wait(prepared)) => {
+                                // 关键：等待期间**不持有锁**。每次都回锁里查一下，
+                                // 有新消息就立刻返回；没有就放锁继续睡。
+                                let deadline = Instant::now() + prepared.timeout();
+                                let mut outcome: Option<
+                                    Result<serde_json::Value, acb_proto::ToolError>,
+                                > = None;
+                                loop {
+                                    {
+                                        let mut guard = lock(bridge);
+                                        match guard.poll_wait(&prepared) {
+                                            Ok(Some(value)) => {
+                                                outcome = Some(Ok(value));
+                                                break;
+                                            }
+                                            Ok(None) => {}
+                                            Err(error) => {
+                                                outcome = Some(Err(error));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let now = Instant::now();
+                                    if now >= deadline {
+                                        break;
+                                    }
+                                    let remaining = deadline.saturating_duration_since(now);
+                                    std::thread::sleep(remaining.min(POLL_INTERVAL));
+                                }
+                                let result = match outcome {
+                                    Some(result) => result,
+                                    None => {
+                                        let mut guard = lock(bridge);
+                                        guard.finish_wait(&prepared)
+                                    }
+                                };
                                 vec![tool_reply(id, result)]
                             }
                             Err(error) => vec![tool_reply(id, Err(error))],

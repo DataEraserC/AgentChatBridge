@@ -411,6 +411,7 @@ mod tests {
                 tags: vec!["poke".into()],
                 payload: None,
                 summary: None,
+                body: false,
             },
             sender: Sender {
                 id: "10001".into(),

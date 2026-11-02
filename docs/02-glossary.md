@@ -23,6 +23,7 @@
 |------|--------|------|
 | **内容元素** | element | 消息的最小组成单位。核心定义一套**标准元素表**：text / at / quote（引用）/ image / audio / video / file / 表情。适配器对每个标准元素做最大程度适配；平台不支持时**降级**（如引用降成纯文本）或明确报错，**绝不悄悄丢弃**。平台特有内容装进不透明载荷原样透传（参考 Koishi 的 element 体系与 NoneBot 的 MessageSegment，不是 OneBot 专属概念；来源：用户裁定要跨平台中立） |
 | **策略** | policy | 一段决定行为的逻辑，有内置默认实现，也可由用户替换成自己的（Lua 脚本或动态库，见 [08](08-plugin-development.md)）。接收、唤醒、访问、投递、发送钩子、失败通知、时钟都是策略 |
+| **消息路由** | route | 入库前决定这条消息交给代码还是 AI：`pass` / `drop` / `handle`；`handle` 可以发消息、打断轮次或跑后台任务。挂在连接上、可挂多条，见 [ADR-0028](adr/0028-message-routing.md) |
 | **流水** | transcript | 房间的完整消息日志，投没投过都在。投递不改流水，只推水位 |
 | **未读** | unread | 某个**订阅**（会话 × 房间）水位之后还没确认的消息，按订阅各自计——同一房间两个会话各看各的未读，互不干扰。不单独存，是流水减水位的差，不会出现两套账对不上 |
 | **水位** | watermark | 「某个会话在某个房间里处理到哪条了」的游标，粒度是**会话 × 房间**；只经 AI 显式确认（`ack_messages`）前推，未确认的留在未读、下轮重投（见 ADR-0010）。自己发的消息永不算未读 |
@@ -58,6 +59,7 @@
 | `send_message_to` | elements, to | 发到别的房间。`to` 的默认可选目标 = **本会话订阅的房间**，越界拒绝；会话可用 `[sessions.access]` 放宽边界（ADR-0026）。跨会话发送已砍（ADR-0017） |
 | `get_history` | room, before, after, limit, columns | 查房间的流水。带 `total` / `has_more` / `next_before` / `next_after`；给了 `after` 就从旧往新翻（补看新消息），`columns` 里有 `quote_ref`（引用对到本房间编号，ADR-0024） |
 | `fetch_records` | room, ids, columns | 按水位编号精确查一批（补投递被截断的部分）；这轮读到的编号可以 `ack_messages` |
+| `wait_message` | room, timeout_ms, limit, columns | 在当前轮次房间里等新消息，最多 60 秒；返回并记为本轮读过，可 `ack_messages`；超时返回空。等待在 core 锁外，不挡别的会话 |
 | `list_rooms` | — | 列出本会话订阅了哪些房间、各自未读多少 |
 | `get_notes` / `set_note` / `del_note` | room, kind, key, value | 房间级笔记（term / member / topic） |
 | `get_platform_events` | room, limit, offset | 查平台事件，带 `total` / `has_more` |

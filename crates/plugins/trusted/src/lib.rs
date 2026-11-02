@@ -11,10 +11,9 @@ use std::sync::Arc;
 
 use acb_kernel::{
     Capability, ExtensionPoint, Health, LoaderKind, LoaderManifest, ManagerManifest, ManagerPlugin,
-    PluginError, PluginLoader, PluginManager, PluginMetadata, PluginSource, ProviderDescriptor,
-    ProviderId, ProviderInstance,
-    ProviderOptions, WakeContext, WakeDecision, WakePolicy, WakeProvider, WakeVerdict,
-    PLUGIN_API_VERSION,
+    PLUGIN_API_VERSION, PluginError, PluginLoader, PluginManager, PluginMetadata, PluginSource,
+    ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, WakeContext, WakeDecision,
+    WakePolicy, WakeProvider, WakeVerdict,
 };
 
 /// 这个 manager 的 namespace。`acb` 是内置保留名，树外不能用。
@@ -36,11 +35,7 @@ impl WakeProvider for AccumulateOnlyWake {
         self.decide_with_reason(options, context).decision
     }
 
-    fn decide_with_reason(
-        &self,
-        options: &WakePolicy,
-        context: &WakeContext<'_>,
-    ) -> WakeVerdict {
+    fn decide_with_reason(&self, options: &WakePolicy, context: &WakeContext<'_>) -> WakeVerdict {
         match options.accumulate {
             Some(threshold) if threshold > 0 && context.unread >= threshold => {
                 WakeVerdict::wake(format!("trusted：攒够 {threshold} 条未读"))
@@ -81,14 +76,16 @@ impl ManagerPlugin for TrustedManager {
     }
 
     fn descriptors(&self) -> Vec<ProviderDescriptor> {
-        vec![ProviderDescriptor::new(
-            accumulate_only_id(),
-            ExtensionPoint::Wake,
-            PLUGIN_API_VERSION,
-            vec![Capability::WakeDecision],
-        )
-        .with_metadata(trusted_metadata())
-        .with_source(PluginSource::Trusted)]
+        vec![
+            ProviderDescriptor::new(
+                accumulate_only_id(),
+                ExtensionPoint::Wake,
+                PLUGIN_API_VERSION,
+                vec![Capability::WakeDecision],
+            )
+            .with_metadata(trusted_metadata())
+            .with_source(PluginSource::Trusted),
+        ]
     }
 
     fn instantiate(
@@ -141,6 +138,7 @@ mod tests {
             text: "在吗",
             at_self,
             reply_to_self: false,
+            has_body: true,
             event: None,
             tags: &[],
             unread,

@@ -15,8 +15,10 @@ pub mod plugin_meta;
 pub mod query;
 pub mod relay;
 pub mod render;
+mod route_worker;
 pub mod sanitize;
 pub mod storage;
+mod task;
 pub mod tools;
 pub mod wire;
 
@@ -26,13 +28,14 @@ pub use adapter::{
     validate_manifest,
 };
 pub use event_queue::{drain_events, EventQueue, EventReceiver};
+pub use route_worker::RouteWorker;
 pub use plugin_meta::{PluginEffect, PluginInfo, PluginMetadata, PluginSource};
 pub use config::{
     AccessPolicy, ClockPolicy, Config, Connection, ConsoleConfig, DEFAULT_MAX_AGE_DAYS,
     PluginConfig,
     DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH, DEFAULT_WORKTREES_ROOT, DeliveryPolicy,
     EndpointConfig, Harness,
-    KNOWN_MEMORY_KINDS, Memory, OutboundPolicy, Persona, ReceivePolicy,
+    KNOWN_MEMORY_KINDS, Memory, OutboundPolicy, Persona, ReceivePolicy, RoutePolicy,
     RetentionConfig, Session, StorageConfig, Subscription, Transport, TurnErrorAction,
     TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput, WakePolicy, WakeVerdict,
 };
@@ -52,8 +55,9 @@ pub use plugin::{
     ElevatedInRoomsAccessProvider, ExtensionPoint, Health, IntervalIdleClockProvider, LoaderKind,
     LoaderManifest, MAX_MANAGER_DEPTH, ManagerHealth, ManagerManifest, ManagerPlugin, NativeLoader,
     PluginError, PluginLoader, PluginManager, ProviderDescriptor, ProviderId, ProviderInstance,
-    ProviderOptions, ReceiveDecision, ReceiveProvider, ReceiveRequest, ReloadScope, SendContext,
-    SendHook, SendOrigin, SubscribedAccessProvider, TurnErrorProvider, TurnErrorRequest,
+    ProviderOptions, ReceiveDecision, ReceiveProvider, ReceiveRequest, ReloadScope, RouteAction,
+    RouteContext, RouteDecision, RouteProvider, InterruptScope,
+    SendContext, SendHook, SendOrigin, SubscribedAccessProvider, TurnErrorProvider, TurnErrorRequest,
     WakeContext, WakeProvider, ALL_ROOMS_ACCESS_PROVIDER, CLOCK_INTERVAL_IDLE_PROVIDER,
     DEFAULT_ACCESS_PROVIDER, DEFAULT_CLOCK_PROVIDER, DEFAULT_DELIVERY_PROVIDER,
     DEFAULT_RECEIVE_PROVIDER, DEFAULT_TURN_ERROR_PROVIDER, ELEVATED_ACCESS_PROVIDER,

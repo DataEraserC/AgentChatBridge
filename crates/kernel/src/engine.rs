@@ -13,14 +13,14 @@
 //! 当前会话订阅的所有房间；**跨会话发送被砍掉**——一个会话不能替别的人格发言。
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acb_proto::element::flatten_text;
 use acb_proto::{
-    Delivery, Element, ErrorCode, MemoryInfo, PersonaInfo, QuoteRef, Record, RecordKind,
-    RoomId, Sender, SessionInfo, Ticket, ToolError, TurnReason,
+    Delivery, Element, ErrorCode, MemoryInfo, PersonaInfo, QuoteRef, Record, RecordKind, RoomId,
+    Sender, SessionInfo, Ticket, ToolError, TurnReason,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,9 +37,9 @@ use crate::outbound::{
 };
 use crate::plugin::{
     AccessAction, AccessDecision, AccessRequest, ClockContext, DefaultDeliveryComposer,
-    DefaultTurnErrorProvider, DeliveryRequest, PluginError, PluginManager, ProviderId,
-    ReceiveDecision, ReceiveRequest, SendContext, SendHook, SendOrigin, TurnErrorRequest,
-    WakeContext,
+    DefaultTurnErrorProvider, DeliveryRequest, InterruptScope, PluginError, PluginManager,
+    ProviderId, ReceiveDecision, ReceiveRequest, RouteAction, RouteContext, RouteDecision,
+    SendContext, SendHook, SendOrigin, TurnErrorRequest, WakeContext,
 };
 use crate::render;
 use crate::storage::{
@@ -47,16 +47,19 @@ use crate::storage::{
     TopicStatus, unread,
 };
 use crate::tools::{
-    AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT, DelNoteArgs, DescribePluginsArgs, EventsArgs,
-    FeedbackArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MemoryAddArgs, MemoryArgs,
-    MemoryBlameArgs,
-    MemoryCommitArgs, MemoryListArgs, MemoryLogArgs, MemorySearchArgs, MemoryWriteArgs, NotesArgs,
-    PlatformCallArgs, PlatformMethodsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs,
+    AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT, DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs,
+    DescribePluginsArgs, EventsArgs, FeedbackArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT,
+    MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs, MemoryBlameArgs, MemoryCommitArgs,
+    MemoryListArgs, MemoryLogArgs, MemorySearchArgs, MemoryWriteArgs, NotesArgs, PlatformCallArgs,
+    PlatformMethodsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, WaitMessageArgs,
     is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
 pub const MAX_DELIVERY: usize = 200;
+
+/// 唤醒延迟的上限。策略可以要求等待，但不能把轮次无限期挂起。
+const MAX_WAKE_DELAY_MS: u64 = 60_000;
 
 /// 查历史时的默认条数与上限。
 const DEFAULT_HISTORY: usize = 20;
@@ -91,6 +94,13 @@ pub enum Ingest {
     NotSubscribed { room: RoomId },
     /// 被连接的入站策略丢掉了——不写流水，也不叫醒任何人。
     Dropped { room: RoomId },
+    /// 被路由插件处理了。`stored` 是命令本身有没有写流水（默认不写）；
+    /// `woke` 是顺便叫醒的会话。需要 I/O 的动作已经排进 `pending_route_actions`，
+    /// 打断请求排在 `pending_interrupts`，由 drain 线程在锁外执行。
+    Handled {
+        stored: Option<u64>,
+        woke: Vec<String>,
+    },
 }
 
 /// 一次清理里某个房间的战果，给日志用。
@@ -103,6 +113,23 @@ pub struct Pruned {
     pub kept: u64,
 }
 
+/// 已经校验、等锁外 sleeping 的一次 `wait_message`。
+pub(crate) struct PreparedWait {
+    ticket: Ticket,
+    room: RoomId,
+    /// 只返回编号大于它的记录：本轮已投递/已读的最大编号，或水位。
+    after: u64,
+    limit: usize,
+    timeout: Duration,
+    columns: Vec<&'static str>,
+}
+
+impl PreparedWait {
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
 /// 等着开轮次的（会话，房间）。
 #[derive(Debug, Clone)]
 struct Pending {
@@ -110,6 +137,9 @@ struct Pending {
     room: RoomId,
     reason: TurnReason,
     wake_reason: Option<String>,
+    /// 最早什么时候允许开轮（Unix 毫秒）。等待期间的新消息照常入库，
+    /// 到点 `open_turn` 会一起取走。
+    not_before: i64,
 }
 
 /// 正在跑的一轮。挂在会话上：一个会话同一时刻只有这一轮。
@@ -126,6 +156,9 @@ struct ActiveTurn {
     /// 开轮时冻结的配置。轮次中途热重载只影响下一轮；这一轮所有工具查询
     /// 都用这份快照，否则「轮次边界生效」只是投递批次的边界，不是真的边界。
     config: Arc<Config>,
+    /// 管理员按了 `/stop`：这一轮是被主动叫停的，收工时的错误不该再按
+    /// `on_turn_error` 发失败通知（那会把「你让我停」报成「我出错了」）。
+    stop_requested: bool,
 }
 
 /// 刚刚收工的一轮。票不再有效，但留一小会儿：补确认、写反馈都要用到它。
@@ -197,12 +230,36 @@ impl PreparedSend {
     }
 }
 
+/// 路由动作要求打断的一个会话；drain 线程据此发 `control: interrupt`。
+#[derive(Debug, Clone)]
+pub(crate) struct PendingInterrupt {
+    pub session: String,
+    pub room: RoomId,
+}
+
+/// 需要 I/O 的路由动作：发送，或者后台任务。
+pub(crate) enum PreparedRouteAction {
+    Send(PreparedSend),
+    Task(PreparedTask),
+}
+
+/// 一个已经确定房间/会话、但还没开始跑的后台任务。
+pub(crate) struct PreparedTask {
+    pub room: RoomId,
+    pub session: String,
+    pub config: Arc<Config>,
+    pub handler: String,
+    pub params: Value,
+}
+
 /// `begin_tool_call` 的两种结果：不需要平台 I/O 的已经做完了；需要平台的交给 endpoint
 /// 在锁外执行，再回来 `finish`。
 pub(crate) enum ToolCallStart {
     Done(Value),
     Platform(PreparedPlatformCall),
     Send(PreparedSend),
+    /// 锁外等待新消息，再回锁里取结果。
+    Wait(PreparedWait),
 }
 
 /// 某个房间的一个订阅者，判定唤醒时要的东西。
@@ -233,6 +290,10 @@ pub struct Bridge<S: Store> {
     ticket_prefix: String,
     /// 排队等着在锁外发出去的失败通知。endpoint 处理完一帧、放下全局锁后执行。
     pending_notices: Vec<PreparedSend>,
+    /// 路由动作要求打断的会话；drain 线程取走后发 control 帧。
+    pending_interrupts: Vec<PendingInterrupt>,
+    /// 路由动作里需要 I/O 的发送/任务；drain 线程交给动作 worker。
+    pending_route_actions: Vec<PreparedRouteAction>,
     /// (会话, 房间) → 上次时钟轮时间（Unix 毫秒）。只活在本进程，重启后重新计间隔。
     clock_last: HashMap<(String, RoomId), i64>,
     /// (会话, 房间) → 上次唤醒（任意原因开轮）时间。只活在本进程；
@@ -305,6 +366,8 @@ impl<S: Store> Bridge<S> {
             ticket_seq: 0,
             ticket_prefix: ticket_prefix(),
             pending_notices: Vec::new(),
+            pending_interrupts: Vec::new(),
+            pending_route_actions: Vec::new(),
             clock_last: HashMap::new(),
             wake_last: HashMap::new(),
             memory,
@@ -499,34 +562,137 @@ impl<S: Store> Bridge<S> {
             return Ok(Ingest::NotSubscribed { room });
         }
 
-        // 入站策略：先问这条连接的 provider 收不收。被丢掉的记录不写流水、不叫醒，
-        // 就像它从没到过桥——水位也不会因为它出现空洞。
-        let receive_policy = self
-            .config
-            .connection(&room.connection)
-            .map(|connection| connection.receive.clone())
-            .unwrap_or_default();
-        let receive_provider = self
-            .plugins
-            .resolve_receive(&receive_policy.provider, &receive_policy)?;
+        // 入站记录先给路由插件看：命令、链接、任务可以在入库前被代码接管。
+        // 路由只看 Text 段，避免把「@机器人 + /stop」里的 @ 拼进命令。
         let text = flatten_text(&draft.elements);
+        let command = command_text(&draft.elements);
         let platform = self
             .config
             .connection(&room.connection)
             .map(|connection| connection.platform.clone())
             .unwrap_or_else(|| "unknown".to_owned());
-        let receive_context = ReceiveRequest {
-            connection: &room.connection,
-            platform: &platform,
-            room: &room,
-            sender: &draft.sender,
-            kind: &draft.kind,
-            elements: &draft.elements,
-            text: &text,
-            at_self: draft.at_self,
+        let account = self.config.account_of_room(&room);
+        let reply_to_self = self.quotes_own_message(&draft, &account)?;
+        // 平台把自己说的话回传回来：可以记流水，但绝不能再触发路由命令/链接，
+        // 否则 bot 自己发的 /send 会被再执行一次。
+        let from_self = !account.is_empty() && draft.sender.id == account;
+        let mut draft = draft.with_reply_to_self(reply_to_self);
+        let sessions: Vec<String> = subscribers
+            .iter()
+            .map(|subscriber| subscriber.session.clone())
+            .collect();
+        // 先拷成 owned 再借：后面要把 draft 移进 store.append，event/tags 还要在
+        // 唤醒判定里继续用。
+        let event = match &draft.kind {
+            RecordKind::Event { event, .. } => Some(event.clone()),
+            RecordKind::Message => None,
         };
-        if receive_provider.decide(&receive_policy, &receive_context) == ReceiveDecision::Drop {
-            return Ok(Ingest::Dropped { room });
+        let tag_names: Vec<String> = match &draft.kind {
+            RecordKind::Event { tags, .. } => tags.clone(),
+            RecordKind::Message => Vec::new(),
+        };
+        let event_ref = event.as_deref();
+        let tags_ref: Vec<&str> = tag_names.iter().map(String::as_str).collect();
+
+        let route_policies = if from_self {
+            Vec::new()
+        } else {
+            self.config
+                .connection(&room.connection)
+                .map(|connection| connection.routes.clone())
+                .unwrap_or_default()
+        };
+        let mut handled = None;
+        for policy in &route_policies {
+            let provider = match self.plugins.resolve_route(&policy.provider, policy) {
+                Ok(provider) => provider,
+                Err(error) => {
+                    eprintln!(
+                        "路由 provider {} 解析失败：{error}（这条消息按 pass 处理）",
+                        policy.provider
+                    );
+                    continue;
+                }
+            };
+            let context = RouteContext {
+                connection: &room.connection,
+                platform: &platform,
+                room: &room,
+                sender: &draft.sender,
+                is_admin: self.config.is_admin(&room, &draft.sender.id),
+                kind: &draft.kind,
+                elements: &draft.elements,
+                text: &command,
+                at_self: draft.at_self,
+                reply_to_self: draft.reply_to_self,
+                has_body: draft.has_body(),
+                event: event_ref,
+                tags: &tags_ref,
+                sessions: &sessions,
+            };
+            match provider.decide(policy, &context) {
+                RouteDecision::Pass => continue,
+                decision => {
+                    handled = Some(decision);
+                    break;
+                }
+            }
+        }
+
+        let route_handled = handled.is_some();
+        let mut suppressed = draft.suppressed;
+        if let Some(decision) = handled {
+            match decision {
+                RouteDecision::Pass => unreachable!("pass 不会放进 handled"),
+                RouteDecision::Drop { reason } => {
+                    if let Some(reason) = reason {
+                        eprintln!("路由丢弃 {room} 的一条记录：{reason}");
+                    }
+                    return Ok(Ingest::Dropped { room });
+                }
+                RouteDecision::Handle {
+                    store,
+                    wake,
+                    actions,
+                } => {
+                    for action in actions {
+                        self.apply_route_action(action, &room, &sessions)?;
+                    }
+                    // 要叫醒 AI 就必须有记录可投；`wake` 隐含 `store`。
+                    let store = store || wake;
+                    if !store {
+                        return Ok(Ingest::Handled {
+                            stored: None,
+                            woke: Vec::new(),
+                        });
+                    }
+                    suppressed = suppressed || !wake;
+                }
+            }
+        } else {
+            // 入站策略：先问这条连接的 provider 收不收。被丢掉的记录不写流水、不叫醒，
+            // 就像它从没到过桥——水位也不会因为它出现空洞。
+            let receive_policy = self
+                .config
+                .connection(&room.connection)
+                .map(|connection| connection.receive.clone())
+                .unwrap_or_default();
+            let receive_provider = self
+                .plugins
+                .resolve_receive(&receive_policy.provider, &receive_policy)?;
+            let receive_context = ReceiveRequest {
+                connection: &room.connection,
+                platform: &platform,
+                room: &room,
+                sender: &draft.sender,
+                kind: &draft.kind,
+                elements: &draft.elements,
+                text: &text,
+                at_self: draft.at_self,
+            };
+            if receive_provider.decide(&receive_policy, &receive_context) == ReceiveDecision::Drop {
+                return Ok(Ingest::Dropped { room });
+            }
         }
 
         // 先把这一轮要用的 provider 都解析出来。放 append 之前是有意的：provider id 写错
@@ -539,16 +705,13 @@ impl<S: Store> Bridge<S> {
             );
         }
 
-        // 「引用的是不是我发的」要查库，所以入库前先判。判据是本房间那条连接的登录账号——
-        // 被引用的那条如果是这个号发的，这条就算冲我来的（WakePolicy::reply）。
-        let account = self.config.account_of_room(&room);
-        let reply_to_self = self.quotes_own_message(&draft, &account)?;
-        let draft = draft.with_reply_to_self(reply_to_self);
+        // 路由决定「只存不叫醒」时，要真的把 suppressed 落进记录：
+        // 否则下一条消息叫醒时，这条命令会被当成未读一起投出去。
+        draft.suppressed = suppressed;
 
         // 适配器可以声明「这条事件只进流水」：不投递、不唤醒、不计未读。
         // 也可以让它指向某条旧记录并追加标签（例如撤回标记）。core 只执行这两个
         // 通用动作，不解释标签或事件名的平台语义。
-        let suppressed = draft.suppressed;
         let target = draft.target_platform_id.clone();
         let target_labels = draft.target_labels.clone();
         let record = self.store.append(draft)?;
@@ -557,14 +720,6 @@ impl<S: Store> Bridge<S> {
                 self.store.add_labels(&room, &target, &target_labels)?;
             }
         }
-        let event = match &record.kind {
-            RecordKind::Event { event, .. } => Some(event.as_str()),
-            RecordKind::Message => None,
-        };
-        let tags: Vec<&str> = match &record.kind {
-            RecordKind::Event { tags, .. } => tags.iter().map(String::as_str).collect(),
-            RecordKind::Message => Vec::new(),
-        };
 
         let mut woke = Vec::new();
         let now = now_millis();
@@ -600,8 +755,9 @@ impl<S: Store> Bridge<S> {
                 text: &text,
                 at_self: record.at_self,
                 reply_to_self: record.reply_to_self,
-                event,
-                tags: &tags,
+                has_body: record.has_body(),
+                event: event_ref,
+                tags: &tags_ref,
                 unread: pending,
                 last_wake_at,
                 now,
@@ -615,14 +771,147 @@ impl<S: Store> Bridge<S> {
                     TurnReason::Wake,
                     verdict.reason,
                     now,
+                    verdict.delay_ms,
                 );
             }
         }
 
-        Ok(Ingest::Recorded {
-            id: record.id,
-            woke,
-        })
+        if route_handled {
+            Ok(Ingest::Handled {
+                stored: Some(record.id),
+                woke,
+            })
+        } else {
+            Ok(Ingest::Recorded {
+                id: record.id,
+                woke,
+            })
+        }
+    }
+
+    /// 执行一个路由动作。打断和状态清理在这里立即做；发送/任务只做准备，
+    /// 真正的 I/O 交给 drain/动作 worker 在锁外跑。
+    fn apply_route_action(
+        &mut self,
+        action: RouteAction,
+        room: &RoomId,
+        sessions: &[String],
+    ) -> Result<(), BridgeError> {
+        match action {
+            RouteAction::Interrupt { scope } => {
+                self.interrupt(scope, room);
+                Ok(())
+            }
+            RouteAction::Send {
+                room: target,
+                elements,
+            } => {
+                let target = target.unwrap_or_else(|| room.clone());
+                let session = self
+                    .config
+                    .subscribers_of(&target)
+                    .first()
+                    .map(|session| session.id.clone());
+                let Some(session) = session else {
+                    eprintln!("路由 send 的目标 {target} 没有订阅者，跳过这条动作");
+                    return Ok(());
+                };
+                let config = Arc::new(self.config.clone());
+                match self.prepare_send(config, &session, target, SendOrigin::Route, elements) {
+                    Ok(prepared) => self
+                        .pending_route_actions
+                        .push(PreparedRouteAction::Send(prepared)),
+                    Err(error) => eprintln!("路由 send 组装失败：{error:?}"),
+                }
+                Ok(())
+            }
+            RouteAction::Task { handler, params } => {
+                let Some(session) = sessions.first().cloned() else {
+                    eprintln!("路由 task 没有可用会话，跳过：{handler}");
+                    return Ok(());
+                };
+                self.pending_route_actions
+                    .push(PreparedRouteAction::Task(PreparedTask {
+                        room: room.clone(),
+                        session,
+                        config: Arc::new(self.config.clone()),
+                        handler,
+                        params,
+                    }));
+                Ok(())
+            }
+        }
+    }
+
+    /// 提前结束轮次。只清 `pending`，不动未读水位：被停掉的消息还在流水里，
+    /// 之后任何一个新的唤醒（下一条消息、攒够未读、时钟）都会照常把它们带出来。
+    fn interrupt(&mut self, scope: InterruptScope, room: &RoomId) {
+        let mut sessions = Vec::new();
+        match &scope {
+            InterruptScope::Room => {
+                for (session, turn) in &self.active {
+                    if &turn.room == room {
+                        sessions.push(session.clone());
+                    }
+                }
+                self.pending.retain(|pending| &pending.room != room);
+            }
+            InterruptScope::Sessions(list) => {
+                for session in list {
+                    if self.active.contains_key(session) {
+                        sessions.push(session.clone());
+                    }
+                }
+                self.pending
+                    .retain(|pending| !list.iter().any(|session| session == &pending.session));
+            }
+            InterruptScope::Connection => {
+                for (session, turn) in &self.active {
+                    if turn.room.connection == room.connection {
+                        sessions.push(session.clone());
+                    }
+                }
+                self.pending
+                    .retain(|pending| pending.room.connection != room.connection);
+            }
+        }
+
+        let mut interrupted = Vec::new();
+        for session in sessions {
+            if let Some(turn) = self.active.get_mut(&session) {
+                turn.stop_requested = true;
+                interrupted.push(PendingInterrupt {
+                    session,
+                    room: turn.room.clone(),
+                });
+            }
+        }
+        eprintln!(
+            "路由 interrupt（{scope:?}）在 {room}：打断 {} 个正在跑的轮次",
+            interrupted.len()
+        );
+        self.pending_interrupts.extend(interrupted);
+    }
+
+    /// drain 线程取走打断请求，锁外发 control 帧。
+    pub(crate) fn take_interrupts(&mut self) -> Vec<PendingInterrupt> {
+        std::mem::take(&mut self.pending_interrupts)
+    }
+
+    /// drain 线程取走需要 I/O 的路由动作，交给动作 worker。
+    pub(crate) fn take_route_actions(&mut self) -> Vec<PreparedRouteAction> {
+        std::mem::take(&mut self.pending_route_actions)
+    }
+
+    /// 动作 worker 用：按路由来源准备一次发送（走发送钩子和文件中继）。
+    pub(crate) fn prepare_route_send(
+        &mut self,
+        config: Arc<Config>,
+        session: &str,
+        room: RoomId,
+        elements: Vec<Element>,
+    ) -> Result<PreparedSend, ToolError> {
+        self.prepare_send(config, session, room, SendOrigin::Route, elements)
     }
 
     /// 这条消息里有没有「引用本合同一个账号发过的消息」。
@@ -650,8 +939,11 @@ impl<S: Store> Bridge<S> {
     /// 取下一轮，不管是谁的。没有就返回 `None`。
     pub fn poll_turn(&mut self) -> Result<Option<Delivery>, BridgeError> {
         self.apply_staged_config();
-        let index = (0..self.pending.len())
-            .find(|&index| !self.active.contains_key(&self.pending[index].session));
+        let now = now_millis();
+        let index = (0..self.pending.len()).find(|&index| {
+            let pending = &self.pending[index];
+            pending.not_before <= now && !self.active.contains_key(&pending.session)
+        });
         let Some(index) = index else {
             return Ok(None);
         };
@@ -662,12 +954,13 @@ impl<S: Store> Bridge<S> {
     /// 只给这一组会话取活。接入点用这个——一条连接只代表它自己那组会话。
     pub fn poll_turn_for(&mut self, sessions: &[String]) -> Result<Option<Delivery>, BridgeError> {
         self.apply_staged_config();
+        let now = now_millis();
         let index = (0..self.pending.len()).find(|&index| {
             let pending = &self.pending[index];
             if !sessions.iter().any(|session| session == &pending.session) {
                 return false;
             }
-            !self.active.contains_key(&pending.session)
+            pending.not_before <= now && !self.active.contains_key(&pending.session)
         });
         let Some(index) = index else {
             return Ok(None);
@@ -695,7 +988,14 @@ impl<S: Store> Bridge<S> {
         };
 
         if let Some(error) = error {
-            self.notify_turn_error(&turn.config, &turn.session, &turn.room, error);
+            if turn.stop_requested {
+                eprintln!(
+                    "会话 {} 在 {} 的轮次被 /stop 叫停：{error}（不发失败通知）",
+                    turn.session, turn.room
+                );
+            } else {
+                self.notify_turn_error(&turn.config, &turn.session, &turn.room, error);
+            }
         }
 
         let Some(session) = self.by_ticket.remove(ticket) else {
@@ -751,10 +1051,7 @@ impl<S: Store> Bridge<S> {
             .session(session)
             .map(|session| session.turn_error.clone())
             .unwrap_or_default();
-        let provider = match self
-            .plugins
-            .resolve_turn_error(&policy.provider, &policy)
-        {
+        let provider = match self.plugins.resolve_turn_error(&policy.provider, &policy) {
             Ok(provider) => provider,
             Err(resolve_error) => {
                 eprintln!(
@@ -868,6 +1165,13 @@ impl<S: Store> Bridge<S> {
                 let args: FetchRecordsArgs = parse(args)?;
                 self.fetch_records(ticket, &turn_config, sessions, &room, args)
             }
+            // 锁外等待的工具不能走这条同步路径；正式接入点用 `begin_tool_call` 的
+            // `ToolCallStart::Wait`。这里只给直接调用 tool_call 的测试/开发 harness 一个明确错误。
+            "wait_message" => Err(ToolError::new(
+                ErrorCode::BadRequest,
+                "[wait_message] 这个工具必须通过正式接入点调用（它需要锁外等待）；\
+                 当前调用路径会把整座桥卡住。",
+            )),
             "list_rooms" => self.list_rooms(&turn_config, sessions),
             "get_notes" => {
                 let args: NotesArgs = parse(args)?;
@@ -1014,6 +1318,53 @@ impl<S: Store> Bridge<S> {
                     self.prepare_platform_call(ticket, args)?,
                 ))
             }
+            "wait_message" => {
+                let args: WaitMessageArgs = parse(args)?;
+                let ctx = self.turn_ctx(ticket, tool)?;
+                let room = match args.room.as_deref() {
+                    Some(room) => resolve_room(room)?,
+                    None => ctx.room.clone(),
+                };
+                if room != ctx.room {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        format!(
+                            "[bad_params] wait_message 只能等当前轮次的房间 {}；\
+                             要查别的房间用 get_history 或 fetch_records。",
+                            ctx.room
+                        ),
+                    ));
+                }
+                let sessions = std::slice::from_ref(&ctx.session);
+                self.ensure_readable(&ctx.config, sessions, &room, &ctx.room)?;
+
+                let cursor = Cursor::new(ctx.session.clone(), room.clone());
+                let watermark = self.store.watermark(&cursor).map_err(internal)?;
+                let seen = ctx
+                    .delivered
+                    .iter()
+                    .chain(ctx.read.iter())
+                    .max()
+                    .copied()
+                    .unwrap_or(0);
+                let after = watermark.max(seen);
+                let timeout = Duration::from_millis(
+                    args.timeout_ms
+                        .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
+                        .min(MAX_WAIT_TIMEOUT_MS),
+                );
+                let limit = args.limit.unwrap_or(DEFAULT_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
+                let columns = column_set(args.columns.as_deref())?;
+
+                Ok(ToolCallStart::Wait(PreparedWait {
+                    ticket: ticket.clone(),
+                    room,
+                    after,
+                    limit,
+                    timeout,
+                    columns,
+                }))
+            }
             // 其余工具不碰外部 I/O（读流水/记忆/笔记都在本地），保持原路径。
             _ => {
                 let value = self.tool_call(ticket, sessions, tool, args)?;
@@ -1156,6 +1507,63 @@ impl<S: Store> Bridge<S> {
             render::slice(result, offset, limit)
         };
         Ok(render::fit("platform_call", result, &self.spill_dir()))
+    }
+
+    /// `wait_message` 的锁内重查：有新消息就返回并记为「本轮读过」；
+    /// 没有就返回 `None`，endpoint 继续在锁外等。
+    pub(crate) fn poll_wait(
+        &mut self,
+        prepared: &PreparedWait,
+    ) -> Result<Option<Value>, ToolError> {
+        let Some(session) = self.by_ticket.get(&prepared.ticket).cloned() else {
+            return Err(no_active_round());
+        };
+        let Some(active) = self.active.get(&session) else {
+            return Err(no_active_round());
+        };
+        if active.room != prepared.room {
+            return Err(no_active_round());
+        }
+        let account = active.config.account_of_room(&prepared.room);
+        let mut records = self
+            .pending_records(&session, &prepared.room, &account)
+            .map_err(internal)?;
+        records.retain(|record| record.id > prepared.after);
+        records.truncate(prepared.limit);
+        if records.is_empty() {
+            return Ok(None);
+        }
+
+        let ids: Vec<u64> = records.iter().map(|record| record.id).collect();
+        self.mark_read(&prepared.ticket, &prepared.room, ids);
+        self.fill_quote_refs(&prepared.room, &mut records);
+
+        let rendered: Vec<Value> = records
+            .iter()
+            .map(|record| record_columns(record, &prepared.columns))
+            .collect();
+        Ok(Some(json!({
+            "room": prepared.room,
+            "after": prepared.after,
+            "timed_out": false,
+            "returned": rendered.len(),
+            "records": rendered,
+        })))
+    }
+
+    /// `wait_message` 超时：确认票仍有效后返回空。
+    pub(crate) fn finish_wait(&mut self, prepared: &PreparedWait) -> Result<Value, ToolError> {
+        if !self.by_ticket.contains_key(&prepared.ticket) {
+            return Err(no_active_round());
+        }
+        Ok(json!({
+            "room": prepared.room,
+            "after": prepared.after,
+            "timed_out": true,
+            "returned": 0,
+            "records": [],
+            "note": "这段时间没有新消息。不要空转重试；可以继续处理手上的事，或稍后再拉一次。",
+        }))
     }
 
     /// 直连 `tool_call` 的 `platform_call` 路径：校验 + 执行 + 结算，仍在调用方锁里。
@@ -1509,7 +1917,14 @@ impl<S: Store> Bridge<S> {
                     last_record_at,
                 };
                 if provider.is_due(&policy, &context) {
-                    self.enqueue(session.clone(), room.clone(), TurnReason::Clock, None, now);
+                    self.enqueue(
+                        session.clone(),
+                        room.clone(),
+                        TurnReason::Clock,
+                        None,
+                        now,
+                        0,
+                    );
                     self.clock_last.insert(key, now);
                     queued += 1;
                 }
@@ -1540,14 +1955,18 @@ impl<S: Store> Bridge<S> {
         reason: TurnReason,
         wake_reason: Option<String>,
         at: i64,
+        delay_ms: u64,
     ) {
-        self.wake_last
-            .insert((session.clone(), room.clone()), at);
-        let already = self
+        self.wake_last.insert((session.clone(), room.clone()), at);
+        let not_before = at.saturating_add(delay_ms.min(MAX_WAKE_DELAY_MS) as i64);
+        // 同一 (会话, 房间) 只排一轮。后来的唤醒只可能把它往前提，
+        // 不会把已经等着的轮次再往后拖。
+        if let Some(existing) = self
             .pending
-            .iter()
-            .any(|pending| pending.session == session && pending.room == room);
-        if already {
+            .iter_mut()
+            .find(|pending| pending.session == session && pending.room == room)
+        {
+            existing.not_before = existing.not_before.min(not_before);
             return;
         }
         self.pending.push_back(Pending {
@@ -1555,6 +1974,7 @@ impl<S: Store> Bridge<S> {
             room,
             reason,
             wake_reason,
+            not_before,
         });
     }
 
@@ -1655,6 +2075,7 @@ impl<S: Store> Bridge<S> {
                 delivered,
                 read: BTreeSet::new(),
                 config: turn_config.clone(),
+                stop_requested: false,
             },
         );
 
@@ -1807,19 +2228,13 @@ impl<S: Store> Bridge<S> {
             .plugins
             .resolve_send_hooks(&outbound_policy.before)
             .map_err(|error| {
-                ToolError::new(
-                    ErrorCode::Internal,
-                    format!("发送前钩子解析失败：{error}"),
-                )
+                ToolError::new(ErrorCode::Internal, format!("发送前钩子解析失败：{error}"))
             })?;
         let after_hooks = self
             .plugins
             .resolve_send_hooks(&outbound_policy.after)
             .map_err(|error| {
-                ToolError::new(
-                    ErrorCode::Internal,
-                    format!("发送后钩子解析失败：{error}"),
-                )
+                ToolError::new(ErrorCode::Internal, format!("发送后钩子解析失败：{error}"))
             })?;
         let hook_context = SendContext {
             session,
@@ -1831,10 +2246,7 @@ impl<S: Store> Bridge<S> {
             let before = elements.clone();
             hook.before_send(&hook_context, &mut elements)
                 .map_err(|error| {
-                    ToolError::new(
-                        ErrorCode::Internal,
-                        format!("发送前钩子失败：{error}"),
-                    )
+                    ToolError::new(ErrorCode::Internal, format!("发送前钩子失败：{error}"))
                 })?;
             // 只报告真的改了正文的钩子；没改的也在回执里列出来只会变成噪音。
             if elements != before {
@@ -2578,11 +2990,10 @@ impl<S: Store> Bridge<S> {
                 let adapters = connections
                     .iter()
                     .map(|connection| {
-                        let info = self
-                            .plugins
-                            .catalog()
-                            .into_iter()
-                            .find(|info| info.kind.as_deref() == Some(connection.kind.as_str()));
+                        let info =
+                            self.plugins.catalog().into_iter().find(|info| {
+                                info.kind.as_deref() == Some(connection.kind.as_str())
+                            });
                         // 先看这条连接运行时上报的能力（外置进程 hello 会带），
                         // 没有再退回按 kind 的静态声明。
                         let manifest = self
@@ -2722,7 +3133,12 @@ impl<S: Store> Bridge<S> {
                     room.connection.clone()
                 }
                 None => {
-                    self.ensure_connection_readable(config, sessions, &turn_room.connection, turn_room)?;
+                    self.ensure_connection_readable(
+                        config,
+                        sessions,
+                        &turn_room.connection,
+                        turn_room,
+                    )?;
                     turn_room.connection.clone()
                 }
             },
@@ -3358,11 +3774,13 @@ fn record_columns(record: &Record, columns: &[&str]) -> Value {
                     tags,
                     payload,
                     summary,
+                    body,
                 } => json!({
                     "event": event,
                     "tags": tags,
                     "payload": payload,
                     "summary": summary,
+                    "body": body,
                 }),
             },
             "sender" => json!(record.sender),
@@ -3425,6 +3843,9 @@ fn outbound_error(error: OutboundError) -> ToolError {
         OutboundError::Unavailable(detail) => {
             ToolError::new(ErrorCode::Internal, with_file_hint(detail))
         }
+        OutboundError::Timeout(detail) => {
+            ToolError::new(ErrorCode::Timeout, with_file_hint(detail))
+        }
     }
 }
 
@@ -3434,6 +3855,16 @@ fn now_millis() -> i64 {
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or(0)
 }
+
+/// 只把文本段拼起来：命令判定不该被 @ / 引用 / 图片占位符干扰。
+fn command_text(elements: &[Element]) -> String {
+    elements
+        .iter()
+        .filter_map(Element::as_text)
+        .collect::<String>()
+}
+
+
 
 // ── 反馈（ADR-0021）────────────────────────────────────────────────────
 
@@ -3826,6 +4257,7 @@ fn call_error(error: CallError) -> ToolError {
         CallError::NotImplemented(_) => (ErrorCode::ToolNotAllowed, "not_implemented"),
         CallError::Forbidden(_) => (ErrorCode::ToolNotAllowed, "forbidden"),
         CallError::Unavailable(_) => (ErrorCode::Internal, "unavailable"),
+        CallError::Timeout(_) => (ErrorCode::Timeout, "timeout"),
     };
     ToolError::new(code, with_file_hint(format!("[{kind}] {error}")))
 }

@@ -255,7 +255,8 @@ fn event_meta_survives_a_restart() {
                     vec!["poke".into(), "notice".into()],
                     Some(serde_json::json!({ "notice_type": "notify", "sub_type": "poke" })),
                     Some("[拍了拍我]".into()),
-                ),
+                )
+                .without_body(),
             )
             .expect("可写");
     }
@@ -268,9 +269,11 @@ fn event_meta_survives_a_restart() {
             tags,
             payload,
             summary,
+            body,
         } => {
             assert_eq!(event, "poke");
             assert_eq!(tags, &["poke".to_string(), "notice".to_string()]);
+            assert!(!body, "无正文标记要能跟着记录落库、重启后还在");
             assert_eq!(
                 payload.as_ref().and_then(|value| value.get("sub_type")).and_then(|value| value.as_str()),
                 Some("poke")

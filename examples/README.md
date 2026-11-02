@@ -23,7 +23,30 @@ examples/lua/
   timeout_log_only.lua turn_error：超时只记日志，其余沿用会话/全局动作
   wake_policy.lua      wake：@、poke、未读阈值、长时间未唤醒（参数全在 options）
   three_hour_clock.lua clock：距上次唤醒满 N 小时开一轮（默认 3）
+  stop_command.lua     route：管理员 /stop，打断当前房间的轮次
+  send_command.lua     route：管理员 /send，直接发消息、不叫醒 AI
+  b23_video.lua        route：匹配 b23/B 站链接，后台 yt-dlp 下载后发回原房间
 ```
+
+路由按连接配置、按顺序执行，`pass` 才轮到下一个：
+
+```toml
+[[connections.routes]]
+provider = "lua.stop_command"
+
+[[connections.routes]]
+provider = "lua.send_command"
+
+[[connections.routes]]
+provider = "lua.b23_video"
+
+[connections.routes.options]
+dir = "/tmp/acb-b23"
+timeout_ms = 600000
+```
+
+路由回调必须快（Lua 上限 50ms）；`b23_video.lua` 只做匹配，下载/转码由 `exec`
+后台任务执行。路由插件能发消息、打断轮次、跑命令，只挂你信任的脚本。
 
 测试环境（本仓库 flake）提供一个把 `ACB_LUA_DIR` 固化进去的包装器，不依赖手工
 drop-in 或宿主环境变量：
@@ -83,6 +106,7 @@ provider = "lua.wake_policy"
 [sessions.subscriptions.wake.options]
 at_mention = true
 poke = true
+empty_body_hold_ms = 5000
 accumulate = 30
 idle_hours = 3
 

@@ -18,11 +18,11 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::adapter::{
-    AdapterError, AdapterFactory, AdapterManifest, AdapterInstance, create_instance,
+    AdapterError, AdapterFactory, AdapterInstance, AdapterManifest, create_instance,
     validate_manifest,
 };
 use crate::config::{
-    AccessPolicy, ClockPolicy, Config, Connection, DeliveryPolicy, ReceivePolicy,
+    AccessPolicy, ClockPolicy, Config, Connection, DeliveryPolicy, ReceivePolicy, RoutePolicy,
     TurnErrorAction, TurnErrorPolicy, WakeDecision, WakeInput, WakePolicy, WakeVerdict,
 };
 use crate::event_queue::EventQueue;
@@ -189,6 +189,8 @@ pub enum ExtensionPoint {
     Wake,
     Access,
     Receive,
+    /// 入库前的消息路由（命令、链接、任务）。
+    Route,
     Send,
     Clock,
     Delivery,
@@ -204,6 +206,7 @@ impl ExtensionPoint {
             Self::Wake => "wake",
             Self::Access => "access",
             Self::Receive => "receive",
+            Self::Route => "route",
             Self::Send => "send",
             Self::Clock => "clock",
             Self::Delivery => "delivery",
@@ -229,6 +232,7 @@ pub enum Capability {
     TurnErrorDecision,
     ClockDecision,
     ReceiveDecision,
+    RouteDecision,
 }
 
 impl Capability {
@@ -245,6 +249,7 @@ impl Capability {
             Self::TurnErrorDecision => "turn_error_decision",
             Self::ClockDecision => "clock_decision",
             Self::ReceiveDecision => "receive_decision",
+            Self::RouteDecision => "route_decision",
         }
     }
 }
@@ -383,10 +388,7 @@ pub enum PluginError {
     #[error("provider 重复注册：{0}")]
     DuplicateProvider(String),
     #[error("provider {id} 的扩展点不支持：{point:?}")]
-    UnsupportedExtensionPoint {
-        id: String,
-        point: ExtensionPoint,
-    },
+    UnsupportedExtensionPoint { id: String, point: ExtensionPoint },
     #[error("provider {id} 返回的实例是 {found:?}，但这里要 {expected:?}")]
     WrongProviderKind {
         id: String,
@@ -400,10 +402,7 @@ pub enum PluginError {
         required: u32,
     },
     #[error("provider {id} 缺少能力：{capability:?}")]
-    MissingCapability {
-        id: String,
-        capability: Capability,
-    },
+    MissingCapability { id: String, capability: Capability },
     #[error("namespace 重复：{0}")]
     DuplicateNamespace(String),
     #[error("namespace {0} 是内置保留名，树外 manager 不能占用")]
@@ -434,6 +433,8 @@ pub struct WakeContext<'a> {
     pub text: &'a str,
     pub at_self: bool,
     pub reply_to_self: bool,
+    /// 有没有正文。只有 @ / 引用 / 空白文本时为 false；事件恒为 false。
+    pub has_body: bool,
     pub event: Option<&'a str>,
     pub tags: &'a [&'a str],
     pub unread: u32,
@@ -449,14 +450,11 @@ pub trait WakeProvider: Send + Sync {
 
     /// 带原因的判定。默认调用 [`decide`](Self::decide)，reason 为空；
     /// 有能力的 provider 覆盖它，让 agent 知道「这次为什么醒」。
-    fn decide_with_reason(
-        &self,
-        options: &WakePolicy,
-        context: &WakeContext<'_>,
-    ) -> WakeVerdict {
+    fn decide_with_reason(&self, options: &WakePolicy, context: &WakeContext<'_>) -> WakeVerdict {
         WakeVerdict {
             decision: self.decide(options, context),
             reason: None,
+            delay_ms: 0,
         }
     }
 }
@@ -470,16 +468,13 @@ impl WakeProvider for DefaultWakeProvider {
         self.decide_with_reason(options, context).decision
     }
 
-    fn decide_with_reason(
-        &self,
-        options: &WakePolicy,
-        context: &WakeContext<'_>,
-    ) -> WakeVerdict {
+    fn decide_with_reason(&self, options: &WakePolicy, context: &WakeContext<'_>) -> WakeVerdict {
         let input = WakeInput {
             sender_id: context.sender_id,
             text: context.text,
             at_self: context.at_self,
             reply_to_self: context.reply_to_self,
+            has_body: context.has_body,
             event: context.event,
             platform: context.platform,
             tags: context.tags,
@@ -695,7 +690,11 @@ pub fn default_delivery_plan(request: &DeliveryRequest<'_>) -> DeliveryPlan {
 
     let sizes: Vec<usize> = records
         .iter()
-        .map(|record| serde_json::to_vec(record).map(|bytes| bytes.len()).unwrap_or(0))
+        .map(|record| {
+            serde_json::to_vec(record)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0)
+        })
         .collect();
 
     let mut budget = MAX_DELIVERY_BYTES;
@@ -727,11 +726,7 @@ pub fn default_delivery_plan(request: &DeliveryRequest<'_>) -> DeliveryPlan {
 
     let mut keep = Vec::with_capacity(head_keep + tail_keep);
     keep.extend(records[..head_keep].iter().map(|record| record.id));
-    keep.extend(
-        records[len - tail_keep..]
-            .iter()
-            .map(|record| record.id),
-    );
+    keep.extend(records[len - tail_keep..].iter().map(|record| record.id));
     let middle = &records[head_keep..len - tail_keep];
     let omitted = middle
         .first()
@@ -751,6 +746,8 @@ pub enum SendOrigin {
     Message,
     /// 一轮失败后的通知。
     TurnFailure,
+    /// 路由插件（命令/任务）替桥发的消息。
+    Route,
 }
 
 impl SendOrigin {
@@ -758,6 +755,7 @@ impl SendOrigin {
         match self {
             Self::Message => "message",
             Self::TurnFailure => "turn_failure",
+            Self::Route => "route",
         }
     }
 }
@@ -914,6 +912,97 @@ impl ReceiveProvider for AcceptAllReceiveProvider {
     }
 }
 
+/// 消息路由的判定输入。比 receive 多带身份和“是不是冲我来的”，
+/// 因为路由要区分管理员命令、裸 @、普通闲聊和链接。
+#[derive(Debug, Clone)]
+pub struct RouteContext<'a> {
+    pub connection: &'a str,
+    pub platform: &'a str,
+    pub room: &'a RoomId,
+    pub sender: &'a Sender,
+    /// 发送者是不是这条连接点名的系统管理员。
+    pub is_admin: bool,
+    pub kind: &'a RecordKind,
+    pub elements: &'a [Element],
+    /// 只拼 Text 段：命令匹配不该被 @ / 引用的占位符干扰。
+    pub text: &'a str,
+    pub at_self: bool,
+    pub reply_to_self: bool,
+    pub has_body: bool,
+    pub event: Option<&'a str>,
+    pub tags: &'a [&'a str],
+    /// 订阅这个房间的会话（按配置顺序）。路由动作默认用第一个会话的身份发消息。
+    pub sessions: &'a [String],
+}
+
+/// 路由决定。
+#[derive(Debug, Clone, PartialEq)]
+pub enum RouteDecision {
+    /// 继续走正常流程：入库、唤醒。
+    Pass,
+    /// 吃掉，不写流水、不叫醒。
+    Drop { reason: Option<String> },
+    /// 交给代码处理。
+    Handle {
+        /// 这条命令本身要不要写流水（默认不写）。
+        store: bool,
+        /// 处理完要不要让 AI 也看到这条（默认不看）。
+        wake: bool,
+        actions: Vec<RouteAction>,
+    },
+}
+
+impl RouteDecision {
+    /// 只做一件事的简写：`Handle { store:false, wake:false, actions:[action] }`。
+    pub fn handle(action: RouteAction) -> Self {
+        Self::Handle {
+            store: false,
+            wake: false,
+            actions: vec![action],
+        }
+    }
+}
+
+/// 路由处理动作。core 负责在锁外执行真正有 I/O 的动作。
+#[derive(Debug, Clone, PartialEq)]
+pub enum RouteAction {
+    /// 提前结束轮次。由 core 清 pending、标 active、发 interrupt。
+    Interrupt { scope: InterruptScope },
+    /// 以桥的身份发一条消息。发到 `room`，不写就发到触发消息所在房间。
+    Send {
+        room: Option<RoomId>,
+        elements: Vec<Element>,
+    },
+    /// 跑一个后台任务（下载、转码等慢活），完成后按任务结果发送。
+    Task { handler: String, params: Value },
+}
+
+/// 打断范围。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterruptScope {
+    /// 触发消息所在房间（默认）。
+    Room,
+    /// 指定会话（必须是订阅了触发房间的会话）。
+    Sessions(Vec<String>),
+    /// 触发消息所属连接上的所有会话。
+    Connection,
+}
+
+/// 消息路由 provider。按连接配置、按顺序调用；返回 `Pass` 才继续下一个。
+pub trait RouteProvider: Send + Sync {
+    fn decide(&self, options: &RoutePolicy, context: &RouteContext<'_>) -> RouteDecision;
+}
+
+/// 没有配置路由时的兜底：全部放行。
+#[derive(Debug, Default)]
+pub struct PassThroughRouteProvider;
+
+impl RouteProvider for PassThroughRouteProvider {
+    fn decide(&self, _options: &RoutePolicy, _context: &RouteContext<'_>) -> RouteDecision {
+        RouteDecision::Pass
+    }
+}
+
 /// manager 实例化 provider 时能拿到的 options。
 #[derive(Debug, Clone, Copy)]
 pub enum ProviderOptions<'a> {
@@ -923,6 +1012,7 @@ pub enum ProviderOptions<'a> {
     TurnError(&'a TurnErrorPolicy),
     Clock(&'a ClockPolicy),
     Receive(&'a ReceivePolicy),
+    Route(&'a RoutePolicy),
     /// 平台适配器：按这条连接的配置实例化。
     PlatformAdapter(&'a Connection),
     /// 不需要 options 的扩展点（发送钩子）。
@@ -938,6 +1028,7 @@ pub enum ProviderInstance {
     TurnError(Arc<dyn TurnErrorProvider>),
     Clock(Arc<dyn ClockProvider>),
     Receive(Arc<dyn ReceiveProvider>),
+    Route(Arc<dyn RouteProvider>),
     PlatformAdapter(Arc<dyn AdapterFactory>),
 }
 
@@ -952,6 +1043,7 @@ impl ProviderInstance {
             Self::TurnError(_) => ExtensionPoint::TurnError,
             Self::Clock(_) => ExtensionPoint::Clock,
             Self::Receive(_) => ExtensionPoint::Receive,
+            Self::Route(_) => ExtensionPoint::Route,
             Self::PlatformAdapter(_) => ExtensionPoint::PlatformAdapter,
         }
     }
@@ -1057,6 +1149,7 @@ impl PluginLoader for NativeLoader {
                 ExtensionPoint::TurnError,
                 ExtensionPoint::Clock,
                 ExtensionPoint::Receive,
+                ExtensionPoint::Route,
             ],
         )
     }
@@ -1195,11 +1288,7 @@ impl PluginLoader for NativeLoader {
                 PLUGIN_API_VERSION,
                 vec![Capability::ReceiveDecision],
             )
-            .with_metadata(native_meta(
-                "接收全部入站",
-                "所有入站记录都入库",
-                &[],
-            )),
+            .with_metadata(native_meta("接收全部入站", "所有入站记录都入库", &[])),
             Arc::new(AcceptAllReceiveProvider),
         )
     }
@@ -1215,6 +1304,7 @@ pub struct PluginManager {
     turn_errors: HashMap<ProviderId, Arc<dyn TurnErrorProvider>>,
     clocks: HashMap<ProviderId, Arc<dyn ClockProvider>>,
     receives: HashMap<ProviderId, Arc<dyn ReceiveProvider>>,
+    routes: HashMap<ProviderId, Arc<dyn RouteProvider>>,
     /// 直接注册的平台适配器工厂，键是连接配置里的 `kind`。
     adapters: HashMap<String, Arc<dyn AdapterFactory>>,
     /// manager 子树声明的适配器：`kind` → provider id。
@@ -1270,6 +1360,7 @@ impl PluginManager {
                     | ExtensionPoint::TurnError
                     | ExtensionPoint::Clock
                     | ExtensionPoint::Receive
+                    | ExtensionPoint::Route
                     | ExtensionPoint::PlatformAdapter
             ) {
                 return Err(PluginError::UnsupportedExtensionPoint {
@@ -1284,7 +1375,10 @@ impl PluginManager {
     /// 直接注册一个平台适配器工厂（内置适配器、native loader 用它）。
     ///
     /// 适配器也走 Root 的 manifest / 版本 / 能力审计，和 provider 一样。
-    pub fn register_adapter(&mut self, factory: Arc<dyn AdapterFactory>) -> Result<(), AdapterError> {
+    pub fn register_adapter(
+        &mut self,
+        factory: Arc<dyn AdapterFactory>,
+    ) -> Result<(), AdapterError> {
         self.register_adapter_with_source(factory, PluginSource::Builtin)
     }
 
@@ -1400,7 +1494,11 @@ impl PluginManager {
             }
             Ok(other) => Err(AdapterError::Create(
                 connection.id.clone(),
-                format!("{} 返回的是 {:?}，不是平台适配器", id, other.extension_point()),
+                format!(
+                    "{} 返回的是 {:?}，不是平台适配器",
+                    id,
+                    other.extension_point()
+                ),
             )),
             Err(error) => Err(AdapterError::Create(
                 connection.id.clone(),
@@ -1558,15 +1656,32 @@ impl PluginManager {
         Ok(())
     }
 
+    /// 注册消息路由 provider。校验规则同 wake。
+    pub fn register_route(
+        &mut self,
+        descriptor: ProviderDescriptor,
+        provider: Arc<dyn RouteProvider>,
+    ) -> Result<(), PluginError> {
+        self.check_descriptor(
+            &descriptor,
+            ExtensionPoint::Route,
+            Capability::RouteDecision,
+        )?;
+        if self.descriptors.contains_key(&descriptor.id) {
+            return Err(PluginError::DuplicateProvider(descriptor.id.to_string()));
+        }
+        self.descriptors
+            .insert(descriptor.id.clone(), descriptor.clone());
+        self.routes.insert(descriptor.id, provider);
+        Ok(())
+    }
+
     /// 安装一棵树外 manager 子树。它拥有自己的 namespace 和子树注册表；Root 只做
     /// namespace / 版本 / 能力 / id 审计，之后把它子树里的 id 委托给它。
     ///
     /// 递归安装子 manager，并检查层级上限与环路。整棵子树先预检、再落表：
     /// 任何一层不合格都不会留下半棵装好的子树。
-    pub fn install_manager(
-        &mut self,
-        manager: Arc<dyn ManagerPlugin>,
-    ) -> Result<(), PluginError> {
+    pub fn install_manager(&mut self, manager: Arc<dyn ManagerPlugin>) -> Result<(), PluginError> {
         let mut collected = Vec::new();
         let mut ancestry = Vec::new();
         self.collect_manager(manager, &mut ancestry, &mut collected)?;
@@ -1577,8 +1692,7 @@ impl PluginManager {
                         self.adapter_providers.insert(kind, descriptor.id.clone());
                     }
                 }
-                self.descriptors
-                    .insert(descriptor.id.clone(), descriptor);
+                self.descriptors.insert(descriptor.id.clone(), descriptor);
             }
             self.manager_order.push(entry.namespace.clone());
             self.managers.insert(entry.namespace, entry.manager);
@@ -1625,9 +1739,7 @@ impl PluginManager {
             });
         }
         if self.managers.contains_key(&namespace)
-            || collected
-                .iter()
-                .any(|entry| entry.namespace == namespace)
+            || collected.iter().any(|entry| entry.namespace == namespace)
         {
             return Err(PluginError::DuplicateNamespace(namespace));
         }
@@ -1678,6 +1790,7 @@ impl PluginManager {
                 ExtensionPoint::TurnError => Capability::TurnErrorDecision,
                 ExtensionPoint::Clock => Capability::ClockDecision,
                 ExtensionPoint::Receive => Capability::ReceiveDecision,
+                ExtensionPoint::Route => Capability::RouteDecision,
                 ExtensionPoint::PlatformAdapter => Capability::PlatformCatalog,
                 point => {
                     return Err(PluginError::UnsupportedExtensionPoint {
@@ -1703,7 +1816,9 @@ impl PluginManager {
                         })
                     });
                 if duplicate {
-                    return Err(PluginError::DuplicateProvider(format!("adapter kind {kind}")));
+                    return Err(PluginError::DuplicateProvider(format!(
+                        "adapter kind {kind}"
+                    )));
                 }
             } else if descriptor.kind.is_some() {
                 return Err(PluginError::Manager {
@@ -1736,12 +1851,7 @@ impl PluginManager {
             descriptors,
         });
         ancestry.push(namespace);
-        for child in collected
-            .last()
-            .expect("刚刚推入")
-            .manager
-            .children()
-        {
+        for child in collected.last().expect("刚刚推入").manager.children() {
             self.collect_manager(child, ancestry, collected)?;
         }
         ancestry.pop();
@@ -1772,12 +1882,10 @@ impl PluginManager {
         self.manager_order
             .iter()
             .filter_map(|namespace| {
-                self.managers
-                    .get(namespace)
-                    .map(|manager| ManagerHealth {
-                        namespace: namespace.clone(),
-                        health: manager.health(),
-                    })
+                self.managers.get(namespace).map(|manager| ManagerHealth {
+                    namespace: namespace.clone(),
+                    health: manager.health(),
+                })
             })
             .collect()
     }
@@ -2015,10 +2123,44 @@ impl PluginManager {
         }
     }
 
+    /// 解析消息路由 provider。先查 Root 直接注册的，再按 namespace 委托 manager。
+    pub fn resolve_route(
+        &self,
+        id: &ProviderId,
+        options: &RoutePolicy,
+    ) -> Result<Arc<dyn RouteProvider>, PluginError> {
+        if let Some(provider) = self.routes.get(id) {
+            return Ok(provider.clone());
+        }
+        let Some(descriptor) = self.descriptors.get(id) else {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        };
+        if descriptor.extension_point != ExtensionPoint::Route {
+            return Err(PluginError::UnsupportedExtensionPoint {
+                id: id.to_string(),
+                point: descriptor.extension_point,
+            });
+        }
+        let Some(manager) = self.managers.get(id.namespace()) else {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        };
+        match manager.instantiate(id, ProviderOptions::Route(options))? {
+            ProviderInstance::Route(provider) => Ok(provider),
+            other => Err(PluginError::WrongProviderKind {
+                id: id.to_string(),
+                expected: ExtensionPoint::Route,
+                found: other.extension_point(),
+            }),
+        }
+    }
+
     /// 启动时校验整份配置引用的 provider 都存在。`main` 在起线程前调用。
     pub fn validate_config(&self, config: &Config) -> Result<(), PluginError> {
         for connection in &config.connections {
             self.resolve_receive(&connection.receive.provider, &connection.receive)?;
+            for route in &connection.routes {
+                self.resolve_route(&route.provider, route)?;
+            }
         }
         for session in &config.sessions {
             self.resolve_access(&session.access.provider, &session.access)?;
@@ -2088,6 +2230,7 @@ mod tests {
             text: "在吗",
             at_self: true,
             reply_to_self: false,
+            has_body: true,
             event: None,
             tags: &[],
             unread: 1,
@@ -2119,7 +2262,10 @@ mod tests {
             .expect("内置 provider 应当可解析");
         let room = test_room();
         let ctx = context(&room);
-        assert_eq!(provider.decide(&WakePolicy::default(), &ctx), WakeDecision::Wake);
+        assert_eq!(
+            provider.decide(&WakePolicy::default(), &ctx),
+            WakeDecision::Wake
+        );
 
         assert!(manager.descriptors().iter().any(|descriptor| {
             descriptor.id == ProviderId::builtin_wake()
@@ -2307,7 +2453,10 @@ mod tests {
         let room = test_room();
         let ctx = context(&room);
         let policy = WakePolicy::default();
-        assert_eq!(DefaultWakeProvider.decide(&policy, &ctx), WakeDecision::Wake);
+        assert_eq!(
+            DefaultWakeProvider.decide(&policy, &ctx),
+            WakeDecision::Wake
+        );
 
         // 没有 @、没有昵称、没有累积、不是引用：不醒。
         let quiet = WakeContext {
@@ -2316,7 +2465,10 @@ mod tests {
             unread: 1,
             ..ctx
         };
-        assert_eq!(DefaultWakeProvider.decide(&policy, &quiet), WakeDecision::Stay);
+        assert_eq!(
+            DefaultWakeProvider.decide(&policy, &quiet),
+            WakeDecision::Stay
+        );
     }
 
     struct AlwaysWake;
@@ -2369,7 +2521,10 @@ mod tests {
             .expect("manager 子树里的 provider 应当可解析");
         let room = test_room();
         let ctx = context(&room);
-        assert_eq!(provider.decide(&WakePolicy::default(), &ctx), WakeDecision::Wake);
+        assert_eq!(
+            provider.decide(&WakePolicy::default(), &ctx),
+            WakeDecision::Wake
+        );
 
         let missing = ProviderId::parse("test.missing").expect("合法");
         assert!(matches!(
@@ -2382,7 +2537,11 @@ mod tests {
 
     impl ManagerPlugin for AccessManager {
         fn manifest(&self) -> ManagerManifest {
-            ManagerManifest::new("vendor", PLUGIN_API_VERSION, vec![Capability::AccessDecision])
+            ManagerManifest::new(
+                "vendor",
+                PLUGIN_API_VERSION,
+                vec![Capability::AccessDecision],
+            )
         }
 
         fn descriptors(&self) -> Vec<ProviderDescriptor> {
@@ -2400,9 +2559,7 @@ mod tests {
             _options: ProviderOptions<'_>,
         ) -> Result<ProviderInstance, PluginError> {
             if id.name() == "all_rooms" {
-                Ok(ProviderInstance::Access(Arc::new(
-                    AllRoomsAccessProvider,
-                )))
+                Ok(ProviderInstance::Access(Arc::new(AllRoomsAccessProvider)))
             } else {
                 Err(PluginError::UnknownProvider(id.to_string()))
             }
@@ -2426,7 +2583,11 @@ mod tests {
 
     impl ManagerPlugin for WrongKindManager {
         fn manifest(&self) -> ManagerManifest {
-            ManagerManifest::new("wrong", PLUGIN_API_VERSION, vec![Capability::AccessDecision])
+            ManagerManifest::new(
+                "wrong",
+                PLUGIN_API_VERSION,
+                vec![Capability::AccessDecision],
+            )
         }
 
         fn descriptors(&self) -> Vec<ProviderDescriptor> {
@@ -2574,11 +2735,7 @@ mod tests {
     fn nested_manager_subtree_is_installed_and_resolved() {
         let mut manager = PluginManager::with_native_builtins();
         manager
-            .install_manager(nested(
-                "parent",
-                false,
-                Some(nested("child", true, None)),
-            ))
+            .install_manager(nested("parent", false, Some(nested("child", true, None))))
             .expect("嵌套子树应当能安装");
 
         let id = ProviderId::parse("child.always").expect("合法");
@@ -2873,7 +3030,8 @@ mod tests {
                 ExtensionPoint::Delivery,
                 ExtensionPoint::TurnError,
                 ExtensionPoint::Clock,
-                ExtensionPoint::Receive
+                ExtensionPoint::Receive,
+                ExtensionPoint::Route
             ]
         );
     }
@@ -3004,9 +3162,7 @@ mod tests {
 
     #[test]
     fn validate_config_rejects_an_unknown_delivery_provider_before_start() {
-        let config = config_with_extra(
-            "[sessions.delivery]\nprovider = \"vendor.missing\"",
-        );
+        let config = config_with_extra("[sessions.delivery]\nprovider = \"vendor.missing\"");
         let manager = PluginManager::with_native_builtins();
         assert!(matches!(
             manager.validate_config(&config),
@@ -3212,9 +3368,7 @@ mod tests {
 
     #[test]
     fn validate_config_rejects_an_unknown_turn_error_provider_before_start() {
-        let config = config_with_extra(
-            "[sessions.turn_error]\nprovider = \"vendor.missing\"",
-        );
+        let config = config_with_extra("[sessions.turn_error]\nprovider = \"vendor.missing\"");
         let manager = PluginManager::with_native_builtins();
         assert!(matches!(
             manager.validate_config(&config),
@@ -3224,9 +3378,7 @@ mod tests {
 
     #[test]
     fn validate_config_rejects_an_unknown_send_hook_before_start() {
-        let config = config_with_extra(
-            "[sessions.outbound]\nbefore = [\"vendor.missing\"]",
-        );
+        let config = config_with_extra("[sessions.outbound]\nbefore = [\"vendor.missing\"]");
         let manager = PluginManager::with_native_builtins();
         assert!(matches!(
             manager.validate_config(&config),
