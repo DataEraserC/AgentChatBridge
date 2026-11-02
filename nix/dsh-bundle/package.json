@@ -1,0 +1,6 @@
+{
+  "name": "acb-presets",
+  "version": "0.1.0",
+  "type": "module",
+  "dsh": { "bundle": { "patch": "./presets/acb.patch.yml" } }
+}
