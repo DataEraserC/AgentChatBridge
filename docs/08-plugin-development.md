@@ -69,7 +69,7 @@ core ──▶ 插件   create(WireInstanceConfig) / invoke(CoreMessage) / Shutd
   `may_stay_silent`）。`options_schema` 目前只是说明，不强制校验。
 - 平台适配器的 `kind` 必须和 `[[plugins]] kind` 一致（如果配置里写了）。
 
-最小可构建示例见 [`examples/dynamic/wake-provider`](../examples/dynamic/wake-provider)；
+最小可构建示例见 [`examples/dynamic/wake-provider`](https://github.com/DataEraserC/AgentChatBridge/tree/dev_20261025/examples/dynamic/wake-provider)；
 更完整的 conformance fixture 见 `crates/adapters/dynamic-fixture` 和
 `crates/plugins/wake-fixture`。
 
@@ -114,7 +114,7 @@ command = ["/path/to/adapter", "--stdio"]
 - 子进程退出后自动重启，退避从 500ms 起翻倍、最多 10 秒；重启期间请求明确失败。
 - 桥退出时发 `shutdown`，2 秒内不收尾就 kill。
 
-参考实现：[`examples/process/adapter.mjs`](../examples/process/adapter.mjs)。
+参考实现：[`examples/process/adapter.mjs`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/process/adapter.mjs)。
 
 ### 入站 `WireRecord` 字段
 
@@ -178,13 +178,13 @@ Lua / 动态库也可以拿它做自己的「按来源房间授权」。
 `WakeContext` 和 `ClockContext` 都带 `last_wake_at`（这个会话×房间上一次因任何原因
 开轮的时间）。做「多久没醒就醒一次」时，wake 端只能覆盖「有入站记录时」的判定；
 没人说话也要到点开轮，必须再配一个 clock provider。参考
-[`examples/lua/wake_policy.lua`](../examples/lua/wake_policy.lua) 和
-[`examples/lua/three_hour_clock.lua`](../examples/lua/three_hour_clock.lua)。
+[`examples/lua/wake_policy.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/wake_policy.lua) 和
+[`examples/lua/three_hour_clock.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/three_hour_clock.lua)。
 
 每次调用最多 50ms，超时按安全侧兜底；脚本拿不到 Store / Bridge / 配置写入。
 脚本和 provider 集合在桥启动时加载：改脚本内容或增删 `.lua` 文件都要重启桥才生效。
-可抄的示例在 [`examples/lua`](../examples/lua)，总览见
-[`examples/README.md`](../examples/README.md)。
+可抄的示例在 [`examples/lua`](https://github.com/DataEraserC/AgentChatBridge/tree/dev_20261025/examples/lua)，总览见
+[`examples/README.md`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/README.md)。
 
 ## 配置与装配
 
@@ -282,4 +282,4 @@ cargo test -p acb-adapter-wake-fixture --test policy
 - 平台适配器与事件映射：[05-adapters.md](05-adapters.md)
 - 插件宿主设计：[ADR-0026](adr/0026-plugin-host.md)
 - 适配器注册与生命周期：[ADR-0027](adr/0027-platform-adapter-registration.md)
-- 可运行示例：[examples](../examples/README.md)
+- 可运行示例：[examples](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/README.md)

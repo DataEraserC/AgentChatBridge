@@ -109,7 +109,7 @@ ignore_speakers = []   # 这些人的发言不叫醒（但照样记账）
   `[sessions.subscriptions.wake.options]`，形状由插件自己定义（Lua 里是 `options.extra`）。
   例如 `provider = "lua.wake_policy"` 时写 `at_mention` / `poke` / `reply` /
   `accumulate` / `idle_hours`，见
-  [`examples/lua/wake_policy.lua`](../../examples/lua/wake_policy.lua) 和
+  [`examples/lua/wake_policy.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/wake_policy.lua) 和
   [插件开发](../08-plugin-development.md)。
 - **唤醒配置是按房间存的**：同一个会话订阅 QQ 房间和 Discord 房间时，QQ 房间写
   `events = ["qq.poke"]`，Discord 房间写 `events = ["discord.reaction_add"]`；带前缀的事件
@@ -136,7 +136,7 @@ provider = "acb.clock.off"   # 默认：不开例行检查
 
 - 时钟轮也走正常投递；没有未读时 `records` 为空，模型可以主动说话（也可以选择不说）。
 - 做「多久没醒就醒一次」时，Lua 的 clock 能拿到 `last_wake_at` / `last_clock_at` /
-  `last_record_at`；参考 [`examples/lua/three_hour_clock.lua`](../../examples/lua/three_hour_clock.lua)。
+  `last_record_at`；参考 [`examples/lua/three_hour_clock.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/three_hour_clock.lua)。
 - 时钟只决定「开不开轮」，不决定叫不叫醒具体哪条消息。
 
 ### 访问策略：能不能去订阅外的房间
