@@ -847,7 +847,7 @@ impl<S: Store> Bridge<S> {
             "send_message_to" => {
                 let args: SendToArgs = parse(args)?;
                 let target = resolve_room(&args.to)?;
-                self.ensure_can_send(&turn_config, &turn_session, &target)?;
+                self.ensure_can_send(&turn_config, &turn_session, &target, &room)?;
                 self.deliver_out(
                     turn_config.clone(),
                     &turn_session,
@@ -998,7 +998,7 @@ impl<S: Store> Bridge<S> {
                 let args: SendToArgs = parse(args)?;
                 let target = resolve_room(&args.to)?;
                 let ctx = self.turn_ctx(ticket, tool)?;
-                self.ensure_can_send(&ctx.config, &ctx.session, &target)?;
+                self.ensure_can_send(&ctx.config, &ctx.session, &target, &ctx.room)?;
                 let prepared = self.prepare_send(
                     ctx.config.clone(),
                     &ctx.session,
@@ -1062,10 +1062,10 @@ impl<S: Store> Bridge<S> {
                 } else {
                     AccessAction::Send
                 };
-                self.ensure_room_access(&ctx.config, sessions, action, &room)?;
+                self.ensure_room_access(&ctx.config, sessions, action, &room, &ctx.room)?;
             }
             Scope::Connection => {
-                self.ensure_connection_readable(&ctx.config, sessions, &room.connection)?
+                self.ensure_connection_readable(&ctx.config, sessions, &room.connection, &ctx.room)?
             }
         }
 
@@ -1319,6 +1319,7 @@ impl<S: Store> Bridge<S> {
         action: AccessAction,
         room: Option<&RoomId>,
         connection: &str,
+        origin: Option<&RoomId>,
     ) -> Result<(), ToolError> {
         let mut denied = Vec::new();
         for id in sessions {
@@ -1346,6 +1347,7 @@ impl<S: Store> Bridge<S> {
                 session: id,
                 connection,
                 room,
+                origin_room: origin,
                 action,
                 subscriptions: &subscriptions,
             };
@@ -1384,6 +1386,7 @@ impl<S: Store> Bridge<S> {
         sessions: &[String],
         action: AccessAction,
         room: &RoomId,
+        origin: &RoomId,
     ) -> Result<(), ToolError> {
         self.check_access(
             config,
@@ -1391,6 +1394,7 @@ impl<S: Store> Bridge<S> {
             action,
             Some(room),
             &room.connection,
+            Some(origin),
         )
     }
 
@@ -1400,8 +1404,9 @@ impl<S: Store> Bridge<S> {
         config: &Config,
         sessions: &[String],
         room: &RoomId,
+        origin: &RoomId,
     ) -> Result<(), ToolError> {
-        self.ensure_room_access(config, sessions, AccessAction::Read, room)
+        self.ensure_room_access(config, sessions, AccessAction::Read, room, origin)
     }
 
     /// 当前会话能不能往这个房间发。`send_message_to` 的边界。
@@ -1410,9 +1415,10 @@ impl<S: Store> Bridge<S> {
         config: &Config,
         session: &str,
         room: &RoomId,
+        origin: &RoomId,
     ) -> Result<(), ToolError> {
         let sessions = [session.to_owned()];
-        self.ensure_room_access(config, &sessions, AccessAction::Send, room)
+        self.ensure_room_access(config, &sessions, AccessAction::Send, room, origin)
     }
 
     /// 连接级权限：访问策略决定这条连接上有没有可用的房间。
@@ -1424,8 +1430,16 @@ impl<S: Store> Bridge<S> {
         config: &Config,
         sessions: &[String],
         connection: &str,
+        origin: &RoomId,
     ) -> Result<(), ToolError> {
-        self.check_access(config, sessions, AccessAction::Connection, None, connection)
+        self.check_access(
+            config,
+            sessions,
+            AccessAction::Connection,
+            None,
+            connection,
+            Some(origin),
+        )
     }
 
     /// 时钟评估：检查每个订阅的时钟策略，到点就把（会话, 房间）排进队列。
@@ -2210,7 +2224,7 @@ impl<S: Store> Bridge<S> {
         args: HistoryArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room)?;
+        self.ensure_readable(config, sessions, &room, turn_room)?;
 
         let columns = column_set(args.columns.as_deref())?;
 
@@ -2281,7 +2295,7 @@ impl<S: Store> Bridge<S> {
         args: FetchRecordsArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room)?;
+        self.ensure_readable(config, sessions, &room, turn_room)?;
 
         if args.ids.is_empty() {
             return Err(ToolError::new(
@@ -2366,7 +2380,7 @@ impl<S: Store> Bridge<S> {
         args: NotesArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room)?;
+        self.ensure_readable(config, sessions, &room, turn_room)?;
 
         let kind = match args.kind.as_deref() {
             Some(text) => Some(parse_note_kind(text)?),
@@ -2395,7 +2409,7 @@ impl<S: Store> Bridge<S> {
         args: SetNoteArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room)?;
+        self.ensure_readable(config, sessions, &room, turn_room)?;
 
         let kind = match args.kind.as_deref() {
             Some(text) => parse_note_kind(text)?,
@@ -2441,7 +2455,7 @@ impl<S: Store> Bridge<S> {
         args: DelNoteArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room)?;
+        self.ensure_readable(config, sessions, &room, turn_room)?;
 
         let kind = match args.kind.as_deref() {
             Some(text) => parse_note_kind(text)?,
@@ -2461,7 +2475,7 @@ impl<S: Store> Bridge<S> {
         args: EventsArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room)?;
+        self.ensure_readable(config, sessions, &room, turn_room)?;
 
         let limit = args.limit.unwrap_or(DEFAULT_HISTORY).min(MAX_PAGE_LIMIT);
         let offset = args.offset.unwrap_or(0);
@@ -2666,7 +2680,7 @@ impl<S: Store> Bridge<S> {
                      想展开某条连接，单独用 connection 查。",
                 ));
             }
-            return self.connection_summaries(config, sessions);
+            return self.connection_summaries(config, sessions, turn_room);
         }
 
         let given_room = if clean(args.room.as_deref()).is_some() {
@@ -2699,16 +2713,16 @@ impl<S: Store> Bridge<S> {
                         ));
                     }
                 }
-                self.ensure_connection_readable(config, sessions, &connection)?;
+                self.ensure_connection_readable(config, sessions, &connection, turn_room)?;
                 connection
             }
             None => match &given_room {
                 Some(room) => {
-                    self.ensure_connection_readable(config, sessions, &room.connection)?;
+                    self.ensure_connection_readable(config, sessions, &room.connection, turn_room)?;
                     room.connection.clone()
                 }
                 None => {
-                    self.ensure_connection_readable(config, sessions, &turn_room.connection)?;
+                    self.ensure_connection_readable(config, sessions, &turn_room.connection, turn_room)?;
                     turn_room.connection.clone()
                 }
             },
@@ -2776,6 +2790,7 @@ impl<S: Store> Bridge<S> {
         &self,
         config: &Config,
         sessions: &[String],
+        origin: &RoomId,
     ) -> Result<Value, ToolError> {
         let mut ids: Vec<String> = Vec::new();
         for id in sessions {
@@ -2794,7 +2809,7 @@ impl<S: Store> Bridge<S> {
             let Some(connection) = config.connection(&id) else {
                 continue;
             };
-            self.ensure_connection_readable(config, sessions, &id)?;
+            self.ensure_connection_readable(config, sessions, &id, origin)?;
             let methods = self.outbound.catalog(&id);
             // 同 describe_plugins：连接运行时 manifest 优先，静态声明兜底。
             let manifest = self

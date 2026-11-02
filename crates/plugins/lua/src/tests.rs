@@ -75,6 +75,7 @@ fn access_request<'a>(room: &'a RoomId, action: AccessAction) -> AccessRequest<'
         session: "main",
         connection: "qq",
         room: Some(room),
+        origin_room: Some(room),
         action,
         subscriptions: &[],
     }
@@ -207,6 +208,54 @@ return {
         ),
         AccessDecision::Deny,
         "发送拒绝"
+    );
+}
+
+#[test]
+fn access_provider_can_read_the_origin_room() {
+    let dir = TempDir::new("origin");
+    dir.write(
+        "origin.lua",
+        r#"
+return {
+  extension = "access",
+  decide = function(_, request)
+    if request.origin_room == "qq:group/1" then return "allow" end
+    return "deny"
+  end,
+}
+"#,
+    );
+    let plugins = loaded(&dir);
+    let id = ProviderId::parse("lua.origin").expect("合法");
+    let provider = plugins
+        .resolve_access(&id, &AccessPolicy::default())
+        .expect("脚本 access provider 应当可解析");
+
+    let origin = RoomId::new("qq", "group/1").expect("合法");
+    let target = RoomId::new("qq", "group/2").expect("合法");
+    let request = AccessRequest {
+        session: "main",
+        connection: "qq",
+        room: Some(&target),
+        origin_room: Some(&origin),
+        action: AccessAction::Send,
+        subscriptions: &[],
+    };
+    assert_eq!(
+        provider.check(&AccessPolicy::default(), &request),
+        AccessDecision::Allow,
+        "脚本应该拿到本轮来源房间"
+    );
+
+    let other = RoomId::new("qq", "group/3").expect("合法");
+    let denied = AccessRequest {
+        origin_room: Some(&other),
+        ..request
+    };
+    assert_eq!(
+        provider.check(&AccessPolicy::default(), &denied),
+        AccessDecision::Deny
     );
 }
 

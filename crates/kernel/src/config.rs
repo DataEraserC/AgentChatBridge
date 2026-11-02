@@ -386,12 +386,17 @@ pub struct Subscription {
 ///
 /// `rooms` 只有 `acb.access.elevated_in_rooms` 用：列在里面的房间不用订阅
 /// 也能读、能发、能调平台方法。空表 = 没有额外豁免。
+///
+/// `origins` 只有 `acb.access.privileged_origins` 用：从这些房间触发的轮次可以访问
+/// 任意房间；其它来源仍按订阅边界。空表 = 没有提权来源。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccessPolicy {
     /// 访问策略的 provider id（ADR-0026）。
     pub provider: ProviderId,
-    /// 额外豁免的房间。
+    /// 额外豁免的目标房间。
     pub rooms: Vec<RoomId>,
+    /// 提权来源房间（按轮次触发房间）。
+    pub origins: Vec<RoomId>,
     /// 插件专属配置；内置 access 忽略它。
     pub options: serde_json::Value,
 }
@@ -401,6 +406,7 @@ impl Default for AccessPolicy {
         Self {
             provider: ProviderId::builtin_access(),
             rooms: Vec::new(),
+            origins: Vec::new(),
             options: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
@@ -1544,9 +1550,37 @@ fn build_access(
         rooms.push(room);
     }
 
+    let mut origins = Vec::new();
+    for text in raw.origins {
+        let text = text.trim();
+        let room = RoomId::parse(text).map_err(|error| ConfigError::BadAccessRoom {
+            session: session.to_owned(),
+            room: text.to_owned(),
+            detail: error.to_string(),
+        })?;
+        if !connections
+            .iter()
+            .any(|connection| connection.id == room.connection)
+        {
+            return Err(ConfigError::UnknownAccessConnection {
+                session: session.to_owned(),
+                room: room.to_string(),
+                connection: room.connection.clone(),
+            });
+        }
+        if origins.iter().any(|listed| listed == &room) {
+            return Err(ConfigError::DuplicateAccessRoom {
+                session: session.to_owned(),
+                room: room.to_string(),
+            });
+        }
+        origins.push(room);
+    }
+
     Ok(AccessPolicy {
         provider,
         rooms,
+        origins,
         options: policy_options(raw.options, "访问策略")?,
     })
 }
@@ -1854,9 +1888,12 @@ struct RawTurnError {
 struct RawAccess {
     /// 访问策略 provider id。不写就用内置「按订阅」。
     provider: Option<String>,
-    /// 额外豁免的房间（完整写法 `连接:路径`，如 `qq:group/123`）。
+    /// 额外豁免的目标房间（完整写法 `连接:路径`，如 `qq:group/123`）。
     #[serde(default)]
     rooms: Vec<String>,
+    /// 提权来源房间：从这些房间触发的轮次可以访问任意房间。
+    #[serde(default)]
+    origins: Vec<String>,
     #[serde(default)]
     options: toml::value::Table,
 }
@@ -2069,6 +2106,7 @@ mod tests {
         let access = &config.sessions[0].access;
         assert_eq!(access.provider, ProviderId::builtin_access());
         assert!(access.rooms.is_empty());
+        assert!(access.origins.is_empty());
     }
 
     /// `[sessions.access]` 写在 `[[sessions]]` 里、订阅表之前。
@@ -2093,6 +2131,23 @@ mod tests {
         assert_eq!(
             access.rooms,
             vec![RoomId::new("qq", "group/999").expect("合法")]
+        );
+    }
+
+    #[test]
+    fn access_policy_parses_origins() {
+        let sessions = session_with_access(
+            "        provider = \"acb.access.privileged_origins\"\n        origins = [\"qq:private/7\"]",
+        );
+        let config = Config::parse(&config_with(ONE_CONNECTION, &sessions)).expect("能解析");
+        let access = &config.sessions[0].access;
+        assert_eq!(
+            access.provider,
+            ProviderId::builtin_privileged_origins_access()
+        );
+        assert_eq!(
+            access.origins,
+            vec![RoomId::new("qq", "private/7").expect("合法")]
         );
     }
 
