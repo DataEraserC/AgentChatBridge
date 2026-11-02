@@ -8,6 +8,27 @@
 保存即热重载，注释和排版不会丢。TOML 手改只是兜底。
 :::
 
+## 环境变量注入
+
+字符串值里可以写环境变量，启动时展开，配置文件本身不用存密钥/部署常量：
+
+- `${NAME}`：按 TOML 字符串注入，值里的引号、反斜杠会自动转义。
+- `${{NAME}}`：原样注入，用来说明这是数字/布尔，或者由你决定要不要加引号。
+- 两种都支持 `:-默认`，变量未设置或为空时用默认值。
+
+```toml
+[endpoint]
+listen = "${ACB_ENDPOINT_LISTEN}"
+
+delivery_limit = ${{ACB_DELIVERY_LIMIT:-50}}
+
+[[sessions]]
+model = "${ACB_MODEL_DSH:-provider/model}"
+```
+
+环境里没有对应变量且没写默认值时会直接报错，不会静默变成空串。这些值只在启动时展开；
+控制台改的是文件里的占位符本身，改端口/密钥仍然要重启桥。
+
 ## 热重载：改了什么时候生效
 
 大部分改动在**当前这轮对话结束后的下一轮**生效——正在进行的对话不会被腰斩，改完不用重启：
@@ -117,7 +138,7 @@ id = "main"
 harness = "dsh"              # 必须是上面 [[harnesses]] 里定义过的 id
 persona = "default"          # 必须是定义过的人格卡
 memories = ["main-memory"]   # 可空；多个就是多个 git 仓库
-model = ""                   # 可空 = harness 侧自己决定用哪个模型
+model = "provider/model"     # 可空 = harness 侧自己决定；写成 provider/model（第一个 / 分隔）
 token = "……"                 # harness 连桥时报这个令牌绑定会话
 on_turn_error = []           # 一轮失败时做什么（log / send:<房间>）；空 = 回退全局默认
 
