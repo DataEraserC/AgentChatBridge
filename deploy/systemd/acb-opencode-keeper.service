@@ -1,7 +1,6 @@
 [Unit]
-Description=ACB opencode keeper
-After=acb-bridge.service
-Wants=acb-bridge.service
+Description=ACB opencode keeper (legacy; superseded by acb-opencode-serve)
+After=network.target
 
 [Service]
 Type=simple
