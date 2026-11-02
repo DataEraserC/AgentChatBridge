@@ -6,7 +6,8 @@
 
 - 一台 Linux 机器（NixOS 直接用本仓库的 flake；其他发行版装 nix 也能用）；
 - 一个聊天平台的账号给 agent 用（本文以 QQ 为例，需要再跑一个 OneBot 实现，如 NapCat / Lagrange / snowluma）；
-- agent 侧的运行时（harness），比如 [DSH](https://dsh)。桥不主动连 harness，是 harness 拿着令牌来连桥。
+- agent 侧的运行时（harness），比如 DSH / opencode；桥不主动连 harness，是 harness 拿着令牌来连桥
+  （各家怎么接见 [harness 适配器](../06-harness-adapters.md)）。
 
 ## 第一步：写配置
 
@@ -33,6 +34,7 @@ public_base = "http://127.0.0.1:3131"   # 平台那边能访问到桥的地址
 
 [[connections]]                  # 你的 QQ 号
 id = "qq"
+platform = "qq"
 kind = "onebot11"
 transport = "ws-client"
 url = "ws://127.0.0.1:3001"      # OneBot 实现的 WS 地址
@@ -66,19 +68,22 @@ poke = true
 ## 第二步：构建
 
 ```sh
-nix build -L .#acb-bridge
+nix build -L .#acb-bridge            # 产出 result/bin/acb-bridge，测试全绿才出结果
+nix build -L .#acb-bridge-test -o result-lua   # 本机测试用包装器，固定 ACB_LUA_DIR
 ```
 
-产出在 `result/bin/acb-bridge`，测试会顺带全跑一遍（全绿才出结果）。
+仓库自带的 `deploy/systemd/acb-bridge.service` 当前指向
+`result-lua/bin/acb-bridge-test`。实际部署不要把 unit 绑在本地 result 路径上：换成
+部署机自己的二进制路径、运行用户和 Lua 目录，按部署策略决定是否与 harness 共用 profile。
 
 ## 第三步：启动
 
 ```sh
-deploy/acb-up.sh     # 按顺序起 dsh → 桥 → 驱动，全部挂 systemd 用户服务
+deploy/acb-up.sh     # 按顺序起 dsh → 桥 → 驱动 → opencode serve，全部挂 systemd 用户服务
 deploy/acb-down.sh   # 停（会先备份数据库）
 ```
 
-为什么挂 systemd 而不是 `nohup`：桥和驱动是常驻进程，挂在终端/AI 会话里，会话一撤
+为什么挂 systemd 而不是 `nohup`：桥、驱动和 opencode serve 都是常驻进程，挂在终端/AI 会话里，会话一撤
 进程活着却开不出新连接，表现为「进程都在、群里没人理」。systemd 用户服务没这个问题。
 重启电脑后重新跑一次 `deploy/acb-up.sh` 即可。
 

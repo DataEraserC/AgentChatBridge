@@ -11,7 +11,7 @@
 
 | 载体 | 能做什么 | 优点 | 代价 |
 |------|----------|------|------|
-| Lua（`ACB_LUA_DIR`） | 七种策略扩展点 | 不用编译，改完 reload 即生效 | 每次调用 50ms 上限；拿不到 Store/流水；不能写平台适配器 |
+| Lua（`ACB_LUA_DIR`） | 七种策略扩展点 | 不用编译；脚本在桥启动时加载，改完重启桥生效 | 每次调用 50ms 上限；拿不到 Store/流水；不能写平台适配器 |
 | 外置进程（`kind = "process"`） | 平台适配器 | 任何语言；崩溃隔离；可自动重启 | 只能做适配器；策略判定在 core 锁内，不开放进程载体 |
 | 动态库（`[[plugins]]`） | 平台适配器 + 七种策略 | 进程内、全扩展点、C ABI + JSON wire | 与桥同进程，panic/卡死会带倒桥；不支持 unload |
 | 内置 native | core 开发者使用 | 无跨进程开销 | 要改仓库代码并重新构建 |
@@ -116,6 +116,23 @@ command = ["/path/to/adapter", "--stdio"]
 
 参考实现：[`examples/process/adapter.mjs`](../examples/process/adapter.mjs)。
 
+### 入站 `WireRecord` 字段
+
+适配器交给桥的每条记录都是 `WireRecord`（`crates/adapter-api`）：
+
+| 字段 | 含义 |
+|------|------|
+| `room` / `kind` / `sender` / `at` / `elements` | 房间、消息或事件、发送者、时间、内容；事件还要在 `kind` 里带 `tags` / `payload` / `summary` |
+| `at_self` | 是不是冲本账号来的（@ 到我、拍我） |
+| `platform_id` | 平台自己的消息编号；反查引用用 |
+| `reply_to_self` | 由桥判定：这条是不是引用了我发的消息。适配器填 `false` 即可，桥会用被引用记录的 `platform_id` 和发送账号反查后覆盖 |
+| `target_platform_id` | 事件指向的旧记录编号（如撤回通知指向被撤回的消息） |
+| `target_labels` | 给目标旧记录追加的标签（如 `["recall"]`） |
+| `suppressed` | 只进流水：不投递、不唤醒、不计未读；落库后对所有订阅者生效 |
+
+`labels` 不是适配器填的：桥在写入/追加标签时才产生，再随投递和查询返回。事件和记录
+的形状细节见 [04-protocol](04-protocol.md) 与 [05-adapters](05-adapters.md)。
+
 ## 写一个 Lua 策略
 
 文件名就是 provider 名：`recent_only.lua` → `lua.recent_only`。脚本返回一个表，
@@ -141,6 +158,23 @@ return {
 | clock | `is_due(options, context)` |
 | receive | `decide(request, options)` |
 
+access 的 `request` 字段：`session`、`connection`、`room`（这次要访问的目标房间；
+连接级请求为 `nil`）、`origin_room`（当前轮次是从哪个房间触发的）、`action`
+（`read` / `send` / `connection`）、`subscriptions`（本会话订阅的房间）。内置的
+`acb.access.privileged_origins` 会按 `origin_room` 提权；其它内置 access 策略不读它。
+Lua / 动态库也可以拿它做自己的「按来源房间授权」。
+
+其它扩展点收到的字段：
+
+| 扩展点 | `context` / `request` 里的字段 |
+|--------|------------------------------|
+| wake | `session`、`room`、`connection`、`platform`、`sender_id`、`text`、`at_self`、`reply_to_self`、`event`（消息为 `nil`）、`tags`、`unread`、`last_wake_at`、`now` |
+| clock | `session`、`room`、`now`、`last_clock_at`、`last_wake_at`、`last_record_at`（房间没记录时为 `nil`） |
+| delivery | `session`、`room`、`limit`；`records` 是投递候选数组，每条带 `id`、`room`、`at`、`at_self`、`reply_to_self`、`redelivery`、`note`、`platform_id`、`text`、`sender`（`id`/`name`/`role`）、`kind`、`event`、`elements`、`quote_ref`。完整 wire 形状（含 `labels`、`suppressed`、事件的 `tags`/`payload`/`summary`）见 [04-protocol](04-protocol.md)；Lua table 只暴露上面这些字段，动态库插件拿到的是完整 JSON |
+| send | `context` 是 `session`、`room`、`origin`（`message` 或 `turn_failure`）；`before` 收到可改写的 `elements`，`after` 收到 `sent`（`platform_id`、`at`） |
+| turn_error | `session`、`room`、`error`、`actions`、`default_actions`；动作是 `{kind="log"}` 或 `{kind="send", room="qq:group/123"}` |
+| receive | `connection`、`platform`、`room`、`sender`、`kind`、`elements`、`text`、`at_self` |
+
 `WakeContext` 和 `ClockContext` 都带 `last_wake_at`（这个会话×房间上一次因任何原因
 开轮的时间）。做「多久没醒就醒一次」时，wake 端只能覆盖「有入站记录时」的判定；
 没人说话也要到点开轮，必须再配一个 clock provider。参考
@@ -148,6 +182,7 @@ return {
 [`examples/lua/three_hour_clock.lua`](../examples/lua/three_hour_clock.lua)。
 
 每次调用最多 50ms，超时按安全侧兜底；脚本拿不到 Store / Bridge / 配置写入。
+脚本和 provider 集合在桥启动时加载：改脚本内容或增删 `.lua` 文件都要重启桥才生效。
 可抄的示例在 [`examples/lua`](../examples/lua)，总览见
 [`examples/README.md`](../examples/README.md)。
 

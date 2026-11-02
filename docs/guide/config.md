@@ -10,8 +10,14 @@
 
 ## 热重载：改了什么时候生效
 
-改动在**当前这轮对话结束后的下一轮**生效——正在进行的对话不会被腰斩，改完不用重启。
-唯一例外是 `[endpoint].listen` 这类「启动才知道」的参数，改完要重启桥。
+大部分改动在**当前这轮对话结束后的下一轮**生效——正在进行的对话不会被腰斩，改完不用重启：
+会话/订阅/唤醒、人格、记忆挂载、保留策略、`delivery_limit`、`default_on_turn_error`、
+`turn_timeout_secs`，以及 `file_relay.public_base` / `dir`。
+
+「启动时才知道」的参数改完必须重启桥：`[endpoint]`、`[console]`、`[[connections]]`
+（连接守护线程持有旧连接信息）、`storage.path`、`worktrees_root`、`[[plugins]]` 的增删
+（动态库在启动时加载且不支持 unload），以及 `file_relay.listen`（增删 `[file_relay]`
+也算）。控制台保存后会把这些列成「需要重启」项。
 
 ## 连接：一个账号一条
 
@@ -24,6 +30,7 @@ transport = "ws-client"    # 桥主动连平台的 WS 服务端
 url = "ws://127.0.0.1:3001"
 token = ""                 # OneBot 的 access token，没设就空着
 account = "10001"          # 这个号自己的 QQ 号——桥靠它认出「哪句是 agent 自己说的」
+admin_qqs = []             # 这些号在记录里标成 system_admin；只影响 sender.role
 allow_destructive = false  # 见下
 ```
 
@@ -31,6 +38,40 @@ allow_destructive = false  # 见下
 - `allow_destructive` 默认 `false`（踢人/禁言/撤回别人消息这些破坏性操作模型调不到）。
   想让 agent 真能管理群就写 `true`，或者只放行几个：`allow_destructive = ["group.kick"]`。
 - 同一个平台第二个号：再复制一段，`id` 换名（如 `qq2`）。同一个群在两个号眼里是两个房间，各记各的账。
+
+### 接收策略：消息进不进流水
+
+接收策略挂在**连接**上，对这一条连接的所有会话生效：
+
+```toml
+[connections.receive]
+provider = "acb.receive.all"   # 默认：全收
+# 插件专属参数；内置策略忽略它
+# [connections.receive.options]
+# blocked = ["机器人号"]
+```
+
+- 返回 `drop` 的记录**不写流水、不叫醒、不占水位**；桥就当它从没来过。
+- 适合丢机器人、丢刷屏号；示例见 `examples/lua/drop_noise.lua`。
+- 网关层（`receive`）是脏数据的第一道门；别拿它替代访问策略或唤醒策略。
+
+## 插件：适配器与策略放到 core 外
+
+```toml
+# 动态库平台适配器
+[[plugins]]
+path = "/绝对路径/libdemo_adapter.so"
+kind = "demo"        # 可选；必须和插件 manifest 的 kind 一致
+
+# 动态库策略 provider（扩展点由插件 manifest 声明）
+[[plugins]]
+path = "/绝对路径/libacb_example_wake.so"
+```
+
+- Lua 脚本不走 `[[plugins]]`：把环境变量 `ACB_LUA_DIR` 指向脚本目录，每个 `.lua` 文件
+  自动成为一个 provider（文件名是 `lua.<文件名>`）。
+- 策略的专属参数写在对应的 `.options`（Lua 里是 `options.extra`）；适配器的参数写在
+  连接的 `options`。扩展点、manifest、生命周期和 wire 形状见[插件开发](../08-plugin-development.md)。
 
 ## 会话与订阅：谁在哪个群、怎么醒
 
@@ -42,6 +83,7 @@ persona = "default"          # 必须是定义过的人格卡
 memories = ["main-memory"]   # 可空；多个就是多个 git 仓库
 model = ""                   # 可空 = harness 侧自己决定用哪个模型
 token = "……"                 # harness 连桥时报这个令牌绑定会话
+on_turn_error = []           # 一轮失败时做什么（log / send:<房间>）；空 = 回退全局默认
 
 [[sessions.subscriptions]]
 connection = "qq"
@@ -63,6 +105,12 @@ ignore_speakers = []   # 这些人的发言不叫醒（但照样记账）
 
 要点：
 
+- **上面这些是内置唤醒策略的字段**。如果 `provider` 换成 Lua / 动态库，参数写在
+  `[sessions.subscriptions.wake.options]`，形状由插件自己定义（Lua 里是 `options.extra`）。
+  例如 `provider = "lua.wake_policy"` 时写 `at_mention` / `poke` / `reply` /
+  `accumulate` / `idle_hours`，见
+  [`examples/lua/wake_policy.lua`](../../examples/lua/wake_policy.lua) 和
+  [插件开发](../08-plugin-development.md)。
 - **唤醒配置是按房间存的**：同一个会话订阅 QQ 房间和 Discord 房间时，QQ 房间写
   `events = ["qq.poke"]`，Discord 房间写 `events = ["discord.reaction_add"]`；带前缀的事件
   配错平台会在启动时直接报错，不会「配了却永远不生效」。
@@ -71,6 +119,25 @@ ignore_speakers = []   # 这些人的发言不叫醒（但照样记账）
 - **私聊建议只留 `at_mention`/`reply`**（示例配置就是这么写的），不然对方每句话都叫醒；
 - `accumulate` 调小反应快但费 token，调大省钱但「攒话」；
 - 两个会话订同一个群完全合法（比如一个主会话 + 一个备用），各自的水位互不干扰。
+
+### 时钟：没人说话时也要检查
+
+时钟按**订阅**配置；默认关闭：
+
+```toml
+[sessions.subscriptions.clock]
+provider = "acb.clock.off"   # 默认：不开例行检查
+
+# 内置固定间隔 / 房间空闲：任一命中就开一轮
+# provider = "acb.clock.interval_idle"
+# interval_secs = 3600       # 距上次时钟轮满 1 小时
+# idle_secs = 7200           # 或者房间 2 小时没新记录
+```
+
+- 时钟轮也走正常投递；没有未读时 `records` 为空，模型可以主动说话（也可以选择不说）。
+- 做「多久没醒就醒一次」时，Lua 的 clock 能拿到 `last_wake_at` / `last_clock_at` /
+  `last_record_at`；参考 [`examples/lua/three_hour_clock.lua`](../../examples/lua/three_hour_clock.lua)。
+- 时钟只决定「开不开轮」，不决定叫不叫醒具体哪条消息。
 
 ### 访问策略：能不能去订阅外的房间
 
@@ -82,9 +149,14 @@ provider = "acb.access.subscribed"   # 默认：只认订阅
 # provider = "acb.access.all_rooms"        # 整个会话豁免：任何已配连接的房间都能碰
 # provider = "acb.access.elevated_in_rooms" # 指定房间豁免（用下面的 rooms）
 # rooms = ["qq:group/123"]                  # 只有 elevated 用；这些房间不用订阅也能读写
+# provider = "acb.access.privileged_origins" # 按来源房间提权（用下面的 origins）
+# origins = ["qq:private/123"]               # 从这些房间触发的轮次可访问任意房间；其它来源按订阅
 ```
 
 - 豁免只改变**工具能碰到哪里**，不改变唤醒：没订阅的房间不会因为它来消息就开轮。
+- `room` 是这次要访问的**目标**房间；策略还能看到本轮是从哪个房间触发的
+  （Lua / 动态库里的 `origin_room`）。内置的 `privileged_origins` 用 `origins` 列出来源；
+  其它内置策略只看目标房间，不区分来源。
 - 破坏性操作仍由连接的 `allow_destructive` 单独把关，访问策略不能顶替它。
 - `all_rooms` 也只能落在**配置里存在的连接**上——连接本身没配登录账号，发不出去。
 
@@ -147,7 +219,17 @@ location = "/home/you/qqab-memories/main"     # 一个 git 仓库路径
 ## 文件中继：发图发文件的关键
 
 agent 发图时，桥把本机文件收下来、换成 URL 给平台下载。**`public_base` 必须填「平台那边」
-能访问到桥的地址**，这是新装最容易翻车的配置。按你的 OneBot 部署方式选：
+能访问到桥的地址**，这是新装最容易翻车的配置。
+
+```toml
+[file_relay]
+mode = "file-server"                                  # 目前只有这一种
+listen = "0.0.0.0:3131"                               # 平台要能连到这个地址
+public_base = "http://host.containers.internal:3131"  # 平台那边访问桥用的地址
+dir = "state/relay"                                   # 不写就用 state/relay
+```
+
+按你的 OneBot 部署方式选 `public_base`：
 
 | OneBot 跑在哪 | `public_base` |
 |---|---|
@@ -161,7 +243,16 @@ agent 发图时，桥把本机文件收下来、换成 URL 给平台下载。**`
 
 ## 其他全局参数
 
+**注意：下面这几项是顶层键，不要写在 `[storage]` 表头下面。** `[storage]` 只装 `path`；
+`worktrees_root` / `delivery_limit` / `default_on_turn_error` / `turn_timeout_secs`
+都写在表外。
+
 ```toml
+worktrees_root = "state/worktrees"   # 每个「会话 × 记忆」的 worktree 放哪
+delivery_limit = 30                  # 一轮最多投多少条；0 = 不截断
+default_on_turn_error = []           # 会话没配 on_turn_error 时的默认动作：log / send:<房间>
+turn_timeout_secs = 0                # 默认关闭；写 n > 0 才启用 n 秒超时
+
 [retention]
 max_records_per_room = 5000   # 每个房间最多留多少条已读记录
 max_age_days = 90             # 已读记录最多留多少天
@@ -169,15 +260,9 @@ max_age_days = 90             # 已读记录最多留多少天
 
 只清理**已读**的记录，任何人还没读到的消息一条不删。两项写 0 = 永不清理。
 
-## 一轮的超时
-
-```toml
-turn_timeout_secs = 0         # 默认关闭；写 n > 0 才启用 n 秒超时
-```
-
-默认**不自动中断**，模型想跑多久跑多久。只有显式写了正数时，一轮对话超过这个时长
-才会被 agent 侧主动打断（dsh 支持打断），打断算这一轮失败、照常走失败通知。
-需要限制长任务时再打开，例如 `turn_timeout_secs = 3600`。
+`turn_timeout_secs` 默认**不自动中断**，模型想跑多久跑多久。只有显式写了正数时，
+一轮对话超过这个时长才会被 agent 侧主动打断（dsh 支持打断），打断算这一轮失败、
+照常走失败通知。需要限制长任务时再打开，例如 `turn_timeout_secs = 3600`。
 
 ## dsh 侧的环境变量
 

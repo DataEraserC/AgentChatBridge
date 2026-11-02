@@ -10,13 +10,13 @@
 
 三类入口，写给不同的人：
 
-- **使用指南**（给人看，不看代码也能上手）：https://dataeraserc.github.io/qq-bridge/guide/
+- **使用指南**（给人看，不看代码也能上手）：https://dataeraserc.github.io/AgentChatBridge/guide/
   ——快速开始、配置手册、网页控制台、日常使用、排障手册；
 - **ACB 开发者**（架构、协议、存储、harness 适配器、ADR）：
-  https://dataeraserc.github.io/qq-bridge/03-architecture
+  https://dataeraserc.github.io/AgentChatBridge/03-architecture
   ——本仓库 `docs/` 的渲染版，想改桥本身从这里进；
 - **插件开发者**（平台适配器、Lua/进程/动态库插件）：
-  https://dataeraserc.github.io/qq-bridge/08-plugin-development
+  https://dataeraserc.github.io/AgentChatBridge/08-plugin-development
   ——从扩展点选择、manifest、生命周期到测试；可运行示例见
   [examples/README.md](examples/README.md)。
 
@@ -27,17 +27,19 @@
 
 | 部分 | 状态 |
 |------|------|
-| 协议（桥 ↔ harness） | 可用：握手、开轮、工具调用、收工，一行一帧 JSON |
-| 核心（连接/订阅/唤醒/流水/水位/笔记/回合调度） | 可用：工具面 9 个工具，同一份记忆的轮次严格串行 |
+| 协议（桥 ↔ harness） | 可用：握手、开轮、工具调用、收工，一行一帧 JSON（协议版本 6） |
+| 核心（连接/订阅/唤醒/流水/水位/笔记/回合调度） | 可用：工具面 26 个工具，同一份记忆的轮次严格串行 |
 | 接入点（harness 连进来） | 可用：TCP 长连接 + 接入令牌（一把令牌代表一组设备） |
-| harness 适配器（opencode v2） | **真机整轮验过**（2026-10-29 19:26，最后一轮 10 秒回话）：真 QQ 发消息 → 桥开轮 → 模型收到 → `execute` 里调 `send_message` 回话 → `ack_messages` 推水位。连接模型上线后重验过：会话按**记忆**开（`acb:main-memory`），出站消息存平台编号，所以引用机器人的话能叫醒。代码 28 个测试 |
-| harness 适配器（DSH / Trae / Codex…） | 没写，判断方法见 [docs/06](docs/06-harness-adapters.md) |
-| QQ 适配器（OneBot 11） | 可用：群与私聊收发、拍一拍、其它平台事件，断线自动重连 |
+| harness 适配器（opencode v2） | **真机整轮验过**（2026-10-29 19:26，最后一轮 10 秒回话）：真 QQ 发消息 → 桥开轮 → 模型收到 → `execute` 里调 `send_message` 回话 → `ack_messages` 推水位。当前常驻方案是 `opencode2 serve`（不再靠 `run` 反复踢）；协议层 28 个测试 + 插件逻辑 11 个 |
+| harness 适配器（DSH） | 已写：进程外驱动 + 内置 MCP server，工具名 `mcp__acb__*`；协议层真机验过，模型真回话待配模型。见 [docs/06](docs/06-harness-adapters.md) |
+| harness 适配器（Trae / Codex…） | 没写，判断方法见 [docs/06](docs/06-harness-adapters.md) |
+| QQ 适配器（OneBot 11） | 可用：群与私聊收发、拍一拍、撤回标记、其它平台事件，断线自动重连 |
+| 插件宿主（Lua / 动态库 / 外置进程） | 可用：Lua 与动态库能替换七种策略（wake/access/delivery/send/turn_error/clock/receive）；外置进程与动态库能接入新平台；见 [docs/08](docs/08-plugin-development.md) |
 | Discord / KOOK / Telegram | 没写 |
-| 存储 | 可用：SQLite 落盘，重启接着上次的账做（编号、水位、笔记、投递次数都在）；旧流水按条数/天数自动清理，只削读过的 |
-| Web 管理页 | 没做，现在改配置要改文件重启 |
+| 存储 | 可用：SQLite 落盘，重启接着上次的账做（编号、水位、笔记、投递次数、撤回标记都在）；旧流水按条数/天数自动清理，只削读过的 |
+| Web 管理页 | 可用：网页控制台（连接/会话/人格/记忆/订阅/唤醒策略都能表单改，保存即热重载）；见 [docs/guide/console.md](docs/guide/console.md) |
 | `wait_message`（阻塞等新消息） | 没做 |
-| 时钟策略（房间安静时例行检查） | 没做 |
+| 时钟策略（房间安静时例行检查） | 可用：内置 `acb.clock.off` / `acb.clock.interval_idle`，也可换成 Lua/动态库；默认关闭，按订阅开启 |
 
 ## 快速开始
 
@@ -53,8 +55,8 @@ cargo run -p acb-bridge -- --config config.toml --check
 # 3. 起桥
 cargo run -p acb-bridge -- --config config.toml
 
-# 4. 另开一个终端，接一个最小 harness（真 harness 还没接）
-cargo run -p acb-bridge --bin dev-harness -- --token <配置里设备的 token>
+# 4. 另开一个终端，接一个最小 harness（先验证协议链路）
+cargo run -p acb-bridge --bin dev-harness -- --token <配置里会话的 token>
 ```
 
 第一次起桥会在工作目录建 `state/acb.db`：流水、水位、笔记、「第几次投递」全在里面，
@@ -69,14 +71,24 @@ cargo run -p acb-bridge --bin dev-harness -- --token <配置里设备的 token>
                  "options": { "token": "<配置里设备的 token>" } } ] }
 ```
 
+常驻用 `opencode2 serve`（默认监听 `127.0.0.1:4097`），再用
+`GET /api/plugin?location[directory]=<仓库绝对路径>` 让插件加载并连桥：
+
 ```bash
-opencode2 --standalone     # 必须带 --standalone，后台 service 模式解析不到插件入口
+opencode2 serve --hostname 127.0.0.1 --port 4097
 ```
 
+仓库里的 [`deploy/opencode-serve.sh`](deploy/opencode-serve.sh) 和
+[`deploy/systemd/acb-opencode-serve.service`](deploy/systemd/acb-opencode-serve.service)
+把这套做成了常驻服务；旧的 `acb-opencode-keeper.service`（反复踢 `opencode2 run`）已废弃。
+`--standalone` 只属于旧的一次性 `run` 方案，不再需要。
+
 现成能抄的那份在 [harnesses/opencode/opencode.jsonc.example](harnesses/opencode/opencode.jsonc.example)。
-接上之后 stderr 会打 `[acb] info 已接入桥，绑定设备组 main`；有人在 QQ 里说话，模型就会通过
-`execute` 调 `await tools.send_message({...})` 回过去（插件工具在 opencode 里走 Code Mode，
-不在原生工具表里——这条坑和整轮实测记录见 [docs/06](docs/06-harness-adapters.md)）。
+接上之后插件日志（`logFile` 或 stderr）会打 `已接入桥，绑定会话组 …`；有人在 QQ 里说话，
+模型就会通过 `execute` 调 `await tools.send_message({...})` 回过去（插件工具在 opencode 里
+走 Code Mode，不在原生工具表里——这条坑和整轮实测记录见
+[docs/06](docs/06-harness-adapters.md)）。没有 web 时用
+`tail -f state/logs/opencode-plugin.log` 看它有没有真的开轮。
 
 不想装 opencode 也想看这一段通不通，用同一个协议客户端的探针：
 
@@ -98,12 +110,13 @@ QQ 这一侧需要 OneBot 11 实现（NapCat / Lagrange / go-cqhttp 等）开出
 | 文档 | 内容 |
 |------|------|
 | [docs/01-vision.md](docs/01-vision.md) | 愿景、核心管什么、不管什么、非目标 |
-| [docs/02-glossary.md](docs/02-glossary.md) | 术语表（全库禁用「会话」这个词） |
+| [docs/02-glossary.md](docs/02-glossary.md) | 术语表：房间/会话/订阅/轮次，以及策略、记录标签、工具面 |
 | [docs/03-architecture.md](docs/03-architecture.md) | 组件、数据流、存储与并发、目录规划 |
 | [docs/04-protocol.md](docs/04-protocol.md) | 桥与 harness 之间的协议 |
 | [docs/05-adapters.md](docs/05-adapters.md) | 适配器：房间写法、事件与元素映射、限制 |
 | [docs/06-harness-adapters.md](docs/06-harness-adapters.md) | harness 适配器：两半能力、各家怎么接、opencode 那一份怎么用 |
 | [docs/07-storage.md](docs/07-storage.md) | 状态库：每张表干什么、清理规则、怎么查、怎么备份、已知限制 |
+| [docs/08-plugin-development.md](docs/08-plugin-development.md) | 插件开发：三种载体、扩展点、wire 字段、生命周期、测试 |
 | [docs/adr/](docs/adr/) | 决策记录，每条标「用户裁定」或「实现默认」 |
 
 ## 验证
@@ -113,7 +126,7 @@ cargo test --workspace                    # 单元 + 调度 + 接入点
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 
-node --test harnesses/opencode/test/*.test.mjs   # harness 适配器：协议层 18 + 插件逻辑 10
+node --test harnesses/opencode/test/*.test.mjs   # harness 适配器：协议层 28 + 插件逻辑 11
 ```
 
 ## 许可证
