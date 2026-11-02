@@ -80,7 +80,7 @@ v2 的插件是一个目录：`index.js` 是入口，`acb-wire.mjs` 是协议客
 }
 ```
 
-完整可抄的版本在 [`harnesses/opencode/opencode.jsonc.example`](../harnesses/opencode/opencode.jsonc.example)。
+完整可抄的版本在 [`harnesses/opencode/opencode.jsonc.example`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/harnesses/opencode/opencode.jsonc.example)。
 
 也可以用环境变量，选项优先于环境变量：
 
@@ -95,11 +95,11 @@ export ACB_ENDPOINT=127.0.0.1:7700  # 可选，默认就是这个
 
 用 systemd 托管一个前台 `opencode2 serve`，不要靠 `opencode2 run` 反复踢：
 
-- [`deploy/opencode-serve.sh`](../deploy/opencode-serve.sh) 起 serve（默认 `127.0.0.1:4097`），
+- [`deploy/opencode-serve.sh`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/deploy/opencode-serve.sh) 起 serve（默认 `127.0.0.1:4097`），
   等 `/api/info` 通；
 - 然后 `GET /api/plugin?location[directory]=<项目目录>` 让这个 location 初始化——插件在
   这一步加载并连桥，**不需要模型请求**；
-- [`deploy/systemd/acb-opencode-serve.service`](../deploy/systemd/acb-opencode-serve.service)
+- [`deploy/systemd/acb-opencode-serve.service`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/deploy/systemd/acb-opencode-serve.service)
   负责常驻，serve 日志写 `state/logs/opencode-serve.log`；
 - 旧的 `acb-opencode-keeper.service`（`opencode2 run` 踢一脚）保留在仓库里，但不再启用。
 
@@ -134,7 +134,7 @@ export ACB_ENDPOINT=127.0.0.1:7700  # 可选，默认就是这个
 ### 没有 web 时怎么看它在干什么
 
 opencode 不像 dsh 有界面。插件选项里配了 `logFile` 之后（示例见
-[`opencode.jsonc.example`](../harnesses/opencode/opencode.jsonc.example)），
+[`opencode.jsonc.example`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/harnesses/opencode/opencode.jsonc.example)），
 它会把这些动作逐行追加进去：
 
 ```bash
