@@ -740,6 +740,10 @@ fn matches_any(names: &[String], text: &str) -> bool {
 pub enum ConfigError {
     #[error("配置读不懂：{detail}")]
     ParseFailed { detail: String },
+    #[error("配置引用了环境变量 {name}，但进程环境里没有它")]
+    MissingEnv { name: String },
+    #[error("配置里的环境变量写法不合法：{detail}")]
+    BadEnvRef { detail: String },
     #[error("会话 {session} 的 {field} 不能为空")]
     EmptyField {
         session: String,
@@ -893,10 +897,81 @@ pub enum ConfigError {
     BadTurnErrorAction { action: String },
 }
 
+/// 把 `${NAME}` / `${{NAME}}` 展开成环境变量的值。
+///
+/// - `${NAME}` 用于字符串：值里的引号/反斜杠按 TOML 基本字符串转义。
+/// - `${{NAME}}` 原样注入：可以写数字/布尔，也可以自己带引号；值不转义。
+/// - 两者都支持 `:-默认`，变量未设置或为空时用默认值。
+fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
+    if !text.contains("${") {
+        return Ok(text.to_owned());
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let raw = rest[start..].starts_with("${{");
+        let (after, close) = if raw {
+            (&rest[start + 3..], "}}")
+        } else {
+            (&rest[start + 2..], "}")
+        };
+        let end = after.find(close).ok_or_else(|| ConfigError::BadEnvRef {
+            detail: format!("`{}` 后面缺 `{close}`", &rest[start..start + 2 + raw as usize]),
+        })?;
+        let (name, fallback) = match after[..end].split_once(":-") {
+            Some((name, fallback)) => (name, Some(fallback)),
+            None => (&after[..end], None),
+        };
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(ConfigError::BadEnvRef {
+                detail: format!("`${{{name}}}` 不是合法的环境变量名"),
+            });
+        }
+        let value = match std::env::var(name) {
+            Ok(value) if !value.is_empty() => value,
+            _ => fallback
+                .ok_or_else(|| ConfigError::MissingEnv {
+                    name: name.to_owned(),
+                })?
+                .to_owned(),
+        };
+        let injected = if raw {
+            value
+        } else {
+            escape_toml_string(&value)
+        };
+        out.push_str(&injected);
+        let consumed = if raw { end + 2 } else { end + 1 };
+        rest = &after[consumed..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn escape_toml_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
 impl Config {
     /// 从 TOML 文本解析并校验。
+    ///
+    /// 字符串里的 `${NAME}` 在解析前按进程环境展开：端口由 Nix 注册表注入，
+    /// 密钥由 agenix 注入，配置文件本身只留引用。环境里没有对应变量就报错，
+    /// 不静默变成空串（空 token 会以很难查的方式失败）。
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
-        let raw: RawConfig = toml::from_str(text).map_err(|error| ConfigError::ParseFailed {
+        let expanded = expand_env_vars(text)?;
+        let raw: RawConfig = toml::from_str(&expanded).map_err(|error| ConfigError::ParseFailed {
             detail: error.to_string(),
         })?;
         Self::from_raw(raw)
@@ -2130,6 +2205,61 @@ mod tests {
 
     fn config_with(connections: &str, sessions: &str) -> String {
         format!("{connections}\n{sessions}")
+    }
+
+    #[test]
+    fn env_placeholders_are_expanded_at_load() {
+        let expected = std::env::var("PATH").expect("测试环境一定有 PATH");
+        let text = config_with(ONE_CONNECTION, ONE_SESSION).replace("t-main", "${PATH}");
+        let config = Config::parse(&text).expect("能解析");
+        assert_eq!(config.session("main").expect("会话在").token, expected);
+    }
+
+    #[test]
+    fn missing_env_placeholder_is_an_error() {
+        let text = config_with(ONE_CONNECTION, ONE_SESSION)
+            .replace("t-main", "${ACB_TEST_SURELY_MISSING_VAR}");
+        let error = Config::parse(&text).expect_err("环境变量缺失要报错");
+        assert!(
+            matches!(error, ConfigError::MissingEnv { ref name } if name == "ACB_TEST_SURELY_MISSING_VAR"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn env_placeholder_falls_back_to_the_default() {
+        let text = config_with(ONE_CONNECTION, ONE_SESSION)
+            .replace("t-main", "${ACB_TEST_SURELY_MISSING_VAR:-t-default}");
+        let config = Config::parse(&text).expect("有默认值就能解析");
+        assert_eq!(
+            config.session("main").expect("会话在").token,
+            "t-default"
+        );
+
+        let text = config_with(ONE_CONNECTION, ONE_SESSION)
+            .replace("t-main", "${PATH:-unused}");
+        let config = Config::parse(&text).expect("有环境变量就用环境变量");
+        assert_eq!(
+            config.session("main").expect("会话在").token,
+            std::env::var("PATH").expect("测试环境一定有 PATH")
+        );
+    }
+
+    #[test]
+    fn raw_env_placeholder_injects_toml_literals() {
+        // 原样注入：数字不需要引号，默认值也按原文落进 TOML。
+        let text = config_with(ONE_CONNECTION, ONE_SESSION)
+            .replace("[[connections]]", "delivery_limit = ${{ACB_TEST_SURELY_MISSING_VAR:-42}}\n\n[[connections]]");
+        let config = Config::parse(&text).expect("原样注入的数字能解析");
+        assert_eq!(config.delivery_limit, 42);
+    }
+
+    #[test]
+    fn env_values_are_escaped_as_toml_strings() {
+        assert_eq!(
+            super::escape_toml_string("a\"b\\c\n\t"),
+            "a\\\"b\\\\c\\n\\t"
+        );
     }
 
     const ONE_CONNECTION: &str = r#"

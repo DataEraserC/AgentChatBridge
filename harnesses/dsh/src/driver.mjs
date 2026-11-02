@@ -76,6 +76,20 @@ function readConfig() {
   }
 }
 
+/**
+ * `provider/model` → {provider, model}。按第一个 `/` 拆：provider 名不含 `/`，
+ * 模型 id 允许含 `/`（如 `1Agent2Api/glm-5.3-flash`）。空串返回 null。
+ */
+function parseModelRef(text) {
+  const value = String(text ?? "").trim()
+  if (!value) return null
+  const slash = value.indexOf("/")
+  if (slash <= 0 || slash === value.length - 1) {
+    throw new Error(`会话模型要写成 provider/model（收到 ${value}）`)
+  }
+  return { provider: value.slice(0, slash), model: value.slice(slash + 1) }
+}
+
 async function main() {
   const config = readConfig()
   if (!config.token) {
@@ -178,8 +192,9 @@ class TurnDriver {
     this.workspaceTitle = workspaceTitle
     // 要钉住的模型 {provider, model, reasoningEffort}；provider/model 任一为空就不干预。
     this.model = model && model.provider && model.model ? model : null
-    // 已经钉过模型的 dsh 会话。一个会话只调一次 selectModel，别每轮都发一遍。
-    this.modelPinned = new Set()
+    // 已经钉过模型的 dsh 会话：sessionId -> "provider/model/effort"。
+    // 模型变了才重新 selectModel，别每轮都发一遍。
+    this.modelPinned = new Map()
     // acb session id -> 固定的 dsh sessionId（`acb:<id>`）。用固定 id 而不是 dsh 造的
     // uuid，是为了持久化：进程重启后 createSession 传同一个 sessionId + cwd，
     // dsh 的 claim 逻辑会直接复用旧会话，不丢上下文。
@@ -267,10 +282,12 @@ class TurnDriver {
     let failure = null
     try {
       let sessionId = await this.#session(delivery.session, link)
-      await this.#pinModel(sessionId)
+      const modelRef = this.#modelFor(delivery)
+      await this.#pinModel(sessionId, modelRef)
       let text = this.#composePrompt(delivery)
-      const info = delivery.session_info ?? {}
-      const model = info.model ?? "(dsh 默认)"
+      const model = modelRef
+        ? `${modelRef.provider}/${modelRef.model}`
+        : "(dsh 默认)"
       this.log(
         "debug",
         `开轮 ${delivery.ticket}：${delivery.room.connection}:${delivery.room.path.join("/")}，${delivery.records.length} 条，模型 ${model}`,
@@ -289,7 +306,7 @@ class TurnDriver {
         this.modelPinned.delete(sessionId)
         this.personas.delete(delivery.session)
         sessionId = await this.#session(delivery.session, link)
-        await this.#pinModel(sessionId)
+        await this.#pinModel(sessionId, modelRef)
         text = this.#composePrompt(delivery)
         await this.dsh.prompt(sessionId, [{ type: "text", text }])
       }
@@ -354,23 +371,41 @@ class TurnDriver {
   }
 
   /**
-   * 把这个会话的模型钉成本进程配置的那个（每个会话一次）。
+   * 这个会话要用的模型：
+   * - 优先 `session_info.model`（ACB 配置 `[[sessions]] model = "provider/model"`）；
+   - 没配就退回驱动进程的环境变量（部署级默认，可留空）。
+   */
+  #modelFor(delivery) {
+    const requested = parseModelRef(delivery.session_info?.model)
+    if (requested) {
+      return {
+        ...requested,
+        reasoningEffort: this.model?.reasoningEffort || "",
+      }
+    }
+    return this.model
+  }
+
+  /**
+   * 把这个会话的模型钉成请求的那个（每个会话/每个模型一次）。
    *
    * 为什么必须做：dsh 把「上次用的模型」记在会话里，复用老会话时它优先于
-   * agent-default-model。只改补丁里的默认模型，老会话会继续跑老模型——而且一点报错都没有，
-   * 只能靠看上游（网关）的日志才发现请求还在打旧渠道。
+   * agent-default-model。只改默认模型，老会话会继续跑老模型。
    *
-   * 失败不阻断这一轮：钉不上就用会话当前的模型跑，只留一条 warn。
+   * dsh 的 `selectModel` 会对照 Host 的 model catalog：模型没在 dsh 侧加过就
+   * 返回 `session/model-unavailable`。这里让它直接失败，不静默退回旧模型。
    */
-  async #pinModel(sessionId) {
-    if (!this.model || this.modelPinned.has(sessionId)) return
-    const { provider, model, reasoningEffort } = this.model
+  async #pinModel(sessionId, model) {
+    if (!model) return
+    const { provider, model: modelId, reasoningEffort } = model
+    const key = `${provider}/${modelId}/${reasoningEffort || ""}`
+    if (this.modelPinned.get(sessionId) === key) return
     try {
-      await this.dsh.selectModel(sessionId, { provider, model, reasoningEffort })
-      this.modelPinned.add(sessionId)
-      this.log("info", `会话 ${sessionId} 模型钉到 ${provider}/${model}${reasoningEffort ? `（${reasoningEffort}）` : ""}`)
+      await this.dsh.selectModel(sessionId, { provider, model: modelId, reasoningEffort })
+      this.modelPinned.set(sessionId, key)
+      this.log("info", `会话 ${sessionId} 模型钉到 ${provider}/${modelId}${reasoningEffort ? `（${reasoningEffort}）` : ""}`)
     } catch (error) {
-      this.log("warn", `给会话 ${sessionId} 选模型失败（这轮仍用会话当前模型）：${error?.message ?? error}`)
+      throw new Error(`会话模型 ${provider}/${modelId} 不可用：${error?.message ?? error}`)
     }
   }
 

@@ -29,6 +29,20 @@ import path from "node:path"
 
 const SERVICE = "acb"
 
+/**
+ * `provider/model` → opencode 的 {providerID, modelID}。按第一个 `/` 拆：
+ * provider 名不含 `/`，模型 id 允许含 `/`（如 `1Agent2Api/glm-5.3-flash`）。
+ */
+function parseModelRef(text) {
+  const value = String(text ?? "").trim()
+  if (!value) return null
+  const slash = value.indexOf("/")
+  if (slash <= 0 || slash === value.length - 1) {
+    throw new Error(`会话模型要写成 provider/model（收到 ${value}）`)
+  }
+  return { providerID: value.slice(0, slash), modelID: value.slice(slash + 1) }
+}
+
 export default {
   id: SERVICE,
 
@@ -249,14 +263,22 @@ class TurnDriver {
         this.log("info", `会话 ${delivery.session} 注入人格 ${delivery.persona?.id ?? ""}`)
       }
       const info = delivery.session_info ?? {}
-      const model = info.model ?? "(opencode 默认)"
+      const modelRef = parseModelRef(info.model)
+      const model = modelRef
+        ? `${modelRef.providerID}/${modelRef.modelID}`
+        : "(opencode 默认)"
       this.log(
         "info",
         `开轮 ${delivery.ticket}：${roomText(delivery.room)}，${delivery.records.length} 条，` +
           `opencode 会话 ${sessionID}，模型 ${model}`,
       )
       // prompt 把话排进会话；wait 等这一轮助手真正说完。
-      await this.ctx.session.prompt({ sessionID, text })
+      // 会话配了 model 就随本轮带上，opencode 会自己校验 provider/model 是否已配置。
+      await this.ctx.session.prompt({
+        sessionID,
+        text,
+        ...(modelRef ? { model: modelRef } : {}),
+      })
       this.log("info", `prompt 已发出 ${delivery.ticket}，等待模型`)
       if (typeof this.ctx.session.wait === "function") {
         await this.ctx.session.wait({ sessionID })
