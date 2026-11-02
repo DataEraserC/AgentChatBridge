@@ -407,7 +407,7 @@ test("没配模型就不碰会话的模型选择", async (t) => {
   assert.equal(dsh.modelPicks.length, 0, "没配模型就不该调 selectModel")
 })
 
-test("selectModel 失败不影响这一轮", async (t) => {
+test("会话模型优先，selectModel 失败让这一轮失败", async (t) => {
   const bridge = await new FakeBridge().start()
   const dsh = new ControllableDsh()
   dsh.selectModel = async () => {
@@ -424,12 +424,55 @@ test("selectModel 失败不影响这一轮", async (t) => {
     log: () => {},
     model: { provider: "trae", model: "deepseek-v4.1-flash" },
   })
-  const runPromise = driver.run(delivery(), link)
-  await waitFor(() => dsh.prompts.length === 1, "钉模型失败也得照常投话")
-  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
-  await runPromise
-
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "new-api-y9000p2025-openai-responses/1Agent2Api/glm-5.3-flash",
+      },
+    }),
+    link,
+  )
   const turnEnd = await nextTurnEnd(bridge)
   assert.equal(turnEnd.frame, "turn_end")
-  assert.equal(turnEnd.error, undefined, "钉模型失败不该让整轮算失败")
+  assert.match(turnEnd.error, /不可用/, "模型不存在要让整轮失败")
+  assert.equal(dsh.prompts.length, 0, "模型没选上就不该投话")
+  await runPromise
+})
+
+test("会话模型按 provider/model 拆，模型 id 里的斜杠保留", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "new-api-y9000p2025-openai-responses/1Agent2Api/glm-5.3-flash",
+      },
+    }),
+    link,
+  )
+  await waitFor(() => dsh.modelPicks.length === 1, "应调用 selectModel")
+  assert.deepEqual(dsh.modelPicks[0], {
+    sessionId: "session-1",
+    provider: "new-api-y9000p2025-openai-responses",
+    model: "1Agent2Api/glm-5.3-flash",
+    reasoningEffort: "",
+  })
+  await waitFor(() => dsh.prompts.length === 1, "选好模型后要投话")
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
+  await runPromise
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.equal(turnEnd.error, undefined)
 })
