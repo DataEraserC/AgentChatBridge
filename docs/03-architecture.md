@@ -1,7 +1,7 @@
 # 架构设计
 
 > 状态：草稿，等用户过目。
-> 术语全部遵循[术语表](../02-glossary.md)。关键决定配了 ADR，每个 ADR 开头标来源。
+> 术语全部遵循[术语表](02-glossary.md)。关键决定配了 ADR，每个 ADR 开头标来源。
 
 ## 一张图看懂
 
@@ -23,9 +23,9 @@ flowchart LR
 | 组件 | 职责 | 对应 ADR |
 |------|------|----------|
 | **接入点** | harness 连进来的通道：本机套接字或 TCP + 接入令牌。harness 与桥说自己的协议，桥不关心 harness 内部 | [0008](adr/0008-harness-endpoint.md) |
-| **回合调度** | 管理「轮次」的生命周期：叫醒 → 投递未读 → 等 harness 干活 → 收工具调用 → 回复 → 收工。同一份记忆的轮次严格串行 | [0003](adr/0003-serial-turns.md) |
+| **回合调度** | 管理「轮次」的生命周期：叫醒 → 投递未读 → 等 harness 干活 → 收工具调用 → 回复 → 收工。同一会话的轮次严格串行（ADR-0017） | [0003](adr/0003-serial-turns.md) |
 | **订阅表** | 会话订了哪条连接上的哪个房间、那条订阅的唤醒策略。收发的合法目标**默认**全部从这里查；会话的访问策略可以放宽（ADR-0026）。发送用哪把账号由连接决定，订阅不重复写 | [0002](adr/0002-subscription-model.md) |
-| **策略机制** | 策略的载体：内置默认实现 + 用户自定义（内嵌脚本或外置进程） | [0002](adr/0002-subscription-model.md) |
+| **策略机制** | 策略的载体：内置默认实现 + 用户自定义（Lua 脚本或动态库）；外置进程只承载平台适配器 | [0026](adr/0026-plugin-host.md) |
 | **扩展宿主** | RootManager 固定；LoaderPlugin / ManagerPlugin 都是扩展点；Provider 按 id 选择 | [0026](adr/0026-plugin-host.md) |
 | **时钟源** | 周期评估：房间空闲超时、未确认未读补投、主动说话的入口 | [0011](adr/0011-clock-policy.md) |
 | **流水 / 未读 / 水位** | 流水按房间一份；水位与未读按订阅（会话 × 房间）各记一份，未读是两者相减。永久存储 | [0003](adr/0003-serial-turns.md) |
@@ -44,16 +44,21 @@ flowchart TD
     F["平台帧"] --> D["适配器解码：消息 / 拍一拍 / 平台事件"]
     D --> S{"该房间有订阅？"}
     S -->|"无"| L["只留日志，不记录"]
-    S -->|"有"| T["① 写入流水（永远发生）"]
-    T --> R{"接收策略：算未读？"}
-    R -->|"是"| U["② 未读 +1"]
-    R -->|"否"| W
+    S -->|"有"| R{"接收策略：收不收？"}
+    R -->|"drop"| X["丢弃：不写流水、不叫醒"]
+    R -->|"record"| T["① 写入流水"]
+    T --> P{"记录声明 suppressed？"}
+    P -->|"是"| Q["只进流水，不计未读"]
+    P -->|"否"| U["② 未读 +1"]
     U --> W{"唤醒策略：叫醒？"}
     W -->|"是"| TURN["③ 为会话开一轮：投递该房间未读"]
-    W -->|"否"| Q["攒着，等下次判定"]
+    W -->|"否"| Q2["攒着，等下次判定"]
 ```
 
-要点：记录与唤醒分离——唤醒策略只决定「开不开轮次」，永远不阻止记录（拍一拍同理，见 [ADR-0007](adr/0007-poke-as-message.md)）。
+要点：接收策略是入站第一道门，`drop` 的记录连流水都不进；进了流水之后，记录与唤醒分离
+——唤醒策略只决定「开不开轮次」，永远不阻止记录（拍一拍同理，见
+[ADR-0007](adr/0007-poke-as-message.md)）。`suppressed` 是记录自身属性：写进流水但永久
+不进未读、不投递、不唤醒。
 
 ### 轮次（会话干活）
 
@@ -107,7 +112,7 @@ flowchart TD
 用户未具体拍板，先按下面做，随时可推翻：
 
 1. **唤醒的其它条件**（关键词、免打扰名单、睡眠时段）：做成默认唤醒策略的**可选开关**，默认全关。默认策略本身保持「@ + 昵称 + 攒 N 条」三件套。
-2. **读取类工具第一版范围**：全做——`get_history` / `list_rooms` / `get_notes` / `set_note` / `del_note` / `get_platform_events`。每个工具都很薄，成本主要在协议层，一次做齐省得反复改。
+2. **读取类工具第一版范围**：全做——`get_history` / `list_rooms` / `get_notes` / `set_note` / `del_note` / `get_platform_events`。每个工具都很薄，成本主要在协议层，一次做齐省得反复改。之后又补了 `fetch_records` / `platform_methods` / `platform_call` / `describe_plugins` / `report_feedback` / `memory_*`，当前清单见[术语表](02-glossary.md#工具面)。
 3. **标准元素表**：第一版就 8 个（text / at / quote / image / audio / video / file / 表情），不加 markdown。平台富文本走不透明载荷透传；等真有跨平台富文本需求再加元素，加元素是兼容演进。
 
 ## 目录规划
@@ -115,26 +120,38 @@ flowchart TD
 ```
 crates/
   proto/                 桥 ↔ harness 的协议（帧、内容元素、记录、回合票）
+  adapter-api/           适配器 wire / C ABI，进程与动态库共用
   kernel/                核心：订阅、唤醒、流水、水位、笔记、回合调度、工具面、接入点
     src/storage.rs         存储接口 + 内存实现
     src/storage/sqlite.rs  落盘实现（正式跑用这个）
   adapters/onebot11/     OneBot 11 适配器（QQ 群与私聊）
-  bridge/                可执行程序：读配置、连平台、起接入点
+  adapters/process/      外置进程载体（stdin/stdout JSON，崩溃隔离）
+  adapters/dynamic/      动态库载体（libloading，进程内）
+  plugins/lua/           Lua manager/loader：每文件一个 provider
+  plugins/trusted/       树外 native manager 示例（trusted.accumulate_only）
+  bridge/                可执行程序：读配置、连平台、起接入点、起控制台
     src/main.rs          桥本体
     src/bin/dev-harness  开发用的最小 harness（验「桥 ↔ 平台」这一段）
 harnesses/
   opencode/
     plugin/             v2 插件目录：index.js（工具面 + 轮次驱动）+ acb-wire.mjs（协议客户端）
     probe.mjs           不用 opencode 也能验「桥这一段」的探针
-    test/               协议层 15 + 插件逻辑 8（后者对面是模拟的 v2 宿主）
+    test/               协议层 28 + 插件逻辑 11
+  dsh/                  进程外驱动：MCP server + webui HTTP/WS 客户端
+  shared/tools.mjs      两个 harness 共用的工具名/描述/JSON Schema
+examples/
+  lua/                  七种策略的可运行 Lua 示例
+  process/              外置进程适配器的最小 Node 实现
+  dynamic/wake-provider 可独立构建的动态库策略示例
 docs/
-  01-vision.md       愿景与范围（已过目）
-  02-glossary.md     术语表（已过目）
+  01-vision.md       愿景与范围
+  02-glossary.md     术语表
   03-architecture.md 本文
   04-protocol.md     桥 ↔ harness 的协议细节
   05-adapters.md     平台适配器：房间写法、事件与元素映射、已知限制
   06-harness-adapters.md harness 适配器：工具面与轮次驱动两半，各家怎么接
   07-storage.md      状态库：每张表干什么、怎么查、怎么备份
+  08-plugin-development.md 插件开发：载体、扩展点、wire 字段、测试
   adr/               决策记录（每条标来源）
 ```
 

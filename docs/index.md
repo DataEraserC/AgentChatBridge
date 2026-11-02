@@ -31,11 +31,14 @@ features:
     details: 所有消息进流水（SQLite），读没读有水位记账；长期记忆是 agent 自己维护的 git 仓库。
   - icon: 🛡️
     title: 能发到哪
-    details: agent 只能往订阅过的房间发消息；破坏性平台操作（踢人禁言）默认全关，由你显式放行。
+    details: agent 默认只能往订阅过的房间发消息；可按会话或来源房间放宽；破坏性平台操作（踢人禁言）默认全关，由你显式放行。
   - icon: 🖥️
     title: 网页控制台
     details: 连接/会话/人格/记忆增删改查、断开映射重置会话、热重载——日常管理不用碰配置文件。
   - icon: 🧩
     title: 大脑在外面
     details: 桥不替 agent 思考。DSH、WorkBuddy、Trae、Codex……通过统一协议接入，各用各的模型和工具。
+  - icon: 🔧
+    title: 可插拔
+    details: 平台适配器和策略都能写在外：Lua/动态库进程内运行，外置进程隔离；覆盖唤醒、访问、投递、发送、失败通知、时钟、接收七个扩展点。
 ---

@@ -4,11 +4,12 @@
 
 ```sh
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
-systemctl --user is-active dsh-acb.service acb-bridge.service acb-drivers.service
-ss -tln | grep -E "7700|3080|3100|3131"
+systemctl --user is-active dsh-acb.service acb-bridge.service acb-drivers.service acb-opencode-serve.service
+ss -tln | grep -E "7700|3080|3100|3131|4097"
 ```
 
-三个都要 `active`，端口都要在监听。重启电脑后要重跑 `deploy/acb-up.sh`。
+四个都要 `active`（没有 opencode 会话时 `acb-opencode-serve` 可以不起），端口该在的都在监听。
+重启电脑后要重跑 `deploy/acb-up.sh`。
 
 ::: warning 别用 ps 判断
 进程存在 ≠ 活着。挂在终端/AI 会话里的常驻进程，会话一撤后 socket 全废
@@ -21,10 +22,13 @@ ss -tln | grep -E "7700|3080|3100|3131"
 按顺序查，哪步断了修哪步：
 
 1. **看控制台**（3100）：连接在线吗？消息记进流水了吗（概览/会话页的未读数动没动）？
-2. **看 harness 侧**：dsh 里对应的会话有没有新的 user/assistant 消息？
+2. **看 harness 侧**：dsh 里对应的会话有没有新的 user/assistant 消息？opencode 看
+   `tail -f state/logs/opencode-plugin.log`：有 `turn_start` / `prompt 已发出` 才说明桥把活
+   交过去了；有 `本轮完成` 但「调用桥工具 0 次」通常表示模型没说任何话或会话坏了。
    没有就是桥→harness 这段断了；有但没回，是 harness/模型侧的问题；
 3. **看连接**：`ss -tn | grep 7700` 有没有 ESTAB。dsh 换了 launch token 后驱动会自动
-   重新铸 cookie，一般不用管；实在不行 `deploy/acb-up.sh` 整链重拉。
+   重新铸 cookie，一般不用管；opencode 看 `systemctl --user status acb-opencode-serve`。
+   实在不行 `deploy/acb-up.sh` 整链重拉。
 
 ## 常见报错速查
 
@@ -32,10 +36,12 @@ ss -tln | grep -E "7700|3080|3100|3131"
 |---|---|---|
 | `session/create 失败（session/conflict）：belongs to ...` | dsh 里已有同 id 会话但工作目录不同（比如改过 `ACB_CWD`） | 驱动会自动换新 id 重试，可忽略；要归组的话在控制台断开重置一次映射 |
 | `session.create accepts workspaceId or cwd, not both` | 旧版驱动的 bug（两个参数同时传） | 升级驱动后重启 |
-| `fetch failed`（发图时） | 平台（OneBot 实现的容器）去下载图片 URL 失败：`public_base` 填了平台访问不到的地址 | 按[文件中继配置](./config#文件中继-发图发文件的关键)核对 `public_base`，用验证命令从容器里 curl 一次 |
+| `fetch failed`（发图时） | 平台（OneBot 实现的容器）去下载图片 URL 失败：`public_base` 填了平台访问不到的地址 | 按[文件中继配置](./config#文件中继发图发文件的关键)核对 `public_base`，用验证命令从容器里 curl 一次 |
 | `第 N 段（image）缺 url` | 消息段的 `url` 字段缺失 | 桥的报错会提示认哪些别名（`file`/`path`/`src` 也认）；给本机路径即可自动中继 |
 | 攒了一堆旧消息反复重投 | 老版本的水位 bug（自己发的消息在别的订阅者账上留洞） | 升级到 2026-10-31 之后的版本，开轮时自动自愈，不用修库 |
 | `未分组`（dsh 网页里会话不进工作区） | 旧版建会话只传了 cwd，dsh 不按 cwd 分组 | 控制台断开重置一次映射，新会话会归到「ACB」工作区 |
+| opencode 不回复，插件日志里也没有 `prompt 已发出` | 插件没收到轮次：检查 `acb-opencode-serve` 是否 active、7700 的 ESTAB、`logFile` 是否配置 | 重启 `acb-opencode-serve`；看插件日志里的 `插件加载 / 已接入桥` |
+| opencode 报 `The requested item was created under a different Azure OpenAI resource` | 模型网关换了上游资源，旧会话里的 Responses item 失效 | 控制台重置该会话映射，下一轮会新建 opencode 会话；长期解法是固定网关渠道 |
 
 ## 数据安全
 

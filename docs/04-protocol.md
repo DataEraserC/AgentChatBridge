@@ -8,6 +8,7 @@
 - 一条长连接（本机套接字或 TCP），**每帧一行 JSON**，UTF-8。
 - 单帧上限 1 MiB，超了直接断连。
 - 首帧必须是 `hello`，带协议版本与令牌（TCP 时必填）。版本不符由桥拒绝并说明原因。
+  当前 `PROTOCOL_VERSION = 6`；wire 形状变了就加一，文档和 `crates/proto` 同时改。
 
 ## 接入点
 
@@ -16,7 +17,7 @@
 - 一条连接只服务它那一组会话：`poll_turn` 只领这组里的活，不会把别人的轮次领走。
 - **跨会话发送已砍**（ADR-0017）：`send_message_to` 默认只能发到本会话订阅的房间，越界拒绝；会话的访问策略（`[sessions.access]`，ADR-0026）可以放宽这个边界。参数里没有「别的会话 id」这种入口。
 - 握手 10 秒内不说话就断；空闲时桥每 100ms 回头看一眼有没有活，所以有活时最迟约 0.1 秒推过去。
-- **断线不丢消息**：连接断在轮次中间，这一轮直接放掉，不确认任何消息——它们还是未读，下一轮重投（[ADR-0010](../adr/0010-ack-watermark.md)）。
+- **断线不丢消息**：连接断在轮次中间，这一轮直接放掉，不确认任何消息——它们还是未读，下一轮重投（[ADR-0010](adr/0010-ack-watermark.md)）。
 - 同一组会话开两条连接不会破坏串行：桥保证一个会话同时只有一轮，第二条连接暂时领不到活。
 
 ## 帧一览
@@ -52,7 +53,7 @@ sequenceDiagram
 要点：
 
 - **票是唯一身份**。`tool_call` 必须带本轮的票，票在 `turn_start` 签发、`turn_end` 作废。票不对，调用一律拒绝。
-- 一轮只投一个房间的记录（[ADR-0003](../adr/0003-serial-turns.md)）。
+- 一轮只投一个房间的记录（[ADR-0003](adr/0003-serial-turns.md)）。
 - 同一会话的轮次串行（串行键 = harness 名 + 会话 id，ADR-0017）：上一轮 `turn_end` 之前不会有下一轮 `turn_start`。不同会话各自并发，记忆不是锁。
 
 ## 一次投递（delivery）
@@ -94,9 +95,9 @@ sequenceDiagram
 
 - `room`：连接名 + 路径段。路径由适配器决定怎么切（QQ 是 `group/123`、`private/456`；
   Discord 这类会更深，如 `guild/9/channel/7/post/8`）。核心不认识段里的词，只把它当一串段
-  ——所以要前缀查「这个群下面所有楼」也是免费的（[ADR-0012](../adr/0012-platform-connections.md)）。
+  ——所以要前缀查「这个群下面所有楼」也是免费的（[ADR-0012](adr/0012-platform-connections.md)）。
 - `id`：房间内递增编号，水位按它推进。
-- `kind`：`message`，或 `{"kind":"event","event":"poke","tags":["poke","notice"],"payload":{…},"summary":"[拍了拍我]"}`；拍一拍就是 `event: poke`（[ADR-0007](../adr/0007-poke-as-message.md)）。事件记录现在带跨平台语义标签 `tags`、原始载荷 `payload` 和一句人话 `summary`；`summary` 是说明，不是对方说的话。
+- `kind`：`message`，或 `{"kind":"event","event":"poke","tags":["poke","notice"],"payload":{…},"summary":"[拍了拍我]"}`；拍一拍就是 `event: poke`（[ADR-0007](adr/0007-poke-as-message.md)）。事件记录现在带跨平台语义标签 `tags`、原始载荷 `payload` 和一句人话 `summary`；`summary` 是说明，不是对方说的话。
 - `at_self`：这条是不是冲本账号来的（@ 到我、拍我）。
 - `reply_to_self`：这条是不是**引用了我发的某条消息**。
   `at_self` 和 `reply_to_self` 是两个事实，不是一个：@ 是明确点名，引用是接着某句话往下说。
@@ -105,8 +106,9 @@ sequenceDiagram
   就当不是——宁可少叫醒一次，也不凭编号长相猜。
 - `platform_id`：平台自己的消息编号（QQ 的 `message_id`）。留着只有一个用途：别人引用某条时，
   靠它反查「被引用的是谁发的」。我方发出去的消息也带，所以「引用了我」才判得出来。
-- `labels`：记录级通用标签，由适配器或插件追加（如撤回事件给原消息加 `recall`）。
-  core 不解释标签含义，只负责存储和透传；harness 看到 `labels` 里有 `recall` 时应在展示时
+- `labels`：记录级通用标签。适配器通过入站记录的 `target_platform_id` + `target_labels`
+  请求桥给旧记录追加（如撤回事件给原消息加 `recall`），桥负责落库和透传。
+  core 不解释标签含义；harness 看到 `labels` 里有 `recall` 时应在展示时
   标出「已撤回」，不能把撤回的话当成还能看到的内容。撤回事件本身也是一条记录（事件记录带
   `recall` 标签），但适配器会把它声明为只进流水：不进未读、不投递、不唤醒，agent 需要时用
   `get_platform_events` 查。
@@ -118,7 +120,7 @@ sequenceDiagram
   「第 2 次投递；调 ack_messages 确认 #5 之后就不再重复投递」。
 
   为什么要由桥来写这句：它是**行为要求**（agent 得知道怎么让重复投递停下），不是某家
-  harness 的排版偏好。放在桥里，接新 harness 不用重新发明一遍（[ADR-0010](../adr/0010-ack-watermark.md)）。
+  harness 的排版偏好。放在桥里，接新 harness 不用重新发明一遍（[ADR-0010](adr/0010-ack-watermark.md)）。
 
   为什么单独一个字段、不塞进 `elements`：`elements` 是对方说的话。旁白混进内容，人和模型
   都会以为「对方打了这行字」——真机上已经出现过一次。harness 的呈现义务是：**内容照原样，
@@ -139,7 +141,7 @@ sequenceDiagram
 | `face` | `platform`，`id` |
 | `opaque` | `platform`，`payload`（平台特有内容原样透传，核心不解释） |
 
-元素表只增不改；加元素是兼容演进（[ADR-0004](../adr/0004-content-elements.md)）。
+元素表只增不改；加元素是兼容演进（[ADR-0004](adr/0004-content-elements.md)）。
 
 ## 错误码
 

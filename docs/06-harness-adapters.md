@@ -1,15 +1,15 @@
 # 06 · harness 适配器
 
-> 状态：opencode 那一份按 **v2 API** 写完了，协议层与插件逻辑都有测试；**还没在真的
-> opencode 里跑完一轮**——本机 opencode2 2.0.22（Bun 1.4.2）加载任何插件都会段错误，
-> 连 4 行空插件都崩。详见下面「卡在哪」。
+> 状态：opencode v2 插件、dsh 驱动都已真机跑通（2026-10-31 / 11-02 复验）；opencode 当前
+> 用 `opencode2 serve` 常驻（见下面「常驻部署」）。早期 2.0.22 的插件加载问题记在文末，
+> 作为历史记录保留。
 > 原则：桥不懂 harness 的内脏，harness 也不懂平台细节。适配器是那个翻译。
 
 ## 一个适配器要干两件事
 
 这两件事互不依赖，可以分别做到、分别缺席：
 
-1. **工具面**：让模型看见桥上的九个工具（发消息、确认水位、翻历史、记笔记……），
+1. **工具面**：让模型看见桥的一整套工具（发消息、确认水位、翻历史、记笔记、平台能力……），
    模型一调，就原样变成一帧 `tool_call` 发给桥。
 2. **轮次驱动**：桥推来一轮（`turn_start`，带着这个房间的未读记录），把它变成 harness 里
    的一次对话，跑完回 `turn_end`。
@@ -91,10 +91,26 @@ export ACB_ENDPOINT=127.0.0.1:7700  # 可选，默认就是这个
 
 没给令牌时插件直接不启用，只写一条警告——不阻塞 opencode 启动。
 
-**要用 `--standalone` 起 opencode。** 后台 service 模式下插件解析不到入口，日志里是
-`PluginModule.LoadError: Plugin entrypoint not found: <插件目录>`（那个进程的工作目录和我们
-给的不是同一个）。`opencode2 --standalone` 正常加载，日志里能看到
-`loading plugin ... entrypoint=file:///…/index.js`。
+### 常驻部署：`opencode2 serve`（默认）
+
+用 systemd 托管一个前台 `opencode2 serve`，不要靠 `opencode2 run` 反复踢：
+
+- [`deploy/opencode-serve.sh`](../deploy/opencode-serve.sh) 起 serve（默认 `127.0.0.1:4097`），
+  等 `/api/info` 通；
+- 然后 `GET /api/plugin?location[directory]=<项目目录>` 让这个 location 初始化——插件在
+  这一步加载并连桥，**不需要模型请求**；
+- [`deploy/systemd/acb-opencode-serve.service`](../deploy/systemd/acb-opencode-serve.service)
+  负责常驻，serve 日志写 `state/logs/opencode-serve.log`；
+- 旧的 `acb-opencode-keeper.service`（`opencode2 run` 踢一脚）保留在仓库里，但不再启用。
+
+为什么不靠 `opencode2 run`：它加载的插件只在 run 存活期间有效，run 退出连接就断；keeper 只能
+反复踢，既没有常驻保证，每次还要烧一次模型请求。`opencode2 serve` 是真正的常驻 HTTP 服务。
+
+注意：插件在 **location 初始化之后**才加载。单纯 `POST /api/session` 不会触发，
+`GET /api/plugin` 或第一次 `prompt` 才会；服务脚本用前者完成自检。
+
+改了插件代码后：`systemctl --user restart acb-opencode-serve`；serve 起来之后也可以
+`POST /api/location/reload` 热重载插件（会先卸载再加载，桥上的连接会短暂断开一次）。
 
 几个刻意的做法：
 
@@ -286,9 +302,9 @@ ESTAB 127.0.0.1:44758  127.0.0.1:7700   users:((".opencode2-wrap",pid=169923,fd=
   `data.id` 三种老形状；opencode 换版本改形状时，这里要跟着看。
 - 插件文件改动后 opencode 的 watcher 会热重载（日志里会再出现一次 `已接入桥`），旧连接自动断。
   这个行为没写进任何文档，属于实测观察。
-- ~~Code Mode 的目录预算是 2000 token，acb 的 25 个工具塞不塞得下没量过~~ → **已验（2026-10-31）**：
+- ~~Code Mode 的目录预算是 2000 token，acb 的 25 个工具塞不塞得下没量过~~ → **已验（2026-10-31，当时 25 个）**：
   实测让模型「把这类工具名全部列出来」，它一次列了 25 个、一个不差（`send_message` … `set_note`）。
-  目录装得下，不用靠 `$codemode.search` 兜。
+  目录装得下，不用靠 `$codemode.search` 兜。之后又加了记忆工具，当前工具面是 26 个。
 - **原生工具调用要过权限**（实测）：让模型用原生 `read` 读 `config.toml`，工具停在 `status: "running"`、
   没执行——`serve` 模式没人批准就不动。但 `execute` 里的 `fetch` **不受这道门管**（它不是工具）。
   所以「读 token」这一步有阻力，「用 token 敲端口」这一步没有。开 `--auto` 时前者也没了。
@@ -346,6 +362,9 @@ update session_v2 set project_id='<新项目的 id>', directory='/home/nixos/qqa
   才算成。
 
 ## 常驻的一套怎么起（2026-10-29）
+
+> 这一节是当时的手工摸索记录；**当前默认常驻方式见前面的「`opencode2 serve`」**，
+> 不用 `--standalone`，也不需要 TLS 反代。
 
 三个进程，缺一个都不通。放在 `~/qqab-scratch/oc-live/`（NixOS 的 `/tmp` 是 tmpfs，不放那儿）：
 
@@ -421,7 +440,7 @@ dsh 跟 opencode 是**完全不同的接入方式**：opencode 走插件（进�
 ```
 桥(acb) ──turn_start/tool_call──> dsh 驱动器(harnesses/dsh/src/driver.mjs)
                                     ├─ acb 客户端：BridgeLink 接桥（复用 opencode 的 acb-wire.mjs）
-                                    ├─ MCP server：stdio，被 dsh 拉起，暴露九个工具
+                                    ├─ MCP server：stdio，被 dsh 拉起，暴露整套工具（当前 26 个）
                                     └─ dsh 客户端：调 webui HTTP/WS API 驱动会话
 ```
 
@@ -439,7 +458,7 @@ dsh 跟 opencode 是**完全不同的接入方式**：opencode 走插件（进�
 - `harnesses/dsh/src/mcp-server.mjs` — 最小 MCP server（stdio，newline JSON-RPC），
   只实现 initialize / tools/list / tools/call / ping，零依赖。
 - `harnesses/dsh/src/driver.mjs` — 主进程：三件事合一。
-- `harnesses/shared/tools.mjs` — 九个工具的名字/描述/JSON Schema（opencode 和 dsh 共用）。
+- `harnesses/shared/tools.mjs` — 整套工具（当前 26 个）的名字/描述/JSON Schema（opencode 和 dsh 共用）。
 
 ### 实测探通的协议（隔离 DSH_HOME，真实跑过）
 

@@ -123,6 +123,7 @@ kind = "demo"          # 可选：适配器 manifest 的 kind 必须等于它
   provider id 用 `namespace.name`。插件收到 `CoreMessage::Decide`（`point` 是扩展点，
   `request` 是对应的 wire 形状）：
   - access / receive / clock 返回 `WireResult::Decision`：access 用 `allow` / `deny`，
+    请求里带目标 `room` 和本轮来源 `origin_room`（连接级请求时 `room` 为空），
     receive 用 `record` / `drop`，clock 用 `due` / `skip`。
   - delivery 返回 `WireResult::Delivery`（`plan = null` 表示用内置选批）。
   - send 的 `before` 返回 `WireResult::Elements` 改写正文，`after` 返回任意回执；
@@ -169,14 +170,14 @@ provider = "vendor.wake"
 threshold = 5
 ```
 
-access / receive / clock / delivery / turn_error 的策略配置也有同名的 `.options` 自由表；
-`options_schema` 目前只是说明，core 不做强制校验。Lua 的 `turn_error` 收到
-`decide(request, options)`；动态库的 `turn_error` 每次 `Decide` 也带最新 options。
+access / receive / clock / delivery / turn_error 的策略配置也有同名的 `.options` 自由表
+（receive 挂在连接上，其余挂在会话/订阅上）；`options_schema` 目前只是说明，core 不做强制校验。
+Lua 的 `turn_error` 收到 `decide(request, options)`；动态库的 `turn_error` 每次 `Decide` 也带最新 options。
 
-插件通过 `CoreMessage::Decide` 收到 `WireWakeRequest`（发送者、正文、@/引用/拍、
+动态库插件通过 `CoreMessage::Decide` 收到 `WireWakeRequest`（发送者、正文、@/引用/拍、
 标签、未读数、上次唤醒时间），返回 `WireResult::Decision { decision = "wake" | "stay" }`。
 解析失败或插件报错按 `stay` 兜底，不会误把会话叫醒。wake 判定在 core 的入库路径里，
-所以这一版只开放动态库载体；外置进程会在 core 锁内做 I/O，等以后有异步判定再开。
+所以只开放进程内载体（动态库与 Lua）；外置进程会在 core 锁内做 I/O，等以后有异步判定再开。
 
 ## Agent 怎么知道插件在做什么
 

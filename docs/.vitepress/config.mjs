@@ -37,7 +37,7 @@ export default withMermaid({
   // mermaid 画图配置：mermaidPlugin.class 是渲染容器的 CSS 类；
   // 暗色主题由插件自动跟随（body 类名带 dark 就切 dark 画图主题）。
   mermaidPlugin: { class: 'mermaid' },
-  base: '/qq-bridge/',
+  base: '/AgentChatBridge/',
   lang: 'zh-CN',
   title: 'acb-bridge',
   description: '把 AI agent 接进聊天平台的桥 —— 多 harness × 多平台',
@@ -58,7 +58,7 @@ export default withMermaid({
         activeMatch: '/(05-adapters|08-plugin-development)/',
       },
       { text: 'ADR', link: '/adr/0001-rust-workspace', activeMatch: '/adr/' },
-      { text: 'GitHub', link: 'https://github.com/DataEraserC/qq-bridge' },
+      { text: 'GitHub', link: 'https://github.com/DataEraserC/AgentChatBridge' },
     ],
     sidebar: {
       // 用户文档：说人话，按使用顺序排。
@@ -92,7 +92,7 @@ export default withMermaid({
         },
       ],
     },
-    socialLinks: [{ icon: 'github', link: 'https://github.com/DataEraserC/qq-bridge' }],
+    socialLinks: [{ icon: 'github', link: 'https://github.com/DataEraserC/AgentChatBridge' }],
     search: { provider: 'local' },
     outline: { level: [2, 3], label: '本页目录' },
     docFooter: { prev: '上一篇', next: '下一篇' },

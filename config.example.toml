@@ -31,22 +31,53 @@ listen = "127.0.0.1:7700"
 # listen = "127.0.0.1:3100"
 # token = "换成你自己的一长串随机字符"
 
-[storage]
-# 状态库：流水、水位、笔记、「第几次投递」都在这一个 SQLite 文件里。
-# 不配就用 state/acb.db（相对启动时的工作目录）。目录不存在会自动建。
-# 备份就是拷这个文件；删了等于失忆，但桥不会因此起不来。
-path = "state/acb.db"
+# 文件中继（ADR-0025）：agent 和平台不共用文件系统时，桥把本机文件收下来，
+# 换成平台能下载的 URL。不配就不起文件服务，本机路径原样透传。
+# public_base 必须是**平台那边**能访问到桥的地址（平台在容器里时通常写宿主网关）。
+# [file_relay]
+# mode = "file-server"                     # 目前只有这一种
+# listen = "0.0.0.0:3131"
+# public_base = "http://host.containers.internal:3131"
+# dir = "state/relay"                      # 不写就用 state/relay
 
+# 动态库插件（ADR-0026 / 0027）：一个 .so/.dylib 可以是平台适配器，也可以是策略 provider。
+# 插件自己的 manifest 决定它是哪一种；这里的 kind 只用于校验适配器。
+# [[plugins]]
+# path = "/绝对路径/libdemo_adapter.so"
+# kind = "demo"                            # 可选；必须和 manifest 的 kind 一致
+#
+# [[plugins]]
+# path = "/绝对路径/libacb_example_wake.so"   # 策略 provider 不写 kind
+#
+# Lua 脚本不写在这里：把 ACB_LUA_DIR 指向脚本目录，文件名就是 provider 名（lua.<文件名>）。
+
+# ---------------------------------------------------------------------------
+# 顶层参数（不属于任何表，必须写在第一个表头之前）
+# ---------------------------------------------------------------------------
 # worktree 根目录：每个「会话 × 记忆」的 worktree 都 checkout 到这里，
 # 按「根/记忆id/会话id」分层。不配就用 state/worktrees。
 # 桥只负责第一次把 worktree 建出来，之后文件读写和 git 操作全交给 harness。
 worktrees_root = "state/worktrees"
+
+# 一轮投递最多塞多少条新记录。默认 30；0 = 不截断。
+# 超过上限时投「最旧一小段 + 最新一批」，中间用 omitted 告诉模型还有多少条。
+delivery_limit = 30
+
+# 一轮失败后的全局默认通知动作：log / send:<房间>。会话自己的 on_turn_error 优先。
+# 空 = 只记日志。
+default_on_turn_error = []
 
 # 一轮最多跑多久（秒）。不配 = 默认关闭（跑多久都等）。
 #   0 = 关闭超时：模型想跑多久跑多久，桥不掐、harness 也不许自己掐。
 #   n > 0 = 到点还没结束，harness 主动打断本侧会话（dsh 有队列能打断；不支持
 #   打断的 harness 按各自兜底）。打断算这轮失败，走 on_turn_error 通知。
 turn_timeout_secs = 0
+
+[storage]
+# 状态库：流水、水位、笔记、「第几次投递」都在这一个 SQLite 文件里。
+# 不配就用 state/acb.db（相对启动时的工作目录）。目录不存在会自动建。
+# 备份就是拷这个文件；删了等于失忆，但桥不会因此起不来。
+path = "state/acb.db"
 
 [retention]
 # 旧流水什么时候可以删。只削**已经读过**的那一段：任何在册会话还没读到的记录，
@@ -79,6 +110,7 @@ transport = "ws-client"
 url = "ws://127.0.0.1:3001"
 token = ""
 account = "10001"
+admin_qqs = []   # 这些 QQ 号会被标成系统管理员（记录里的 sender.role = system_admin）
 # 想让它真顶一个人的位置（能踢人能禁言能改群名），把这行改成 true。
 allow_destructive = false
 
@@ -158,6 +190,19 @@ memories = ["main-memory"]
 model = "deepseek-chat"
 # 接入令牌：harness 连进来时报出 harness id + 这个令牌，桥据此绑定会话。
 token = "换成你自己的一长串随机字符"
+
+# 这个会话一轮失败后的通知动作（log / send:<房间>）。空 = 只记日志，
+# 回退到全局 default_on_turn_error。
+on_turn_error = []
+
+# 访问策略（可选）：默认只认本会话的订阅。
+# [sessions.access]
+# provider = "acb.access.subscribed"
+# 其它内置：all_rooms（整个会话豁免）/ elevated_in_rooms（rooms = [...] 额外开房间）/
+# privileged_origins（origins = [...]：从这些房间触发的轮次可访问任意房间）。
+# [sessions.access]
+# provider = "acb.access.privileged_origins"
+# origins = ["qq:private/123456"]
 
 # 投递批次选择（ADR-0026 Phase 4）。不写就是内置「最旧一小段 + 最新一批」。
 # [sessions.delivery]
