@@ -69,6 +69,28 @@ pub struct Delivery {
     /// 打断不了的按各自兜底处理），打断算这轮失败，走桥的失败通知。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_timeout_ms: Option<u64>,
+    /// 插件贡献的上下文片段。core 已按预算裁剪并排好序；空 = 没有注入。
+    /// 旧 harness 不认识这个字段时直接忽略，行为不变。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<PromptFragment>,
+}
+
+/// 一段插件贡献的上下文。片段与记录/人格分开，不能改写对话历史。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptFragment {
+    /// 来源 provider id，由 core 填写。
+    pub source: String,
+    /// 正文；core 已保证不超过单段上限。
+    pub text: String,
+    /// 数值越大越靠前；同优先级按 source 字典序。
+    pub priority: i32,
+    /// 是否被 core 从更长文本裁剪过。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// 本轮被跳过的未读区间。
@@ -368,6 +390,7 @@ mod tests {
             more: None,
             omitted: None,
             turn_timeout_ms: None,
+            prompts: Vec::new(),
         }
     }
 
@@ -431,6 +454,23 @@ mod tests {
             Frame::Ping,
             Frame::Pong,
         ]
+    }
+
+    #[test]
+    fn empty_prompts_are_omitted_for_old_harnesses() {
+        let frame = Frame::TurnStart {
+            delivery: sample_delivery(),
+        };
+        let line = encode(&frame).expect("可编码");
+        assert!(
+            !line.contains("\"prompts\""),
+            "没有片段时不能凭空多一个字段：{line}"
+        );
+        let back = decode(&line).expect("旧形状仍可解码");
+        let Frame::TurnStart { delivery } = back else {
+            panic!("应当是 turn_start");
+        };
+        assert!(delivery.prompts.is_empty());
     }
 
     #[test]

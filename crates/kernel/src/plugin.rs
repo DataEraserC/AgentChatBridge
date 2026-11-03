@@ -13,7 +13,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use acb_proto::{Element, Omitted, Record, RecordKind, RoomId, Sender, ToolError};
+use acb_proto::{Element, Omitted, Record, RecordKind, RoomId, Sender, ToolError, TurnReason};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -203,6 +203,8 @@ pub enum ExtensionPoint {
     Tool,
     /// 插件提供的后台任务 handler。
     Task,
+    /// 插件贡献的上下文片段（声明式、受预算约束）。
+    Prompt,
     PlatformAdapter,
     Manager,
     Loader,
@@ -223,6 +225,7 @@ impl ExtensionPoint {
             Self::Observer => "observer",
             Self::Tool => "tool",
             Self::Task => "task",
+            Self::Prompt => "prompt",
             Self::PlatformAdapter => "platform_adapter",
             Self::Manager => "manager",
             Self::Loader => "loader",
@@ -255,6 +258,8 @@ pub enum Capability {
     TaskHandle,
     /// 只读否决工具调用。不能覆盖 core 的既有判定。
     ToolAccessDecision,
+    /// 贡献上下文片段（受 core 预算约束）。
+    PromptContribute,
 }
 
 impl Capability {
@@ -277,6 +282,7 @@ impl Capability {
             Self::ToolCall => "tool_call",
             Self::TaskHandle => "task_handle",
             Self::ToolAccessDecision => "tool_access_decision",
+            Self::PromptContribute => "prompt_contribute",
         }
     }
 }
@@ -552,6 +558,33 @@ pub enum ToolAccessVerdict {
 /// 被两层入口各问一次）。返回 `Err` 时 core 按失败关闭处理（拒绝本次调用）。
 pub trait ToolAccessProvider: Send + Sync {
     fn check(&self, context: &ToolAccessContext<'_>) -> Result<ToolAccessVerdict, String>;
+}
+
+/// 上下文注入的输入。刻意只给会话/房间/平台/开轮原因；拿不到记录、Store、票或水位。
+#[derive(Debug, Clone)]
+pub struct PromptContext {
+    pub session: String,
+    pub room: RoomId,
+    pub platform: String,
+    pub reason: TurnReason,
+    pub wake_reason: Option<String>,
+    /// 本轮开始时间（毫秒）。
+    pub now: i64,
+}
+
+/// 插件要贡献的一段上下文。来源由 core 填，插件不能伪造。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptDraft {
+    pub text: String,
+    pub priority: i32,
+}
+
+/// 上下文注入 provider。
+///
+/// 契约：同步、只读、快；不要做网络/磁盘 I/O。core 在独立线程里调用并设超时，
+/// 超时/报错只跳过该 provider 的片段，不影响本轮投递。
+pub trait PromptProvider: Send + Sync {
+    fn prompts(&self, context: &PromptContext) -> Result<Vec<PromptDraft>, String>;
 }
 
 /// 内置唤醒策略：等价于原来的 `WakePolicy::decide`。
@@ -1128,6 +1161,8 @@ pub enum ProviderOptions<'a> {
     Task,
     /// 工具访问判定不需要策略配置。
     ToolAccess,
+    /// 上下文注入 provider 不需要策略配置。
+    Prompt,
     /// 平台适配器：按这条连接的配置实例化。
     PlatformAdapter(&'a Connection),
     /// 不需要 options 的扩展点（发送钩子）。
@@ -1148,6 +1183,7 @@ pub enum ProviderInstance {
     Tool(Arc<dyn ToolProvider>),
     Task(Arc<dyn crate::task::TaskHandler>),
     ToolAccess(Arc<dyn ToolAccessProvider>),
+    Prompt(Arc<dyn PromptProvider>),
     PlatformAdapter(Arc<dyn AdapterFactory>),
 }
 
@@ -1167,6 +1203,7 @@ impl ProviderInstance {
             Self::Tool(_) => ExtensionPoint::Tool,
             Self::Task(_) => ExtensionPoint::Task,
             Self::ToolAccess(_) => ExtensionPoint::ToolAccess,
+            Self::Prompt(_) => ExtensionPoint::Prompt,
             Self::PlatformAdapter(_) => ExtensionPoint::PlatformAdapter,
         }
     }
@@ -1462,6 +1499,7 @@ pub struct PluginManager {
     observers: HashMap<ProviderId, Arc<dyn RecordObserver>>,
     tool_providers: HashMap<ProviderId, Arc<dyn ToolProvider>>,
     tool_access: HashMap<ProviderId, Arc<dyn ToolAccessProvider>>,
+    prompt_providers: HashMap<ProviderId, Arc<dyn PromptProvider>>,
     /// handler 名 → (注册者 provider id, 执行器)。名字可比 provider id 短，所以
     /// 卸载时按注册者归属清，而不是猜名字前缀。
     task_handlers: HashMap<String, (ProviderId, Arc<dyn crate::task::TaskHandler>)>,
@@ -1546,6 +1584,7 @@ impl PluginManager {
                     | ExtensionPoint::Tool
                     | ExtensionPoint::Task
                     | ExtensionPoint::ToolAccess
+                    | ExtensionPoint::Prompt
                     | ExtensionPoint::PlatformAdapter
             ) {
                 return Err(PluginError::UnsupportedExtensionPoint {
@@ -1638,6 +1677,8 @@ impl PluginManager {
             self.tool_providers
                 .retain(|id, _| id.namespace() != namespace);
             self.tool_access.retain(|id, _| id.namespace() != namespace);
+            self.prompt_providers
+                .retain(|id, _| id.namespace() != namespace);
             self.task_handlers
                 .retain(|_, (owner, _)| owner.namespace() != namespace);
             self.adapter_providers
@@ -2287,6 +2328,59 @@ impl PluginManager {
         None
     }
 
+    /// 注册上下文注入 provider。
+    pub fn register_prompt(
+        &mut self,
+        descriptor: ProviderDescriptor,
+        provider: Arc<dyn PromptProvider>,
+    ) -> Result<(), PluginError> {
+        self.check_descriptor(
+            &descriptor,
+            ExtensionPoint::Prompt,
+            Capability::PromptContribute,
+        )?;
+        if self.descriptors.contains_key(&descriptor.id) {
+            return Err(PluginError::DuplicateProvider(descriptor.id.to_string()));
+        }
+        self.descriptors
+            .insert(descriptor.id.clone(), descriptor.clone());
+        self.prompt_providers.insert(descriptor.id, provider);
+        Ok(())
+    }
+
+    /// 按 provider id 取上下文注入 provider。只有会话配置显式引用的才会被调用。
+    pub fn prompt_provider(&self, id: &ProviderId) -> Option<Arc<dyn PromptProvider>> {
+        if let Some(provider) = self.prompt_providers.get(id) {
+            return Some(provider.clone());
+        }
+        let descriptor = self.descriptors.get(id)?;
+        if descriptor.extension_point != ExtensionPoint::Prompt {
+            return None;
+        }
+        let manager = self.managers.get(id.namespace())?;
+        match manager.instantiate(id, ProviderOptions::Prompt) {
+            Ok(ProviderInstance::Prompt(provider)) => Some(provider),
+            Ok(other) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.plugin.prompt_wrong_kind",
+                        id = id,
+                        found = format!("{:?}", other.extension_point())
+                    )
+                );
+                None
+            }
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("kernel.plugin.prompt_failed", id = id, error = error)
+                );
+                None
+            }
+        }
+    }
+
     /// 安装一棵树外 manager 子树。它拥有自己的 namespace 和子树注册表；Root 只做
     /// namespace / 版本 / 能力 / id 审计，之后把它子树里的 id 委托给它。
     ///
@@ -2407,6 +2501,7 @@ impl PluginManager {
                 ExtensionPoint::Tool => Capability::ToolCall,
                 ExtensionPoint::Task => Capability::TaskHandle,
                 ExtensionPoint::ToolAccess => Capability::ToolAccessDecision,
+                ExtensionPoint::Prompt => Capability::PromptContribute,
                 ExtensionPoint::PlatformAdapter => Capability::PlatformCatalog,
                 point => {
                     return Err(PluginError::UnsupportedExtensionPoint {
@@ -3418,6 +3513,41 @@ mod tests {
         assert!(
             manager.check_tool_access(&context).is_none(),
             "卸载 namespace 后否决点不能残留"
+        );
+    }
+
+    struct StubPrompt;
+
+    impl PromptProvider for StubPrompt {
+        fn prompts(&self, _context: &PromptContext) -> Result<Vec<PromptDraft>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn prompt_provider_is_removed_with_its_namespace() {
+        let mut manager = PluginManager::with_native_builtins();
+        manager
+            .install_manager(Arc::new(DemoManager))
+            .expect("能装 demo manager");
+        let id = ProviderId::parse("demo.prompt").expect("合法");
+        manager
+            .register_prompt(
+                ProviderDescriptor::new(
+                    id.clone(),
+                    ExtensionPoint::Prompt,
+                    PLUGIN_API_VERSION,
+                    vec![Capability::PromptContribute],
+                ),
+                Arc::new(StubPrompt),
+            )
+            .expect("能注册");
+        assert!(manager.prompt_provider(&id).is_some());
+
+        manager.uninstall_manager("demo").expect("能卸载");
+        assert!(
+            manager.prompt_provider(&id).is_none(),
+            "卸载 namespace 后注入来源不能残留"
         );
     }
 

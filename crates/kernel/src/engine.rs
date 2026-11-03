@@ -21,8 +21,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acb_proto::element::flatten_text;
 use acb_proto::{
-    Delivery, Element, ErrorCode, MemoryInfo, PersonaInfo, QuoteRef, Record, RecordKind, RoomId,
-    Sender, SessionInfo, Ticket, ToolError, TurnReason,
+    Delivery, Element, ErrorCode, MemoryInfo, PersonaInfo, PromptFragment, QuoteRef, Record,
+    RecordKind, RoomId, Sender, SessionInfo, Ticket, ToolError, TurnReason,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -40,8 +40,9 @@ use crate::outbound::{
 use crate::plugin::{
     AccessAction, AccessDecision, AccessRequest, Capability, ClockContext, DefaultDeliveryComposer,
     DefaultTurnErrorProvider, DeliveryRequest, InterruptScope, PluginError, PluginManager,
-    ProviderId, ReceiveDecision, ReceiveRequest, ReloadScope, RouteAction, RouteContext,
-    RouteDecision, SendContext, SendHook, SendOrigin, TurnErrorRequest, WakeContext,
+    PromptContext, PromptDraft, PromptProvider, ProviderId, ReceiveDecision, ReceiveRequest,
+    ReloadScope, RouteAction, RouteContext, RouteDecision, SendContext, SendHook, SendOrigin,
+    TurnErrorRequest, WakeContext,
 };
 use crate::plugin_meta::{PluginLifecycle, PluginSource};
 use crate::render;
@@ -68,6 +69,12 @@ const MAX_EXTENSION_FILE_BYTES: u64 = 64 * 1024;
 
 /// 进程内保留的任务记录上限；超出丢最旧的，避免无限增长。
 const TASK_KEEP: usize = 200;
+
+/// 上下文注入预算：单段/整轮字符数、单轮最多片段数、单个 provider 的超时。
+const PROMPT_FRAGMENT_MAX_CHARS: usize = 2000;
+const PROMPT_TOTAL_MAX_CHARS: usize = 6000;
+const PROMPT_MAX_FRAGMENTS: usize = 8;
+const PROMPT_TIMEOUT: Duration = Duration::from_millis(50);
 /// `task_list` 单页上限。
 const TASK_LIST_LIMIT: usize = 100;
 
@@ -3742,6 +3749,13 @@ impl<S: Store> Bridge<S> {
                 name: persona.name.clone(),
                 text: persona.text.clone(),
             });
+        let prompts = self.collect_prompts(
+            &turn_config,
+            &pending.session,
+            &pending.room,
+            pending.reason,
+            pending.wake_reason.as_deref(),
+        );
 
         // 批次已经由 composer 选好（默认是最旧一小段 + 最新一批），这里直接用它。
         Ok(Delivery {
@@ -3758,7 +3772,164 @@ impl<S: Store> Bridge<S> {
             omitted,
             // 0 = 配置里关了超时，harness 收到就别自己掐。
             turn_timeout_ms: Some(turn_config.turn_timeout_ms()),
+            prompts,
         })
+    }
+
+    /// 收集本轮插件贡献的上下文片段，并按预算裁剪/排序。
+    ///
+    /// provider 只拿到会话/房间/平台/开轮原因，拿不到记录、Store、票或水位；
+    /// 调用在独立线程里做，超时/报错只跳过该来源，不影响本轮投递。
+    fn collect_prompts(
+        &self,
+        config: &Config,
+        session: &str,
+        room: &RoomId,
+        reason: TurnReason,
+        wake_reason: Option<&str>,
+    ) -> Vec<PromptFragment> {
+        let Some(session_config) = config.session(session) else {
+            return Vec::new();
+        };
+        if session_config.prompts.is_empty() {
+            return Vec::new();
+        }
+        let platform = config
+            .connection(&room.connection)
+            .map(|connection| connection.platform.clone())
+            .unwrap_or_default();
+        let context = PromptContext {
+            session: session.to_owned(),
+            room: room.clone(),
+            platform,
+            reason,
+            wake_reason: wake_reason.map(str::to_owned),
+            now: now_millis(),
+        };
+
+        let mut collected: Vec<(ProviderId, String, i32, bool)> = Vec::new();
+        let mut failed = 0usize;
+        for id in &session_config.prompts {
+            let Some(provider) = self.plugins.prompt_provider(id) else {
+                failed += 1;
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.prompt.missing",
+                        provider = id,
+                        session = session,
+                        room = room
+                    )
+                );
+                continue;
+            };
+            let started = Instant::now();
+            match run_prompt_provider(provider, &context) {
+                Ok(drafts) => {
+                    for draft in drafts.into_iter().take(PROMPT_MAX_FRAGMENTS) {
+                        let text = draft.text.trim();
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let count = text.chars().count();
+                        let (text, truncated) = if count > PROMPT_FRAGMENT_MAX_CHARS {
+                            (clip_chars(text, PROMPT_FRAGMENT_MAX_CHARS), true)
+                        } else {
+                            (text.to_owned(), false)
+                        };
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "kernel.prompt.source",
+                                provider = id,
+                                session = session,
+                                room = room,
+                                chars = text.chars().count(),
+                                priority = draft.priority,
+                                truncated = truncated,
+                                ms = started.elapsed().as_millis()
+                            )
+                        );
+                        collected.push((id.clone(), text, draft.priority, truncated));
+                    }
+                }
+                Err(error) => {
+                    failed += 1;
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "kernel.prompt.source_skipped",
+                            provider = id,
+                            session = session,
+                            room = room,
+                            reason = error,
+                            ms = started.elapsed().as_millis()
+                        )
+                    );
+                }
+            }
+        }
+
+        // 优先级大的在前；同优先级按来源 id 稳定排序。
+        collected.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
+
+        let mut prompts = Vec::new();
+        let mut total = 0usize;
+        let mut dropped = 0usize;
+        for (source, text, priority, truncated) in collected {
+            if prompts.len() >= PROMPT_MAX_FRAGMENTS {
+                dropped += 1;
+                continue;
+            }
+            let chars = text.chars().count();
+            if total + chars <= PROMPT_TOTAL_MAX_CHARS {
+                prompts.push(PromptFragment {
+                    source: source.to_string(),
+                    text,
+                    priority,
+                    truncated,
+                });
+                total += chars;
+            } else if prompts.is_empty() {
+                // 高优先级来源至少保留一部分；这时才接受整轮上限内的裁剪。
+                let clipped = clip_chars(&text, PROMPT_TOTAL_MAX_CHARS);
+                prompts.push(PromptFragment {
+                    source: source.to_string(),
+                    text: clipped,
+                    priority,
+                    truncated: true,
+                });
+                total = PROMPT_TOTAL_MAX_CHARS;
+            } else {
+                dropped += 1;
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.prompt.drop",
+                        provider = source,
+                        session = session,
+                        room = room,
+                        chars = chars
+                    )
+                );
+            }
+        }
+
+        if !prompts.is_empty() || failed > 0 || dropped > 0 {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.prompt.audit",
+                    session = session,
+                    room = room,
+                    sources = prompts.len(),
+                    chars = total,
+                    failed = failed,
+                    dropped = dropped
+                )
+            );
+        }
+        prompts
     }
 
     /// 开轮前自愈：把水位之上「本连接账号自己发的」记录确认掉。
@@ -5927,6 +6098,19 @@ fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
+/// 严格不超过 `max` 字符（省略号也算在内），用于上下文注入预算。
+fn clip_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = text.chars().take(max - 1).collect::<String>();
+    out.push('…');
+    out
+}
+
 fn internal(error: impl std::fmt::Display) -> ToolError {
     ToolError::new(ErrorCode::Internal, error.to_string())
 }
@@ -5953,6 +6137,31 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// 在独立线程里调用一次 prompt provider；超时或 panic 都按“跳过该来源”处理。
+///
+/// 超时后线程可能还在跑，但它拿不到 Store/票/水位，最多浪费一点 CPU；这里不 join，
+/// 避免一个坏插件把整轮投递卡住。
+fn run_prompt_provider(
+    provider: Arc<dyn PromptProvider>,
+    context: &PromptContext,
+) -> Result<Vec<PromptDraft>, String> {
+    let context = context.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(provider.prompts(&context));
+    });
+    match receiver.recv_timeout(PROMPT_TIMEOUT) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(acb_i18n::t!(
+            "kernel.prompt.timeout",
+            ms = PROMPT_TIMEOUT.as_millis()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(acb_i18n::t!("kernel.prompt.panicked"))
+        }
+    }
 }
 
 /// 只把文本段拼起来：命令判定不该被 @ / 引用 / 图片占位符干扰。

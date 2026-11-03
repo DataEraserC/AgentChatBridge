@@ -16,6 +16,7 @@ import {
   personaSignature,
   renderElements,
   renderPersona,
+  renderPrompts,
   renderTurn,
 } from "../plugin/acb-wire.mjs"
 import {
@@ -269,6 +270,34 @@ test("空记录的一轮也要说清楚是例行检查", () => {
   const text = renderTurn({ ...delivery(), records: [], reason: "clock" })
   assert.match(text, /定时例行检查/)
   assert.match(text, /没有新记录/)
+})
+
+test("插件上下文独立成块，排在记录之前并带来源", () => {
+  const text = renderTurn({
+    ...delivery(),
+    prompts: [
+      { source: "demo.lore", text: "这是设定", priority: 5 },
+      { source: "demo.rules", text: "这是规则", priority: 1, truncated: true },
+    ],
+  })
+  const block = text.indexOf("[插件上下文]")
+  const record = text.indexOf("在吗")
+  assert.ok(block >= 0, `应当有独立块：${text}`)
+  assert.ok(block < record, `上下文要在记录之前：${text}`)
+  assert.match(text, /\[来源: demo\.lore\]/)
+  assert.match(text, /\[来源: demo\.rules\]/)
+  // 片段不能拼进记录行，也不能冒充用户消息。
+  assert.ok(!text.includes("[来源: demo.lore] 这是设定"), `片段要单独成行：${text}`)
+})
+
+test("旧桥没有 prompts 字段时输出完全不变", () => {
+  const legacy = renderTurn(delivery())
+  const empty = renderTurn({ ...delivery(), prompts: [] })
+  assert.equal(empty, legacy)
+  assert.ok(!legacy.includes("[插件上下文]"))
+  assert.equal(renderPrompts(undefined), "")
+  assert.equal(renderPrompts(null), "")
+  assert.equal(renderPrompts([]), "")
 })
 
 test("人格卡渲染成一段可注入的 context 文本", () => {
