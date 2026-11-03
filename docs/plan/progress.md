@@ -85,5 +85,5 @@
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
   仍使用 `~/.config/systemd/user/acb-bridge.service.d/worktree.conf` 指向 worktree debug 构建。
-- 未提交文件：`code-review-prompt.md`（按用户要求不提交）、
-  `docs/09-cordis-mechanism-evaluation.md`（上一轮评估稿，按“不提交”要求保留在工作区）。
+- 未提交文件：`code-review-prompt.md`（按用户要求不提交）。
+- `docs/09-cordis-mechanism-evaluation.md` 已补提交，作为 Cordis 评估的可评审产物。
