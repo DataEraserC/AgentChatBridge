@@ -439,6 +439,40 @@ path 例如 echo/manifest.toml。`,
     },
   },
   {
+    name: "task_list",
+    description: `列出本会话的后台任务记录（最新在前）。
+后台任务（route 的 task 动作）会记录任务 id、handler、状态、开始/结束时间、结果摘要和错误。
+任务可能在本轮结束后才完成；即使你没有收到唤醒，也可以回来用 task_list / task_get 查询。
+status 可过滤 queued / running / succeeded / failed。`,
+    schema: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: ["queued", "running", "succeeded", "failed"],
+          description: "只看某个状态",
+        },
+        limit: { type: "integer", description: "最多返回几条，默认 20，上限 100" },
+        offset: { type: "integer", description: "从第几条开始（翻页）" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "task_get",
+    description: `按任务 id 查一条本会话的后台任务记录。
+返回 handler、params_summary、状态、时间、result、error、delivery_error。
+只能查当前会话的任务；跨会话 id 会报 not found。`,
+    schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "task_list 返回的任务 id" },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "report_feedback",
     description: `把「你被什么卡住了」写回桥里——这是你唯一正式的抱怨出口。
 

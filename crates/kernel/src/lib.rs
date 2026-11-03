@@ -36,7 +36,7 @@ pub use config::{
     WakeVerdict,
 };
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
-pub use engine::{Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned};
+pub use engine::{Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned, TaskRecord, TaskStatus};
 pub use event_queue::{EventQueue, EventReceiver, drain_events};
 pub use outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, Outbounds, OutgoingKind,

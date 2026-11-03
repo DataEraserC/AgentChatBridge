@@ -73,6 +73,11 @@ fn run_action<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, action: PreparedRouteAct
 }
 
 fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
+    {
+        let mut guard = lock(bridge);
+        guard.mark_task_running(&task.task_id);
+    }
+
     let outcome = match task::run(&task.handler, &task.params) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -84,11 +89,20 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
                     error = error
                 )
             );
+            lock(bridge).finish_task(&task.task_id, None, Some(error), None);
             return;
         }
     };
     let candidates = match outcome {
-        task::TaskOutcome::Nothing => return,
+        task::TaskOutcome::Nothing => {
+            lock(bridge).finish_task(
+                &task.task_id,
+                Some(serde_json::json!({ "outcome": "nothing" })),
+                None,
+                None,
+            );
+            return;
+        }
         task::TaskOutcome::Send(candidates) => candidates,
     };
     let total = candidates.len();
@@ -108,12 +122,19 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
+                let detail = format!("{error:?}");
                 eprintln!(
                     "{}",
                     acb_i18n::t!(
                         "kernel.route_worker.task_result_assemble_failed",
-                        error = format!("{error:?}")
+                        error = detail
                     )
+                );
+                lock(bridge).finish_task(
+                    &task.task_id,
+                    Some(serde_json::json!({ "outcome": "assemble_failed" })),
+                    Some(detail),
+                    None,
                 );
                 return;
             }
@@ -121,15 +142,25 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
         match prepared.execute() {
             Ok(sent) => {
                 let mut guard = lock(bridge);
-                if let Err(error) = guard.finish_send(prepared, Ok(sent)) {
+                let send_error = guard
+                    .finish_send(prepared, Ok(sent))
+                    .err()
+                    .map(|error| format!("{error:?}"));
+                if let Some(error) = &send_error {
                     eprintln!(
                         "{}",
-                        acb_i18n::t!(
-                            "kernel.route_worker.task_result_send_failed",
-                            error = format!("{error:?}")
-                        )
+                        acb_i18n::t!("kernel.route_worker.task_result_send_failed", error = error)
                     );
                 }
+                guard.finish_task(
+                    &task.task_id,
+                    Some(serde_json::json!({
+                        "outcome": "sent",
+                        "candidates": total,
+                    })),
+                    None,
+                    send_error,
+                );
                 return;
             }
             Err(OutboundError::Unsupported(detail)) if index + 1 < total => {
@@ -143,20 +174,42 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
                 );
             }
             Err(error) => {
+                let detail = format!("{error:?}");
                 let mut guard = lock(bridge);
-                if let Err(error) = guard.finish_send(prepared, Err(error)) {
+                let send_error = guard
+                    .finish_send(prepared, Err(error))
+                    .err()
+                    .map(|error| format!("{error:?}"));
+                if let Some(error) = &send_error {
                     eprintln!(
                         "{}",
-                        acb_i18n::t!(
-                            "kernel.route_worker.task_result_send_failed",
-                            error = format!("{error:?}")
-                        )
+                        acb_i18n::t!("kernel.route_worker.task_result_send_failed", error = error)
                     );
                 }
+                guard.finish_task(
+                    &task.task_id,
+                    Some(serde_json::json!({ "outcome": "send_failed" })),
+                    None,
+                    Some(detail),
+                );
                 return;
             }
         }
     }
+
+    eprintln!(
+        "{}",
+        acb_i18n::t!(
+            "kernel.route_worker.task_result_assemble_failed",
+            error = "all send candidates unsupported"
+        )
+    );
+    lock(bridge).finish_task(
+        &task.task_id,
+        Some(serde_json::json!({ "outcome": "unsupported" })),
+        Some("all send candidates unsupported".to_owned()),
+        None,
+    );
 }
 
 fn lock<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>) -> std::sync::MutexGuard<'_, Bridge<S>> {

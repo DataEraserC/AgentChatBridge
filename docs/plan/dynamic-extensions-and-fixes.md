@@ -154,12 +154,34 @@ agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例
 
 ### T7. 任务结果与反馈回复的唤醒闭环
 
-- [ ] task 注册表与任务记录：task_id、origin、handler、状态、结果、错误、时间。
-- [ ] `task_list` / `task_get` 工具；任务完成后写 `kind=task` 合成事件。
-- [ ] `wake_on = never|error|always` 快捷条件；默认走现有 wake 策略。
-- [ ] 高信任模块的直接唤醒 API，带审计与频率限制；合成事件跳过会再次触发同一 route 的路径。
-- [ ] feedback reply 复用同一套事件，回复时可唤醒原会话。
-- 依据：ADR-0029 D5、D9.4；feedback 4。
+**完成时用户能做什么：** AI 触发的后台任务有可查询的 id/状态/结果/错误；任务完成可按
+`wake_on` 自动唤醒，也可以完全不唤醒、由 AI 在后续轮次用 `task_list` / `task_get`
+自查；feedback 回复复用同一套事件并唤醒原会话，且不会形成自触发循环。
+
+#### T7a：任务记录与查询（已完成）
+
+- [x] Bridge 进程内任务注册表：task_id、origin、handler、参数摘要、状态、
+      创建/开始/结束时间、result、error、delivery_error。
+- [x] `task_list` / `task_get` 工具；按会话隔离，任务结束后仍可查询。
+- [x] RouteWorker 记录 queued → running → succeeded / failed；发送失败写 `delivery_error`。
+- [x] 记录上限 200 条，超出丢最旧；重启清空（持久化留给后续阶段）。
+- 实测：`cargo test -p acb-kernel --test task_flow` 2/2；`cargo test --workspace` 全通过；
+  dsh/opencode harness 测试通过。
+- 边界：本阶段不写 `kind=task` 合成事件，不做 `wake_on`，不接 feedback reply。
+
+#### T7b：合成事件与唤醒（待办）
+
+- [ ] 任务完成写 `kind=task` 合成事件；`wake_on = never|error|always`。
+- [ ] 合成事件跳过会再次触发同一 route 的路径，避免失败→唤醒→再失败循环。
+- [ ] 高信任模块直接唤醒 API，带审计与频率限制。
+- 依据：ADR-0029 D5、D9.4。
+
+#### T7c：反馈回复（待办）
+
+- [ ] `feedback_list` / `feedback_get` / `feedback_reply`；回复复用 T7b 事件唤醒原会话。
+- [ ] 控制台反馈回复与状态流转。
+- 依据：ADR-0021、ADR-0029 D5；feedback 4。
+
 - 验收：任务失败/成功可按策略唤醒；AI 未唤醒也能用 `task_get` 查到结果；无自触发循环。
 
 ### T8. 反馈生命周期（feedback 4）

@@ -537,6 +537,8 @@
   "kernel.engine.unknown_method_supports": "这个连接支持：{methods}",
   "kernel.engine.unknown_param": "[bad_params] {method} 不认识参数 {parameter}；{known}",
   "kernel.engine.unknown_ticket": "这张票无效或本轮已结束：{ticket}",
+  "kernel.engine.task_bad_status": "task_list 的 status 只能是 queued / running / succeeded / failed，收到 {status}",
+  "kernel.engine.task_not_found": "没有任务 {id}（或不属于当前会话）",
   "kernel.engine.unknown_tool": "没有这个工具：{tool}",
   "kernel.engine.unknown_plugin": "没有这个插件 provider：{id}",
   "kernel.engine.unload_applied": "已卸载动态 provider {id}",

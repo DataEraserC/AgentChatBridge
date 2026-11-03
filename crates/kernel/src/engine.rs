@@ -55,8 +55,8 @@ use crate::tools::{
     ExtensionsWriteArgs, FeedbackArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT,
     MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs, MemoryBlameArgs, MemoryCommitArgs,
     MemoryListArgs, MemoryLogArgs, MemorySearchArgs, MemoryWriteArgs, NotesArgs, PlatformCallArgs,
-    PlatformMethodsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, WaitMessageArgs,
-    is_known,
+    PlatformMethodsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, TaskGetArgs,
+    TaskListArgs, WaitMessageArgs, is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -64,6 +64,11 @@ pub const MAX_DELIVERY: usize = 200;
 
 /// authoring 工具读/写单个扩展文件的硬上限。
 const MAX_EXTENSION_FILE_BYTES: u64 = 64 * 1024;
+
+/// 进程内保留的任务记录上限；超出丢最旧的，避免无限增长。
+const TASK_KEEP: usize = 200;
+/// `task_list` 单页上限。
+const TASK_LIST_LIMIT: usize = 100;
 
 fn extension_namespace(namespace: Option<&str>) -> &str {
     namespace
@@ -270,11 +275,59 @@ pub(crate) enum PreparedRouteAction {
 
 /// 一个已经确定房间/会话、但还没开始跑的后台任务。
 pub(crate) struct PreparedTask {
+    pub task_id: String,
     pub room: RoomId,
     pub session: String,
     pub config: Arc<Config>,
     pub handler: String,
     pub params: Value,
+}
+
+/// 后台任务状态。任务记录只活在本进程，重启后清空（持久化留给后续阶段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl TaskStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "queued" => Self::Queued,
+            "running" => Self::Running,
+            "succeeded" => Self::Succeeded,
+            "failed" => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+/// 一条后台任务记录。给 `task_list` / `task_get` 和任务完成事件用。
+#[derive(Debug, Clone)]
+pub struct TaskRecord {
+    pub id: String,
+    pub session: String,
+    pub room: RoomId,
+    pub handler: String,
+    pub params_summary: String,
+    pub status: TaskStatus,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub result: Option<Value>,
+    pub error: Option<String>,
+    pub delivery_error: Option<String>,
 }
 
 /// `begin_tool_call` 的两种结果：不需要平台 I/O 的已经做完了；需要平台的交给 endpoint
@@ -342,6 +395,10 @@ pub struct Bridge<S: Store> {
     pending_manager_reloads: Vec<String>,
     /// manager 重载失败的原因，按 namespace 记录。
     manager_errors: HashMap<String, String>,
+    /// 后台任务记录，按创建时间从旧到新；超过上限丢最旧的。
+    tasks: VecDeque<TaskRecord>,
+    /// 任务 id 序号；和票前缀一起保证进程内唯一。
+    task_seq: u64,
     /// 配置版本号：每换一次配置 +1，控制台靠它展示「配置换过没有」。
     config_version: u64,
 }
@@ -413,6 +470,8 @@ impl<S: Store> Bridge<S> {
             plugin_errors: HashMap::new(),
             pending_manager_reloads: Vec::new(),
             manager_errors: HashMap::new(),
+            tasks: VecDeque::new(),
+            task_seq: 0,
             config_version: 0,
         }
     }
@@ -646,6 +705,121 @@ impl<S: Store> Bridge<S> {
             "lastError": error,
             "details": self.plugins.manager_details(namespace),
         })
+    }
+
+    fn create_task_record(
+        &mut self,
+        room: &RoomId,
+        session: &str,
+        handler: &str,
+        params: &Value,
+    ) -> String {
+        self.task_seq = self.task_seq.saturating_add(1);
+        let id = format!("task-{}-{}", self.ticket_prefix, self.task_seq);
+        self.tasks.push_back(TaskRecord {
+            id: id.clone(),
+            session: session.to_owned(),
+            room: room.clone(),
+            handler: handler.to_owned(),
+            params_summary: summarize_params(params),
+            status: TaskStatus::Queued,
+            created_at: now_millis(),
+            started_at: None,
+            finished_at: None,
+            result: None,
+            error: None,
+            delivery_error: None,
+        });
+        while self.tasks.len() > TASK_KEEP {
+            self.tasks.pop_front();
+        }
+        id
+    }
+
+    pub(crate) fn mark_task_running(&mut self, task_id: &str) {
+        if let Some(record) = self.tasks.iter_mut().find(|record| record.id == task_id) {
+            record.status = TaskStatus::Running;
+            record.started_at = Some(now_millis());
+        }
+    }
+
+    pub(crate) fn finish_task(
+        &mut self,
+        task_id: &str,
+        result: Option<Value>,
+        error: Option<String>,
+        delivery_error: Option<String>,
+    ) {
+        if let Some(record) = self.tasks.iter_mut().find(|record| record.id == task_id) {
+            record.status = if error.is_some() || delivery_error.is_some() {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Succeeded
+            };
+            record.finished_at = Some(now_millis());
+            record.result = result;
+            record.error = error;
+            record.delivery_error = delivery_error;
+        }
+    }
+
+    /// 列当前会话的任务记录（最新在前）。任务可能在轮次结束后才完成，
+    /// 所以这个查询不依赖任务触发时的票是否还活着。
+    pub fn task_list(
+        &self,
+        session: &str,
+        status: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Value, ToolError> {
+        let wanted = match status.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(text) => Some(TaskStatus::parse(text).ok_or_else(|| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("kernel.engine.task_bad_status", status = text),
+                )
+            })?),
+            None => None,
+        };
+        let records: Vec<&TaskRecord> = self
+            .tasks
+            .iter()
+            .rev()
+            .filter(|record| record.session == session)
+            .filter(|record| wanted.is_none_or(|status| record.status == status))
+            .collect();
+        let total = records.len();
+        let limit = limit.clamp(1, TASK_LIST_LIMIT);
+        let tasks: Vec<Value> = records
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(task_json)
+            .collect();
+        Ok(json!({
+            "session": session,
+            "total": total,
+            "offset": offset,
+            "returned": tasks.len(),
+            "has_more": offset + tasks.len() < total,
+            "tasks": tasks,
+        }))
+    }
+
+    /// 按 id 查一条任务记录；只允许查询本会话的任务。
+    pub fn task_get(&self, session: &str, task_id: &str) -> Result<Value, ToolError> {
+        let record = self
+            .tasks
+            .iter()
+            .rev()
+            .find(|record| record.id == task_id && record.session == session)
+            .ok_or_else(|| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("kernel.engine.task_not_found", id = task_id),
+                )
+            })?;
+        Ok(task_json(record))
     }
 
     fn require_extension_admin(
@@ -1471,8 +1645,10 @@ impl<S: Store> Bridge<S> {
                     );
                     return Ok(());
                 };
+                let task_id = self.create_task_record(&room, &session, &handler, &params);
                 self.pending_route_actions
                     .push(PreparedRouteAction::Task(PreparedTask {
+                        task_id,
                         room: room.clone(),
                         session,
                         config: Arc::new(self.config.clone()),
@@ -1920,6 +2096,19 @@ impl<S: Store> Bridge<S> {
                         namespace = namespace
                     ),
                 }))
+            }
+            "task_list" => {
+                let args: TaskListArgs = parse(args)?;
+                self.task_list(
+                    &turn_session,
+                    args.status.as_deref(),
+                    args.limit.unwrap_or(20),
+                    args.offset.unwrap_or(0),
+                )
+            }
+            "task_get" => {
+                let args: TaskGetArgs = parse(args)?;
+                self.task_get(&turn_session, &args.id)
             }
             // 反馈：诚实报告「这里卡住了」。这是出口，不是抱怨箱（ADR-0021）。
             "report_feedback" => {
@@ -2378,7 +2567,8 @@ impl<S: Store> Bridge<S> {
                     ));
                 }
             }
-            "report_feedback" => {}
+            // 任务结果查询不依赖任务触发时的票：任务可能在本轮结束后才完成。
+            "report_feedback" | "task_list" | "task_get" => {}
             _ => return Err(no_active_round()),
         }
 
@@ -4674,6 +4864,54 @@ fn note_json(note: &Note) -> Value {
         "corrected": note.corrected,
         "updated_at": note.updated_at,
     })
+}
+
+fn task_json(record: &TaskRecord) -> Value {
+    json!({
+        "id": record.id,
+        "session": record.session,
+        "room": record.room.to_string(),
+        "handler": record.handler,
+        "params_summary": record.params_summary,
+        "status": record.status.as_str(),
+        "created_at": record.created_at,
+        "started_at": record.started_at,
+        "finished_at": record.finished_at,
+        "result": record.result,
+        "error": record.error,
+        "delivery_error": record.delivery_error,
+    })
+}
+
+/// 任务参数摘要：只留够识别任务的一小段，避免把命令环境/长 JSON 原样塞回模型。
+fn summarize_params(params: &Value) -> String {
+    if let Some(command) = params.get("command").and_then(Value::as_array) {
+        let joined = command
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| item.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        return truncate_chars(&joined, 200);
+    }
+    if let Some(send) = params.get("send") {
+        return truncate_chars(&format!("send={send}"), 200);
+    }
+    truncate_chars(
+        &serde_json::to_string(params).unwrap_or_else(|_| "{}".to_owned()),
+        200,
+    )
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut out = text.chars().take(max).collect::<String>();
+    if text.chars().count() > max {
+        out.push('…');
+    }
+    out
 }
 
 fn internal(error: impl std::fmt::Display) -> ToolError {
