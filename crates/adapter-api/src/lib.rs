@@ -648,6 +648,7 @@ mod tests {
                     required: true,
                     desc: "正文".into(),
                     values: vec![],
+                    example: None,
                 }],
                 targets: vec![],
                 effect: "read".into(),
