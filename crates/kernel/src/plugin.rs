@@ -1641,6 +1641,8 @@ pub struct PluginManager {
     /// 安装顺序（含嵌套子树）。reload/health 正序，shutdown 逆序。
     manager_order: Vec<String>,
     descriptors: HashMap<ProviderId, ProviderDescriptor>,
+    /// 实例化失败（含 panic）的 provider → 最近一次错误。控制台 `lastError` 用。
+    instantiate_errors: Mutex<HashMap<ProviderId, String>>,
     /// 安装过的 loader，用于按 provider 找到能卸载它的载体。
     loaders: Vec<Arc<dyn PluginLoader>>,
 }
@@ -1679,6 +1681,59 @@ impl PluginManager {
             .install_loader(&NativeLoader)
             .expect("built-in providers must register successfully");
         manager
+    }
+
+    /// 实例化一个 manager provider；插件 panic 只影响这一个 provider。
+    ///
+    /// 失败写进 `instantiate_errors`（控制台 `lastError` 可见），并返回
+    /// `PluginError::Provider`。成功会清掉旧错误，允许插件恢复。
+    fn instantiate_safe(
+        &self,
+        manager: &Arc<dyn ManagerPlugin>,
+        id: &ProviderId,
+        options: ProviderOptions<'_>,
+    ) -> Result<ProviderInstance, PluginError> {
+        match catch_unwind(AssertUnwindSafe(|| manager.instantiate(id, options))) {
+            Ok(Ok(instance)) => {
+                self.instantiate_errors
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(id);
+                Ok(instance)
+            }
+            Ok(Err(error)) => {
+                self.instantiate_errors
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(id.clone(), error.to_string());
+                Err(error)
+            }
+            Err(payload) => {
+                let error = PluginError::Provider {
+                    id: id.to_string(),
+                    detail: acb_i18n::t!(
+                        "kernel.plugin.instantiate_panicked",
+                        id = id,
+                        panic = panic_text(payload)
+                    ),
+                };
+                eprintln!("{error}");
+                self.instantiate_errors
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(id.clone(), error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    /// 最近一次实例化错误（控制台 `lastError` 用）。
+    pub fn provider_error(&self, id: &ProviderId) -> Option<String> {
+        self.instantiate_errors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .cloned()
     }
 
     /// 安装一个 loader。动态/进程/Lua loader 后续通过这个入口注册。
@@ -1876,15 +1931,23 @@ impl PluginManager {
     ///
     /// 描述由插件作者声明，core 不靠它做行为判断；health 来自 manager 子树。
     pub fn catalog(&self) -> Vec<PluginInfo> {
+        let instantiate_errors = self
+            .instantiate_errors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let mut infos: Vec<PluginInfo> = self
             .descriptors
             .values()
             .map(|descriptor| {
-                let health = self
-                    .managers
-                    .get(descriptor.id.namespace())
-                    .map(|manager| manager.health())
-                    .unwrap_or(Health::Healthy);
+                let health = match instantiate_errors.get(&descriptor.id) {
+                    Some(error) => Health::Unhealthy(error.clone()),
+                    None => self
+                        .managers
+                        .get(descriptor.id.namespace())
+                        .map(|manager| manager.health())
+                        .unwrap_or(Health::Healthy),
+                };
                 let unloadable = self
                     .loaders
                     .iter()
@@ -1954,7 +2017,7 @@ impl PluginManager {
             ));
         };
 
-        match manager.instantiate(&id, ProviderOptions::PlatformAdapter(connection)) {
+        match self.instantiate_safe(manager, &id, ProviderOptions::PlatformAdapter(connection)) {
             Ok(ProviderInstance::PlatformAdapter(factory)) => {
                 create_instance(factory.as_ref(), connection, events)
             }
@@ -2244,7 +2307,7 @@ impl PluginManager {
             return Some(provider.clone());
         }
         let manager = self.managers.get(id.namespace())?;
-        match manager.instantiate(id, ProviderOptions::Tool) {
+        match self.instantiate_safe(manager, id, ProviderOptions::Tool) {
             Ok(ProviderInstance::Tool(provider)) => Some(provider),
             Ok(other) => {
                 eprintln!(
@@ -2323,7 +2386,7 @@ impl PluginManager {
             return None;
         }
         let manager = self.managers.get(id.namespace())?;
-        match manager.instantiate(&id, ProviderOptions::Task) {
+        match self.instantiate_safe(manager, &id, ProviderOptions::Task) {
             Ok(ProviderInstance::Task(handler)) => Some(handler),
             Ok(other) => {
                 eprintln!(
@@ -2385,7 +2448,7 @@ impl PluginManager {
             let Some(manager) = self.managers.get(id.namespace()) else {
                 continue;
             };
-            match manager.instantiate(id, ProviderOptions::Observer) {
+            match self.instantiate_safe(manager, id, ProviderOptions::Observer) {
                 Ok(ProviderInstance::Observer(observer)) => observe_one(id, &observer, record),
                 Ok(other) => eprintln!(
                     "{}",
@@ -2451,7 +2514,7 @@ impl PluginManager {
                     );
                     continue;
                 };
-                match manager.instantiate(id, ProviderOptions::ToolAccess) {
+                match self.instantiate_safe(manager, id, ProviderOptions::ToolAccess) {
                     Ok(ProviderInstance::ToolAccess(provider)) => provider,
                     Ok(other) => {
                         let reason = acb_i18n::t!(
@@ -2517,7 +2580,7 @@ impl PluginManager {
             return None;
         }
         let manager = self.managers.get(id.namespace())?;
-        match manager.instantiate(id, ProviderOptions::Prompt) {
+        match self.instantiate_safe(manager, id, ProviderOptions::Prompt) {
             Ok(ProviderInstance::Prompt(provider)) => Some(provider),
             Ok(other) => {
                 eprintln!(
@@ -2819,7 +2882,7 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(PluginError::UnknownProvider(id.to_string()));
         };
-        match manager.instantiate(id, ProviderOptions::Wake(options))? {
+        match self.instantiate_safe(manager, id, ProviderOptions::Wake(options))? {
             ProviderInstance::Wake(provider) => Ok(provider),
             other => Err(PluginError::WrongProviderKind {
                 id: id.to_string(),
@@ -2850,7 +2913,7 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(PluginError::UnknownProvider(id.to_string()));
         };
-        match manager.instantiate(id, ProviderOptions::Access(options))? {
+        match self.instantiate_safe(manager, id, ProviderOptions::Access(options))? {
             ProviderInstance::Access(provider) => Ok(provider),
             other => Err(PluginError::WrongProviderKind {
                 id: id.to_string(),
@@ -2881,7 +2944,7 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(PluginError::UnknownProvider(id.to_string()));
         };
-        match manager.instantiate(id, ProviderOptions::Delivery(options))? {
+        match self.instantiate_safe(manager, id, ProviderOptions::Delivery(options))? {
             ProviderInstance::Delivery(provider) => Ok(provider),
             other => Err(PluginError::WrongProviderKind {
                 id: id.to_string(),
@@ -2908,7 +2971,7 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(PluginError::UnknownProvider(id.to_string()));
         };
-        match manager.instantiate(id, ProviderOptions::None)? {
+        match self.instantiate_safe(manager, id, ProviderOptions::None)? {
             ProviderInstance::Send(hook) => Ok(hook),
             other => Err(PluginError::WrongProviderKind {
                 id: id.to_string(),
@@ -2947,7 +3010,7 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(PluginError::UnknownProvider(id.to_string()));
         };
-        match manager.instantiate(id, ProviderOptions::TurnError(options))? {
+        match self.instantiate_safe(manager, id, ProviderOptions::TurnError(options))? {
             ProviderInstance::TurnError(provider) => Ok(provider),
             other => Err(PluginError::WrongProviderKind {
                 id: id.to_string(),
@@ -2978,7 +3041,7 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(PluginError::UnknownProvider(id.to_string()));
         };
-        match manager.instantiate(id, ProviderOptions::Clock(options))? {
+        match self.instantiate_safe(manager, id, ProviderOptions::Clock(options))? {
             ProviderInstance::Clock(provider) => Ok(provider),
             other => Err(PluginError::WrongProviderKind {
                 id: id.to_string(),
@@ -3009,7 +3072,7 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(PluginError::UnknownProvider(id.to_string()));
         };
-        match manager.instantiate(id, ProviderOptions::Receive(options))? {
+        match self.instantiate_safe(manager, id, ProviderOptions::Receive(options))? {
             ProviderInstance::Receive(provider) => Ok(provider),
             other => Err(PluginError::WrongProviderKind {
                 id: id.to_string(),
@@ -3040,7 +3103,7 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(PluginError::UnknownProvider(id.to_string()));
         };
-        match manager.instantiate(id, ProviderOptions::Route(options))? {
+        match self.instantiate_safe(manager, id, ProviderOptions::Route(options))? {
             ProviderInstance::Route(provider) => Ok(provider),
             other => Err(PluginError::WrongProviderKind {
                 id: id.to_string(),
