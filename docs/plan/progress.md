@@ -637,6 +637,30 @@
   3. 存储恢复：损坏的 SQLite 文件启动时报明确错误；不会悄悄新建空库；已有好库仍能读。
 - 纪律：重任务串行；每个小项一提交一推送。
 
+## 2026-11-04 06:30 CST — core 内存与延迟基准（结果）
+
+- 任务编号：剩余项 1（基准）
+- 做了什么：新增 `crates/kernel/examples/core_bench.rs`；父进程为 0/100/500 个空观察者
+  各起一个干净子进程，输出 JSON 行；口径为 `/proc/self/status` 的 VmRSS/VmHWM 与
+  ingest→poll_turn→end_turn 的墙钟耗时。
+- 复跑命令：`cargo run --release -p acb-kernel --example core_bench`
+- 基线（本机 release，2026-11-04）：
+  - 0 观察者：进程启动 RSS 3,216 KiB；建桥后 4,812 KiB；HWM 5,236 KiB；
+    建桥 455 µs；单轮 p50 42 µs / p95 58 µs / max 62 µs。
+  - 100 观察者：启动 3,304 KiB；建桥后 4,980 KiB；HWM 5,356 KiB；
+    建桥 453 µs；p50 44 µs / p95 62 µs / max 67 µs。
+  - 500 观察者：启动 3,184 KiB；建桥后 5,396 KiB；HWM 5,824 KiB；
+    建桥 743 µs；p50 77 µs / p95 92 µs / max 95 µs。
+- 解读：
+  - 空观察者本身几乎不改变单轮延迟；500 个时 p50 从 42 µs 升到 77 µs，主要是每条记录
+    append 后把 500 个 provider id 排序一次（`observe` 的既有实现）。
+  - 内存随插件数增长约 1.2 KiB/观察者（500 个约 +584 KiB），没有阶跃式泄漏。
+  - 这是“插件壳”成本，不含真实插件内部逻辑/I/O；后续若做观察者批量/索引优化，
+    用这组数字做对照。
+- 证据/产物：`cargo run --release -p acb-kernel --example core_bench` 输出上述 JSON；
+  `cargo check --workspace --all-targets` 通过。
+- 可回退：纯 example + 文档，不影响生产代码。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
