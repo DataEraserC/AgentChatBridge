@@ -25,7 +25,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use acb_adapter_api::abi::{ABI_VERSION, AdapterV1, ENTRY_SYMBOL, EntryFn, HostV1};
+use acb_adapter_api::abi::{
+    ABI_VERSION, ABI_VERSION_V2, AcbPluginV2, AdapterV1, ENTRY_SYMBOL, ENTRY_SYMBOL_V2, EntryFn,
+    EntryFnV2, HostV1, PLUGIN_FLAG_UNLOAD_SAFE,
+};
 use acb_adapter_api::{
     AdapterMessage, CoreMessage, WireAccessRequest, WireClockRequest, WireConnection,
     WireDeliveryRequest, WireError, WireInstanceConfig, WireManifest, WireReceiveRequest,
@@ -48,11 +51,158 @@ use acb_kernel::{
 };
 use libloading::Library;
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 
 /// 动态库的一次发送/调用最多等这么久。超时只保证 core 不被卡死；插件线程本身
 /// 无法安全打断，超时后会把该 handle 视为不可用（后续调用继续超时，重启桥即可）。
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// ABI v2 的独立装载器：只接受声明 `UNLOAD_SAFE` 的插件，调用方显式
+/// `destroy` 全部 handle 后可以 `unload`（dlclose）。
+///
+/// 这是 ADR-0030 的第一层：ABI 和 loader 级卸载路径。Root 的安全点调度尚未接入，
+/// 因此 v2 目前不注册进 PluginManager；接入时复用同一张函数表。
+pub struct UnloadSafeLibrary {
+    library: Library,
+    table: AcbPluginV2,
+    path: PathBuf,
+}
+
+impl UnloadSafeLibrary {
+    pub fn load(path: &str) -> Result<Self, String> {
+        let library = unsafe { Library::new(path) }
+            .map_err(|error| acb_i18n::t!("adapter.dynamic.open_library_failed", error = error))?;
+        let entry: libloading::Symbol<'_, EntryFnV2> = unsafe { library.get(ENTRY_SYMBOL_V2) }
+            .map_err(|error| {
+                acb_i18n::t!(
+                    "adapter.dynamic.missing_export",
+                    symbol = String::from_utf8_lossy(ENTRY_SYMBOL_V2),
+                    error = error
+                )
+            })?;
+        let table_ptr = unsafe { entry() };
+        if table_ptr.is_null() {
+            return Err(acb_i18n::t!("adapter.dynamic.empty_table"));
+        }
+        let table = unsafe { *table_ptr };
+        if table.abi_version != ABI_VERSION_V2 {
+            return Err(acb_i18n::t!(
+                "adapter.dynamic.abi_incompatible",
+                version = table.abi_version,
+                required = ABI_VERSION_V2
+            ));
+        }
+        let required_size = std::mem::size_of::<AcbPluginV2>() as u32;
+        if table.struct_size < required_size {
+            return Err(acb_i18n::t!(
+                "adapter.dynamic.v2_struct_too_small",
+                size = table.struct_size,
+                required = required_size
+            ));
+        }
+        if table.flags & PLUGIN_FLAG_UNLOAD_SAFE == 0 {
+            return Err(acb_i18n::t!(
+                "adapter.dynamic.v2_unload_safe_required",
+                path = path
+            ));
+        }
+        if table.manifest.is_none()
+            || table.create.is_none()
+            || table.invoke.is_none()
+            || table.destroy.is_none()
+            || table.free_string.is_none()
+        {
+            return Err(acb_i18n::t!("adapter.dynamic.incomplete_table"));
+        }
+        Ok(Self {
+            library,
+            table,
+            path: PathBuf::from(path),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn manifest(&self) -> Result<String, String> {
+        let function = self
+            .table
+            .manifest
+            .ok_or_else(|| acb_i18n::t!("adapter.dynamic.incomplete_table"))?;
+        let pointer = unsafe { function() };
+        take_c_string(&self.table, pointer, "manifest")
+    }
+
+    pub fn create(&self, config_json: &str, host: &HostV1) -> Result<*mut c_void, String> {
+        let function = self
+            .table
+            .create
+            .ok_or_else(|| acb_i18n::t!("adapter.dynamic.incomplete_table"))?;
+        let config = CString::new(config_json).map_err(|error| {
+            acb_i18n::t!(
+                "adapter.dynamic.v2_call_failed",
+                call = "create",
+                error = error
+            )
+        })?;
+        let handle = unsafe { function(config.as_ptr(), host) };
+        if handle.is_null() {
+            return Err(acb_i18n::t!(
+                "adapter.dynamic.v2_call_failed",
+                call = "create",
+                error = "null handle"
+            ));
+        }
+        Ok(handle)
+    }
+
+    pub fn invoke(&self, handle: *mut c_void, request_json: &str) -> Result<String, String> {
+        let function = self
+            .table
+            .invoke
+            .ok_or_else(|| acb_i18n::t!("adapter.dynamic.incomplete_table"))?;
+        let request = CString::new(request_json).map_err(|error| {
+            acb_i18n::t!(
+                "adapter.dynamic.v2_call_failed",
+                call = "invoke",
+                error = error
+            )
+        })?;
+        let pointer = unsafe { function(handle, request.as_ptr()) };
+        take_c_string(&self.table, pointer, "invoke")
+    }
+
+    pub fn destroy(&self, handle: *mut c_void) {
+        if let Some(function) = self.table.destroy {
+            unsafe { function(handle) };
+        }
+    }
+
+    /// 调用方必须先 destroy 所有 handle；之后丢弃 Library 触发 dlclose。
+    pub fn unload(self) -> Result<(), String> {
+        drop(self.library);
+        Ok(())
+    }
+}
+
+fn take_c_string(table: &AcbPluginV2, pointer: *mut c_char, call: &str) -> Result<String, String> {
+    if pointer.is_null() {
+        return Err(acb_i18n::t!(
+            "adapter.dynamic.v2_call_failed",
+            call = call,
+            error = "null string"
+        ));
+    }
+    let text = unsafe { CStr::from_ptr(pointer) }
+        .to_string_lossy()
+        .into_owned();
+    if let Some(free) = table.free_string {
+        unsafe { free(pointer) };
+    }
+    Ok(text)
+}
 
 /// 动态库 loader：把配置里声明的 `.so` 装进 Root。
 #[derive(Debug, Default)]
