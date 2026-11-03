@@ -257,7 +257,7 @@
     - 代价：MVP vs 完整版（独立常驻 supervisor）对比；落地顺序。
 - 证据：文档静态审阅；对照 `deploy/systemd/acb-bridge.service`、
   `crates/bridge/src/main.rs`（无信号处理、退出码只有 0/1）、ADR-0029/0030。
-- commit：`TBD`。
+- commit：`439f980 docs(plan): design native reload supervisor and record agent context budget rule`
 - 下一步入口：等用户拍板文档末尾四个选项（重启作为唯一可信边界、drain 强制退出丢
   内存任务、探针是否免 token、版本回滚用包装器还是独立 supervisor）。
 - 新增用户设计偏好（2026-11-04，写入后续所有设计与实现）：
@@ -283,7 +283,7 @@
   - 给出愿景/ADR-0027 的修订建议文本（不改原文）与能力 flags 建议。
 - 证据：对照 `docs/01-vision.md`、`docs/adr/0027-platform-adapter-registration.md`、
   `crates/kernel/src/adapter.rs`、`crates/adapter-api/src/lib.rs`、`crates/kernel/src/outbound.rs`。
-- commit：`TBD`。
+- commit：`a13667d docs(plan): add platform boundary and extension catalog with four-axis criteria`
 - 未决问题：是否采纳 ADR 修订方向；能力 flags 首批范围；`sample_string` 是否移到
   `MethodSpec.examples`。
 - 下一步入口：等用户确认后再改 ADR/代码。
@@ -303,7 +303,7 @@
     测量口径。
 - 证据：对照 `crates/kernel/src/plugin.rs` 的 trait/上下文、`adapter.rs` 的 manifest、
   `tools.rs` 的参数与上限、`engine.rs` 的 delivery/tool 实现。
-- commit：`TBD`。
+- commit：`a13667d docs(plan): add platform boundary and extension catalog with four-axis criteria`
 - 未决问题：`RecordObserver` / `ToolProvider` / `TaskHandler` 首批范围；`PluginState`
   是否进 core；context budget 中哪些优化先测量。
 - 下一步入口：与「外部项目功能面清单」合并成差距矩阵。
