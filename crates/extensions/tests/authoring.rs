@@ -195,6 +195,30 @@ fn admin_can_list_read_write_and_reload() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// 成本测量：1 个模块（典型）与 50 个模块（最坏）的 extensions_list 返回体。
+/// 数字用 `-- --nocapture` 打印；这里只保证测量路径可重复。
+#[test]
+fn measure_extension_catalog_sizes() {
+    for count in [1usize, 50] {
+        let root = temp_root();
+        for index in 0..count {
+            write_module(
+                &root,
+                &format!("m{index}"),
+                &manifest(&format!("dyn.m{index}"), &format!("/m{index}")),
+            );
+        }
+        let mut bridge = bridge(&root, true);
+        let ticket = ticket(&mut bridge);
+        let listed = call(&mut bridge, &ticket, "extensions_list", json!({})).expect("list");
+        println!(
+            "MEASURE extensions_catalog modules={count} bytes={}",
+            serde_json::to_vec(&listed).map(|bytes| bytes.len()).unwrap_or(0)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
 #[test]
 fn non_admin_is_refused() {
     let root = temp_root();
