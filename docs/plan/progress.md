@@ -661,6 +661,29 @@
   `cargo check --workspace --all-targets` 通过。
 - 可回退：纯 example + 文档，不影响生产代码。
 
+## 2026-11-04 06:45 CST — 插件作者最小路径验证（结果）
+
+- 任务编号：剩余项 2（作者路径）
+- 做了什么：
+  - 新增 `examples/tool-provider/`：可独立构建运行的最小 `ToolProvider`
+    （实现 `tools()/call()` → `register_tools` → `Bridge::with_plugins` →
+    `plugin_tools` 发现 → `plugin_tool_call` 调用 → 收轮）；
+  - `docs/08-plugin-development.md` 新增「工具提供者（in-process）」小节：四步、
+    边界（不能和内置工具重名、context 不含 Store/票/水位、core 不设工具超时、
+    ToolAccess 只能否决）；
+  - `examples/README.md` 登记新示例。
+- 实测命令：`cargo run --manifest-path examples/tool-provider/Cargo.toml`
+  → 输出 `plugin_tools`（1 个工具）与 `plugin_tool_call`（回显参数），退出码 0。
+- 卡点（已据此改文档）：
+  1. 文档此前完全没有 ToolProvider 路径；作者只能从测试里找 `Bridge::with_plugins`
+     与 `tool_call` 的组合。
+  2. **当前 ToolProvider 不能热装**：动态库 ABI / `ACB_DYNAMIC_DIR` 没有 tool 载体，
+     必须和宿主一起编译，或由进程内 Manager 提供。这是后续 ABI 缺口，不是文档能解决的。
+  3. 工具名重名在注册时拒绝；schema 是 JSON Schema object，agent 需要先 `plugin_tools`
+     再 `plugin_tool_call`。
+- 证据：示例运行成功；`cargo check --workspace --all-targets` 不受影响（示例独立 workspace）。
+- 可回退：删除示例与文档小节即可。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
