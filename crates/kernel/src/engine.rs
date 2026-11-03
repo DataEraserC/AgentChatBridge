@@ -2486,6 +2486,7 @@ impl<S: Store> Bridge<S> {
         }
 
         let ctx = self.turn_ctx(ticket, tool)?;
+        self.check_tool_access(&ctx, tool, &args)?;
         let turn_session = ctx.session.clone();
         let turn_config = ctx.config.clone();
         let origin_sender = ctx.origin_sender.clone();
@@ -2793,6 +2794,16 @@ impl<S: Store> Bridge<S> {
         tool: &str,
         args: Value,
     ) -> Result<ToolCallStart, ToolError> {
+        if !is_known(tool) {
+            return Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                acb_i18n::t!("kernel.engine.unknown_tool", tool = tool),
+            ));
+        }
+        // 先问否决点，再走任何可能产生副作用的分支；插件只能拒绝，不能放行。
+        let ctx = self.turn_ctx(ticket, tool)?;
+        self.check_tool_access(&ctx, tool, &args)?;
+
         match tool {
             "send_message" => {
                 let args: SendArgs = parse(args)?;
@@ -3181,6 +3192,52 @@ impl<S: Store> Bridge<S> {
             origin_sender: ended.origin_sender,
             live: false,
         })
+    }
+
+    /// 工具访问否决点。放在 core 既有的「已知工具 + 轮次有效」判定之后；
+    /// 插件只能在这里拒绝，`Allow` 不能覆盖 core 的任何拒绝。
+    fn check_tool_access(&self, ctx: &TurnCtx, tool: &str, args: &Value) -> Result<(), ToolError> {
+        let platform = ctx
+            .config
+            .connection(&ctx.room.connection)
+            .map(|connection| connection.platform.as_str())
+            .unwrap_or("");
+        let is_admin = ctx
+            .origin_sender
+            .as_deref()
+            .is_some_and(|sender| ctx.config.is_admin(&ctx.room, sender));
+        let context = crate::plugin::ToolAccessContext {
+            tool,
+            args,
+            session: &ctx.session,
+            room: &ctx.room,
+            platform,
+            origin_sender: ctx.origin_sender.as_deref(),
+            is_admin,
+            live: ctx.live,
+        };
+        let Some((provider, reason)) = self.plugins.check_tool_access(&context) else {
+            return Ok(());
+        };
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "kernel.engine.tool_access_denied",
+                provider = provider,
+                tool = tool,
+                session = ctx.session,
+                room = ctx.room,
+                reason = reason
+            )
+        );
+        Err(ToolError::new(
+            ErrorCode::ToolNotAllowed,
+            acb_i18n::t!(
+                "kernel.engine.tool_access_denied_message",
+                provider = provider,
+                reason = reason
+            ),
+        ))
     }
 
     /// 落盘兜底放在哪：状态库旁边（`state/spill/`），跟库一起备份、一起清。
