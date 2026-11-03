@@ -129,12 +129,14 @@ provider = "dyn.routes"
 
 ## 工具提供者（in-process）
 
-`ToolProvider` 目前**没有动态库 / 外置进程载体**：它必须和宿主程序一起编译，或由
-进程内 `ManagerPlugin` 提供。`ACB_DYNAMIC_DIR` 的声明式模块只能做 route，不能注册工具。
+`ToolProvider` 目前**没有动态库 / 外置进程载体**：代码仍要和宿主程序一起编译。
+但注册方式用 `ToolLoader` 后，工具会跟其它插件一样参与轮次边界的卸载/重载：
+`queue_unload` / `queue_reload` 生效后，`plugin_tools` 索引里出现/消失，不需要重启进程。
+`ACB_DYNAMIC_DIR` 的声明式模块只能做 route，不能注册工具。
 
 最小可运行示例见
 [`examples/tool-provider`](https://github.com/DataEraserC/AgentChatBridge/tree/dev_20261025/examples/tool-provider)，
-它不连平台、不起服务，只演示宿主需要做的四步：
+它不连平台、不起服务，演示宿主需要做的五步：
 
 ```rust
 struct EchoTool;
@@ -164,22 +166,28 @@ impl ToolProvider for EchoTool {
 ```
 
 1. 实现 `ToolProvider`：`tools()` 声明名字/summary/JSON Schema；`call()` 处理参数。
-2. `PluginManager::register_tools(descriptor, Arc::new(EchoTool))`：descriptor 的
-   extension point 是 `Tool`，能力是 `ToolCall`，id 形如 `example.tools`。
+2. 用 `ToolLoader::new(vec![(descriptor, Arc::new(EchoTool))])` 注册：descriptor 的
+   extension point 是 `Tool`，能力是 `ToolCall`，id 形如 `example.tools`；
+   loader 用 `install_loader_owned` 装进 `PluginManager`。
 3. `Bridge::with_plugins(config, store, outbound, plugins)`。
 4. agent 侧先 `plugin_tools` 发现，再 `plugin_tool_call({tool, arguments})` 调用；
    `plugin_tools({name})` 可单独查某个工具的完整 schema。
+5. 生命周期：`queue_unload("example.tools")` / `queue_reload("example.tools")` 只入队，
+   在下一个轮次边界生效；在途轮次继续用旧快照。状态与 `lastError` 在
+   `plugin_catalog` 的 `state` / `pending` / `lastError` 字段里可见。
 
 边界：
 
-- 工具名不能和内置工具重名，重名在注册时拒绝，不会覆盖 `send_message` 等核心工具。
+- 工具名不能和内置工具或其它 provider 重名；注册时返回 `ToolNameConflict`，
+  错误里带冲突的工具名，并提示换一个名字。
 - `ToolCallContext` 只给 session / room / origin_sender / live；拿不到 Store、票和水位。
 - 工具内部的 I/O 由插件自己负责；core 不做超时，慢工具会占住调用方。
 - 工具权限判定仍是 core 的事（`ToolAccessProvider` 只能再加否决，不能放行）。
 
 卡点记录（2026-11-04 实测）：写这个最小示例时，必须读 `plugin_tools_flow` 测试才知道
 `Bridge::with_plugins` 与 `tool_call` 的组合方式；文档此前只覆盖 dynamic wake 和声明式
-route。上面的步骤即据此补上。动态库 ABI 的 tool 载体是后续缺口，不在本示例范围内。
+route。上面的步骤即据此补上。当前仍未解决的是**从磁盘加载新的工具代码**：动态库 ABI
+没有 tool 载体，ToolLoader 解决的是注册/卸载的边界语义，不是代码热加载。
 
 ## 嵌套 manager
 

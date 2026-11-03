@@ -56,7 +56,7 @@ pub use plugin::{
     ProviderInstance, ProviderOptions, ReceiveDecision, ReceiveProvider, ReceiveRequest,
     RecordObserver, ReloadScope, RouteAction, RouteContext, RouteDecision, RouteProvider,
     SendContext, SendHook, SendOrigin, SubscribedAccessProvider, ToolAccessContext,
-    ToolAccessProvider, ToolAccessVerdict, ToolCallContext, ToolProvider, ToolSpec,
+    ToolAccessProvider, ToolAccessVerdict, ToolCallContext, ToolLoader, ToolProvider, ToolSpec,
     TurnErrorProvider, TurnErrorRequest, WakeContext, WakeProvider, default_delivery_plan,
 };
 pub use plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetadata, PluginSource};
