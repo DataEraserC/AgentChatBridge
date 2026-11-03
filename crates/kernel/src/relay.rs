@@ -49,6 +49,7 @@ pub enum RelayError {
 
 /// 文件中继。一个实例只管一个目录；桥里可以有两个实例（发布用的和 HTTP 服务用的），
 /// 只要目录相同就是同一份文件——token 目录就是唯一的事实来源。
+#[derive(Clone)]
 pub struct FileRelay {
     root: PathBuf,
     base: String,
@@ -95,18 +96,46 @@ impl FileRelay {
             });
         }
 
-        let token = new_token();
-        let entry = self.root.join(&token);
-        fs::create_dir_all(&entry).map_err(|error| RelayError::Io {
-            path: entry.clone(),
+        // 根目录可能还不存在；先建根，再为本次发布抢占一个唯一的 token 目录。
+        // 用 `create_dir`（不是 `create_dir_all`）靠文件系统保证 token 不撞车：
+        // 并发发布即使碰巧生成同一个 token，也只有一个能拿到目录。
+        fs::create_dir_all(&self.root).map_err(|error| RelayError::Io {
+            path: self.root.clone(),
             error,
         })?;
+        let (token, entry) = loop {
+            let token = new_token();
+            let entry = self.root.join(&token);
+            match fs::create_dir(&entry) {
+                Ok(()) => break (token, entry),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(RelayError::Io {
+                        path: entry.clone(),
+                        error,
+                    });
+                }
+            }
+        };
         let name = safe_name_of(source);
         let dest = entry.join(&name);
-        fs::copy(source, &dest).map_err(|error| RelayError::Io {
-            path: source.to_owned(),
-            error,
-        })?;
+        // 先写同目录临时文件，再 rename。HTTP 侧只会在 rename 之后看到最终文件名，
+        // 因此永远不会取到写了一半的文件；rename 在同一文件系统内是原子的。
+        let temp = entry.join(format!(".{name}.part"));
+        if let Err(error) = fs::copy(source, &temp) {
+            let _ = fs::remove_file(&temp);
+            return Err(RelayError::Io {
+                path: source.to_owned(),
+                error,
+            });
+        }
+        if let Err(error) = fs::rename(&temp, &dest) {
+            let _ = fs::remove_file(&temp);
+            return Err(RelayError::Io {
+                path: dest.clone(),
+                error,
+            });
+        }
         Ok(format!("{}/f/{token}/{name}", self.base))
     }
 
@@ -368,6 +397,57 @@ mod tests {
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn concurrent_publishes_stay_complete_and_isolated() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = TempDir::new("concurrent");
+        let relay = FileRelay::new(temp.0.join("store"), "http://x");
+        let source = temp.0.join("payload.bin");
+        let bytes = vec![b'x'; 256 * 1024];
+        fs::write(&source, &bytes).expect("能写源文件");
+
+        let clients = 8;
+        let barrier = Arc::new(Barrier::new(clients));
+        let mut handles = Vec::new();
+        for _ in 0..clients {
+            let relay = relay.clone();
+            let source = source.clone();
+            let barrier = Arc::clone(&barrier);
+            let expected = bytes.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let url = relay.publish(&source).expect("并发发布应当成功");
+                let rest = url.strip_prefix("http://x/f/").expect("前缀对");
+                let (token, name) = rest.split_once('/').expect("URL 含 token 和文件名");
+                let (path, size) = relay.lookup(token, name).expect("发布返回时文件必须完整可见");
+                assert_eq!(size, expected.len() as u64, "不能是半写文件");
+                assert_eq!(fs::read(path).expect("能读"), expected);
+                url
+            }));
+        }
+        let urls: Vec<String> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("线程正常"))
+            .collect();
+        let unique: std::collections::HashSet<&String> = urls.iter().collect();
+        assert_eq!(unique.len(), urls.len(), "每次发布要有独立 token 目录");
+
+        for entry in fs::read_dir(relay.root()).expect("能读根目录") {
+            let entry = entry.expect("目录项");
+            let files: Vec<_> = fs::read_dir(entry.path())
+                .expect("能读 token 目录")
+                .map(|item| item.expect("文件项").file_name())
+                .collect();
+            assert_eq!(files.len(), 1, "每个 token 目录只应有一个最终文件：{files:?}");
+            assert!(
+                !files[0].to_string_lossy().ends_with(".part"),
+                "不能留下临时文件：{:?}",
+                files[0]
+            );
         }
     }
 

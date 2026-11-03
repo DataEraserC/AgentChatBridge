@@ -70,7 +70,17 @@ fn run_loop<S: Store + Send + 'static>(
 
 fn run_action<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, action: PreparedRouteAction) {
     match action {
-        PreparedRouteAction::Send(prepared) => {
+        PreparedRouteAction::Send(mut prepared) => {
+            if let Err(error) = prepared.relay() {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.route_worker.relay_failed",
+                        error = format!("{error:?}")
+                    )
+                );
+                return;
+            }
             let result = prepared.execute();
             let mut guard = lock(bridge);
             if let Err(error) = guard.finish_send(prepared, result) {
@@ -140,7 +150,7 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
                 elements,
             )
         };
-        let prepared = match prepared {
+        let mut prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 let detail = format!("{error:?}");
@@ -160,6 +170,23 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
                 return;
             }
         };
+        if let Err(error) = prepared.relay() {
+            let detail = format!("{error:?}");
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.route_worker.task_result_relay_failed",
+                    error = detail
+                )
+            );
+            lock(bridge).finish_task(
+                &task.task_id,
+                Some(serde_json::json!({ "outcome": "relay_failed" })),
+                Some(detail),
+                None,
+            );
+            return;
+        }
         match prepared.execute() {
             Ok(sent) => {
                 let mut guard = lock(bridge);

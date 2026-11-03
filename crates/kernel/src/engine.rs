@@ -246,9 +246,24 @@ pub(crate) struct PreparedPlatformCall {
     /// 开轮时冻结的配置快照。结算写流水时要用它查账号、找订阅者。
     config: Arc<Config>,
     outbound: OutboundHandle,
+    /// 本机文件中继；真正的文件拷贝在 `relay()` 里做，调用方应在锁外调用。
+    relay: Option<crate::relay::FileRelay>,
+    relay_done: bool,
 }
 
 impl PreparedPlatformCall {
+    /// 把 params 里的本机文件收进中继（I/O 在锁外做）。
+    pub(crate) fn relay(&mut self) -> Result<(), ToolError> {
+        if self.relay_done {
+            return Ok(());
+        }
+        if let Some(relay) = &self.relay {
+            self.params = relay_params(relay, self.params.clone())?;
+        }
+        self.relay_done = true;
+        Ok(())
+    }
+
     pub(crate) fn execute(&self) -> Result<CallOutcome, CallError> {
         self.outbound
             .call(&self.room, self.spec.name.as_ref(), &self.params)
@@ -272,9 +287,24 @@ pub(crate) struct PreparedSend {
     /// 改写正文的发送前钩子（provider id，按执行顺序）。回执里如实告诉 agent
     /// 「你写的正文被谁改过」，不然它以为发出去的是原文。
     modified_by: Vec<String>,
+    /// 本机文件中继；真正的文件拷贝在 `relay()` 里做，调用方应在锁外调用。
+    relay: Option<crate::relay::FileRelay>,
+    relay_done: bool,
 }
 
 impl PreparedSend {
+    /// 把元素里的本机文件收进中继（I/O 在锁外做）。幂等：重复调用不会重复拷贝。
+    pub(crate) fn relay(&mut self) -> Result<(), ToolError> {
+        if self.relay_done {
+            return Ok(());
+        }
+        if let Some(relay) = &self.relay {
+            self.relayed = relay_elements(relay, &mut self.elements)?;
+        }
+        self.relay_done = true;
+        Ok(())
+    }
+
     pub(crate) fn execute(&self) -> Result<Sent, OutboundError> {
         self.outbound.send(&self.room, &self.elements)
     }
@@ -2412,7 +2442,17 @@ impl<S: Store> Bridge<S> {
     ///
     /// endpoint 不走这里：它要先把全局锁放下，等平台的那段时间不挡别人。
     pub fn flush_notices(&mut self) {
-        for prepared in self.take_pending_notices() {
+        for mut prepared in self.take_pending_notices() {
+            if let Err(error) = prepared.relay() {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.engine.turn_error_notice_relay_failed",
+                        error = format!("{error:?}")
+                    )
+                );
+                continue;
+            }
             let sent = prepared.execute();
             if let Err(error) = self.finish_send(prepared, sent) {
                 eprintln!(
@@ -3036,9 +3076,6 @@ impl<S: Store> Bridge<S> {
 
         check_params(spec, &args.params)?;
         check_target_params(spec, &room, &args.params)?;
-        // params 里的本机文件路径换成中继 URL（ADR-0025）。这一步只碰本地文件，
-        // 在锁里做没问题；真正的平台调用在锁外。
-        let params = self.relay_params(args.params.clone())?;
 
         let outbound = self.outbound.handle_for(&room.connection).ok_or_else(|| {
             call_error(CallError::Unavailable(acb_i18n::t!(
@@ -3051,10 +3088,13 @@ impl<S: Store> Bridge<S> {
         Ok(PreparedPlatformCall {
             room,
             spec: spec.clone(),
-            params,
+            // 中继的 I/O 必须留到锁外：这里只登记 relay 与原始 params。
+            params: args.params.clone(),
             args,
             config,
             outbound,
+            relay: self.relay.clone(),
+            relay_done: false,
         })
     }
 
@@ -3165,7 +3205,8 @@ impl<S: Store> Bridge<S> {
         ticket: &Ticket,
         args: PlatformCallArgs,
     ) -> Result<Value, ToolError> {
-        let prepared = self.prepare_platform_call(ticket, args)?;
+        let mut prepared = self.prepare_platform_call(ticket, args)?;
+        prepared.relay()?;
         let result = prepared.execute();
         self.finish_platform_call(prepared, result)
     }
@@ -4051,13 +4092,14 @@ impl<S: Store> Bridge<S> {
         origin: SendOrigin,
         elements: Vec<Element>,
     ) -> Result<Value, ToolError> {
-        let prepared = self.prepare_send(config, session, room.clone(), origin, elements)?;
+        let mut prepared = self.prepare_send(config, session, room.clone(), origin, elements)?;
+        prepared.relay()?;
         let sent = prepared.execute();
         self.finish_send(prepared, sent)
     }
 
-    /// 校验、切调用标记、跑发送前钩子、中继本机文件、查账号、取出发通道——但**不发送**。
-    /// endpoint 可以拿着这个结果放下全局锁，真正等平台。
+    /// 校验、切调用标记、跑发送前钩子、登记文件中继、查账号、取出发通道——但**不做
+    /// 文件 I/O，也不发送**。调用方拿到结果后放下全局锁，先 `relay()` 再 `execute()`。
     fn prepare_send(
         &mut self,
         config: Arc<Config>,
@@ -4140,10 +4182,6 @@ impl<S: Store> Bridge<S> {
             ));
         }
 
-        // 本机文件换成平台取得到的 URL（ADR-0025）。配了 [file_relay] 才有动作；
-        // 没配、或路径不是本机存在的文件，就原样透传——平台侧路径（共享卷等）不受影响。
-        let relayed = self.relay_elements(&mut elements)?;
-
         let account = config.account_of_room(&room);
         if account.is_empty() {
             return Err(ToolError::new(
@@ -4169,7 +4207,10 @@ impl<S: Store> Bridge<S> {
             config,
             outbound,
             trimmed,
-            relayed,
+            // 中继的 I/O 必须留到锁外：这里只登记 relay 与空的映射表。
+            relayed: Vec::new(),
+            relay: self.relay.clone(),
+            relay_done: false,
             session: session.to_owned(),
             origin,
             after_hooks,
@@ -4337,104 +4378,6 @@ impl<S: Store> Bridge<S> {
     /// 两段式发送结算后，endpoint 用同一个口做分页/落盘。
     pub(crate) fn fit_tool_result(&self, tool: &str, value: Value) -> Value {
         render::fit(tool, value, &self.spill_dir())
-    }
-
-    /// 把元素里的本机文件收进中继，换成平台取得到的 URL。返回 (原路径, URL) 列表。
-    ///
-    /// 只动「本机真实存在」的路径：本机没有的路径可能是平台那边才存在的
-    /// （共享卷、平台自己的缓存），动它反而弄坏原本能用的写法。
-    fn relay_elements(
-        &mut self,
-        elements: &mut [Element],
-    ) -> Result<Vec<(String, String)>, ToolError> {
-        let Some(relay) = &self.relay else {
-            return Ok(Vec::new());
-        };
-        let mut relayed = Vec::new();
-        for element in elements.iter_mut() {
-            let url = match element {
-                Element::Image { url, .. } | Element::Audio { url } | Element::Video { url } => url,
-                Element::File { url, .. } => url,
-                _ => continue,
-            };
-            let Some(local) = crate::relay::local_path(url) else {
-                continue;
-            };
-            if !local.is_file() {
-                continue;
-            }
-            match relay.publish(&local) {
-                Ok(published) => {
-                    relayed.push((url.clone(), published.clone()));
-                    *url = published;
-                }
-                Err(error) => {
-                    return Err(ToolError::new(
-                        ErrorCode::BadRequest,
-                        format!(
-                            "[bad_params] file {} exists locally, but the bridge cannot accept it: \
-                             {error}. The platform cannot get this file. Check that [file_relay].dir \
-                             is writable; small files (up to 1 MiB after base64) can also be inlined \
-                             by writing the url as base64://...",
-                            local.display()
-                        ),
-                    ));
-                }
-            }
-        }
-        Ok(relayed)
-    }
-
-    /// 把 params 里的本机文件路径换成中继 URL（ADR-0025）。
-    ///
-    /// 平台调用（upload_file 这类）的文件路径在 params 里，不在元素里，是同一个断层。
-    /// 递归遍历，只动「本机真实存在」的绝对路径，其余字符串原样保留。
-    fn relay_params(&self, params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-        fn walk(
-            relay: &crate::relay::FileRelay,
-            value: serde_json::Value,
-        ) -> Result<serde_json::Value, ToolError> {
-            match value {
-                serde_json::Value::String(text) => {
-                    let Some(local) = crate::relay::local_path(&text) else {
-                        return Ok(serde_json::Value::String(text));
-                    };
-                    if !local.is_file() {
-                        return Ok(serde_json::Value::String(text));
-                    }
-                    relay
-                        .publish(&local)
-                        .map(serde_json::Value::String)
-                        .map_err(|error| {
-                            ToolError::new(
-                                ErrorCode::BadRequest,
-                                format!(
-                                    "[bad_params] file {} in params exists locally, but the bridge \
-                                     cannot accept it: {error}. Small files can be inlined with \
-                                     base64:// instead.",
-                                    local.display()
-                                ),
-                            )
-                        })
-                }
-                serde_json::Value::Array(items) => items
-                    .into_iter()
-                    .map(|item| walk(relay, item))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(serde_json::Value::Array),
-                serde_json::Value::Object(map) => map
-                    .into_iter()
-                    .map(|(key, value)| walk(relay, value).map(|value| (key, value)))
-                    .collect::<Result<serde_json::Map<_, _>, _>>()
-                    .map(serde_json::Value::Object),
-                other => Ok(other),
-            }
-        }
-
-        match &self.relay {
-            Some(relay) => walk(relay, params),
-            None => Ok(params),
-        }
     }
 
     /// 确认一批记录。
@@ -6170,6 +6113,103 @@ fn clip_chars(text: &str, max: usize) -> String {
 
 fn internal(error: impl std::fmt::Display) -> ToolError {
     ToolError::new(ErrorCode::Internal, error.to_string())
+}
+
+/// 把元素里的本机文件收进中继，换成平台取得到的 URL。返回 (原路径, URL) 列表。
+///
+/// 只动「本机真实存在」的路径：本机没有的路径可能是平台那边才存在的
+/// （共享卷、平台自己的缓存），动它反而弄坏原本能用的写法。
+///
+/// 这是纯 I/O 函数，调用方必须在**不持有 core 全局锁**时调用（见 `PreparedSend::relay`）。
+fn relay_elements(
+    relay: &crate::relay::FileRelay,
+    elements: &mut [Element],
+) -> Result<Vec<(String, String)>, ToolError> {
+    let mut relayed = Vec::new();
+    for element in elements.iter_mut() {
+        let url = match element {
+            Element::Image { url, .. } | Element::Audio { url } | Element::Video { url } => url,
+            Element::File { url, .. } => url,
+            _ => continue,
+        };
+        let Some(local) = crate::relay::local_path(url) else {
+            continue;
+        };
+        if !local.is_file() {
+            continue;
+        }
+        match relay.publish(&local) {
+            Ok(published) => {
+                relayed.push((url.clone(), published.clone()));
+                *url = published;
+            }
+            Err(error) => {
+                return Err(ToolError::new(
+                    ErrorCode::BadRequest,
+                    format!(
+                        "[bad_params] file {} exists locally, but the bridge cannot accept it: \
+                         {error}. The platform cannot get this file. Check that [file_relay].dir \
+                         is writable; small files (up to 1 MiB after base64) can also be inlined \
+                         by writing the url as base64://...",
+                        local.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(relayed)
+}
+
+/// 把 params 里的本机文件路径换成中继 URL（ADR-0025）。
+///
+/// 平台调用（upload_file 这类）的文件路径在 params 里，不在元素里，是同一个断层。
+/// 递归遍历，只动「本机真实存在」的绝对路径，其余字符串原样保留。
+fn relay_params(
+    relay: &crate::relay::FileRelay,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, ToolError> {
+    fn walk(
+        relay: &crate::relay::FileRelay,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolError> {
+        match value {
+            serde_json::Value::String(text) => {
+                let Some(local) = crate::relay::local_path(&text) else {
+                    return Ok(serde_json::Value::String(text));
+                };
+                if !local.is_file() {
+                    return Ok(serde_json::Value::String(text));
+                }
+                relay
+                    .publish(&local)
+                    .map(serde_json::Value::String)
+                    .map_err(|error| {
+                        ToolError::new(
+                            ErrorCode::BadRequest,
+                            format!(
+                                "[bad_params] file {} in params exists locally, but the bridge \
+                                 cannot accept it: {error}. Small files can be inlined with \
+                                 base64:// instead.",
+                                local.display()
+                            ),
+                        )
+                    })
+            }
+            serde_json::Value::Array(items) => items
+                .into_iter()
+                .map(|item| walk(relay, item))
+                .collect::<Result<Vec<_>, _>>()
+                .map(serde_json::Value::Array),
+            serde_json::Value::Object(map) => map
+                .into_iter()
+                .map(|(key, value)| walk(relay, value).map(|value| (key, value)))
+                .collect::<Result<serde_json::Map<_, _>, _>>()
+                .map(serde_json::Value::Object),
+            other => Ok(other),
+        }
+    }
+
+    walk(relay, params)
 }
 
 fn outbound_error(error: OutboundError) -> ToolError {

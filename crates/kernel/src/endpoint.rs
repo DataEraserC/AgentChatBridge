@@ -519,20 +519,26 @@ pub fn run_connection<S: Store>(
                             Ok(ToolCallStart::Done(result)) => {
                                 vec![tool_reply(id, Ok(result))]
                             }
-                            Ok(ToolCallStart::Platform(prepared)) => {
-                                let result = prepared.execute();
-                                let mut guard = lock(bridge);
-                                let result = guard.finish_platform_call(prepared, result);
-                                vec![tool_reply(id, result)]
-                            }
-                            Ok(ToolCallStart::Send(prepared)) => {
-                                let result = prepared.execute();
-                                let mut guard = lock(bridge);
-                                let result = guard
-                                    .finish_send(prepared, result)
-                                    .map(|value| guard.fit_tool_result(&tool, value));
-                                vec![tool_reply(id, result)]
-                            }
+                            Ok(ToolCallStart::Platform(mut prepared)) => match prepared.relay() {
+                                Ok(()) => {
+                                    let result = prepared.execute();
+                                    let mut guard = lock(bridge);
+                                    let result = guard.finish_platform_call(prepared, result);
+                                    vec![tool_reply(id, result)]
+                                }
+                                Err(error) => vec![tool_reply(id, Err(error))],
+                            },
+                            Ok(ToolCallStart::Send(mut prepared)) => match prepared.relay() {
+                                Ok(()) => {
+                                    let result = prepared.execute();
+                                    let mut guard = lock(bridge);
+                                    let result = guard
+                                        .finish_send(prepared, result)
+                                        .map(|value| guard.fit_tool_result(&tool, value));
+                                    vec![tool_reply(id, result)]
+                                }
+                                Err(error) => vec![tool_reply(id, Err(error))],
+                            },
                             Ok(ToolCallStart::Wait(prepared)) => {
                                 // 关键：等待期间**不持有锁**。每次都回锁里查一下，
                                 // 有新消息就立刻返回；没有就放锁继续睡。
@@ -583,7 +589,17 @@ pub fn run_connection<S: Store>(
                             }
                         };
                         // 失败通知在锁外真发：等平台的那段时间不挡别的会话。
-                        for prepared in notices {
+                        for mut prepared in notices {
+                            if let Err(error) = prepared.relay() {
+                                eprintln!(
+                                    "{}",
+                                    acb_i18n::t!(
+                                        "kernel.endpoint.turn_error_notice_relay_failed",
+                                        error = format!("{error:?}")
+                                    )
+                                );
+                                continue;
+                            }
                             let sent = prepared.execute();
                             let mut guard = lock(bridge);
                             if let Err(error) = guard.finish_send(prepared, sent) {
