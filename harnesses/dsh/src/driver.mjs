@@ -127,7 +127,42 @@ async function main() {
     description: t.description,
     inputSchema: t.schema,
   }))
-  const onCall = (name, args) => callBridge(link, name, args)
+  const onCall = async (name, args) => {
+    const started = Date.now()
+    log(
+      "debug",
+      t("dsh.tool_call_start", {
+        tool: name,
+        ticket: link.ticket ?? "",
+        at: new Date(started).toISOString(),
+      }),
+    )
+    try {
+      const result = await callBridge(link, name, args)
+      log(
+        "debug",
+        t("dsh.tool_call_end", {
+          tool: name,
+          ticket: link.ticket ?? "",
+          at: new Date().toISOString(),
+          elapsed: Date.now() - started,
+        }),
+      )
+      return result
+    } catch (error) {
+      log(
+        "warn",
+        t("dsh.tool_call_end", {
+          tool: name,
+          ticket: link.ticket ?? "",
+          at: new Date().toISOString(),
+          elapsed: Date.now() - started,
+          error: `: ${error?.message ?? error}`,
+        }),
+      )
+      throw error
+    }
+  }
 
   // 桥是独立的 TCP 连接，可以现在就连。连上后把桥下发的会话映射 seed 进驱动，
   // 这样跨进程重启也能复用旧 dsh 会话，而不是每次都新建一个。
@@ -336,6 +371,14 @@ class TurnDriver {
       this.log("error", t("dsh.turn_failed", { error: failure }))
       // 同上：异常也不丢映射，避免「一轮失败就换一个新会话」。
     } finally {
+      this.log(
+        "info",
+        t("dsh.turn_end_sent", {
+          ticket: delivery.ticket,
+          session: delivery.session,
+          at: new Date().toISOString(),
+        }),
+      )
       try {
         link.endTurn(delivery.ticket, failure)
       } catch (error) {

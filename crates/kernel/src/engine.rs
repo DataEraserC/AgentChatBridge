@@ -73,6 +73,10 @@ const TURN_GRACE: Duration = Duration::from_secs(600);
 /// 只给 60 秒：再晚就说不清「这是补刚才那一轮」还是「你其实在处理新的一轮」，
 /// 而新的一轮会正常投递、正常确认，不需要替旧票开太久的口子。
 const ACK_GRACE: Duration = Duration::from_secs(60);
+/// 轮次收工后仍允许补发一条 `send_message` 的窗口。长工具链跑完、模型才发出最后一条
+/// 消息时，桥已经收到 harness 的 `turn_end`；给这段延迟一个有限的补发口，而不是把
+/// 已经生成的内容直接丢掉。
+const SEND_GRACE: Duration = Duration::from_secs(60);
 
 /// 调度层错误：存储坏了，或者拿了一张不存在的票。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -1015,6 +1019,20 @@ impl<S: Store> Bridge<S> {
             return Err(BridgeError::UnknownTicket(ticket.to_string()));
         };
 
+        // 收轮时记下时序：之后若有工具迟到，可与这条日志对齐，判断是传输竞态还是
+        // harness 在 turn_end 之后还在调用。
+        let error_suffix = error.map(|error| format!(": {error}")).unwrap_or_default();
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "kernel.engine.turn_end_received",
+                session = turn.session,
+                room = turn.room,
+                ticket = ticket.to_string(),
+                error = error_suffix
+            )
+        );
+
         if let Some(error) = error {
             if turn.stop_requested {
                 eprintln!(
@@ -1664,7 +1682,21 @@ impl<S: Store> Bridge<S> {
             return Err(no_active_round());
         };
 
-        // 轮次结束了。只放行两件事——其余工具这轮真的用不了，说清楚让 agent 收手。
+        // 迟到调用统一留痕：工具名、票、距 turn_end 的毫秒数。排查「轮次结束后
+        // harness 还在调工具」时，这条日志是唯一能区分传输竞态和越界的锚点。
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "kernel.engine.late_tool",
+                tool = tool,
+                session = ended.session,
+                room = ended.room,
+                ticket = ticket.to_string(),
+                ms = ended.at.elapsed().as_millis()
+            )
+        );
+
+        // 轮次结束了。只放行三件事——其余工具这轮真的用不了，说清楚让 agent 收手。
         match tool {
             "ack_messages" => {
                 if ended.at.elapsed() > ACK_GRACE {
@@ -1676,6 +1708,19 @@ impl<S: Store> Bridge<S> {
                              delivered again as unread in the next turn (same ids); acknowledge them \
                              then. Do not retry now - retrying will not succeed.",
                             ACK_GRACE.as_secs()
+                        ),
+                    ));
+                }
+            }
+            "send_message" => {
+                if ended.at.elapsed() > SEND_GRACE {
+                    return Err(ToolError::new(
+                        ErrorCode::Unauthorized,
+                        format!(
+                            "[send_expired] more than {} seconds have passed since this turn ended; \
+                             the late-send window is closed. Do not retry now - the message will not \
+                             go out. If the content still matters, say it in the next turn.",
+                            SEND_GRACE.as_secs()
                         ),
                     ));
                 }
@@ -2932,7 +2977,12 @@ impl<S: Store> Bridge<S> {
             Some(text) => parse_note_kind(text)?,
             None => NoteKind::Term,
         };
-        let status = match args.status.as_deref() {
+        let status = match args
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
             Some("open") => Some(TopicStatus::Open),
             Some("closed") => Some(TopicStatus::Closed),
             Some(other) => {
@@ -3832,9 +3882,9 @@ fn no_active_round() -> ToolError {
         ErrorCode::Unauthorized,
         "[no_active_round] the turn for this ticket has ended; **no tools are available for this \
          turn - end the turn instead of retrying**. Unacknowledged messages are still there and will \
-         be delivered again as unread next turn (same ids); acknowledge them then. Only two things \
-         remain possible: late acknowledgement within 60 seconds (ack_messages) and reporting \
-         feedback at any time (report_feedback).",
+         be delivered again as unread next turn (same ids); acknowledge them then. Only a few \
+         things remain possible: late acknowledgement within 60 seconds (ack_messages), a late \
+         send within 60 seconds (send_message), and reporting feedback at any time (report_feedback).",
     )
 }
 
