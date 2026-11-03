@@ -10,8 +10,9 @@
 - **P1**：规模化、异常输入或坏插件下会拖垮服务、长期泄漏或无法自愈。
 - **P2**：局部、低概率或只影响可诊断性；可在相关改动时顺手做。
 
-**结论**：本次没有发现 P0。P1 共 6 项，集中在三处：无界入站/路由队列、持锁做阻塞 I/O
-（含 process `stdin` 写入与 relay 磁盘清理）、坏插件线程泄漏。
+**结论**：本次没有发现 P0。原 P1 共 6 项；2026-11-04 跟进已修 3 项（relay 锁内复制、
+process `stdin` 持锁写、relay 过期目录清理），剩余 3 项待拍板：入站队列上限、路由队列
+上限、动态库调用线程泄漏（设计见 `queue-backpressure.md` / `dynamic-call-timeout.md`）。
 
 ---
 
@@ -94,11 +95,11 @@ src 内测试模块单列。
 
 | 位置 | 问题 | 影响 | 建议动作 | 优先级 |
 |---|---|---|---|---|
-| `crates/kernel/src/engine.rs:4145,4366`（`begin_tool_call` → `relay_elements` → `FileRelay::publish`） | **持全局 Bridge 锁做 `fs::copy`**（单文件上限 128 MiB） | 一次大文件中继会阻塞入库、开轮、控制台；文件大或磁盘慢时表现为整桥卡顿 | 把 relay 准备移出锁：`begin_tool_call` 先返回 `PreparedRelay`，endpoint 锁外 publish 后再回锁结算；或独立 relay worker | P1 |
-| `crates/kernel/src/engine.rs:3041,4392`（`platform_call` 参数中继） | 同上 | 同上 | 同上 | P1 |
+| `crates/kernel/src/engine.rs:4145,4366`（`begin_tool_call` → `relay_elements` → `FileRelay::publish`） | **持全局 Bridge 锁做 `fs::copy`**（单文件上限 128 MiB） | 一次大文件中继会阻塞入库、开轮、控制台；文件大或磁盘慢时表现为整桥卡顿 | **已修（c912a63）**：锁内只登记 `PreparedSend` / `PreparedPlatformCall`，endpoint / route worker 锁外先 `relay()` 再执行；publish 用临时文件 + rename | 已修 |
+| `crates/kernel/src/engine.rs:3041,4392`（`platform_call` 参数中继） | 同上 | 同上 | 同上（同一提交） | 已修 |
 | `crates/bridge/src/console.rs:706`（以及 `:852` 的 `lock`） | 持全局锁执行 SQLite 读（feedback/history 等） | 慢查询或大库会阻塞 ingest；控制台高频轮询放大 | 控制台查询先 clone 所需状态或使用只读连接；至少避免在锁内做多页查询 | P2 |
 | `crates/kernel/src/outbound.rs:734-762` | `OutboundHandle` 的每连接 `Mutex` 覆盖 `send/call` 全程（含网络 I/O） | 单连接串行是刻意设计；但慢平台/挂死平台会让该连接所有发送与 `platform_call` 排队，直到适配器超时 | 保持串行语义；给适配器层补明确超时与“连接不可用”状态（process/dynamic 已有部分） | P2 |
-| `crates/adapters/process/src/lib.rs:708-720` | `stdin` 锁持有期间做阻塞 `write_all` + `flush` | 子进程不读 stdin 时写满管道，锁不释放；随后 shutdown 的 `write_line` 也卡住，只能等 kill | 增加写超时/独立写线程 + 有界队列；或写失败即标记连接不可用 | P1 |
+| `crates/adapters/process/src/lib.rs:737-813` | `stdin` 锁持有期间做阻塞 `write_all` + `flush` | 子进程不读 stdin 时写满管道，锁不释放；随后 shutdown 的 `write_line` 也卡住，只能等 kill | **已修（f0ea047）**：stdin 交给独立 writer 线程，调用方只入有界队列；队列满超过 5s 标记 `write_failed`，supervise 杀子进程并重启 | 已修 |
 | `crates/adapters/dynamic/src/lib.rs:1911-1922` | handle 锁持有期间调插件 `invoke`（FFI 可能永不返回） | 该适配器后续所有调用、destroy 全部排队；`destroy_handle` 2s 后放弃，句柄泄漏 | 保持“插件必须可重入/可返回”的契约；超时后标记该 handle 不可用并停止再调用（见 §4） | P1 |
 | 所有 `into_inner()` 恢复点（如 `kernel/endpoint.rs:54,64,80,693`） | panic 中毒后继续使用，可能读到半更新状态 | 当前回调 panic 已 catch，但未来新增 panic 路径仍可能留下不一致状态 | 建议在 `into_inner` 分支统一打一行“锁中毒，已恢复”日志，便于事后定位；关键状态机可加一致性断言 | P2 |
 | `crates/extensions/src/lib.rs:301-327` vs `:380-404` | `reload` 持 `status` 锁再取 `live` 写锁；`details` 先克隆 `live` 读锁（立即释放）再取 `status` | 当前读锁在语句结束即释放，不构成反向持锁；但写法脆弱 | 建议统一锁序（先 status 后 live，或先取快照再取 status），并在注释里写明 | P2 |
@@ -115,10 +116,10 @@ src 内测试模块单列。
 
 | 位置 | 集合 | 当前边界 | 增长场景 | 影响 | 建议动作 | 优先级 |
 |---|---|---|---|---|---|---|
-| `crates/kernel/src/event_queue.rs:41-44` | 入站 `mpsc::channel`（`EventQueue`） | **无界**（注释明说“队列无界，不阻塞平台读循环”） | 平台洪峰 / SQLite 写入变慢 / drain 线程卡住 | 内存持续上涨直到 OOM；适配器线程不背压 | 改成有界队列（如 10k），满了记数并丢弃最旧/拒绝；暴露队列深度指标 | P1 |
-| `crates/kernel/src/route_worker.rs:19,29,36-44` | 路由动作队列 | **无界** | 路由插件批量产生 send/task，或平台 I/O 慢 | 同上 | 有界 + 满时拒绝并写 `lastError`/日志；区分 send 与 task 的限流 | P1 |
-| `crates/adapters/dynamic/src/lib.rs:1932-1955` | 每次调用 `thread::spawn` 一个工作线程等插件返回 | 无界 | 插件挂死；调用方 2s 超时后继续发新调用 | 线程数无界增长，且全部堵在 handle 锁上；RSS 上涨、适配器永久不可用 | 超时后把 handle 标记 dead，后续直接失败；限制每适配器同时在途调用数（1 个即可，因为本来就是串行） | P1 |
-| `crates/kernel/src/relay.rs:27,136-160` + `crates/bridge/src/main.rs:261` | 收下的文件目录 | 只在**启动时**扫一次 24h 过期 | 长期运行、频繁发文件 | 磁盘无界增长；最坏写满分区 | 把 `sweep_expired` 挂到现有 prune 周期（`bridge/main.rs` 后台线程）或 relay 自身定时器 | P1 |
+| `crates/kernel/src/event_queue.rs:41-44` | 入站 `mpsc::channel`（`EventQueue`） | **无界**（注释明说“队列无界，不阻塞平台读循环”） | 平台洪峰 / SQLite 写入变慢 / drain 线程卡住 | 内存持续上涨直到 OOM；适配器线程不背压 | 上限与超限语义设计见 `queue-backpressure.md`（待拍板） | P1 |
+| `crates/kernel/src/route_worker.rs:19,29,36-44` | 路由动作队列 | **无界** | 路由插件批量产生 send/task，或平台 I/O 慢 | 同上 | 上限与超限语义设计见 `queue-backpressure.md`（待拍板） | P1 |
+| `crates/adapters/dynamic/src/lib.rs:1932-1955` | 每次调用 `thread::spawn` 一个工作线程等插件返回 | 无界 | 插件挂死；调用方 2s 超时后继续发新调用 | 线程数无界增长，且全部堵在 handle 锁上；RSS 上涨、适配器永久不可用 | 修法对比见 `dynamic-call-timeout.md`（推荐先做 D：超时标死句柄） | P1 |
+| `crates/kernel/src/relay.rs:27,165-219` + `crates/bridge/src/main.rs:36-38,264-291` | 收下的文件目录 | 启动扫描 + **每小时**定期清理（保留 24h） | 长期运行、频繁发文件 | 磁盘无界增长；最坏写满分区 | **已修（ba39c88）**：过期文件最多多留 1h；删除失败只记日志 | 已修 |
 | `crates/kernel/src/engine.rs:72,811` | `tasks: VecDeque<TaskRecord>` | 200 条，超出丢最旧 | 正常 | 旧任务查询丢失；内存有界 | 已知取舍；需要保留时落库（见 §5） | P2 |
 | `crates/kernel/src/engine.rs:458,2400-2401` | `ended: HashMap<Ticket, EndedTurn>` | 每次 `end_turn` 按 `TURN_GRACE`（600s）清理 | 轮次持续结束 | 有界（最多 600s 内的结束轮次） | 可保持；若并发会话极多可再加硬上限 | P2 |
 | `crates/kernel/src/engine.rs:452,3660-3678` | `pending: VecDeque<Pending>` | 按 `(session, room)` 去重，上限 = 订阅对数 | 配置订阅很多 | 有界于配置 | 无需改 | — |
@@ -145,7 +146,7 @@ src 内测试模块单列。
 | 自动回滚/ADR-0030 D3 未实现 | `docs/plan/native-reload-rollback-options.md`；`dynamic/src/lib.rs:355-358` 注释 | 同路径 reload 失败后只能保持 unloaded；旧实现已 `dlclose` | 维持手动；可信健康判据未定 | P2 |
 | 插件 manager 的 `manifest()` / `children()` / `details()` / `root()` 未 catch | `plugin.rs:1246-1282` 接口；调用点 `plugin.rs:2666/2823` 等 | 坏 manager 在这些只读接口 panic 会让安装/控制台路径 unwind（可能毒锁） | 本次已 catch `descriptors()` / `health()`；其余接口成本相仿，建议按同一 helper 补齐 | P2 |
 | FFI 内 panic 无法由 core 安全 catch | `docs/plan/callback-panic-policy.md` §1.5 | 插件 panic 跨 `extern "C"` → abort/进程退出 | 策略已定：插件自己在 FFI 入口 catch；supervisor 拉起。属已知限制 | P2 |
-| 动态库调用超时后线程无法安全取消 | `dynamic/src/lib.rs:58-60,1932-1955` | 每次超时留下一个阻塞线程 | 见 §4 P1；至少先停止后续调用并标记句柄 | P1 |
+| 动态库调用超时后线程无法安全取消 | `dynamic/src/lib.rs:58-60,1932-1955` | 每次超时留下一个阻塞线程 | 修法对比与推荐见 `dynamic-call-timeout.md`（先做 D） | P1 |
 | 无入站限流/配额 | `event_queue.rs`/`engine.rs` | 单个平台/账号刷屏会挤占所有会话的入库与唤醒 | 可先做队列上限（§4），再评估按房间速率限制 | P2 |
 
 ---
@@ -173,10 +174,10 @@ src 内测试模块单列。
 
 ## 7. 建议处理顺序
 
-1. **P1**：入站队列与路由队列加上限 + 计数器（两处独立小改，可分别提交）。
-2. **P1**：动态适配器超时后标记句柄 dead + 限制在途调用。
-3. **P1**：文件 relay 移出全局锁（`PreparedRelay` 或 worker）。
-4. **P1**：process `stdin` 写入超时/独立写线程。
-5. **P1**：relay 过期清理挂到周期线程。
+1. **P1（已修）**：文件 relay 移出全局锁（c912a63）。
+2. **P1（已修）**：process `stdin` 写入超时/独立写线程（f0ea047）。
+3. **P1（已修）**：relay 过期清理挂到周期线程（ba39c88）。
+4. **P1（待拍板）**：入站队列与路由队列上限，设计见 `queue-backpressure.md`。
+5. **P1（待拍板）**：动态适配器超时后标记句柄 dead，设计见 `dynamic-call-timeout.md`。
 6. **P2**：补动态库 ABI 安全契约与 `unsafe impl Send` 注释；把 manager 其余只读接口
    纳入 `call_manager`；控制台查询出锁。

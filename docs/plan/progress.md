@@ -867,6 +867,47 @@
 - 可回退：clippy 提交可逐文件回退；panic 兜底移除 helper、i18n 两条键与测试即可；
   `core-risk-inventory.md` 为纯新增文档。
 
+## 2026-11-04 04:58 CST — 风险清单 A 类修复（relay 锁外 I/O、定期清理、process 写超时）
+
+- 任务编号：core-risk-inventory 跟进 A1–A3
+- 做了什么：
+  1. **A1 relay 锁外 I/O**（`c912a63`）
+     - `PreparedSend` / `PreparedPlatformCall` 新增 `relay()`；锁内只登记 relay 与原始
+       params/elements，endpoint 与 route worker 放下全局锁后先 `relay()` 再 `execute()`。
+     - `FileRelay::publish` 改为「`create_dir` 抢占唯一 token 目录 + 同目录临时文件 +
+       rename」，并发发布不会共享目录或暴露半写文件。
+     - 新增并发测试：8 线程同时发布 256 KiB 文件，校验每个 URL 可见时内容完整、token
+       目录唯一、无 `.part` 残留。
+  2. **A2 relay 定期清理**（`ba39c88`）
+     - 启动扫一次 + 后台线程每小时扫一次（`RELAY_SWEEP_EVERY = 3600s`）。保留期 24h，
+       因此过期目录最多多留 1h；单次只 read_dir 一层。
+     - 单个目录删除失败只记 `kernel.relay.sweep_failed` 日志，不中断循环。
+     - 测试用 `sweep_expired_older_than(Duration::ZERO)` 避免真实等待 24h。
+  3. **A3 process 写队列**（`f0ea047`）
+     - `ChildStdin` 交给独立 writer 线程；调用方只把编码好的行放进有界队列
+       （64 行），不持锁等 I/O。
+     - 队列满超过 `WRITE_TIMEOUT = 5s`：记 `adapter.process.write_timeout`，置
+       `write_failed`/`alive=false`，supervise 杀子进程并按既有退避重启。
+     - 测试：`sh -c 'sleep 30'` 不读 stdin，容量 0 队列使第二次写入必然超时；断言
+       `write_failed`、`alive=false`、`wait_for_exit` 杀掉子进程。
+  4. **B 类设计文档（只出设计，未改代码）**
+     - `docs/plan/queue-backpressure.md`：入站 4096 / 路由 1024 候选，reject vs block
+       vs drop_oldest 的语义与内存上界、观测字段、`[queues]` 配置草案、对「不丢消息」
+       不变量的改写建议。
+     - `docs/plan/dynamic-call-timeout.md`：线程泄漏成因、D（超时标死句柄）/ A（单
+       worker）/ B（进程隔离）/ C（线程池）对比，推荐先 D 再评估 A，B 作为不可信插件
+       配套。
+     - `docs/plan/core-risk-inventory.md` 已更新三项「已修」与两项「待拍板」状态。
+- 证据：
+  - 每次提交前 `cargo clippy --workspace --all-targets -- -D warnings` → exit 0；
+  - 每次提交前 `cargo test --workspace` → 54 个 suite 全 `ok`；
+  - A1 并发测试、A2 sweep 测试、A3 写超时测试均单独通过。
+- 偏离/未做：
+  - A 类没有引入新的队列抽象；relay 只做「prepare 登记 + execute 前 relay」的最小拆分。
+  - B 类按用户要求只出文档，队列上限与动态库 `failed` 状态未改代码，等拍板。
+- 可回退：A1 回退 `PreparedSend/PreparedPlatformCall` 的 relay 字段与调用点；A2 回退
+  后台线程与 sweep 返回值；A3 回退 writer 线程改回直接写 stdin；文档纯新增。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
