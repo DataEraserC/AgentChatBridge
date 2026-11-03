@@ -706,6 +706,60 @@
   - `cargo test --workspace` 全绿。
 - 可回退：两个测试用例独立，删除即可；不改生产代码。
 
+## 2026-11-04 08:10 CST — ToolProvider 热装（轮次边界）
+
+- 任务编号：ToolProvider 热装（用户要求：与现有 pending_unload/refs/lastError 一致）
+- **完成时用户能做什么**：
+  - 用 `ToolLoader` 注册的 ToolProvider 会出现在 `plugin_tools` 索引里并可调用；
+  - `queue_unload` / `queue_reload` 只入队，下一个轮次边界生效：索引里的工具随之
+    消失/出现，不需要重启桥；
+  - 在途轮次继续用旧快照；卸载期间其它内置工具照常可用；
+  - 工具名和内置或其它 provider 冲突时安装立即失败，错误里带工具名并要求换名；
+  - 卸载后 `plugin_catalog` 显示 `unloaded`，`lastError` 与现有状态机一致。
+- 做了什么：
+  - `plugin.rs`：新增 `ToolLoader`（`PluginLoader` 实现：install/unload/can_unload/
+    inactive/reload；批量安装失败会回滚已装项，不留半套）；
+  - `PluginManager::remove_tool`：只摘直接注册的 ToolProvider；manager-owned 的
+    工具必须走 manager 卸载；
+  - `PluginError::ToolNameConflict`：内置/跨 provider 重名时返回可行动错误；
+  - `lib.rs` 导出 `ToolLoader`；i18n 中英三条；
+  - `crates/kernel/tests/tool_hot_install.rs`（新）：热装后立即可列可用、卸载后索引消失、
+    在途轮次旧快照、重载恢复、重名拒绝（内置 + 跨 provider）；
+  - `examples/tool-provider` 改为 `ToolLoader` + 边界卸载/重载演示；
+  - `docs/08-plugin-development.md` / `examples/README.md` 同步（从「需重启」改为
+    「边界内生效，但代码仍需和宿主编译」）。
+- 证据：
+  - `cargo test -p acb-kernel --test tool_hot_install` → 2/2；
+  - `cargo test --workspace` 全绿；
+  - `cargo run --manifest-path examples/tool-provider/Cargo.toml`：
+    initial total=1 → pending_unload → unloaded（total=0、调用报 unknown）→
+    pending_reload → total=1 且调用成功。
+- commit：`3f138fd feat(plugin): hot unload and reload in-process tool providers`
+- 边界：`ToolLoader` 解决的是**注册/卸载的边界语义**，不是从磁盘加载新代码；
+  动态库 ABI 仍没有 tool 载体。启动时的首次安装仍是立即的（没有在途轮次），
+  之后的卸载/重载走排队安全点。
+- 可回退：删除 `ToolLoader` / `remove_tool` / `ToolNameConflict` 与测试即可；
+  现有 `register_tools` 直接路径不受影响。
+
+## 2026-11-04 08:30 CST — 回调 panic 策略（只出结论）
+
+- 任务编号：回调 panic 评估（用户要求：只出结论，不改代码）
+- 产物：`docs/plan/callback-panic-policy.md`。
+- 结论：
+  - **必须 catch**：`RecordObserver`（记录已落库，panic 不能挡住唤醒/毒化锁）、
+    `RouteProvider`（catch → Pass + 日志，路由不是安全闸门，丢消息比漏命令更糟）、
+    `ToolProvider`（catch → `[tool_panic]` 错误，轮次继续）。
+  - **已经隔离**：`PromptProvider`（线程 + channel 断开）。
+  - **不能 catch，应该退出**：动态库 / FFI 回调；panic 跨 `extern "C"` 是未定义行为，
+    core 侧 catch 只是掩盖问题。插件应在自己的 FFI 入口 catch 并返回 wire error。
+  - **core 自身 panic**：退出，暴露 bug。
+- catch 后必须断言：锁未中毒、无半完成的 core 写入（记录/唤醒/`pending_*`）、
+  其它 provider 不受影响、下一次调用可用、不能用“成功”掩盖失败。
+- 与既有测试的关系：`prompt_flow` 已固定 Prompt panic 隔离；Observer/Route/Tool 目前
+  仍直接 panic，尚未实现 catch（本文件只定策略，改动留待用户确认实施顺序）。
+- commit：`a16d80e docs(plan): evaluate callback panic handling policy`
+- 可回退：纯文档。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
