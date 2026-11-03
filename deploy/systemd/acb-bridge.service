@@ -19,7 +19,8 @@ RestartPreventExitStatus=78
 RestartSec=5
 # core 默认排空 30s；给 systemd 留出余量，避免排空未完成就 SIGKILL。
 TimeoutStopSec=45
-ExecReload=/bin/kill -HUP $MAINPID
+# NixOS 没有 /bin/kill；用系统 profile 里的绝对路径。
+ExecReload=/run/current-system/sw/bin/kill -HUP $MAINPID
 # 健康探针只做 curl；token 由 core 写到运行时目录（0600），不写进单元文件。
 ExecStartPost=/bin/sh -c 'sleep 5; curl -fsS --max-time 5 -H "Authorization: Bearer $(cat ${XDG_RUNTIME_DIR}/acb-health.token)" http://127.0.0.1:3100/healthz >/dev/null'
 StandardOutput=append:/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/state/logs/bridge.log
