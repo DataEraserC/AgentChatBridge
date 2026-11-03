@@ -238,6 +238,38 @@
   反馈闭环的必要语义（否则回复可能永远不被看见），代价是原会话会多开一轮空投递。
 - 未决问题：是否需要限制回复频率/回复长度可配置；反馈审计是否要单独持久化。
 
+## 2026-11-04 02:45 CST — 设计文档：native 重载与 supervisor
+
+- 任务编号：T7 之后的设计议题（用户新增，只出文档）
+- 做了什么：
+  - 新增 `docs/plan/native-reload-and-supervisor.md`：
+    - 边界：core 只能排空 + 按退出码退出 + 暴露健康/排空探针；真正拉起必须外部
+      supervisor（systemd）；进程内 self-exec 在进程已不可信时不可靠，用具体失败场景
+      论证（堆损坏、残留线程/锁、fd/信号污染、fork+exec、PID 不变、启动期坏配置）。
+    - supervisor：systemd `Restart` / `RestartForceExitStatus=75` /
+      `RestartPreventExitStatus=78` / `StartLimitIntervalSec` / `TimeoutStopSec` /
+      `ExecStart` 包装器 / `ExecStartPost` 健康门禁；core 侧信号、探针、退出码、
+      drain 配置项命名（`[runtime.drain]`）。
+    - 回滚：版本回滚（`current` / `last-good` / `attempt` + 健康门禁切回 store path）；
+      插件回滚（`current.json` / `last-good.json` 清单 + 启动失败回退）。
+    - 与 ADR-0029/0030：drain 期间拒绝新轮次但不丢队列；任务记录内存态会丢；
+      ADR-0030 D3 的 native 回滚仍不成立，supervisor 重启是现实保底。
+    - 代价：MVP vs 完整版（独立常驻 supervisor）对比；落地顺序。
+- 证据：文档静态审阅；对照 `deploy/systemd/acb-bridge.service`、
+  `crates/bridge/src/main.rs`（无信号处理、退出码只有 0/1）、ADR-0029/0030。
+- commit：`TBD`。
+- 下一步入口：等用户拍板文档末尾四个选项（重启作为唯一可信边界、drain 强制退出丢
+  内存任务、探针是否免 token、版本回滚用包装器还是独立 supervisor）。
+- 新增用户设计偏好（2026-11-04，写入后续所有设计与实现）：
+  1. **主要使用者是 agent**：新增工具/输出/事件先问上下文消耗——返回体大小、字段冗余、
+     分页/截断、稳定短 id、批量查询、错误信息可行动性。
+  2. `extension-point-catalog.md` 必须增加 context budget 一节：每个工具/接口的典型与
+     最坏返回大小，标出随数据规模线性增长的输出并给上限/分页。
+  3. 功能优先由插件/扩展实现，但不让功能面扩张变成上下文膨胀；新增能力同时给
+     「最小调用面」（默认按需查询细节，不平铺全量）。
+  4. 本机内存有限：`cargo test --workspace`、`nix build` 等重任务串行执行，不同时起
+     多个；若进程被杀，先记录 `journalctl` 的 OOM 条目再继续。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
