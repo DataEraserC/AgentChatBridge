@@ -791,6 +791,46 @@
     结构断言（pending/队列/lastError）才是硬检查。
 - 可回退：移除三处 `catch_unwind` 与日志键即可；测试与文档可保留。
 
+## 2026-11-04 10:10 CST — manager.instantiate panic 兜底
+
+- 任务编号：manager.instantiate panic（用户要求优先）
+- 做了什么：
+  - `PluginManager` 新增 `instantiate_safe`；14 个 manager 实例化入口（wake/access/
+    delivery/send/turn_error/clock/receive/route/tool/tool_access/prompt/task/observer/
+    platform adapter）全部改走它；
+  - panic 或普通 `Err` 只把该 provider 记为 `instantiate_errors`，成功时清除；
+  - `catalog` 对该 provider 输出 `Health::Unhealthy(错误)`；`Bridge::plugin_catalog`
+    的 `lastError` 合并该错误；日志用 `kernel.plugin.instantiate_panicked`；
+  - 实例化失败不会新增注册条目：失败发生在解析阶段，core 不写 provider 表；
+  - 被 `config.toml` 引用的坏 provider 由 `validate_plugins` 启动检查返回
+    `PluginError::Provider`，错误里带 provider id + panic 原因；bridge 启动路径已调用它。
+- 测试：`instantiate_panic.rs` 2/2：
+  - 同一 manager 里坏 wake/bad_tool/route 与好 tool 并存：坏的全部 panic 被隔离，
+    `plugin_tools` 只出现 `good_tool`，好工具可调用，内置 `list_rooms` 可用，
+    重复列索引不卡死；
+  - 坏 provider `lastError` 含 panic 原因，好 provider `lastError=null`；
+  - descriptor 数量不变；被 config 引用的 panic.wake 在 `validate_config` 返回可行动
+    错误；再次解析仍报错；route panic 也只影响自己。
+- 证据：`cargo test --workspace` 全绿。
+- commit：`4955971 fix(plugin): contain manager instantiate panics per provider`
+- 边界：manager 自己的 `descriptors()`/`health()` panic 仍未 catch；本项只覆盖
+  `instantiate`。动态库 FFI 仍按前一份策略处理。
+- 可回退：改回直接 `manager.instantiate` 调用并删除错误表即可。
+
+## 2026-11-04 10:10 CST — 早间决策速览（只出文档）
+
+- 任务编号：4 项待决汇总（用户要求短文档）
+- 产物：`docs/plan/decision-brief.md`（约 1.5 页）。
+- 四项与推荐：
+  1. memory 远端：推荐裸仓库权威 + 每机 clone + 每会话 worktree；
+  2. 扩展工厂/分发：推荐暂不做安装器/市场，保留 `extensions_*` + 控制台；
+  3. 自动回滚/ADR-0030 D3：推荐维持手动，D3 原文不动，等可信健康判据；
+  4. 动态库 tool ABI：推荐短期 in-process + ToolLoader，中期 B（`.so`）或 C（外置进程）
+     选一个，优先 C。
+- 每项都写了「问题 / 选项 / 各自代价 / 推荐理由 / 不决策会怎样」，细节只给链接。
+- commit：`4d80848 docs(plan): add manager panic status and morning decision brief`
+- 可回退：纯文档。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
