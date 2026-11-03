@@ -14,9 +14,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, Feedbacks, MIN_KEPT, Note, NoteKey,
-    NoteKind, Notes, PrunePlan, RecordDraft, Recorded, SessionMap, SessionMaps, StorageError,
-    TopicStatus, Transcript, Watermarks,
+    Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT,
+    Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft, Recorded, SessionMap, SessionMaps,
+    StorageError, TopicStatus, Transcript, Watermarks,
 };
 
 /// 这个程序认识的库结构版本。改表就加一。
@@ -35,7 +35,8 @@ use super::{
 /// 8 → 9：`records` 加 `labels` JSON；适配器可以给记录追加通用标签（如 recall）。
 /// 9 → 10：`records` 加 `suppressed`；被抑制的记录只进流水，不投递/不唤醒/不计未读，
 ///         语义落在记录上，之后新加的订阅者也不会看到它。
-pub const SCHEMA_VERSION: i64 = 10;
+/// 10 → 11：`feedback` 加 `replies` JSON；维护方回复与通知原会话（T7c）。
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"
@@ -132,6 +133,7 @@ CREATE TABLE IF NOT EXISTS feedback (
     context     TEXT    NOT NULL,         -- 现场 JSON：票、模型、时间
     status      TEXT    NOT NULL,         -- open | acked | resolved | wontfix
     note        TEXT,
+    replies     TEXT    NOT NULL DEFAULT '[]',  -- JSON 数组：维护方回复（T7c）
     first_at    INTEGER NOT NULL,
     last_at     INTEGER NOT NULL
 );
@@ -329,6 +331,11 @@ impl SqliteStore {
         // 9 → 10：被抑制的记录。
         if version < 10 {
             self.add_column_if_missing("records", "suppressed", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+
+        // 10 → 11：反馈回复。老反馈没有回复，默认空数组。
+        if version < 11 {
+            self.add_column_if_missing("feedback", "replies", "TEXT NOT NULL DEFAULT '[]'")?;
         }
 
         self.conn
@@ -1499,7 +1506,8 @@ impl Feedbacks for SqliteStore {
             .conn
             .prepare(
                 "SELECT id, title, body, suggestion, kind, severity, refs, occurrences, repeats,
-                        tool, session, harness, room, context, status, note, first_at, last_at
+                        tool, session, harness, room, context, status, note, replies,
+                        first_at, last_at
                    FROM feedback
                   WHERE (?1 = '' OR status = ?1)
                   ORDER BY last_at DESC
@@ -1525,8 +1533,9 @@ impl Feedbacks for SqliteStore {
                     row.get::<_, String>(13)?,
                     row.get::<_, String>(14)?,
                     row.get::<_, Option<String>>(15)?,
-                    row.get::<_, i64>(16)?,
+                    row.get::<_, String>(16)?,
                     row.get::<_, i64>(17)?,
+                    row.get::<_, i64>(18)?,
                 ))
             })
             .map_err(io_error)?;
@@ -1551,8 +1560,9 @@ impl Feedbacks for SqliteStore {
                 context: serde_json::from_str(&row.13).unwrap_or(serde_json::Value::Null),
                 status: row.14,
                 note: row.15,
-                first_at: row.16,
-                last_at: row.17,
+                replies: serde_json::from_str(&row.16).unwrap_or_default(),
+                first_at: row.17,
+                last_at: row.18,
             });
         }
         Ok(items)
@@ -1572,6 +1582,41 @@ impl Feedbacks for SqliteStore {
             )
             .map_err(io_error)?;
         Ok(changed > 0)
+    }
+
+    fn feedback_by_id(&self, id: i64) -> Result<Option<Feedback>, StorageError> {
+        let mut items = self.feedback(None, usize::MAX)?;
+        Ok(items.drain(..).find(|item| item.id == id))
+    }
+
+    fn reply_feedback(&mut self, id: i64, reply: FeedbackReply) -> Result<bool, StorageError> {
+        let replies: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT replies FROM feedback WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io_error)?;
+        let Some(raw) = replies else {
+            return Ok(false);
+        };
+        let mut parsed: Vec<FeedbackReply> = serde_json::from_str(&raw).unwrap_or_default();
+        parsed.push(reply);
+        let encoded = serde_json::to_string(&parsed).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.store_feedback_replies_failed",
+                error = error
+            ))
+        })?;
+        self.conn
+            .execute(
+                "UPDATE feedback SET replies = ?2 WHERE id = ?1",
+                params![id, encoded],
+            )
+            .map_err(io_error)?;
+        Ok(true)
     }
 }
 

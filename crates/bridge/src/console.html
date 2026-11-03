@@ -198,12 +198,19 @@ async function loadFeedback() {
       <td>${f.id}</td>
       <td><span class="pill ${esc(f.status)}">${esc(f.status)}</span></td>
       <td>${esc(f.kind || "—")}${f.severity && f.severity !== "info" ? '<br><span class="muted">' + esc(f.severity) + "</span>" : ""}</td>
-      <td class="wrap">${esc(f.title)}${f.body ? '<br><span class="muted">' + esc(String(f.body).slice(0, 160)) + "</span>" : ""}${f.suggestion ? '<br><span class="muted">建议：' + esc(String(f.suggestion).slice(0, 120)) + "</span>" : ""}</td>
+      <td class="wrap">${esc(f.title)}${f.body ? '<br><span class="muted">' + esc(String(f.body).slice(0, 160)) + "</span>" : ""}${f.suggestion ? '<br><span class="muted">建议：' + esc(String(f.suggestion).slice(0, 120)) + "</span>" : ""}${(f.replies || []).map((r) => '<br><span class="muted">回复（' + esc(r.author) + "）：" + esc(r.text) + "</span>").join("")}</td>
       <td class="wrap">${esc(f.tool || "—")}${f.session ? '<br><span class="muted">' + esc(f.session) + "</span>" : ""}</td>
       <td>${f.occurrences || 1}${f.repeats ? "（重复）" : ""}</td>
       <td class="muted">${esc(new Date(f.last_at).toLocaleString())}</td>
-      <td><button class="act ghost" onclick="resolveFeedback(${f.id})">标记</button></td>
+      <td><button class="act" onclick="replyFeedback(${f.id})">回复</button> <button class="act ghost" onclick="resolveFeedback(${f.id})">标记</button></td>
     </tr>`).join("")}</table>` : '<p class="empty">没有反馈记录</p>';
+}
+
+async function replyFeedback(id) {
+  const text = prompt("回复内容？会作为事件通知原会话。", "");
+  if (!text) return;
+  try { await api("/api/feedback/" + id + "/reply", { method: "POST", body: JSON.stringify({ text }) }); loadFeedback(); }
+  catch (e) { alert(e.message); }
 }
 
 async function resolveFeedback(id) {

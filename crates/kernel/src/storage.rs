@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use acb_proto::{Element, Record, RecordKind, RoomId, Sender};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// 存储层错误。
@@ -487,8 +488,21 @@ pub struct Feedback {
     pub status: String,
     /// 处理备注（人写的）。
     pub note: Option<String>,
+    /// 维护方回复，按时间从旧到新。回复会通知原会话（T7c）。
+    pub replies: Vec<FeedbackReply>,
     pub first_at: i64,
     pub last_at: i64,
+}
+
+/// 一条反馈回复。谁写的、写了什么、从哪个入口写的。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedbackReply {
+    pub at: i64,
+    /// 控制台写 "console"，工具调用写调用方会话 id。
+    pub author: String,
+    pub text: String,
+    /// console / tool。入口用于审计与展示，不参与权限判定。
+    pub via: String,
 }
 
 /// 写一条反馈要的东西。指纹相同的会被合并（见 [`Feedbacks::record_feedback`]）。
@@ -540,6 +554,12 @@ pub trait Feedbacks {
         status: &str,
         note: Option<&str>,
     ) -> Result<bool, StorageError>;
+
+    /// 按 id 取一条。`None` = 不存在。
+    fn feedback_by_id(&self, id: i64) -> Result<Option<Feedback>, StorageError>;
+
+    /// 追加一条回复。`id` 不存在返回 `false`。
+    fn reply_feedback(&mut self, id: i64, reply: FeedbackReply) -> Result<bool, StorageError>;
 }
 
 /// 反馈最多留多少条。一条最多几 KB，五千条是十几 MB 的量级——够留很久，也不至于失控。
@@ -892,6 +912,7 @@ impl Feedbacks for MemoryStore {
             context: draft.context,
             status: "open".to_owned(),
             note: None,
+            replies: Vec::new(),
             first_at: draft.at,
             last_at: draft.at,
         };
@@ -948,6 +969,18 @@ impl Feedbacks for MemoryStore {
         if let Some(note) = note {
             item.note = Some(note.to_owned());
         }
+        Ok(true)
+    }
+
+    fn feedback_by_id(&self, id: i64) -> Result<Option<Feedback>, StorageError> {
+        Ok(self.feedback.iter().find(|item| item.id == id).cloned())
+    }
+
+    fn reply_feedback(&mut self, id: i64, reply: FeedbackReply) -> Result<bool, StorageError> {
+        let Some(item) = self.feedback.iter_mut().find(|item| item.id == id) else {
+            return Ok(false);
+        };
+        item.replies.push(reply);
         Ok(true)
     }
 }

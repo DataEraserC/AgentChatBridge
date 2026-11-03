@@ -46,17 +46,17 @@ use crate::plugin::{
 use crate::plugin_meta::{PluginLifecycle, PluginSource};
 use crate::render;
 use crate::storage::{
-    Cursor, MIN_KEPT, Note, NoteKey, NoteKind, PrunePlan, RecordDraft, StorageError, Store,
-    TopicStatus, unread,
+    Cursor, FEEDBACK_CAP, Feedback, FeedbackReply, MIN_KEPT, Note, NoteKey, NoteKind, PrunePlan,
+    RecordDraft, StorageError, Store, TopicStatus, unread,
 };
 use crate::tools::{
     AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT, DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs,
     DescribePluginsArgs, EventsArgs, ExtensionsListArgs, ExtensionsReadArgs, ExtensionsReloadArgs,
-    ExtensionsWriteArgs, FeedbackArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT,
-    MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs, MemoryBlameArgs, MemoryCommitArgs,
-    MemoryListArgs, MemoryLogArgs, MemorySearchArgs, MemoryWriteArgs, NotesArgs, PlatformCallArgs,
-    PlatformMethodsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, TaskGetArgs,
-    TaskListArgs, WaitMessageArgs, is_known,
+    ExtensionsWriteArgs, FeedbackArgs, FeedbackGetArgs, FeedbackListArgs, FeedbackReplyArgs,
+    FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs,
+    MemoryBlameArgs, MemoryCommitArgs, MemoryListArgs, MemoryLogArgs, MemorySearchArgs,
+    MemoryWriteArgs, NotesArgs, PlatformCallArgs, PlatformMethodsArgs, RECORD_COLUMNS, SendArgs,
+    SendToArgs, SetNoteArgs, TaskGetArgs, TaskListArgs, WaitMessageArgs, is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -2527,6 +2527,37 @@ impl<S: Store> Bridge<S> {
                 let args: FeedbackArgs = parse(args)?;
                 self.report_feedback(ticket, &turn_session, &room, live, args)
             }
+            "feedback_list" => {
+                let args: FeedbackListArgs = parse(args)?;
+                self.feedback_list(&turn_session, args)
+            }
+            "feedback_get" => {
+                let args: FeedbackGetArgs = parse(args)?;
+                self.feedback_get(&turn_session, args)
+            }
+            "feedback_reply" => {
+                let args: FeedbackReplyArgs = parse(args)?;
+                let admin = origin_sender
+                    .as_deref()
+                    .is_some_and(|sender| turn_config.is_admin(&room, sender));
+                let item = self
+                    .store
+                    .feedback_by_id(args.id)
+                    .map_err(internal)?
+                    .ok_or_else(|| {
+                        ToolError::new(
+                            ErrorCode::BadRequest,
+                            acb_i18n::t!("kernel.engine.feedback_not_found", id = args.id),
+                        )
+                    })?;
+                if item.session != turn_session && !admin {
+                    return Err(ToolError::new(
+                        ErrorCode::Unauthorized,
+                        acb_i18n::t!("kernel.engine.feedback_reply_forbidden", id = args.id),
+                    ));
+                }
+                self.reply_feedback(args.id, &turn_session, "tool", &args.text)
+            }
             // 记忆：文件层。
             "memory_read" => {
                 let args: MemoryArgs = parse(args)?;
@@ -2980,7 +3011,7 @@ impl<S: Store> Bridge<S> {
                 }
             }
             // 任务结果查询不依赖任务触发时的票：任务可能在本轮结束后才完成。
-            "report_feedback" | "task_list" | "task_get" => {}
+            "report_feedback" | "feedback_list" | "feedback_get" | "task_list" | "task_get" => {}
             _ => return Err(no_active_round()),
         }
 
@@ -4698,6 +4729,245 @@ impl<S: Store> Bridge<S> {
         }))
     }
 
+    /// 列本会话写过的反馈（最新在前）。回复也一并返回。
+    fn feedback_list(&self, session: &str, args: FeedbackListArgs) -> Result<Value, ToolError> {
+        let status = args
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(status) = status
+            && !FEEDBACK_STATUSES.contains(&status)
+        {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!(
+                    "kernel.engine.feedback_bad_status",
+                    statuses = FEEDBACK_STATUSES.join(" / "),
+                    status = status
+                ),
+            ));
+        }
+        let limit = args
+            .limit
+            .unwrap_or(FEEDBACK_LIST_DEFAULT)
+            .clamp(1, FEEDBACK_LIST_LIMIT);
+        let offset = args.offset.unwrap_or(0);
+        let all = self
+            .store
+            .feedback(status, FEEDBACK_CAP)
+            .map_err(internal)?;
+        let own: Vec<&Feedback> = all.iter().filter(|item| item.session == session).collect();
+        let total = own.len();
+        let items: Vec<Value> = own
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(feedback_view)
+            .collect();
+        Ok(json!({
+            "session": session,
+            "total": total,
+            "offset": offset,
+            "returned": items.len(),
+            "has_more": offset + items.len() < total,
+            "feedback": items,
+        }))
+    }
+
+    /// 按 id 查一条本会话的反馈。
+    fn feedback_get(&self, session: &str, args: FeedbackGetArgs) -> Result<Value, ToolError> {
+        let item = self
+            .store
+            .feedback_by_id(args.id)
+            .map_err(internal)?
+            .filter(|item| item.session == session)
+            .ok_or_else(|| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("kernel.engine.feedback_not_found", id = args.id),
+                )
+            })?;
+        Ok(feedback_view(&item))
+    }
+
+    /// 给一条反馈写回复，并把回复作为合成事件通知原会话（T7c）。
+    ///
+    /// 回复不走 route/receive；原会话即使 wake 策略不认这个事件，也会被直接排进
+    /// 唤醒队列——「有人回了你」不该等下一次普通消息才被看见。
+    pub fn reply_feedback(
+        &mut self,
+        id: i64,
+        author: &str,
+        via: &str,
+        text: &str,
+    ) -> Result<Value, ToolError> {
+        let (text, clipped) = clip(text.trim(), MAX_FEEDBACK_REPLY);
+        if text.is_empty() {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                "[bad_params] reply text must not be empty.",
+            ));
+        }
+        let item = self
+            .store
+            .feedback_by_id(id)
+            .map_err(internal)?
+            .ok_or_else(|| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("kernel.engine.feedback_not_found", id = id),
+                )
+            })?;
+        let at = now_millis();
+        let reply = FeedbackReply {
+            at,
+            author: author.to_owned(),
+            text: text.clone(),
+            via: via.to_owned(),
+        };
+        if !self
+            .store
+            .reply_feedback(id, reply.clone())
+            .map_err(internal)?
+        {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!("kernel.engine.feedback_not_found", id = id),
+            ));
+        }
+        let mut status = item.status.clone();
+        if status == "open" {
+            self.store
+                .set_feedback_status(id, "acked", None)
+                .map_err(internal)?;
+            status = "acked".to_owned();
+        }
+
+        let mut event_id = None;
+        let mut woke = Vec::new();
+        let mut event_error = None;
+        let room = item
+            .room
+            .as_deref()
+            .and_then(|room| RoomId::parse(room).ok());
+        if let Some(room) = room {
+            let subscribed = self
+                .config
+                .subscribers_of(&room)
+                .iter()
+                .any(|subscriber| subscriber.id == item.session);
+            if subscribed || !self.config.subscribers_of(&room).is_empty() {
+                let summary = acb_i18n::t!(
+                    "kernel.engine.feedback_reply_event",
+                    id = id,
+                    author = author
+                );
+                let mut draft = RecordDraft::event(
+                    room.clone(),
+                    Sender {
+                        id: "acb.feedback".into(),
+                        name: "feedback".into(),
+                        role: None,
+                    },
+                    at,
+                    "feedback",
+                    vec![Element::text(text.clone())],
+                    false,
+                );
+                if let RecordKind::Event {
+                    tags,
+                    payload,
+                    summary: event_summary,
+                    ..
+                } = &mut draft.kind
+                {
+                    tags.push("feedback".into());
+                    tags.push("feedback.reply".into());
+                    *payload = Some(json!({
+                        "feedback_id": id,
+                        "title": item.title,
+                        "author": author,
+                        "via": via,
+                        "reply": text,
+                        "status": status,
+                    }));
+                    *event_summary = Some(summary);
+                }
+                match self.ingest_inner(draft, true) {
+                    Ok(Ingest::Recorded {
+                        id,
+                        woke: event_woke,
+                    }) => {
+                        event_id = Some(id);
+                        woke = event_woke;
+                    }
+                    Ok(Ingest::NotSubscribed { room }) => {
+                        event_error = Some(acb_i18n::t!(
+                            "kernel.engine.task_event_not_subscribed",
+                            room = room
+                        ));
+                    }
+                    Ok(Ingest::Dropped { room }) => {
+                        event_error = Some(acb_i18n::t!(
+                            "kernel.engine.task_event_dropped",
+                            room = room
+                        ));
+                    }
+                    Ok(Ingest::Handled { .. }) => {
+                        event_error = Some(acb_i18n::t!("kernel.engine.task_event_handled"));
+                    }
+                    Err(error) => event_error = Some(error.to_string()),
+                }
+                if subscribed {
+                    let wake_reason = acb_i18n::t!(
+                        "kernel.engine.feedback_reply_reason",
+                        id = id,
+                        author = author
+                    );
+                    self.enqueue(
+                        item.session.clone(),
+                        room,
+                        TurnReason::Wake,
+                        Some(wake_reason),
+                        None,
+                        at,
+                        0,
+                    );
+                    if !woke.iter().any(|session| session == &item.session) {
+                        woke.push(item.session.clone());
+                    }
+                }
+            } else {
+                event_error = Some(acb_i18n::t!(
+                    "kernel.engine.task_event_not_subscribed",
+                    room = room
+                ));
+            }
+        } else {
+            event_error = Some(acb_i18n::t!(
+                "kernel.engine.feedback_reply_no_room",
+                id = id
+            ));
+        }
+
+        Ok(json!({
+            "ok": true,
+            "id": id,
+            "status": status,
+            "reply": {
+                "at": reply.at,
+                "author": reply.author,
+                "via": reply.via,
+                "text": reply.text,
+            },
+            "truncated": clipped,
+            "event_id": event_id,
+            "woke": woke,
+            "event_error": event_error,
+        }))
+    }
+
     /// 记一条反馈（ADR-0021）。
     ///
     /// 取向是**写建议，不是填表**：正文一个字段，想说多少说多少（上限
@@ -5299,6 +5569,29 @@ fn task_json(record: &TaskRecord) -> Value {
     })
 }
 
+fn feedback_view(item: &Feedback) -> Value {
+    json!({
+        "id": item.id,
+        "title": item.title,
+        "body": item.body,
+        "suggestion": item.suggestion,
+        "kind": item.kind,
+        "severity": item.severity,
+        "refs": item.refs,
+        "occurrences": item.occurrences,
+        "repeats": item.repeats,
+        "tool": item.tool,
+        "session": item.session,
+        "harness": item.harness,
+        "room": item.room,
+        "status": item.status,
+        "note": item.note,
+        "replies": item.replies,
+        "first_at": item.first_at,
+        "last_at": item.last_at,
+    })
+}
+
 /// 任务参数摘要：只留够识别任务的一小段，避免把命令环境/长 JSON 原样塞回模型。
 fn summarize_params(params: &Value) -> String {
     if let Some(command) = params.get("command").and_then(Value::as_array) {
@@ -5373,6 +5666,16 @@ const FEEDBACK_KINDS: &[&str] = &["bug", "gap", "friction", "idea"];
 
 /// 影响面。三者足够排序：干不下去 / 很烦 / 小毛病。
 const FEEDBACK_SEVERITIES: &[&str] = &["blocker", "major", "minor"];
+
+/// 反馈生命周期。回复会把 open 推进到 acked，其余状态由控制台显式流转。
+const FEEDBACK_STATUSES: &[&str] = &["open", "acked", "resolved", "wontfix"];
+
+/// `feedback_list` 默认返回条数与单页上限。
+const FEEDBACK_LIST_DEFAULT: usize = 20;
+const FEEDBACK_LIST_LIMIT: usize = 100;
+
+/// 一条回复的长度上限（字符）。
+const MAX_FEEDBACK_REPLY: usize = 2000;
 
 /// 正文上限（字符）。4000 字大约能装一次完整的失败对话 + 复现步骤。
 ///

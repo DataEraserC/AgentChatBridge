@@ -61,10 +61,10 @@ pub use plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetadata,
 pub use relay::{FileRelay, RelayError};
 pub use route_worker::RouteWorker;
 pub use storage::{
-    Counts, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, Feedbacks, MIN_KEPT,
-    MemoryStore, Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft, Recorded, SCHEMA_VERSION,
-    SessionMap, SessionMaps, SqliteStore, StorageError, Store, TopicStatus, Transcript, Watermarks,
-    unread,
+    Counts, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks,
+    MIN_KEPT, MemoryStore, Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft, Recorded,
+    SCHEMA_VERSION, SessionMap, SessionMaps, SqliteStore, StorageError, Store, TopicStatus,
+    Transcript, Watermarks, unread,
 };
 pub use tools::TOOL_NAMES;
 
