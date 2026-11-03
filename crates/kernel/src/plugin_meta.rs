@@ -146,6 +146,8 @@ pub enum PluginSource {
     Lua,
     /// 动态库插件（适配器或策略）。
     Dynamic,
+    /// 声明式模块：由 core 解释的规则，不执行任意代码。
+    Declarative,
 }
 
 impl PluginSource {
@@ -155,6 +157,7 @@ impl PluginSource {
             Self::Trusted => "trusted",
             Self::Lua => "lua",
             Self::Dynamic => "dynamic",
+            Self::Declarative => "declarative",
         }
     }
 }

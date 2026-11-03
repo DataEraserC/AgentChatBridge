@@ -9,6 +9,7 @@
 | `process/` | 外置进程 | 任意语言写平台适配器；通过连接配置启动 |
 | `dynamic/wake-provider/` | 动态库 | 可独立构建的 wake 策略 `.so` 示例 |
 | `dynamic/nested-manager/` | 进程内 native | `ManagerPlugin::children()` 嵌套子树示例 |
+| `extensions/` | 声明式模块 | `ACB_DYNAMIC_DIR` 里的 route 模块示例 |
 | 动态库 | `.so` / `.dylib` | 参考 `crates/adapters/dynamic-fixture`（适配器）和 `crates/plugins/wake-fixture`（策略） |
 
 ## Lua 策略

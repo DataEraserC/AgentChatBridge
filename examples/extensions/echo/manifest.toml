@@ -1,0 +1,16 @@
+# 最小声明式 route 模块（ADR-0029 P1）。
+# 放到 $ACB_DYNAMIC_DIR/echo/manifest.toml；配置里只需引用 dyn.routes 一次。
+id = "dyn.echo"
+api_version = 1
+carrier = "declarative"
+extension = "route"
+summary = "命中 /echo 时回一条固定消息"
+capabilities = ["route_decision"]
+effects = ["may_drop"]
+
+[match]
+text_prefix = "/echo"
+
+[action]
+kind = "send"
+text = "echo"

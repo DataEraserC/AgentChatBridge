@@ -101,6 +101,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if !config.plugins.is_empty() {
         plugins.install_loader_owned(Arc::new(DynamicLoader::new(&config.plugins)))?;
     }
+    // 动态扩展目录（ADR-0029 P1）：只从 ACB_DYNAMIC_DIR 发现声明式 route 模块。
+    if let Some(extensions) = acb_extensions::DynamicRouteManager::from_env()? {
+        plugins.install_manager(Arc::new(extensions))?;
+    }
     // 平台适配器也登记在 Root 里：内置 OneBot、外置进程、动态库走同一张表。
     plugins.register_adapter(Arc::new(OneBotAdapterFactory))?;
     plugins.register_adapter(Arc::new(ProcessAdapterFactory))?;

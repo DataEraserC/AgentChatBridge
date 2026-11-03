@@ -38,8 +38,8 @@ use crate::outbound::{
 use crate::plugin::{
     AccessAction, AccessDecision, AccessRequest, ClockContext, DefaultDeliveryComposer,
     DefaultTurnErrorProvider, DeliveryRequest, InterruptScope, PluginError, PluginManager,
-    ProviderId, ReceiveDecision, ReceiveRequest, RouteAction, RouteContext, RouteDecision,
-    SendContext, SendHook, SendOrigin, TurnErrorRequest, WakeContext,
+    ProviderId, ReceiveDecision, ReceiveRequest, ReloadScope, RouteAction, RouteContext,
+    RouteDecision, SendContext, SendHook, SendOrigin, TurnErrorRequest, WakeContext,
 };
 use crate::plugin_meta::PluginLifecycle;
 use crate::render;
@@ -318,6 +318,10 @@ pub struct Bridge<S: Store> {
     pending_reloads: Vec<ProviderId>,
     /// 轮次边界卸载/重载失败的原因，控制台按 provider 显示。
     plugin_errors: HashMap<ProviderId, String>,
+    /// 等待在轮次边界重载的 manager namespace（动态扩展目录用）。
+    pending_manager_reloads: Vec<String>,
+    /// manager 重载失败的原因，按 namespace 记录。
+    manager_errors: HashMap<String, String>,
     /// 配置版本号：每换一次配置 +1，控制台靠它展示「配置换过没有」。
     config_version: u64,
 }
@@ -387,6 +391,8 @@ impl<S: Store> Bridge<S> {
             pending_unloads: Vec::new(),
             pending_reloads: Vec::new(),
             plugin_errors: HashMap::new(),
+            pending_manager_reloads: Vec::new(),
+            manager_errors: HashMap::new(),
             config_version: 0,
         }
     }
@@ -410,10 +416,15 @@ impl<S: Store> Bridge<S> {
             .catalog()
             .into_iter()
             .map(|info| {
-                let pending = if self
-                    .pending_reloads
+                let manager_pending = self
+                    .pending_manager_reloads
                     .iter()
-                    .any(|pending| pending == &info.id)
+                    .any(|namespace| namespace == info.id.namespace());
+                let pending = if manager_pending
+                    || self
+                        .pending_reloads
+                        .iter()
+                        .any(|pending| pending == &info.id)
                 {
                     Some("reload")
                 } else if self
@@ -431,7 +442,10 @@ impl<S: Store> Bridge<S> {
                     _ => info.lifecycle.as_str(),
                 };
                 let refs = self.plugin_references(&info.id);
-                let error = self.plugin_errors.get(&info.id);
+                let error = self
+                    .plugin_errors
+                    .get(&info.id)
+                    .or_else(|| self.manager_errors.get(info.id.namespace()));
                 let mut value = info.to_json();
                 if let Value::Object(fields) = &mut value {
                     fields.insert("state".into(), json!(state));
@@ -577,11 +591,51 @@ impl<S: Store> Bridge<S> {
         Ok(())
     }
 
+    /// 请求在下一个轮次边界重载一棵 manager 子树（动态扩展目录用）。
+    ///
+    /// 与 provider 级 unload/reload 共用同一个安全点；重载失败只记录错误，
+    /// 不替换线上模块快照（由 manager 自己保证）。
+    pub fn queue_extension_reload(&mut self, namespace: &str) -> Result<(), BridgeError> {
+        if !self.plugins.has_manager(namespace) {
+            return Err(BridgeError::Plugin(PluginError::Manager {
+                namespace: namespace.to_owned(),
+                detail: acb_i18n::t!("extensions.manager_missing", namespace = namespace),
+            }));
+        }
+        if !self
+            .pending_manager_reloads
+            .iter()
+            .any(|pending| pending == namespace)
+        {
+            self.pending_manager_reloads.push(namespace.to_owned());
+        }
+        Ok(())
+    }
+
+    /// 动态扩展目录的只读视图：pending 状态、最近错误、模块级信息。
+    pub fn extension_catalog(&self, namespace: &str) -> Value {
+        let pending = self
+            .pending_manager_reloads
+            .iter()
+            .any(|item| item == namespace);
+        let error = self.manager_errors.get(namespace);
+        json!({
+            "namespace": namespace,
+            "installed": self.plugins.has_manager(namespace),
+            "pendingReload": pending,
+            "lastError": error,
+            "details": self.plugins.manager_details(namespace),
+        })
+    }
+
     fn apply_pending_plugin_actions(&mut self) {
         if !self.active.is_empty() {
             return;
         }
-        if self.pending_unloads.is_empty() && self.pending_reloads.is_empty() {
+        if self.pending_unloads.is_empty()
+            && self.pending_reloads.is_empty()
+            && self.pending_manager_reloads.is_empty()
+        {
             return;
         }
         let unloads = std::mem::take(&mut self.pending_unloads);
@@ -620,6 +674,27 @@ impl<S: Store> Bridge<S> {
                         acb_i18n::t!("kernel.engine.reload_failed", id = id, error = error)
                     );
                 }
+            }
+        }
+
+        // manager 级重载（动态扩展目录）：和 provider 动作同一个安全点。
+        let managers = std::mem::take(&mut self.pending_manager_reloads);
+        for namespace in managers {
+            let failures = self
+                .plugins
+                .reload_managers(&ReloadScope::Namespace(namespace.clone()));
+            if failures.is_empty() {
+                self.manager_errors.remove(&namespace);
+                eprintln!("extensions: reloaded namespace {namespace}");
+            } else {
+                let detail = failures
+                    .iter()
+                    .map(|(name, error)| format!("{name}: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                self.manager_errors
+                    .insert(namespace.clone(), detail.clone());
+                eprintln!("extensions: reload rejected for namespace {namespace}: {detail}");
             }
         }
     }

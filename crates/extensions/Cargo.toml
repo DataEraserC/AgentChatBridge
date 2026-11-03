@@ -1,0 +1,14 @@
+[package]
+name = "acb-extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "ACB 动态扩展目录：manifest 校验、稳定 route 分派器与轮次边界热重载"
+
+[dependencies]
+acb-i18n = { workspace = true }
+acb-kernel = { path = "../kernel" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }

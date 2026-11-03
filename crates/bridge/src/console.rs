@@ -199,6 +199,9 @@ impl<S: Store + Send + 'static> Console<S> {
             // 动态插件卸载/重载：只入队，真正的 dlclose/dlopen 在轮次边界执行。
             ("POST", "/api/plugins/unload") => self.plugin_action(body, false),
             ("POST", "/api/plugins/reload") => self.plugin_action(body, true),
+            // 动态扩展目录：模块级目录与轮次边界重载。
+            ("GET", "/api/extensions") => (200, self.extensions(query)),
+            ("POST", "/api/extensions/reload") => self.reload_extensions(body),
             // 控制台前端 i18n：当前 locale + 完整 message map。
             ("GET", "/api/i18n") => (200, acb_i18n::catalog_json()),
             ("GET", "/api/feedback") => self.feedback(query),
@@ -614,6 +617,50 @@ impl<S: Store + Send + 'static> Console<S> {
                     json!({"queued": true, "id": id, "state": state, "note": note}).to_string(),
                 )
             }
+            Err(error) => (409, json!({"error": error.to_string()}).to_string()),
+        }
+    }
+
+    /// 动态扩展目录的模块级视图。默认 namespace 是 `dyn`。
+    fn extensions(&self, query: &str) -> String {
+        let namespace = query_param(query, "namespace")
+            .filter(|value| !value.is_empty())
+            .unwrap_or("dyn");
+        lock(&self.bridge).extension_catalog(namespace).to_string()
+    }
+
+    /// 排队重载动态扩展目录；真正扫描/替换在下一个轮次边界。
+    fn reload_extensions(&self, body: &str) -> (u16, String) {
+        let value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    400,
+                    json!({"error": acb_i18n::t!("bridge.console.invalid_json", error = error)})
+                        .to_string(),
+                );
+            }
+        };
+        let namespace = value
+            .get("namespace")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("dyn");
+        let mut bridge = lock(&self.bridge);
+        match bridge.queue_extension_reload(namespace) {
+            Ok(()) => (
+                202,
+                json!({
+                    "queued": true,
+                    "namespace": namespace,
+                    "state": "pending_reload",
+                    "note": acb_i18n::t!(
+                        "bridge.console.extension_reload_queued",
+                        namespace = namespace
+                    ),
+                })
+                .to_string(),
+            ),
             Err(error) => (409, json!({"error": error.to_string()}).to_string()),
         }
     }
