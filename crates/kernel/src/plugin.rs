@@ -8,7 +8,7 @@
 //! 其余（receive / clock / 换投递引擎 / 动态 platform adapter）按 ADR-0026 的 phase
 //! 逐个加，不在这里提前造空壳。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -1355,6 +1355,25 @@ struct CollectedManager {
     descriptors: Vec<ProviderDescriptor>,
 }
 
+/// 收集一棵 manager 子树的所有 namespace（父在前、子在后）。
+///
+/// `visited` 防止运行期 `children()` 返回环路；安装阶段虽然已经拒绝静态环路，
+/// 但 manager 可以在运行中改变自己的 child 集合，卸载路径仍要防御。
+fn collect_manager_namespaces(
+    manager: &Arc<dyn ManagerPlugin>,
+    namespaces: &mut Vec<String>,
+    visited: &mut HashSet<String>,
+) {
+    let namespace = manager.manifest().namespace.trim().to_owned();
+    if namespace.is_empty() || !visited.insert(namespace.clone()) {
+        return;
+    }
+    namespaces.push(namespace);
+    for child in manager.children() {
+        collect_manager_namespaces(&child, namespaces, visited);
+    }
+}
+
 impl PluginManager {
     /// 带内置 provider 的 Root。`Bridge::new` 用这个，保证默认行为不变。
     pub fn with_native_builtins() -> Self {
@@ -1449,28 +1468,42 @@ impl PluginManager {
 
     /// 移除一棵 manager 子树及其 descriptor、路由和适配器登记。
     ///
-    /// 目前只用于单层动态策略 manager；嵌套 manager 的子 namespace 需要调用方逐层卸载。
-    /// 调用前必须保证没有在途轮次或已解析的 provider 实例。
+    /// 递归收集 `children()` 的整棵子树，按“子先父后”的逆序 shutdown 并清理注册表。
+    /// 调用前必须保证没有在途轮次或已解析的 provider 实例；这是安全点约束，不是本方法
+    /// 能自行验证的状态。
     pub fn uninstall_manager(&mut self, namespace: &str) -> Result<(), PluginError> {
-        let Some(manager) = self.managers.remove(namespace) else {
+        let Some(manager) = self.managers.get(namespace).cloned() else {
             return Err(PluginError::Manager {
                 namespace: namespace.to_owned(),
                 detail: acb_i18n::t!("kernel.plugin.manager_not_installed", namespace = namespace),
             });
         };
-        manager.shutdown();
-        self.manager_order.retain(|name| name != namespace);
-        self.descriptors.retain(|id, _| id.namespace() != namespace);
-        self.wake.retain(|id, _| id.namespace() != namespace);
-        self.access.retain(|id, _| id.namespace() != namespace);
-        self.delivery.retain(|id, _| id.namespace() != namespace);
-        self.send_hooks.retain(|id, _| id.namespace() != namespace);
-        self.turn_errors.retain(|id, _| id.namespace() != namespace);
-        self.clocks.retain(|id, _| id.namespace() != namespace);
-        self.receives.retain(|id, _| id.namespace() != namespace);
-        self.routes.retain(|id, _| id.namespace() != namespace);
-        self.adapter_providers
-            .retain(|_, id| id.namespace() != namespace);
+
+        // 先完整收集子树再动手：如果收集到一半失败，不能留下半棵卸载的树。
+        // visited 同时挡住动态 `children()` 返回环路的情况；安装阶段的环路校验
+        // 只管静态树，运行期仍要防御。
+        let mut namespaces = Vec::new();
+        let mut visited = HashSet::new();
+        collect_manager_namespaces(&manager, &mut namespaces, &mut visited);
+
+        // 逆序：最深/最后的 child 先 shutdown，父 manager 最后。
+        for namespace in namespaces.iter().rev() {
+            if let Some(manager) = self.managers.remove(namespace) {
+                manager.shutdown();
+            }
+            self.manager_order.retain(|name| name != namespace);
+            self.descriptors.retain(|id, _| id.namespace() != namespace);
+            self.wake.retain(|id, _| id.namespace() != namespace);
+            self.access.retain(|id, _| id.namespace() != namespace);
+            self.delivery.retain(|id, _| id.namespace() != namespace);
+            self.send_hooks.retain(|id, _| id.namespace() != namespace);
+            self.turn_errors.retain(|id, _| id.namespace() != namespace);
+            self.clocks.retain(|id, _| id.namespace() != namespace);
+            self.receives.retain(|id, _| id.namespace() != namespace);
+            self.routes.retain(|id, _| id.namespace() != namespace);
+            self.adapter_providers
+                .retain(|_, id| id.namespace() != namespace);
+        }
         Ok(())
     }
 
@@ -2902,6 +2935,110 @@ mod tests {
             vec!["parent", "child"],
             "安装顺序应该先父后子"
         );
+    }
+
+    struct PassRoute;
+
+    impl RouteProvider for PassRoute {
+        fn decide(&self, _options: &RoutePolicy, _context: &RouteContext<'_>) -> RouteDecision {
+            RouteDecision::Pass
+        }
+    }
+
+    struct RouteChild;
+
+    impl ManagerPlugin for RouteChild {
+        fn manifest(&self) -> ManagerManifest {
+            ManagerManifest::new(
+                "childroute",
+                PLUGIN_API_VERSION,
+                vec![Capability::WakeDecision, Capability::RouteDecision],
+            )
+        }
+
+        fn descriptors(&self) -> Vec<ProviderDescriptor> {
+            vec![
+                ProviderDescriptor::new(
+                    ProviderId::parse("childroute.always").expect("合法"),
+                    ExtensionPoint::Wake,
+                    PLUGIN_API_VERSION,
+                    vec![Capability::WakeDecision],
+                ),
+                ProviderDescriptor::new(
+                    ProviderId::parse("childroute.route").expect("合法"),
+                    ExtensionPoint::Route,
+                    PLUGIN_API_VERSION,
+                    vec![Capability::RouteDecision],
+                ),
+            ]
+        }
+
+        fn instantiate(
+            &self,
+            id: &ProviderId,
+            _options: ProviderOptions<'_>,
+        ) -> Result<ProviderInstance, PluginError> {
+            match id.name() {
+                "always" => Ok(ProviderInstance::Wake(Arc::new(AlwaysWake))),
+                "route" => Ok(ProviderInstance::Route(Arc::new(PassRoute))),
+                _ => Err(PluginError::UnknownProvider(id.to_string())),
+            }
+        }
+    }
+
+    #[test]
+    fn uninstalling_parent_removes_child_providers_and_routes() {
+        let mut manager = PluginManager::with_native_builtins();
+        manager
+            .install_manager(nested("parent", false, Some(Arc::new(RouteChild))))
+            .expect("嵌套子树应当能安装");
+
+        let wake_id = ProviderId::parse("childroute.always").expect("合法");
+        let route_id = ProviderId::parse("childroute.route").expect("合法");
+        manager
+            .resolve_wake(&wake_id, &WakePolicy::default())
+            .expect("子 manager 的 wake provider 应当可解析");
+        manager
+            .resolve_route(
+                &route_id,
+                &RoutePolicy {
+                    provider: route_id.clone(),
+                    options: serde_json::json!({}),
+                },
+            )
+            .expect("子 manager 的 route provider 应当可解析");
+
+        manager
+            .uninstall_manager("parent")
+            .expect("递归卸载 parent 子树");
+
+        assert!(
+            manager
+                .resolve_wake(&wake_id, &WakePolicy::default())
+                .is_err(),
+            "child wake provider 不能残留"
+        );
+        assert!(
+            manager
+                .resolve_route(
+                    &route_id,
+                    &RoutePolicy {
+                        provider: route_id.clone(),
+                        options: serde_json::json!({}),
+                    },
+                )
+                .is_err(),
+            "child route provider 不能残留"
+        );
+        assert!(
+            manager.info(&wake_id).is_none(),
+            "child descriptor 不能残留"
+        );
+        assert!(
+            manager.info(&route_id).is_none(),
+            "child route descriptor 不能残留"
+        );
+        assert!(manager.manager_health().is_empty(), "子树 manager 不能残留");
     }
 
     #[test]
