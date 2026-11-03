@@ -78,6 +78,10 @@ pub struct AdapterManifest {
     pub supports_at: bool,
     /// 入站记录里 `reply_to_self`（引用我发的消息）是否可信。
     pub supports_reply: bool,
+    /// 单条文本消息的建议上限（字符）。`None` = 适配器未知/未声明，不等于无限。
+    ///
+    /// 这是数据，不是 core 写死的平台规则；不同客户端/协议可能不同。
+    pub text_limit: Option<usize>,
     /// 给 agent / 控制台看的说明。
     pub metadata: PluginMetadata,
 }
@@ -246,6 +250,7 @@ mod tests {
         event_tags: Cow::Borrowed(&[]),
         supports_at: true,
         supports_reply: true,
+        text_limit: None,
         metadata: PluginMetadata::EMPTY,
     };
 
@@ -338,6 +343,7 @@ mod tests {
                 event_tags: Cow::Borrowed(&[]),
                 supports_at: true,
                 supports_reply: true,
+                text_limit: None,
                 metadata: PluginMetadata::EMPTY,
             }
         }

@@ -26,6 +26,8 @@ fn main() -> std::io::Result<()> {
                 event_tags: vec!["notice".into(), "poke".into()],
                 supports_at: true,
                 supports_reply: true,
+                // 声明上限，供 core 做通用切分/提示；不声明不等于无限。
+                text_limit: Some(4000),
             },
         },
     )?;

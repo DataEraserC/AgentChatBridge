@@ -4611,23 +4611,25 @@ impl<S: Store> Bridge<S> {
                             .outbound
                             .manifest(&connection.id)
                             .or_else(|| self.plugins.adapter_manifest(&connection.kind));
-                        let (events, event_tags, supports_at, supports_reply) = match manifest {
-                            Some(manifest) => (
-                                manifest
-                                    .events
-                                    .iter()
-                                    .map(|event| event.as_ref().to_owned())
-                                    .collect::<Vec<_>>(),
-                                manifest
-                                    .event_tags
-                                    .iter()
-                                    .map(|tag| tag.as_ref().to_owned())
-                                    .collect::<Vec<_>>(),
-                                manifest.supports_at,
-                                manifest.supports_reply,
-                            ),
-                            None => (Vec::new(), Vec::new(), false, false),
-                        };
+                        let (events, event_tags, supports_at, supports_reply, text_limit) =
+                            match manifest {
+                                Some(manifest) => (
+                                    manifest
+                                        .events
+                                        .iter()
+                                        .map(|event| event.as_ref().to_owned())
+                                        .collect::<Vec<_>>(),
+                                    manifest
+                                        .event_tags
+                                        .iter()
+                                        .map(|tag| tag.as_ref().to_owned())
+                                        .collect::<Vec<_>>(),
+                                    manifest.supports_at,
+                                    manifest.supports_reply,
+                                    manifest.text_limit,
+                                ),
+                                None => (Vec::new(), Vec::new(), false, false, None),
+                            };
                         json!({
                             "connection": connection.id,
                             "platform": connection.platform,
@@ -4640,6 +4642,7 @@ impl<S: Store> Bridge<S> {
                             "event_tags": event_tags,
                             "supports_at": supports_at,
                             "supports_reply": supports_reply,
+                            "text_limit": text_limit,
                             "info": info.map(|info| info.to_json()),
                         })
                     })
@@ -4855,7 +4858,7 @@ impl<S: Store> Bridge<S> {
                 .outbound
                 .manifest(&id)
                 .or_else(|| self.plugins.adapter_manifest(&connection.kind));
-            let (events, event_tags, supports_at, supports_reply) = match manifest {
+            let (events, event_tags, supports_at, supports_reply, text_limit) = match manifest {
                 Some(manifest) => (
                     manifest
                         .events
@@ -4869,8 +4872,9 @@ impl<S: Store> Bridge<S> {
                         .collect::<Vec<_>>(),
                     manifest.supports_at,
                     manifest.supports_reply,
+                    manifest.text_limit,
                 ),
-                None => (Vec::new(), Vec::new(), false, false),
+                None => (Vec::new(), Vec::new(), false, false, None),
             };
             connections.push(json!({
                 "connection": connection.id,
@@ -4883,6 +4887,7 @@ impl<S: Store> Bridge<S> {
                 "event_tags": event_tags,
                 "supports_at": supports_at,
                 "supports_reply": supports_reply,
+                "text_limit": text_limit,
             }));
         }
 

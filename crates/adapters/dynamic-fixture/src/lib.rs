@@ -61,6 +61,7 @@ unsafe extern "C" fn fixture_manifest() -> *mut c_char {
         event_tags: vec!["notice".into(), "poke".into()],
         supports_at: true,
         supports_reply: true,
+        text_limit: None,
         extension: "platform_adapter".into(),
         metadata: WirePluginMetadata {
             title: Some("动态库夹具".into()),

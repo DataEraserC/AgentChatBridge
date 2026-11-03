@@ -79,6 +79,7 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
     event_tags: Cow::Borrowed(&[]),
     supports_at: true,
     supports_reply: true,
+    text_limit: None,
     metadata: PluginMetadata {
         title: Some(Cow::Borrowed("外置进程适配器")),
         summary: Some(Cow::Borrowed(
@@ -315,6 +316,7 @@ fn runtime_manifest(platform: &str, shared: &SharedProcess) -> AdapterManifest {
         event_tags: event_tags.into(),
         supports_at: info.supports_at,
         supports_reply: info.supports_reply,
+        text_limit: info.text_limit,
         ..MANIFEST.clone()
     }
 }

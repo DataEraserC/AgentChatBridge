@@ -350,6 +350,7 @@ impl AdapterFactory for FakeAdapterFactory {
             event_tags: Cow::Borrowed(ADAPTER_EVENT_TAGS),
             supports_at: true,
             supports_reply: true,
+            text_limit: None,
             metadata: PluginMetadata::EMPTY,
         }
     }
