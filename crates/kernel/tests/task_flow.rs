@@ -9,10 +9,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use acb_kernel::{
-    Bridge, Config, ControlRegistry, Element, EventQueue, MemoryStore, Outbound, OutboundError,
-    PLUGIN_API_VERSION, PluginManager, ProviderDescriptor, ProviderId, RecordDraft, RoomId,
-    RouteAction, RouteContext, RouteDecision, RoutePolicy, RouteProvider, RouteWorker, Sender,
-    Sent, drain_events,
+    Bridge, Capability, Config, ControlRegistry, Element, EventQueue, ExtensionPoint, MemoryStore,
+    Outbound, OutboundError, PLUGIN_API_VERSION, PluginManager, ProviderDescriptor, ProviderId,
+    RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision, RoutePolicy, RouteProvider,
+    RouteWorker, Sender, Sent, TaskHandler, TaskOutcome, drain_events,
 };
 use serde_json::{Value, json};
 
@@ -89,6 +89,15 @@ impl RouteProvider for TaskRoute {
             (vec!["sh", "-c", "printf ok"], "always")
         } else if context.text.starts_with("/task fail") {
             (vec!["sh", "-c", "exit 7"], "always")
+        } else if context.text.starts_with("/task plugin") {
+            return RouteDecision::Handle {
+                store: false,
+                wake: false,
+                actions: vec![RouteAction::Task {
+                    handler: "test.echo".into(),
+                    params: json!({"text": "plugin-ok"}),
+                }],
+            };
         } else if context.text.starts_with("/task quiet") {
             (vec!["sh", "-c", "printf quiet"], "never")
         } else if context.text.starts_with("/task error-ok") {
@@ -113,9 +122,33 @@ impl RouteProvider for TaskRoute {
     }
 }
 
+struct EchoTask;
+
+impl TaskHandler for EchoTask {
+    fn handle(&self, _task_id: &str, payload: &Value) -> Result<TaskOutcome, String> {
+        let text = payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("echo");
+        Ok(TaskOutcome::Send(vec![vec![Element::text(text)]]))
+    }
+}
+
 fn bridge(wake_extra: &str) -> Arc<Mutex<Bridge<MemoryStore>>> {
     let id = ProviderId::parse("test.task").expect("合法");
     let mut plugins = PluginManager::with_native_builtins();
+    plugins
+        .register_task_handler(
+            ProviderDescriptor::new(
+                ProviderId::parse("test.echo").expect("合法"),
+                ExtensionPoint::Task,
+                PLUGIN_API_VERSION,
+                vec![Capability::TaskHandle],
+            ),
+            "test.echo",
+            Arc::new(EchoTask),
+        )
+        .expect("注册任务 handler");
     plugins
         .register_route(
             ProviderDescriptor::new(
@@ -221,6 +254,34 @@ fn wait_for_status(
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn plugin_task_handler_runs_in_the_route_worker() {
+    let bridge = bridge("");
+    let (queue, receiver) = EventQueue::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker = RouteWorker::spawn(Arc::clone(&bridge), Arc::clone(&shutdown));
+    let drain = {
+        let bridge = Arc::clone(&bridge);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            drain_events(bridge, receiver, shutdown, ControlRegistry::new(), worker)
+        })
+    };
+
+    queue.submit(message("/task plugin", false));
+    let task = wait_for_task(
+        &bridge,
+        |task| task["handler"] == "test.echo" && task["status"] == "succeeded",
+        Duration::from_secs(3),
+    );
+    assert_eq!(task["result"]["outcome"], "sent");
+    assert!(task["error"].is_null());
+
+    shutdown.store(true, Ordering::Relaxed);
+    queue.submit(message("收工", false));
+    drain.join().expect("drain 收工");
 }
 
 #[test]

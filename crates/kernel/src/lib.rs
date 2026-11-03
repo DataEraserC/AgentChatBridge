@@ -67,6 +67,7 @@ pub use storage::{
     SCHEMA_VERSION, SessionMap, SessionMaps, SqliteStore, StorageError, Store, TopicStatus,
     Transcript, Watermarks, unread,
 };
+pub use task::{TaskHandler, TaskOutcome};
 pub use tools::TOOL_NAMES;
 
 /// 协议类型顺手转出去：下游（接入点、适配器）依赖 kernel 一个 crate 就够。

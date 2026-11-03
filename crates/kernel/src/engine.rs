@@ -2156,6 +2156,11 @@ impl<S: Store> Bridge<S> {
         })
     }
 
+    /// 路由 worker 用：按 handler 名取插件任务执行器（取完在锁外跑）。
+    pub(crate) fn task_handler(&self, name: &str) -> Option<Arc<dyn crate::task::TaskHandler>> {
+        self.plugins.task_handler(name)
+    }
+
     /// 提前结束轮次。只清 `pending`，不动未读水位：被停掉的消息还在流水里，
     /// 之后任何一个新的唤醒（下一条消息、攒够未读、时钟）都会照常把它们带出来。
     fn interrupt(&mut self, scope: InterruptScope, room: &RoomId) {

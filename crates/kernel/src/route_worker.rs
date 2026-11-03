@@ -93,7 +93,13 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
         guard.mark_task_running(&task.task_id);
     }
 
-    let outcome = match task::run(&task.handler, &task.params) {
+    // 插件 handler 先取出来，命令/任务在锁外跑；取不到再回退内置 `exec`。
+    let plugin_handler = lock(bridge).task_handler(&task.handler);
+    let outcome = match plugin_handler {
+        Some(handler) => handler.handle(&task.task_id, &task.params),
+        None => task::run(&task.handler, &task.params),
+    };
+    let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
             eprintln!(

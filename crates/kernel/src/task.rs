@@ -13,12 +13,21 @@ use acb_proto::Element;
 use serde_json::Value;
 
 /// 任务跑完要做什么。
-pub(crate) enum TaskOutcome {
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskOutcome {
     /// 没有要发的东西。
     Nothing,
     /// 发到触发任务的那个房间。外层是候选，按顺序试；只有平台返回
     /// `Unsupported`（编码阶段、还没发出去）才换下一个。
     Send(Vec<Vec<Element>>),
+}
+
+/// 插件提供的任务 handler。
+///
+/// 签名刻意只给 `task_id` + payload：不暴露 Store、票、水位或 Bridge。任务记录
+/// 仍是 core 的内存态；插件要持久化就自己存，core 不替它保证跨重启。
+pub trait TaskHandler: Send + Sync {
+    fn handle(&self, task_id: &str, payload: &Value) -> Result<TaskOutcome, String>;
 }
 
 /// 按 handler 名字执行任务。未知 handler 明确报错，不静默成功。
