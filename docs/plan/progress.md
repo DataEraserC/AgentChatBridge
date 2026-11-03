@@ -123,6 +123,41 @@
   `adapters/dynamic/src/lib.rs` 的 `reload` 注释。
 - 下一步入口：T7b；读 `task_flow.rs`、`route_worker.rs`、`engine.rs` 的 route/wake 路径。
 
+## 2026-11-04 01:47 CST — T7b-1：任务合成事件与 wake_on
+
+- 任务编号：D / T7b-1
+- 代行决策：
+  - `wake_on` 只作为合成事件的发射过滤器（never / error / always），不直接影响 wake 策略；
+  - 缺省 `always`：任务完成默认发事件，但是否开轮仍由现有 wake/clock 策略决定；
+  - 任务记录继续内存 + 200 条上限，暂不上 SQLite。
+  - 理由：用户明确指定 wake_on 语义；默认 always 让任务完成可观察，但不绕过策略；
+    内存记录换取 T7b 阶段的可迭代性，持久化等真实跨重启需求。
+  - 可否回退：把 `create_task_record` 的缺省 wake_on 改成 `never`、或删除合成事件调用即可；
+    不改配置格式/JSON wire/C ABI。
+- 做了什么：
+  - `crates/kernel/src/engine.rs`
+    - `WakeOn` 枚举；`TaskRecord` 新增 `wake_on`、`event_id`、`event_woke`、`event_error`；
+    - `ingest` 拆出 `ingest_inner(draft, skip_route)`；合成事件跳过 route/receive，只走
+      store + wake 策略；
+    - `finish_task` 按 wake_on 发射 `kind=task` 合成事件，写回事件 id / 唤醒会话 / 错误。
+  - `crates/kernel/tests/task_flow.rs`
+    - `task_records_success_failure_and_can_be_queried_after_turn_end` 增加：
+      always 成功/失败都发事件；never 成功不发；error 成功不发、失败发；
+      合成事件误入 route 会再触发任务，用 total 计数抓自触发循环；
+    - `task_event_wakes_through_existing_policy`：`event_tags=["task.failed"]` 时，
+      现有 wake 策略确实开轮，`event_woke=["main"]`。
+  - `harnesses/shared/tools.mjs` 描述补 wake_on / 事件字段。
+- 证据：
+  - `cargo test -p acb-kernel --test task_flow` → 3/3。
+  - `cargo test --workspace` → 42 suites 全通过，0 failed。
+  - dsh/opencode `npm test` 通过；`node --check harnesses/shared/tools.mjs` 通过。
+- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- 偏离说明：默认 `always` 会让每个任务在流水里多一条合成事件；换取默认可观察性。
+  如果用户觉得噪音大，可回退为 `never` 或只让 `error` 发。
+- 下一步入口：T7b-2 直接唤醒 API（高信任模块、审计、频率限制）；读 `PluginManager` 的
+  wake/clock 注册与 `Bridge::enqueue`。
+- 未决问题：直接唤醒 API 的信任标记、限流窗口；T7c feedback reply 的事件复用。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
