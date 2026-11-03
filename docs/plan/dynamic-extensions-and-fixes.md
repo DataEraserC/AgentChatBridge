@@ -71,16 +71,18 @@ agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例
 - [x] 增加最小 C fixture：加载 → invoke → destroy → dlclose → 重新加载。
 - [x] 非 `UNLOAD_SAFE` 插件拒绝加载并明确报错；v1 行为保持不变。
 - 实测：`cargo test -p acb-adapter-dynamic --test unload_v2` 2/2 通过；`cargo test --workspace` 全通过。
-- 边界：`UnloadSafeLibrary` 目前是独立的 loader 级 API，尚未注册进 `PluginManager`；
-  Root 安全点卸载、策略 provider 生命周期和平台适配器卸载留给 T4b。
+- 边界：`UnloadSafeLibrary` 仍保留为独立的 loader 级 API；Root 集成见 T4b。
 
-#### T4b：接入 Root（待做）
+#### T4b：接入 Root（已完成）
 
-- [ ] `DynamicLoader` 识别 v2，并把 `UNLOAD_SAFE` 插件登记到可卸载注册表。
-- [ ] Root / `PluginLoader` 增加安全点卸载：停止新调用 → 轮次边界 → destroy → 丢弃实例 → dlclose。
-- [ ] 第一版只覆盖策略扩展点（wake/access/delivery/send/turn_error/clock/receive/route）；
-      平台适配器后置。
-- [ ] 控制台/工具暴露卸载入口与审计记录。
+- [x] `DynamicLoader` 识别 v2，并把 `UNLOAD_SAFE` 策略插件登记到可卸载注册表。
+- [x] Root / `PluginLoader` 增加安全点卸载：停止新调用 → 轮次边界 → destroy → 丢弃实例 → dlclose。
+- [x] 第一版只覆盖策略扩展点（wake/access/delivery/send/turn_error/clock/receive/route）；
+      平台适配器保持常驻。
+- [x] 控制台暴露 `POST /api/plugins/unload`，只入队，真正的 dlclose 在 `poll_turn` 轮次边界执行，并留审计日志。
+- 验证：`cargo test -p acb-adapter-dynamic --test unload_v2` 3/3；`cargo test --workspace` 全通过。
+- 边界：`uninstall_manager` 目前只处理单层动态策略 manager；嵌套子 namespace 仍需逐层卸载。
+      控制台接口没有专门 UI 按钮，先用 API 调用。
 
 ### T5. 增加 PluginManager 嵌套样例
 

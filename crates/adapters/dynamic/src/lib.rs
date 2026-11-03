@@ -17,6 +17,7 @@
 //! kind = "demo"   # 可选；manifest 的 kind 必须等于它
 //! ```
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -205,15 +206,18 @@ fn take_c_string(table: &AcbPluginV2, pointer: *mut c_char, call: &str) -> Resul
 }
 
 /// 动态库 loader：把配置里声明的 `.so` 装进 Root。
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct DynamicLoader {
     plugins: Vec<PluginConfig>,
+    /// 只登记声明 UNLOAD_SAFE 的 v2 策略插件：provider id -> 库句柄。
+    unloadable: Mutex<HashMap<ProviderId, Arc<Library>>>,
 }
 
 impl DynamicLoader {
     pub fn new(plugins: &[PluginConfig]) -> Self {
         Self {
             plugins: plugins.to_vec(),
+            unloadable: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -246,23 +250,64 @@ impl PluginLoader for DynamicLoader {
                         detail = detail
                     ))
                 })?;
-            match loaded {
-                LoadedPlugin::Adapter(factory) => manager
+            let LoadedPlugin {
+                inner,
+                provider_id,
+                library,
+                unload_safe,
+            } = loaded;
+            match inner {
+                LoadedKind::Adapter(factory) => manager
                     .register_adapter_with_source(Arc::new(factory), PluginSource::Dynamic)
                     .map_err(|error| PluginError::Loader(error.to_string()))?,
-                LoadedPlugin::Wake(wake) => manager
+                LoadedKind::Wake(wake) => manager
                     .install_manager(Arc::new(wake))
                     .map_err(|error| PluginError::Loader(error.to_string()))?,
-                LoadedPlugin::Decision(decision) => manager
+                LoadedKind::Decision(decision) => manager
                     .install_manager(Arc::new(decision))
                     .map_err(|error| PluginError::Loader(error.to_string()))?,
+            }
+            if unload_safe {
+                if let Some(id) = provider_id {
+                    self.unloadable
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(id, library);
+                }
             }
         }
         Ok(())
     }
+
+    fn unload(&self, manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
+        let library = {
+            let unloadable = self
+                .unloadable
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            unloadable.get(id).cloned().ok_or_else(|| {
+                PluginError::Loader(acb_i18n::t!("adapter.dynamic.unload_unknown", id = id))
+            })?
+        };
+        manager.uninstall_manager(id.namespace())?;
+        self.unloadable
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
+        // manager 已丢弃，剩下的库引用在这里释放，触发 dlclose。
+        drop(library);
+        Ok(())
+    }
 }
 
-enum LoadedPlugin {
+struct LoadedPlugin {
+    inner: LoadedKind,
+    provider_id: Option<ProviderId>,
+    library: Arc<Library>,
+    unload_safe: bool,
+}
+
+enum LoadedKind {
     Adapter(DylibAdapterFactory),
     Wake(DylibWakeManager),
     Decision(DylibDecisionManager),
@@ -272,35 +317,8 @@ impl LoadedPlugin {
     fn load(path: &str, expected_kind: Option<&str>) -> Result<Self, String> {
         let library = unsafe { Library::new(path) }
             .map_err(|error| acb_i18n::t!("adapter.dynamic.open_library_failed", error = error))?;
-        let entry: libloading::Symbol<'_, EntryFn> =
-            unsafe { library.get(ENTRY_SYMBOL) }.map_err(|error| {
-                acb_i18n::t!(
-                    "adapter.dynamic.missing_export",
-                    symbol = String::from_utf8_lossy(ENTRY_SYMBOL),
-                    error = error
-                )
-            })?;
-        let table_ptr = unsafe { entry() };
-        if table_ptr.is_null() {
-            return Err(acb_i18n::t!("adapter.dynamic.empty_table"));
-        }
-        let table = unsafe { *table_ptr };
-        if table.abi_version != ABI_VERSION {
-            return Err(acb_i18n::t!(
-                "adapter.dynamic.abi_incompatible",
-                version = table.abi_version,
-                required = ABI_VERSION
-            ));
-        }
-        if table.manifest.is_none()
-            || table.create.is_none()
-            || table.invoke.is_none()
-            || table.destroy.is_none()
-            || table.free_string.is_none()
-        {
-            return Err(acb_i18n::t!("adapter.dynamic.incomplete_table"));
-        }
-
+        let (table, unload_safe) = read_abi_table(&library)?;
+        let library = Arc::new(library);
         let wire = read_manifest(&table)?;
         match wire.extension.as_str() {
             "platform_adapter" => {
@@ -317,11 +335,17 @@ impl LoadedPlugin {
                         ));
                     }
                 }
-                Ok(Self::Adapter(DylibAdapterFactory {
-                    _library: Arc::new(library),
-                    table,
-                    manifest,
-                }))
+                Ok(Self {
+                    inner: LoadedKind::Adapter(DylibAdapterFactory {
+                        _library: library.clone(),
+                        table,
+                        manifest,
+                    }),
+                    provider_id: None,
+                    library,
+                    // 适配器卸载还没实现；即使声明 v2 也按常驻处理。
+                    unload_safe: false,
+                })
             }
             "wake" => {
                 let provider = ProviderId::parse(&wire.id).map_err(|error| {
@@ -356,14 +380,19 @@ impl LoadedPlugin {
                 if metadata.effects.is_empty() {
                     return Err(acb_i18n::t!("adapter.dynamic.wake_effects_required"));
                 }
-                Ok(Self::Wake(DylibWakeManager::new(
-                    Arc::new(library),
-                    table,
-                    provider,
-                    wire.platform,
-                    wire.id,
-                    metadata,
-                )))
+                Ok(Self {
+                    inner: LoadedKind::Wake(DylibWakeManager::new(
+                        library.clone(),
+                        table,
+                        provider.clone(),
+                        wire.platform,
+                        wire.id,
+                        metadata,
+                    )),
+                    provider_id: Some(provider),
+                    library,
+                    unload_safe,
+                })
             }
             "access" | "delivery" | "send" | "turn_error" | "receive" | "clock" => {
                 let provider = ProviderId::parse(&wire.id).map_err(|error| {
@@ -407,14 +436,19 @@ impl LoadedPlugin {
                     "clock" => ExtensionPoint::Clock,
                     _ => unreachable!("already routed by extension point"),
                 };
-                Ok(Self::Decision(DylibDecisionManager::new(
-                    Arc::new(library),
-                    table,
-                    provider,
-                    point,
-                    wire.id,
-                    metadata,
-                )))
+                Ok(Self {
+                    inner: LoadedKind::Decision(DylibDecisionManager::new(
+                        library.clone(),
+                        table,
+                        provider.clone(),
+                        point,
+                        wire.id,
+                        metadata,
+                    )),
+                    provider_id: Some(provider),
+                    library,
+                    unload_safe,
+                })
             }
             other => Err(acb_i18n::t!(
                 "adapter.dynamic.unknown_extension",
@@ -422,6 +456,80 @@ impl LoadedPlugin {
             )),
         }
     }
+}
+
+fn read_abi_table(library: &Library) -> Result<(AdapterV1, bool), String> {
+    if let Ok(entry) = unsafe { library.get::<EntryFnV2>(ENTRY_SYMBOL_V2) } {
+        let table_ptr = unsafe { entry() };
+        if table_ptr.is_null() {
+            return Err(acb_i18n::t!("adapter.dynamic.empty_table"));
+        }
+        let table = unsafe { *table_ptr };
+        if table.abi_version != ABI_VERSION_V2 {
+            return Err(acb_i18n::t!(
+                "adapter.dynamic.abi_incompatible",
+                version = table.abi_version,
+                required = ABI_VERSION_V2
+            ));
+        }
+        let required = std::mem::size_of::<AcbPluginV2>() as u32;
+        if table.struct_size < required {
+            return Err(acb_i18n::t!(
+                "adapter.dynamic.v2_struct_too_small",
+                size = table.struct_size,
+                required = required
+            ));
+        }
+        if table.manifest.is_none()
+            || table.create.is_none()
+            || table.invoke.is_none()
+            || table.destroy.is_none()
+            || table.free_string.is_none()
+        {
+            return Err(acb_i18n::t!("adapter.dynamic.incomplete_table"));
+        }
+        return Ok((
+            AdapterV1 {
+                abi_version: ABI_VERSION,
+                manifest: table.manifest,
+                create: table.create,
+                invoke: table.invoke,
+                destroy: table.destroy,
+                free_string: table.free_string,
+            },
+            table.flags & PLUGIN_FLAG_UNLOAD_SAFE != 0,
+        ));
+    }
+
+    let entry: libloading::Symbol<'_, EntryFn> =
+        unsafe { library.get(ENTRY_SYMBOL) }.map_err(|error| {
+            acb_i18n::t!(
+                "adapter.dynamic.missing_export",
+                symbol = String::from_utf8_lossy(ENTRY_SYMBOL),
+                error = error
+            )
+        })?;
+    let table_ptr = unsafe { entry() };
+    if table_ptr.is_null() {
+        return Err(acb_i18n::t!("adapter.dynamic.empty_table"));
+    }
+    let table = unsafe { *table_ptr };
+    if table.abi_version != ABI_VERSION {
+        return Err(acb_i18n::t!(
+            "adapter.dynamic.abi_incompatible",
+            version = table.abi_version,
+            required = ABI_VERSION
+        ));
+    }
+    if table.manifest.is_none()
+        || table.create.is_none()
+        || table.invoke.is_none()
+        || table.destroy.is_none()
+        || table.free_string.is_none()
+    {
+        return Err(acb_i18n::t!("adapter.dynamic.incomplete_table"));
+    }
+    Ok((table, false))
 }
 
 struct DylibAdapterFactory {

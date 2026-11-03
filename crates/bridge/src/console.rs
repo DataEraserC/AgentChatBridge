@@ -196,6 +196,8 @@ impl<S: Store + Send + 'static> Console<S> {
                     json!({ "count": plugins.len(), "plugins": plugins }).to_string(),
                 )
             }
+            // 动态插件卸载：只入队，真正的 dlclose 在轮次边界执行。
+            ("POST", "/api/plugins/unload") => self.unload_plugin(body),
             ("GET", "/api/feedback") => self.feedback(query),
             ("POST", p) if p.starts_with("/api/feedback/") => self.set_feedback(p, body),
             ("POST", p) if p.starts_with("/api/session/") => self.reset(p),
@@ -566,6 +568,34 @@ impl<S: Store + Send + 'static> Console<S> {
             })
             .collect();
         json!({ "sessions": sessions }).to_string()
+    }
+
+    /// 请求卸载一个动态插件；真正的卸载在下一个轮次边界执行。
+    fn unload_plugin(&self, body: &str) -> (u16, String) {
+        let value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    400,
+                    json!({"error": format!("invalid JSON body: {error}")}).to_string(),
+                );
+            }
+        };
+        let Some(id) = value.get("id").and_then(serde_json::Value::as_str) else {
+            return (
+                400,
+                json!({"error": "body must contain a string field `id`"}).to_string(),
+            );
+        };
+        let mut bridge = lock(&self.bridge);
+        match bridge.queue_unload(id) {
+            Ok(()) => (
+                202,
+                json!({"queued": true, "id": id, "note": "unload runs at the next turn boundary"})
+                    .to_string(),
+            ),
+            Err(error) => (409, json!({"error": error.to_string()}).to_string()),
+        }
     }
 
     /// 列反馈。默认只给最近 50 条，按最近一次被提的时间倒序。

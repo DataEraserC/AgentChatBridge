@@ -311,6 +311,8 @@ pub struct Bridge<S: Store> {
     /// 暂存的新配置（管理员在控制台保存后放这，下一次开轮时换上——ADR-0009
     /// 轮次边界重载）。正在跑的轮次不受影响：投递批次在开轮时组装，组装完就不变。
     staged_config: Option<Config>,
+    /// 等待在轮次边界执行的动态插件卸载。
+    pending_unloads: Vec<ProviderId>,
     /// 配置版本号：每换一次配置 +1，控制台靠它展示「配置换过没有」。
     config_version: u64,
 }
@@ -377,6 +379,7 @@ impl<S: Store> Bridge<S> {
             memory,
             relay,
             staged_config: None,
+            pending_unloads: Vec::new(),
             config_version: 0,
         }
     }
@@ -394,6 +397,37 @@ impl<S: Store> Bridge<S> {
     /// 插件目录的只读 JSON 视图（控制台用）。
     pub fn plugin_catalog(&self) -> Vec<Value> {
         self.plugins.catalog_json()
+    }
+
+    /// 请求在下一个轮次边界卸载一个动态插件。不会在轮次进行中直接 dlclose。
+    pub fn queue_unload(&mut self, id: &str) -> Result<(), BridgeError> {
+        let id = ProviderId::parse(id)?;
+        if self.plugins.info(&id).is_none() {
+            return Err(BridgeError::Plugin(PluginError::Provider {
+                id: id.to_string(),
+                detail: acb_i18n::t!("kernel.engine.unknown_plugin", id = id),
+            }));
+        }
+        if !self.pending_unloads.iter().any(|pending| pending == &id) {
+            self.pending_unloads.push(id);
+        }
+        Ok(())
+    }
+
+    fn apply_pending_unloads(&mut self) {
+        if !self.active.is_empty() || self.pending_unloads.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_unloads);
+        for id in pending {
+            match self.plugins.unload_provider(&id) {
+                Ok(()) => eprintln!("{}", acb_i18n::t!("kernel.engine.unload_applied", id = id)),
+                Err(error) => eprintln!(
+                    "{}",
+                    acb_i18n::t!("kernel.engine.unload_failed", id = id, error = error)
+                ),
+            }
+        }
     }
 
     /// 校验一份**还没生效**的配置（控制台保存时用）。暂存前先过这一关，
@@ -970,6 +1004,7 @@ impl<S: Store> Bridge<S> {
 
     /// 取下一轮，不管是谁的。没有就返回 `None`。
     pub fn poll_turn(&mut self) -> Result<Option<Delivery>, BridgeError> {
+        self.apply_pending_unloads();
         self.apply_staged_config();
         let now = now_millis();
         let index = (0..self.pending.len()).find(|&index| {
@@ -985,6 +1020,7 @@ impl<S: Store> Bridge<S> {
 
     /// 只给这一组会话取活。接入点用这个——一条连接只代表它自己那组会话。
     pub fn poll_turn_for(&mut self, sessions: &[String]) -> Result<Option<Delivery>, BridgeError> {
+        self.apply_pending_unloads();
         self.apply_staged_config();
         let now = now_millis();
         let index = (0..self.pending.len()).find(|&index| {
