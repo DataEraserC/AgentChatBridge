@@ -622,7 +622,9 @@ impl<S: Store> Bridge<S> {
                 let error = self
                     .plugin_errors
                     .get(&info.id)
-                    .or_else(|| self.manager_errors.get(info.id.namespace()));
+                    .cloned()
+                    .or_else(|| self.manager_errors.get(info.id.namespace()).cloned())
+                    .or_else(|| self.plugins.provider_error(&info.id));
                 let mut value = info.to_json();
                 if let Value::Object(fields) = &mut value {
                     fields.insert("state".into(), json!(state));
