@@ -68,9 +68,11 @@ fn unload_safe_v2_plugin_can_be_loaded_invoked_and_reloaded() {
         "manifest 要原样返回"
     );
     let handle = plugin.create("{}", &host()).expect("create");
-    let output = plugin.invoke(handle, "{}").expect("invoke");
+    // SAFETY: handle 来自同一 loader 的 create，且在下一次 destroy 前串行使用。
+    let output = unsafe { plugin.invoke(handle, "{}") }.expect("invoke");
     assert!(output.contains("\"ok\":true"), "invoke 结果：{output}");
-    plugin.destroy(handle);
+    // SAFETY: handle 只 destroy 一次，之后不再使用。
+    unsafe { plugin.destroy(handle) };
     plugin.unload().expect("unload");
 
     // 卸载后重新 dlopen：至少证明 loader 没有把 Library 永久钉在静态表里。

@@ -13,6 +13,9 @@ use serde_json::Value;
 use crate::segment;
 
 /// 一条事件的处理结果。
+// `RecordDraft` 约 328 字节；`Parsed` 每条事件只活一瞬间，boxing 会给每条消息
+// 多加一次堆分配，得不偿失。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
     /// 值得记进流水的一条。

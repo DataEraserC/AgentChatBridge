@@ -951,7 +951,7 @@ impl Feedbacks for MemoryStore {
             .filter(|item| status.is_none_or(|wanted| item.status == wanted))
             .cloned()
             .collect();
-        items.sort_by(|a, b| b.last_at.cmp(&a.last_at));
+        items.sort_by_key(|item| std::cmp::Reverse(item.last_at));
         items.truncate(limit);
         Ok(items)
     }

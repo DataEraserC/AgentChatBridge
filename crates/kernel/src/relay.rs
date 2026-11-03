@@ -372,6 +372,8 @@ mod tests {
     }
 
     #[test]
+    // 测试名保持中文可读性；URL 是专有名词，不应为 lint 改名。
+    #[allow(non_snake_case)]
     fn 收下的文件能按URL取回来() {
         let temp = TempDir::new("roundtrip");
         let relay = FileRelay::new(temp.0.join("store"), "http://10.89.0.1:3131");

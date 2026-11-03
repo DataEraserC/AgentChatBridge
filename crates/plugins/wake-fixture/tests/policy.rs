@@ -3,7 +3,7 @@
 //! 同一个 cdylib 通过环境变量切换 manifest 的扩展点；这个测试文件只有一个测试函数，
 //! 所以进程内的环境变量不会和别的测试打架。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use acb_adapter_dynamic::DynamicLoader;
 use acb_kernel::{
@@ -32,7 +32,7 @@ fn fixture_path() -> PathBuf {
     profile_dir.join(name)
 }
 
-fn load(path: &PathBuf) -> PluginManager {
+fn load(path: &Path) -> PluginManager {
     let mut plugins = PluginManager::with_native_builtins();
     plugins
         .install_loader(&DynamicLoader::new(&[PluginConfig {

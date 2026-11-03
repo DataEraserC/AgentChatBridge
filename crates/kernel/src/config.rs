@@ -1404,17 +1404,14 @@ impl Config {
                     trimmed
                 }
             };
-            let model = raw_session
-                .model
-                .map(|m| {
-                    let trimmed = m.trim().to_owned();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed)
-                    }
-                })
-                .flatten();
+            let model = raw_session.model.and_then(|m| {
+                let trimmed = m.trim().to_owned();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            });
 
             let on_turn_error = parse_turn_error_actions(&raw_session.on_turn_error)?;
             let access = build_access(&id, raw_session.access, &connections)?;

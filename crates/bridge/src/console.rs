@@ -703,7 +703,7 @@ impl<S: Store + Send + 'static> Console<S> {
             .clamp(1, 500);
 
         let bridge = lock(&self.bridge);
-        match bridge.store().feedback(status.as_deref(), limit) {
+        match bridge.store().feedback(status, limit) {
             Ok(items) => {
                 let returned = items.len();
                 let body = json!({
@@ -968,7 +968,7 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p)
+    buffer.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
 fn parse_request_line(header_text: &str) -> (String, String, String) {

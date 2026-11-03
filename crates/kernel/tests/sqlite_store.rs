@@ -1023,8 +1023,7 @@ fn corrupted_database_fails_loudly_and_is_not_replaced() {
     std::fs::write(db.path(), garbage).expect("写坏文件");
 
     let error = acb_kernel::SqliteStore::open(db.path())
-        .err()
-        .expect("损坏的库必须明确报错，不能静默当成空库");
+        .expect_err("损坏的库必须明确报错，不能静默当成空库");
     assert!(
         matches!(error, StorageError::Backend(_)),
         "应当是后端错误而不是 panic：{error:?}"

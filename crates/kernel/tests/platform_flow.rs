@@ -35,6 +35,8 @@ static FILE_PARAMS: &[ParamSpec] = &[ParamSpec::required("file_id", "群文件 i
 /// 测试平台声明：`group_id` 是房间目标，不能由模型在 params 里换掉。
 static GROUP_TARGETS: &[TargetSpec] = &[TargetSpec::room("group_id", "group")];
 
+// 测试夹具按 MethodSpec 的字段顺序逐个传入，拆结构体只会让几十处调用更啰嗦。
+#[allow(clippy::too_many_arguments)]
 fn spec(
     name: &'static str,
     summary: &'static str,
@@ -1299,6 +1301,8 @@ impl Drop for TempRelayDir {
 }
 
 #[test]
+// 测试名保持中文可读性；URL 是专有名词，不应为 lint 改名。
+#[allow(non_snake_case)]
 fn 平台调用的params里本机文件换成中继URL() {
     let temp = TempRelayDir::new("platform-call");
     let source = temp.0.join("upload.bin");

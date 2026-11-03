@@ -232,6 +232,9 @@ struct SharedProcess {
     info: Mutex<WireAdapterInfo>,
 }
 
+// 启动期一次性返回三件异质产物（出站口、恢复闭包、manifest）；拆成类型别名反而
+// 让调用点更难读，保持内联元组。
+#[allow(clippy::type_complexity)]
 fn spawn_process(
     connection: &Connection,
     events: EventQueue,
@@ -322,6 +325,8 @@ fn runtime_manifest(platform: &str, shared: &SharedProcess) -> AdapterManifest {
 }
 
 /// 启动一个子进程并等到 hello。失败时把已经起的进程收掉，不留孤儿。
+// 返回值是启动阶段的四元组，只在 `spawn_process` 里解构一次；类型别名无复用价值。
+#[allow(clippy::type_complexity)]
 fn start_child(
     config: &ProcessConfig,
     connection: &str,

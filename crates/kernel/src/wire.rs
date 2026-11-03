@@ -171,7 +171,7 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
         let tags = spec
             .tags
             .into_iter()
-            .map(|tag| Cow::Owned(tag))
+            .map(Cow::Owned)
             .collect::<Vec<_>>();
 
         Ok(MethodSpec {
@@ -540,11 +540,6 @@ mod tests {
         assert!(manifest.supports_at && manifest.supports_reply);
         assert_eq!(manifest.text_limit, Some(4000));
         assert_eq!(manifest.kind, "demo");
-        assert!(
-            manifest
-                .capabilities
-                .iter()
-                .any(|capability| *capability == AdapterCapability::Send)
-        );
+        assert!(manifest.capabilities.contains(&AdapterCapability::Send));
     }
 }

@@ -110,6 +110,19 @@ pub fn tr_args(key: &str, args: &[(&str, String)]) -> String {
 /// use acb_i18n::t;
 /// let _ = t!("bridge.main.start_failed", error = "boom");
 /// ```
+#[macro_export]
+macro_rules! t {
+    ($key:expr $(,)?) => {
+        $crate::tr($key)
+    };
+    ($key:expr, $($name:ident = $value:expr),+ $(,)?) => {{
+        let args: ::std::vec::Vec<(&str, ::std::string::String)> = ::std::vec![
+            $((::std::stringify!($name), ::std::format!("{}", $value))),+
+        ];
+        $crate::tr_args($key, &args)
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,17 +141,4 @@ mod tests {
             "控制台插件页文案必须在两个 locale 里都存在"
         );
     }
-}
-
-#[macro_export]
-macro_rules! t {
-    ($key:expr $(,)?) => {
-        $crate::tr($key)
-    };
-    ($key:expr, $($name:ident = $value:expr),+ $(,)?) => {{
-        let args: ::std::vec::Vec<(&str, ::std::string::String)> = ::std::vec![
-            $((::std::stringify!($name), ::std::format!("{}", $value))),+
-        ];
-        $crate::tr_args($key, &args)
-    }};
 }
