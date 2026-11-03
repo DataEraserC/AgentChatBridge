@@ -1316,6 +1316,8 @@ pub struct PluginManager {
     /// 安装顺序（含嵌套子树）。reload/health 正序，shutdown 逆序。
     manager_order: Vec<String>,
     descriptors: HashMap<ProviderId, ProviderDescriptor>,
+    /// 安装过的 loader，用于按 provider 找到能卸载它的载体。
+    loaders: Vec<Arc<dyn PluginLoader>>,
 }
 
 /// 安装前的预检结果：先攒齐整棵子树，再落表，避免装到一半失败留下半棵树。
@@ -1373,6 +1375,59 @@ impl PluginManager {
             }
         }
         loader.install(self)
+    }
+
+    /// 安装一个需要保留引用、后续可以按 provider 卸载的 loader（动态库 v2 用）。
+    pub fn install_loader_owned(
+        &mut self,
+        loader: Arc<dyn PluginLoader>,
+    ) -> Result<(), PluginError> {
+        self.install_loader(loader.as_ref())?;
+        self.loaders.push(loader);
+        Ok(())
+    }
+
+    /// 按 provider id 找到能卸载它的 loader 并卸载。只能在安全点调用（无在途轮次）。
+    pub fn unload_provider(&mut self, id: &ProviderId) -> Result<(), PluginError> {
+        let loaders = self.loaders.clone();
+        let mut last = None;
+        for loader in loaders {
+            match loader.unload(self, id) {
+                Ok(()) => return Ok(()),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| PluginError::Provider {
+            id: id.to_string(),
+            detail: "no installed loader can unload this provider".to_owned(),
+        }))
+    }
+
+    /// 移除一棵 manager 子树及其 descriptor、路由和适配器登记。
+    ///
+    /// 目前只用于单层动态策略 manager；嵌套 manager 的子 namespace 需要调用方逐层卸载。
+    /// 调用前必须保证没有在途轮次或已解析的 provider 实例。
+    pub fn uninstall_manager(&mut self, namespace: &str) -> Result<(), PluginError> {
+        let Some(manager) = self.managers.remove(namespace) else {
+            return Err(PluginError::Manager {
+                namespace: namespace.to_owned(),
+                detail: acb_i18n::t!("kernel.plugin.manager_not_installed", namespace = namespace),
+            });
+        };
+        manager.shutdown();
+        self.manager_order.retain(|name| name != namespace);
+        self.descriptors.retain(|id, _| id.namespace() != namespace);
+        self.wake.retain(|id, _| id.namespace() != namespace);
+        self.access.retain(|id, _| id.namespace() != namespace);
+        self.delivery.retain(|id, _| id.namespace() != namespace);
+        self.send_hooks.retain(|id, _| id.namespace() != namespace);
+        self.turn_errors.retain(|id, _| id.namespace() != namespace);
+        self.clocks.retain(|id, _| id.namespace() != namespace);
+        self.receives.retain(|id, _| id.namespace() != namespace);
+        self.routes.retain(|id, _| id.namespace() != namespace);
+        self.adapter_providers
+            .retain(|_, id| id.namespace() != namespace);
+        Ok(())
     }
 
     /// 直接注册一个平台适配器工厂（内置适配器、native loader 用它）。

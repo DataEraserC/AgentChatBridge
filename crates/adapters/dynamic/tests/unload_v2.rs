@@ -5,10 +5,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use acb_adapter_api::abi::{ABI_VERSION, HostV1};
-use acb_adapter_dynamic::UnloadSafeLibrary;
+use acb_adapter_dynamic::{DynamicLoader, UnloadSafeLibrary};
+use acb_kernel::{PluginConfig, PluginManager, ProviderId, WakePolicy};
 
 fn temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
@@ -76,6 +78,41 @@ fn unload_safe_v2_plugin_can_be_loaded_invoked_and_reloaded() {
     assert!(again.manifest().expect("manifest").contains("test.unload"));
     again.unload().expect("再次卸载");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unload_safe_v2_strategy_is_removed_from_root() {
+    let dir = temp_dir();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unload_v2.c");
+    let library = dir.join("libstrategy_v2.so");
+    if let Err(error) = compile(&source, &library, None) {
+        eprintln!("skip ABI v2 strategy test: compiler unavailable ({error})");
+        return;
+    }
+
+    let config = PluginConfig {
+        path: library.to_str().expect("UTF-8 路径").to_owned(),
+        kind: None,
+    };
+    let loader = Arc::new(DynamicLoader::new(&[config]));
+    let mut plugins = PluginManager::with_native_builtins();
+    plugins
+        .install_loader_owned(loader.clone())
+        .expect("v2 wake fixture 应当装进 Root");
+    let id = ProviderId::parse("test.unload").expect("合法 provider id");
+    assert!(
+        plugins.resolve_wake(&id, &WakePolicy::default()).is_ok(),
+        "安装后应当能解析 wake provider"
+    );
+
+    plugins
+        .unload_provider(&id)
+        .expect("Root 通过 loader 注册表卸载");
+    assert!(
+        plugins.resolve_wake(&id, &WakePolicy::default()).is_err(),
+        "卸载后 manager 与 descriptor 都必须消失"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
