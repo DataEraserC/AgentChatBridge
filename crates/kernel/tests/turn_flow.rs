@@ -1630,8 +1630,8 @@ fn a_stale_ticket_is_rejected() {
         .tool_call(
             &ticket,
             &sessions(),
-            "send_message",
-            json!({"elements": [{"type": "text", "text": "迟到的"}]}),
+            "send_message_to",
+            json!({"to": "qq:group/123", "elements": [{"type": "text", "text": "迟到的"}]}),
         )
         .expect_err("收工之后的票作废");
     assert_eq!(error.code, ErrorCode::Unauthorized);
@@ -1847,6 +1847,72 @@ fn record_column_status_is_boolean_not_wording() {
     // 取了的列照旧在记录上；没取的列不出现（状态表说了没取）。
     assert!(records[0].get("id").is_some());
     assert!(records[0].get("kind").is_none());
+}
+
+#[test]
+fn set_note_term_and_member_accept_absent_or_empty_status() {
+    let (mut bridge, _sends) = bridge();
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    // term/member 没有状态：不传、空串、纯空白都应当按“无状态”处理。
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "set_note",
+            json!({"kind": "term", "key": "部署", "value": "蓝绿发布"}),
+        )
+        .expect("term 不传 status 应当能写");
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "set_note",
+            json!({"kind": "term", "key": "发布", "value": "周五", "status": ""}),
+        )
+        .expect("term 空 status 应当视为没有状态");
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "set_note",
+            json!({"kind": "member", "key": "老王", "value": "运维", "status": "  "}),
+        )
+        .expect("member 空白 status 应当视为没有状态");
+
+    // topic 仍然只接受 open / closed。
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "set_note",
+            json!({"kind": "topic", "key": "部署", "value": "蓝绿", "status": "open"}),
+        )
+        .expect("topic open 能写");
+
+    // term/member 传真实状态仍然要拒绝，不能让状态静默落到错误类型上。
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "set_note",
+            json!({"kind": "term", "key": "部署", "value": "蓝绿", "status": "open"}),
+        )
+        .expect_err("term 不该接受 topic 状态");
+    assert_eq!(error.code, ErrorCode::BadRequest);
+
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "set_note",
+            json!({"kind": "topic", "key": "部署", "value": "蓝绿", "status": "weird"}),
+        )
+        .expect_err("topic 只接受 open / closed");
+    assert_eq!(error.code, ErrorCode::BadRequest);
 }
 
 #[test]
@@ -2404,6 +2470,32 @@ fn ack_still_works_right_after_the_turn_ends() {
             .expect("可读"),
         1
     );
+}
+
+/// 收工之后仍允许补发一条当前房间的消息：长工具链跑完时模型可能还没来得及发送。
+#[test]
+fn send_message_is_allowed_right_after_the_turn_ends() {
+    let (mut bridge, sends) = bridge();
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    bridge.end_turn(&ticket, None).expect("能收工");
+
+    let result = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message",
+            json!({"elements": [{"type": "text", "text": "补发的内容"}]}),
+        )
+        .expect("宽限窗内的补发应当放行");
+    assert_eq!(result["ok"], true);
+
+    let sends = sends.lock().expect("没被毒死");
+    assert_eq!(sends.len(), 1, "补发消息应当真的发出去");
+    assert_eq!(sends[0].0, room("qq:group/123"));
+    assert_eq!(sends[0].1, vec![Element::text("补发的内容")]);
 }
 
 /// 收工后调别的工具：错误信息必须说清「这一轮不会再有工具可用，请结束本轮」。

@@ -15,7 +15,9 @@
 //! worktree 路径固定为 `worktrees_root/<记忆id>/<会话id>`。固定路径是「惰性初始化能否
 //! 幂等」的前提：路径上已经是个有效 worktree 就复用，异常就报错，绝不 `rm -rf` 重建。
 
+use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use acb_proto::{ErrorCode, ToolError};
 
@@ -77,19 +79,6 @@ impl MemoryRepo {
         let bare = self.ensure_bare_repo(location)?;
         let worktree = self.worktree_path(memory, session);
 
-        if worktree.exists() {
-            match git2::Repository::open(&worktree) {
-                Ok(repo) if repo.workdir().is_some() => return Ok(worktree),
-                _ => {
-                    return Err(ToolError::new(
-                        ErrorCode::Internal,
-                        acb_i18n::t!("kernel.memory.worktree_invalid", path = worktree.display()),
-                    ));
-                }
-            }
-        }
-
-        // 不存在 → 从裸仓库 checkout 出来。worktree 的分支名用会话 id，避免和主分支撞。
         let repo = git2::Repository::open(&bare).map_err(|error| {
             ToolError::new(
                 ErrorCode::Internal,
@@ -100,25 +89,85 @@ impl MemoryRepo {
                 ),
             )
         })?;
+        // 空裸仓库没有 HEAD，libgit2 无法从它创建 linked worktree。先种一个空提交，
+        // 让主仓库有可 checkout 的基点；否则每个 worktree 都会退化成独立仓库。
+        ensure_initial_commit(&repo, &bare)?;
 
-        // 空裸仓库（HEAD 还没指向任何提交）没有分支可 checkout，`git worktree add` 会报
-        // UnbornBranch。这种时候 worktree 就自己 init 成一个独立仓库——反正没有历史可共享，
-        // 第一个提交由这个 worktree 自己长出。
-        if repo.head().is_err() {
-            git2::Repository::init(&worktree).map_err(|error| {
+        if worktree.exists() {
+            let dotgit = worktree.join(".git");
+            if dotgit.is_file() {
+                if git2::Repository::open(&worktree).is_ok() {
+                    return Ok(worktree);
+                }
+                return Err(ToolError::new(
+                    ErrorCode::Internal,
+                    acb_i18n::t!("kernel.memory.worktree_invalid", path = worktree.display()),
+                ));
+            }
+            if dotgit.is_dir() && standalone_worktree_is_empty(&worktree) {
+                // 旧实现留下的空独立仓库：改名留存，再重建为 linked worktree。
+                let backup = orphan_backup_path(&worktree);
+                fs::rename(&worktree, &backup).map_err(|error| {
+                    ToolError::new(
+                        ErrorCode::Internal,
+                        acb_i18n::t!(
+                            "kernel.memory.worktree_migrate_failed",
+                            path = worktree.display(),
+                            error = error
+                        ),
+                    )
+                })?;
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.memory.worktree_migrated",
+                        path = worktree.display(),
+                        backup = backup.display()
+                    )
+                );
+            } else {
+                return Err(ToolError::new(
+                    ErrorCode::Internal,
+                    acb_i18n::t!(
+                        "kernel.memory.worktree_not_linked",
+                        path = worktree.display(),
+                        bare = bare.display()
+                    ),
+                ));
+            }
+        }
+
+        // 不存在（或刚移走中的空独立仓库）→ 从主仓库创建 linked worktree。
+        // 分支名用会话 id，避免和主分支撞。
+        let branch = format!("acb/{session}");
+        if let Some(parent) = worktree.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
                 ToolError::new(
                     ErrorCode::Internal,
                     acb_i18n::t!(
-                        "kernel.memory.init_worktree_failed",
-                        path = worktree.display(),
-                        error = error
+                        "kernel.memory.checkout_worktree_failed",
+                        session = session,
+                        error = error,
+                        bare = bare.display()
                     ),
                 )
             })?;
-            return Ok(worktree);
         }
-
-        let branch = format!("acb/{session}");
+        // libgit2 不会为 worktree 的 admin 目录自动建中间层；分支名 acb/<session>
+        // 对应 <bare>/worktrees/acb/<session>，要先建 acb 这一层。
+        if let Some((parent, _)) = branch.rsplit_once('/') {
+            fs::create_dir_all(bare.join("worktrees").join(parent)).map_err(|error| {
+                ToolError::new(
+                    ErrorCode::Internal,
+                    acb_i18n::t!(
+                        "kernel.memory.checkout_worktree_failed",
+                        session = session,
+                        error = error,
+                        bare = bare.display()
+                    ),
+                )
+            })?;
+        }
         repo.worktree(&branch, &worktree, None).map_err(|error| {
             ToolError::new(
                 ErrorCode::Internal,
@@ -185,6 +234,74 @@ impl MemoryRepo {
         })?;
         self.ensure_worktree(&location, memory, session)
     }
+}
+
+/// 空裸仓库没有 HEAD；先种一个空提交，linked worktree 才有可 checkout 的基点。
+fn ensure_initial_commit(repo: &git2::Repository, bare: &Path) -> Result<(), ToolError> {
+    if repo.head().is_ok() {
+        return Ok(());
+    }
+    let result = (|| -> Result<(), git2::Error> {
+        let signature = git2::Signature::now("ACB", "acb@localhost")?;
+        let tree_id = {
+            let mut builder = repo.treebuilder(None)?;
+            builder.write()?
+        };
+        let tree = repo.find_tree(tree_id)?;
+        repo.commit(
+            Some("refs/heads/main"),
+            &signature,
+            &signature,
+            "memory: initial commit",
+            &tree,
+            &[],
+        )?;
+        repo.set_head("refs/heads/main")?;
+        Ok(())
+    })();
+    result.map_err(|error| {
+        ToolError::new(
+            ErrorCode::Internal,
+            acb_i18n::t!(
+                "kernel.memory.init_initial_commit_failed",
+                bare = bare.display(),
+                error = error
+            ),
+        )
+    })
+}
+
+/// 旧实现用 `git init` 建出来的独立仓库：没有提交、目录里除 `.git` 外没有内容时，
+/// 可以安全改名留存并重建为 linked worktree。
+fn standalone_worktree_is_empty(path: &Path) -> bool {
+    let Ok(repo) = git2::Repository::open(path) else {
+        return false;
+    };
+    if repo.head().is_ok() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .all(|entry| entry.file_name() == ".git")
+}
+
+fn orphan_backup_path(path: &Path) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let mut backup = path.to_path_buf();
+    let name = format!(
+        "{}.orphan-{stamp}",
+        path.file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default()
+    );
+    backup.set_file_name(name);
+    backup
 }
 
 /// 规范化路径：去掉 `.` 和 `..`（不要求真实存在，供越界判断兜底用）。
@@ -524,14 +641,37 @@ pub fn git_push(worktree: &Path) -> Result<String, ToolError> {
             acb_i18n::t!("kernel.memory.no_origin", error = error),
         )
     })?;
-    remote
-        .push(&["refs/heads/acb/HEAD"], None)
-        .map_err(|error| {
+    // 推送当前 worktree 所在的分支，而不是写死的 acb/HEAD。
+    let head = repo.head().map_err(|error| {
+        ToolError::new(
+            ErrorCode::BadRequest,
+            acb_i18n::t!(
+                "kernel.memory.git_push_detached",
+                path = worktree.display(),
+                error = error
+            ),
+        )
+    })?;
+    let branch = head
+        .shorthand()
+        .filter(|name| *name != "HEAD")
+        .ok_or_else(|| {
             ToolError::new(
-                ErrorCode::Internal,
-                acb_i18n::t!("kernel.memory.git_push_failed", error = error),
+                ErrorCode::BadRequest,
+                acb_i18n::t!(
+                    "kernel.memory.git_push_detached",
+                    path = worktree.display(),
+                    error = "HEAD is detached"
+                ),
             )
         })?;
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    remote.push(&[refspec.as_str()], None).map_err(|error| {
+        ToolError::new(
+            ErrorCode::Internal,
+            acb_i18n::t!("kernel.memory.git_push_failed", error = error),
+        )
+    })?;
     Ok("已推送".to_owned())
 }
 
@@ -657,12 +797,81 @@ mod tests {
             .ensure_worktree(bare.to_str().unwrap(), "m1", "s1")
             .expect("首次 checkout");
         assert!(first.exists());
+        assert!(
+            first.join(".git").is_file(),
+            "worktree 必须是主仓库的 linked worktree，而不是独立仓库"
+        );
+        let worktree_repo = git2::Repository::open(&first).expect("能打开 worktree");
+        assert_eq!(
+            worktree_repo.head().expect("有 HEAD").shorthand(),
+            Some("acb/s1"),
+            "worktree 分支应当按会话命名"
+        );
 
         // 第二次：路径已存在且是有效 worktree，直接复用，不报错、不重建。
         let second = repo
             .ensure_worktree(bare.to_str().unwrap(), "m1", "s1")
             .expect("幂等复用");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn empty_standalone_worktree_is_migrated_to_linked() {
+        let root = tmp();
+        let bare = root.join("main.git");
+        let repo = MemoryRepo::new(root.join("wt"));
+        let wt = repo.worktree_path("m1", "s1");
+        std::fs::create_dir_all(&wt).expect("建 worktree 目录");
+        git2::Repository::init(&wt).expect("旧实现留下的独立仓库");
+
+        let linked = repo
+            .ensure_worktree(bare.to_str().unwrap(), "m1", "s1")
+            .expect("空独立仓库应当能迁移");
+        assert!(
+            linked.join(".git").is_file(),
+            "迁移后必须是 linked worktree"
+        );
+
+        let parent = wt.parent().expect("有父目录");
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .expect("读目录")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("s1.orphan-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "旧独立仓库应当改名留存，不是删除");
+    }
+
+    #[test]
+    fn git_push_pushes_the_current_worktree_branch() {
+        let root = tmp();
+        let bare = root.join("main.git");
+        let remote = root.join("remote.git");
+        git2::Repository::init_bare(&remote).expect("建远端裸仓库");
+        let repo = MemoryRepo::new(root.join("wt"));
+        let wt = repo
+            .ensure_worktree(bare.to_str().unwrap(), "m1", "s1")
+            .expect("checkout");
+
+        write_file(&wt, "shared.md", "第一版").expect("写");
+        git_add(&wt, "").expect("暂存");
+        git_commit(&wt, "第一版").expect("提交");
+
+        let worktree_repo = git2::Repository::open(&wt).expect("打开 worktree");
+        worktree_repo
+            .remote("origin", remote.to_str().unwrap())
+            .expect("配置 origin");
+        git_push(&wt).expect("推送到 origin");
+
+        let remote_repo = git2::Repository::open_bare(&remote).expect("打开远端");
+        assert!(
+            remote_repo.find_reference("refs/heads/acb/s1").is_ok(),
+            "推送的应当是当前会话分支 acb/s1"
+        );
     }
 
     #[test]
@@ -725,8 +934,7 @@ mod tests {
             .ensure_worktree(bare.to_str().unwrap(), "m1", "s1")
             .expect("checkout");
 
-        // 空裸仓库没有分支，首次 commit 前先落一个初始提交，git2 的 worktree 从空仓库
-        // checkout 时可能没有 HEAD。这里直接写文件 + add + commit 验证链路。
+        // worktree 已从主仓库 checkout 出 acb/s1 分支；直接写文件 + add + commit 验证链路。
         write_file(&wt, "shared.md", "第一版").expect("写");
         git_add(&wt, "").expect("暂存全部");
         git_commit(&wt, "初始").expect("提交");
