@@ -191,7 +191,7 @@
   - `cargo test -p acb-kernel --test task_flow` → 3/3；
   - `cargo test --workspace` → 全通过（exit 0）；
   - `cargo fmt --all -- --check` 无差异。
-- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- commit：`44816e1 feat(wake): add audited direct wake for high-trust providers`
 - 偏离说明：Lua / 声明式模块即使构造同样的 `Wake` 动作也会被信任检查拒绝；不为 Lua
   增加解析入口，避免把直通能力漏给 T1 沙箱。代价是这两种载体暂时只能走合成事件。
 - 未决问题：审计是否持久化、限流是否按会话细分、控制台是否要做审计 UI。
