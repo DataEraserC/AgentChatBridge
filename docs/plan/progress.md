@@ -760,6 +760,37 @@
 - commit：`a16d80e docs(plan): evaluate callback panic handling policy`
 - 可回退：纯文档。
 
+## 2026-11-04 09:20 CST — 回调 panic catch 实施
+
+- 任务编号：按 `callback-panic-policy.md` 实施 catch（用户要求）
+- 做了什么：
+  - `plugin.rs`：`RecordObserver` 的每次 `observe` 包 `catch_unwind`；panic 只跳过该
+    观察者并记 `kernel.plugin.observer_panicked`，记录入库/唤醒/其它观察者继续；
+  - `engine.rs`：`RouteProvider::decide` panic 按 `Pass` 处理并记日志；core 在收到完整
+    decision 前不写 pending，因此没有半成品要回滚；
+  - `engine.rs`：`ToolProvider::call` panic 返回 `[tool_panic] <provider>: <tool>` 的
+    `ToolError::Internal`；轮次、票、工具索引继续可用；
+  - `panic_text` 统一提取 `&str` / `String` payload，避免只留“某处 panic”。
+- 测试：
+  - `callback_panic.rs` 3/3：Observer（入库+唤醒+其它观察者+再次调用）、Route
+    （Pass 后下一条路由继续+入库+`pending_route_actions=0`）、Tool（`[tool_panic]`、
+    同轮其它工具、再次调用、下一轮索引）；
+  - `panic_stress.rs` 1/1：连续 200 次 Observer+Route+Tool panic；断言
+    `queued_turns=0`、`pending_route_actions=0`、provider `lastError=null`、
+    生命周期不变、压力后仍可服务；
+  - 实测 RSS：baseline 11,012 KiB → 12,456 KiB，增长 1,444 KiB（含 200 条新入库记录），
+    低于测试上限 16 MiB；没有结构性残留。
+- 证据：`cargo test --workspace` 全绿。
+- commit：`10e897f fix(plugin): catch callback panics without poisoning bridge state`
+- 边界/未做：
+  - 只 catch **回调本身**；`manager.instantiate` 的 panic 仍会冒泡（它属于插件装载路径，
+    需要单独的安全点设计）。
+  - 动态库 / FFI 回调仍不能由 core catch；按文档由插件在 FFI 入口自己 catch，
+    否则进程退出由 supervisor 拉起。
+  - 压力测试的内存断言是宽松上限；增长里包含正常入库数据，不能单独当作“无泄漏”证据，
+    结构断言（pending/队列/lastError）才是硬检查。
+- 可回退：移除三处 `catch_unwind` 与日志键即可；测试与文档可保留。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
