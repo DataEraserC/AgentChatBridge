@@ -151,12 +151,15 @@
   - `cargo test -p acb-kernel --test task_flow` → 3/3。
   - `cargo test --workspace` → 42 suites 全通过，0 failed。
   - dsh/opencode `npm test` 通过；`node --check harnesses/shared/tools.mjs` 通过。
-- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- commit：`928715b feat(task): emit synthetic task events filtered by wake_on`
 - 偏离说明：默认 `always` 会让每个任务在流水里多一条合成事件；换取默认可观察性。
   如果用户觉得噪音大，可回退为 `never` 或只让 `error` 发。
 - 下一步入口：T7b-2 直接唤醒 API（高信任模块、审计、频率限制）；读 `PluginManager` 的
   wake/clock 注册与 `Bridge::enqueue`。
 - 未决问题：直接唤醒 API 的信任标记、限流窗口；T7c feedback reply 的事件复用。
+- 新增待办（优先级低于 T7b）：`docs/plan/native-reload-and-supervisor.md` 设计文档，
+  讨论 core 排空+退出、外部 supervisor 重启、版本/插件回滚边界。仅出设计，不改代码/
+  systemd/服务。完成后在本日志补记录。
 
 ## 环境状态
 
