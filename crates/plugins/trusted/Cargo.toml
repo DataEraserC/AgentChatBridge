@@ -7,4 +7,5 @@ rust-version.workspace = true
 description = "受信任的树外 manager：扩展宿主契约的参考实现（ADR-0026 Phase 3）"
 
 [dependencies]
+acb-i18n = { workspace = true }
 acb-kernel = { path = "../../kernel" }

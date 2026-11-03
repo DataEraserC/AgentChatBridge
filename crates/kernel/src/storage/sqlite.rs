@@ -168,15 +168,21 @@ impl SqliteStore {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|error| {
-                    backend(format!(
-                        "failed to create directory {}: {error}",
-                        parent.display()
+                    backend(acb_i18n::t!(
+                        "kernel.storage.create_dir_failed",
+                        dir = parent.display(),
+                        error = error
                     ))
                 })?;
             }
         }
-        let conn = Connection::open(path)
-            .map_err(|error| backend(format!("failed to open {}: {error}", path.display())))?;
+        let conn = Connection::open(path).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.open_failed",
+                path = path.display(),
+                error = error
+            ))
+        })?;
         Self::prepare(conn, true)
     }
 
@@ -192,12 +198,21 @@ impl SqliteStore {
         // WAL 让「读」不被「写」挡住；内存库没有意义，跳过。
         if on_disk {
             conn.execute_batch("PRAGMA journal_mode = WAL;")
-                .map_err(|error| backend(format!("failed to enable WAL: {error}")))?;
+                .map_err(|error| {
+                    backend(acb_i18n::t!(
+                        "kernel.storage.enable_wal_failed",
+                        error = error
+                    ))
+                })?;
         }
         conn.execute_batch("PRAGMA synchronous = NORMAL;")
             .map_err(|error| backend(error.to_string()))?;
-        conn.execute_batch(SCHEMA)
-            .map_err(|error| backend(format!("failed to create tables: {error}")))?;
+        conn.execute_batch(SCHEMA).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.create_tables_failed",
+                error = error
+            ))
+        })?;
 
         let store = Self { conn };
         store.check_version()?;
@@ -215,7 +230,12 @@ impl SqliteStore {
                 "CREATE INDEX IF NOT EXISTS records_platform
                      ON records (connection, room_key, platform_id);",
             )
-            .map_err(|error| backend(format!("failed to create indexes: {error}")))
+            .map_err(|error| {
+                backend(acb_i18n::t!(
+                    "kernel.storage.create_indexes_failed",
+                    error = error
+                ))
+            })
     }
 
     /// 把库升到 [`SCHEMA_VERSION`]。
@@ -236,16 +256,19 @@ impl SqliteStore {
         // 新库（或被清过版本号的库）：按 0 处理，后面照常补列，不会漏。
         let version = match found {
             None => 0,
-            Some(raw) => raw
-                .trim()
-                .parse::<i64>()
-                .map_err(|_| backend(format!("unrecognized schema version in database: {raw}")))?,
+            Some(raw) => raw.trim().parse::<i64>().map_err(|_| {
+                backend(acb_i18n::t!(
+                    "kernel.storage.schema_version_unreadable",
+                    raw = raw
+                ))
+            })?,
         };
 
         if version > SCHEMA_VERSION {
-            return Err(backend(format!(
-                "这个库是第 {version} 版的结构，本程序只认识第 {SCHEMA_VERSION} 版。\
-                 别拿新库配老程序——先升级程序，或者换一个库文件"
+            return Err(backend(acb_i18n::t!(
+                "kernel.storage.schema_version_too_new",
+                version = version,
+                current = SCHEMA_VERSION
             )));
         }
 
@@ -270,7 +293,12 @@ impl SqliteStore {
             // 留着只是白占写入开销，删掉。
             self.conn
                 .execute_batch("DROP INDEX IF EXISTS records_platform_id;")
-                .map_err(|error| backend(format!("failed to drop old indexes: {error}")))?;
+                .map_err(|error| {
+                    backend(acb_i18n::t!(
+                        "kernel.storage.drop_old_indexes_failed",
+                        error = error
+                    ))
+                })?;
         }
 
         // 3 → 4：device 概念升级为「harness 会话」。只改名不搬数据——`device` 那一列
@@ -316,7 +344,12 @@ impl SqliteStore {
                 "CREATE INDEX IF NOT EXISTS records_by_platform_id
                      ON records (connection, room_key, platform_id);",
             )
-            .map_err(|error| backend(format!("failed to create indexes: {error}")))?;
+            .map_err(|error| {
+                backend(acb_i18n::t!(
+                    "kernel.storage.create_indexes_failed",
+                    error = error
+                ))
+            })?;
         Ok(())
     }
 
@@ -335,7 +368,15 @@ impl SqliteStore {
             .execute_batch(&format!(
                 "ALTER TABLE {table} RENAME COLUMN {old} TO {new};"
             ))
-            .map_err(|error| backend(format!("failed to rename {table}.{old} to {new}: {error}")))
+            .map_err(|error| {
+                backend(acb_i18n::t!(
+                    "kernel.storage.rename_failed",
+                    table = table,
+                    old = old,
+                    new = new,
+                    error = error
+                ))
+            })
     }
 
     /// 表里有哪些列。
@@ -369,7 +410,14 @@ impl SqliteStore {
             .execute_batch(&format!(
                 "ALTER TABLE {table} ADD COLUMN {column} {definition};"
             ))
-            .map_err(|error| backend(format!("failed to add column {column} to {table}: {error}")))
+            .map_err(|error| {
+                backend(acb_i18n::t!(
+                    "kernel.storage.add_column_failed",
+                    table = table,
+                    column = column,
+                    error = error
+                ))
+            })
     }
 
     /// 库里有多少东西。只给启动摘要用，不算进 [`Store`] 约束。
@@ -422,17 +470,30 @@ impl Transcript for SqliteStore {
                         summary: summary.clone(),
                         body: *body,
                     })
-                    .map_err(|error| backend(format!("failed to store event metadata: {error}")))?,
+                    .map_err(|error| {
+                        backend(acb_i18n::t!(
+                            "kernel.storage.store_event_metadata_failed",
+                            error = error
+                        ))
+                    })?,
                 ),
             ),
         };
-        let elements = serde_json::to_string(&draft.elements)
-            .map_err(|error| backend(format!("failed to store content elements: {error}")))?;
+        let elements = serde_json::to_string(&draft.elements).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.store_elements_failed",
+                error = error
+            ))
+        })?;
 
         // 路径的原始结构也存一份：以后房间要换成更自由的形状，原始数据还在，
         // 重新算键是一次脚本的事，不用重导。
-        let room_json = serde_json::to_string(&draft.room.path)
-            .map_err(|error| backend(format!("failed to store room path: {error}")))?;
+        let room_json = serde_json::to_string(&draft.room.path).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.store_room_path_failed",
+                error = error
+            ))
+        })?;
 
         let transaction = self.conn.transaction().map_err(io_error)?;
         // 编号是「房间内」的：同一个房间接着往上数，不同连接同号互不相干。
@@ -566,8 +627,11 @@ impl Transcript for SqliteStore {
         for row in rows {
             let (connection, room_key) = row.map_err(io_error)?;
             let room = RoomId::new(&connection, &room_key).map_err(|error| {
-                backend(format!(
-                    "unrecognized room in database: {connection}:{room_key} ({error})"
+                backend(acb_i18n::t!(
+                    "kernel.storage.unrecognized_room",
+                    connection = connection,
+                    room_key = room_key,
+                    error = error
                 ))
             })?;
             rooms.push(room);
@@ -660,7 +724,12 @@ impl Transcript for SqliteStore {
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
-            .map_err(|error| backend(format!("failed to read record labels: {error}")))?
+            .map_err(|error| {
+                backend(acb_i18n::t!(
+                    "kernel.storage.read_labels_failed",
+                    error = error
+                ))
+            })?
             .unwrap_or_default();
         let before = current.len();
         for label in labels {
@@ -671,8 +740,12 @@ impl Transcript for SqliteStore {
         if current.len() == before {
             return Ok(false);
         }
-        let text = serde_json::to_string(&current)
-            .map_err(|error| backend(format!("failed to store record labels: {error}")))?;
+        let text = serde_json::to_string(&current).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.store_labels_failed",
+                error = error
+            ))
+        })?;
         self.conn
             .execute(
                 "UPDATE records SET labels = ?4
@@ -813,7 +886,12 @@ impl RawRow {
                     .as_deref()
                     .map(serde_json::from_str)
                     .transpose()
-                    .map_err(|error| backend(format!("failed to read event metadata: {error}")))?
+                    .map_err(|error| {
+                        backend(acb_i18n::t!(
+                            "kernel.storage.read_event_metadata_failed",
+                            error = error
+                        ))
+                    })?
                     .unwrap_or_default();
                 RecordKind::Event {
                     event: self.event.unwrap_or_default(),
@@ -824,19 +902,29 @@ impl RawRow {
                 }
             }
             other => {
-                return Err(backend(format!(
-                    "unrecognized record kind in database: {other}"
+                return Err(backend(acb_i18n::t!(
+                    "kernel.storage.unrecognized_record_kind",
+                    kind = other
                 )));
             }
         };
-        let elements: Vec<Element> = serde_json::from_str(&self.elements)
-            .map_err(|error| backend(format!("failed to read content elements: {error}")))?;
+        let elements: Vec<Element> = serde_json::from_str(&self.elements).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.read_elements_failed",
+                error = error
+            ))
+        })?;
         let labels: Vec<String> = self
             .labels
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
-            .map_err(|error| backend(format!("failed to read record labels: {error}")))?
+            .map_err(|error| {
+                backend(acb_i18n::t!(
+                    "kernel.storage.read_labels_failed",
+                    error = error
+                ))
+            })?
             .unwrap_or_default();
 
         Ok(Record {
@@ -1130,8 +1218,9 @@ impl Notes for SqliteStore {
         for row in rows {
             let (kind, key, value, label, status, corrected, updated_at) = row.map_err(io_error)?;
             let Some(kind) = NoteKind::parse(&kind) else {
-                return Err(backend(format!(
-                    "unrecognized note kind in database: {kind}"
+                return Err(backend(acb_i18n::t!(
+                    "kernel.storage.unrecognized_note_kind",
+                    kind = kind
                 )));
             };
             notes.push(Note {
@@ -1220,7 +1309,10 @@ impl SessionMaps for SqliteStore {
             return Ok(None);
         };
         let meta: serde_json::Value = serde_json::from_str(&meta).map_err(|error| {
-            backend(format!("failed to parse session mapping metadata: {error}"))
+            backend(acb_i18n::t!(
+                "kernel.storage.parse_session_map_meta_failed",
+                error = error
+            ))
         })?;
         Ok(Some(SessionMap {
             session: session.to_owned(),
@@ -1232,7 +1324,10 @@ impl SessionMaps for SqliteStore {
 
     fn upsert_session_map(&mut self, map: SessionMap) -> Result<(), StorageError> {
         let meta = serde_json::to_string(&map.meta).map_err(|error| {
-            backend(format!("failed to store session mapping metadata: {error}"))
+            backend(acb_i18n::t!(
+                "kernel.storage.store_session_map_meta_failed",
+                error = error
+            ))
         })?;
         self.conn
             .execute(
@@ -1282,7 +1377,10 @@ impl SessionMaps for SqliteStore {
         for row in rows {
             let (session, harness_session, meta, updated_at) = row.map_err(io_error)?;
             let meta: serde_json::Value = serde_json::from_str(&meta).map_err(|error| {
-                backend(format!("failed to parse session mapping metadata: {error}"))
+                backend(acb_i18n::t!(
+                    "kernel.storage.parse_session_map_meta_failed",
+                    error = error
+                ))
             })?;
             maps.push(SessionMap {
                 session,
@@ -1297,10 +1395,18 @@ impl SessionMaps for SqliteStore {
 
 impl Feedbacks for SqliteStore {
     fn record_feedback(&mut self, draft: FeedbackDraft) -> Result<Recorded, StorageError> {
-        let refs = serde_json::to_string(&draft.refs)
-            .map_err(|error| backend(format!("failed to store feedback origin: {error}")))?;
-        let context = serde_json::to_string(&draft.context)
-            .map_err(|error| backend(format!("failed to store feedback context: {error}")))?;
+        let refs = serde_json::to_string(&draft.refs).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.store_feedback_origin_failed",
+                error = error
+            ))
+        })?;
+        let context = serde_json::to_string(&draft.context).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.store_feedback_context_failed",
+                error = error
+            ))
+        })?;
 
         // 先看指纹在不在。在就合并，不在就新建——比 upsert 多一次查询，但两种情况的
         // 返回不一样（新建要给新 id，合并要给累计次数），分开写更好读。

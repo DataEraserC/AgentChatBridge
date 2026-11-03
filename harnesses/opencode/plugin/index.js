@@ -24,6 +24,7 @@ import {
   roomText,
 } from "./acb-wire.mjs"
 import { TOOLS } from "../../shared/tools.mjs"
+import { t } from "../../shared/i18n.mjs"
 import fs from "node:fs"
 import path from "node:path"
 
@@ -38,7 +39,7 @@ function parseModelRef(text) {
   if (!value) return null
   const slash = value.indexOf("/")
   if (slash <= 0 || slash === value.length - 1) {
-    throw new Error(`session model must be provider/model (got ${value})`)
+    throw new Error(t("opencode.model_ref_invalid", { value }))
   }
   return { providerID: value.slice(0, slash), modelID: value.slice(slash + 1) }
 }
@@ -51,12 +52,16 @@ export default {
     const log = makeLogger(ctx, config.logFile)
     log(
       "info",
-      `plugin load endpoint=${config.endpoint} harness=${config.harness} ` +
-        `session=${config.session || "(from acb session map)"} log=${config.logFile}`,
+      t("opencode.plugin_load", {
+        endpoint: config.endpoint,
+        harness: config.harness,
+        session: config.session || t("opencode.session_from_map"),
+        logFile: config.logFile,
+      }),
     )
 
     if (!config.token) {
-      log("warn", "no token (ctx.options.token or ACB_TOKEN); acb disabled")
+      log("warn", t("opencode.no_token_disabled"))
       return
     }
 
@@ -87,16 +92,16 @@ export default {
     void link
       .connect()
       .then(async () => {
-        log("info", `connected to bridge; bound sessions ${link.sessions.join(", ")}`)
+        log("info", t("opencode.connected", { sessions: link.sessions.join(", ") }))
         // 把 storage 里还活着的映射主动报给桥：控制台的「harness 侧映射」
         // 靠 report_map 落盘，不报的话页面上永远是空、也没法断开。
         await driver.reportStoredMaps(link)
       })
-      .catch((error) => log("warn", `cannot reach the bridge yet: ${error.message}; retrying`))
+      .catch((error) => log("warn", t("opencode.bridge_unreachable", { error: error.message })))
 
     return async () => {
       link.close()
-      log("warn", "plugin unloaded: bridge disconnected and will not reconnect. If the process is still alive but receives no messages, this is likely why")
+      log("warn", t("opencode.plugin_unloaded"))
       try {
         await registration?.dispose?.()
       } catch {
@@ -163,7 +168,7 @@ class TurnDriver {
         this.sessions.set(session, stored)
         this.#reportMap(session, stored, link)
       } catch (error) {
-        this.log("warn", `failed to report mapping for session ${session}: ${error?.message ?? error}`)
+        this.log("warn", t("opencode.report_mapping_failed", { session, error: error?.message ?? error }))
       }
     }
   }
@@ -181,9 +186,9 @@ class TurnDriver {
         command: "report_map",
         result: { session_id: id, meta: { title: `acb:${session}` } },
       })
-      this.log("info", `reported mapping ${session} -> ${id} to the bridge`)
+      this.log("info", t("opencode.mapping_reported", { session, id }))
     } catch (error) {
-      this.log("warn", `failed to report mapping: ${error?.message ?? error}`)
+      this.log("warn", t("opencode.mapping_report_failed", { error: error?.message ?? error }))
     }
   }
 
@@ -200,10 +205,10 @@ class TurnDriver {
       if (command === "interrupt") {
         const sessionID = this.pinned || this.sessions.get(session)
         if (!sessionID) {
-          throw new Error(`session ${session} has no opencode mapping yet (no turn has run)`)
+          throw new Error(t("opencode.no_mapping", { session }))
         }
         if (typeof this.ctx.session.interrupt !== "function") {
-          throw new Error("this opencode version has no ctx.session.interrupt; cannot interrupt")
+          throw new Error(t("opencode.no_interrupt"))
         }
         await this.ctx.session.interrupt({ sessionID })
         link.controlResult({
@@ -212,14 +217,14 @@ class TurnDriver {
           command,
           result: { ok: true, session_id: sessionID },
         })
-        this.log("info", `interrupted session ${session} (opencode ${sessionID})`)
+        this.log("info", t("opencode.interrupted", { session, sessionID }))
         return
       }
-      if (command !== "reset") throw new Error(`unknown command ${command}`)
+      if (command !== "reset") throw new Error(t("opencode.unknown_command", { command }))
       this.#forget(session)
       let newId = ""
       if (this.pinned) {
-        this.log("warn", `session ${session} is pinned to an opencode session (${this.pinned}); reset will not switch sessions`)
+        this.log("warn", t("opencode.pinned_reset_warning", { session, pinned: this.pinned }))
       } else {
         // storage 刚清掉，#session 在这里必然走新建分支。
         newId = await this.#session(session)
@@ -230,10 +235,15 @@ class TurnDriver {
         command,
         result: { ok: true, ...(newId ? { session_id: newId } : {}) },
       })
-      this.log("info", `session ${session} reset${newId ? ` -> new session ${newId}` : ""}`)
+      this.log(
+        "info",
+        newId
+          ? t("opencode.session_reset_new", { session, sessionId: newId })
+          : t("opencode.session_reset", { session }),
+      )
     } catch (error) {
       const message = error?.message ?? String(error)
-      this.log("error", `failed to reset session ${session}: ${message}`)
+      this.log("error", t("opencode.reset_failed", { session, error: message }))
       link.controlResult({ id, session, command, error: message })
     }
   }
@@ -260,17 +270,25 @@ class TurnDriver {
         const updated = this.personas.has(delivery.session) ? "[人格已更新]\n" : ""
         text = `${updated}${personaText}\n\n${text}`
         this.personas.set(delivery.session, signature)
-        this.log("info", `injected persona ${delivery.persona?.id ?? ""} into session ${delivery.session}`)
+        this.log("info", t("opencode.persona_injected", {
+          persona: delivery.persona?.id ?? "",
+          session: delivery.session,
+        }))
       }
       const info = delivery.session_info ?? {}
       const modelRef = parseModelRef(info.model)
       const model = modelRef
         ? `${modelRef.providerID}/${modelRef.modelID}`
-        : "(opencode default)"
+        : t("opencode.model_default")
       this.log(
         "info",
-        `turn start ${delivery.ticket}: ${roomText(delivery.room)}, ${delivery.records.length} record(s), ` +
-          `opencode session ${sessionID}, model ${model}`,
+        t("opencode.turn_started", {
+          ticket: delivery.ticket,
+          room: roomText(delivery.room),
+          count: delivery.records.length,
+          sessionID,
+          model,
+        }),
       )
       // prompt 把话排进会话；wait 等这一轮助手真正说完。
       // 会话配了 model 就随本轮带上，opencode 会自己校验 provider/model 是否已配置。
@@ -279,26 +297,33 @@ class TurnDriver {
         text,
         ...(modelRef ? { model: modelRef } : {}),
       })
-      this.log("info", `prompt sent ${delivery.ticket}; waiting for model`)
+      this.log("info", t("opencode.prompt_sent", { ticket: delivery.ticket }))
       if (typeof this.ctx.session.wait === "function") {
         await this.ctx.session.wait({ sessionID })
       }
       this.log(
         "info",
-        `turn complete ${delivery.ticket}, elapsed ${((Date.now() - started) / 1000).toFixed(1)}s, ` +
-          `called bridge tools ${link.turnCalls ?? 0} time(s)`,
+        t("opencode.turn_complete", {
+          ticket: delivery.ticket,
+          seconds: ((Date.now() - started) / 1000).toFixed(1),
+          calls: link.turnCalls ?? 0,
+        }),
       )
       if (delivery.records.length > 0 && (link.turnCalls ?? 0) === 0) {
         this.log(
           "warn",
-          `turn called no bridge tools: the model may not have really replied (${delivery.ticket})`,
+          t("opencode.no_tool_calls", { ticket: delivery.ticket }),
         )
       }
     } catch (error) {
       failure = error?.message ?? String(error)
       this.log(
         "error",
-        `turn failed ${delivery.ticket}: ${failure} (elapsed ${((Date.now() - started) / 1000).toFixed(1)}s)`,
+        t("opencode.turn_failed_elapsed", {
+          ticket: delivery.ticket,
+          error: failure,
+          seconds: ((Date.now() - started) / 1000).toFixed(1),
+        }),
       )
       // 会话可能被删了：下次重建，别一直往一个死会话里灌。
       this.#forget(delivery.session)
@@ -306,7 +331,7 @@ class TurnDriver {
       try {
         link.endTurn(delivery.ticket, failure)
       } catch (error) {
-        this.log("warn", `failed to send turn_end: ${error.message}`)
+        this.log("warn", t("opencode.turn_end_failed", { error: error.message }))
       }
     }
   }
@@ -329,7 +354,7 @@ class TurnDriver {
     const stored = await this.#storageGet(`session:${session}`)
     if (stored && (await this.#alive(stored))) {
       this.sessions.set(session, stored)
-      this.log("info", `reused session ${stored} (acb:${session})`)
+      this.log("info", t("opencode.session_reused", { sessionId: stored, session }))
       return stored
     }
 
@@ -340,13 +365,11 @@ class TurnDriver {
       created?.session?.id ??
       created?.data?.id
     if (!id) {
-      throw new Error(
-        `session creation returned no id; the opencode response shape may have changed: ${JSON.stringify(created).slice(0, 200)}`,
-      )
+      throw new Error(t("opencode.session_no_id", { result: JSON.stringify(created).slice(0, 200) }))
     }
     this.sessions.set(session, id)
     await this.#storageSet(`session:${session}`, id)
-    this.log("info", `new session ${id} (acb:${session})`)
+    this.log("info", t("opencode.session_created", { sessionId: id, session }))
     return id
   }
 

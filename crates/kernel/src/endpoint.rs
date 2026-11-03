@@ -90,11 +90,11 @@ impl ControlRegistry {
 /// 接入点错误。
 #[derive(Debug, Error)]
 pub enum EndpointError {
-    #[error("network I/O failed: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.endpoint.io_failed", detail = .0))]
     Io(#[from] std::io::Error),
-    #[error("protocol error: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.endpoint.protocol_error", detail = .0))]
     Protocol(String),
-    #[error("handshake failed: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.endpoint.handshake_failed", detail = .0))]
     Handshake(String),
     #[error(transparent)]
     Bridge(#[from] BridgeError),
@@ -109,23 +109,28 @@ pub fn handshake<S: Store>(bridge: &Bridge<S>, frame: Frame) -> Result<Vec<Strin
             token,
         } => (version, harness, token),
         other => {
-            return Err(EndpointError::Handshake(format!(
-                "first frame must be hello, got {}",
-                other.kind()
+            return Err(EndpointError::Handshake(acb_i18n::t!(
+                "kernel.endpoint.first_frame",
+                frame = other.kind()
             )));
         }
     };
     if !acb_proto::frame::version_compatible(version) {
-        return Err(EndpointError::Handshake(format!(
-            "incompatible protocol version: peer is {version}, local is {}",
-            acb_proto::frame::PROTOCOL_VERSION
+        return Err(EndpointError::Handshake(acb_i18n::t!(
+            "kernel.endpoint.version_incompatible",
+            peer = version,
+            local = acb_proto::frame::PROTOCOL_VERSION
         )));
     }
     if harness.trim().is_empty() {
-        return Err(EndpointError::Handshake("harness name not provided".into()));
+        return Err(EndpointError::Handshake(acb_i18n::t!(
+            "kernel.endpoint.handshake_missing_harness"
+        )));
     }
     let Some(token) = token else {
-        return Err(EndpointError::Handshake("access token not provided".into()));
+        return Err(EndpointError::Handshake(acb_i18n::t!(
+            "kernel.endpoint.handshake_missing_token"
+        )));
     };
     // harness 名下的所有会话，再按令牌筛出「这次接入能代表的」。
     let sessions: Vec<String> = bridge
@@ -136,9 +141,9 @@ pub fn handshake<S: Store>(bridge: &Bridge<S>, frame: Frame) -> Result<Vec<Strin
         .map(|session| session.id.clone())
         .collect();
     if sessions.is_empty() {
-        return Err(EndpointError::Handshake(
-            "invalid harness name or access token".into(),
-        ));
+        return Err(EndpointError::Handshake(acb_i18n::t!(
+            "kernel.endpoint.handshake_invalid_identity"
+        )));
     }
     Ok(sessions)
 }
@@ -226,8 +231,7 @@ impl Conn {
                 let Some(session) = owned else {
                     return Ok(vec![Frame::Log {
                         level: LogLevel::Warn,
-                        message: "ignoring turn_end that does not belong to the current turn"
-                            .into(),
+                        message: acb_i18n::t!("kernel.endpoint.log_foreign_turn_end"),
                     }]);
                 };
                 self.tickets.remove(&session);
@@ -236,7 +240,7 @@ impl Conn {
                 if let Some(error) = error {
                     replies.push(Frame::Log {
                         level: LogLevel::Warn,
-                        message: format!("harness reported a turn error: {error}"),
+                        message: acb_i18n::t!("kernel.endpoint.log_turn_error", error = error),
                     });
                 }
                 Ok(replies)
@@ -256,7 +260,11 @@ impl Conn {
                                 // 重置失败：不动映射，记一笔日志。
                                 Ok(vec![Frame::Log {
                                     level: LogLevel::Warn,
-                                    message: format!("failed to reset session {session}: {err}"),
+                                    message: acb_i18n::t!(
+                                        "kernel.endpoint.log_reset_failed",
+                                        session = session,
+                                        error = err
+                                    ),
                                 }])
                             }
                             None => {
@@ -276,7 +284,10 @@ impl Conn {
                                 }
                                 Ok(vec![Frame::Log {
                                     level: LogLevel::Info,
-                                    message: format!("session {session} reset"),
+                                    message: acb_i18n::t!(
+                                        "kernel.endpoint.log_reset_ok",
+                                        session = session
+                                    ),
                                 }])
                             }
                         }
@@ -284,11 +295,18 @@ impl Conn {
                     "interrupt" => match error {
                         Some(err) => Ok(vec![Frame::Log {
                             level: LogLevel::Warn,
-                            message: format!("failed to interrupt session {session}: {err}"),
+                            message: acb_i18n::t!(
+                                "kernel.endpoint.log_interrupt_failed",
+                                session = session,
+                                error = err
+                            ),
                         }]),
                         None => Ok(vec![Frame::Log {
                             level: LogLevel::Info,
-                            message: format!("session {session} interrupted"),
+                            message: acb_i18n::t!(
+                                "kernel.endpoint.log_interrupt_ok",
+                                session = session
+                            ),
                         }]),
                     },
                     "report_map" => {
@@ -296,8 +314,10 @@ impl Conn {
                         match error {
                             Some(err) => Ok(vec![Frame::Log {
                                 level: LogLevel::Warn,
-                                message: format!(
-                                    "session {session} failed to report its mapping: {err}"
+                                message: acb_i18n::t!(
+                                    "kernel.endpoint.log_report_map_failed",
+                                    session = session,
+                                    error = err
                                 ),
                             }]),
                             None => {
@@ -322,15 +342,18 @@ impl Conn {
                     }
                     other => Ok(vec![Frame::Log {
                         level: LogLevel::Warn,
-                        message: format!("unknown control_result command: {other}"),
+                        message: acb_i18n::t!(
+                            "kernel.endpoint.log_unknown_control_result",
+                            command = other
+                        ),
                     }]),
                 }
             }
             Frame::Ping => Ok(vec![Frame::Pong]),
             Frame::Pong => Ok(Vec::new()),
-            other => Err(EndpointError::Protocol(format!(
-                "harness must not send {} frames",
-                other.kind()
+            other => Err(EndpointError::Protocol(acb_i18n::t!(
+                "kernel.endpoint.protocol_harness_frame",
+                frame = other.kind()
             ))),
         }
     }
@@ -378,11 +401,15 @@ pub fn run_connection<S: Store>(
     let sessions = {
         let line = match read_line(&mut stream, &mut buffer, HANDSHAKE_TIMEOUT)? {
             Incoming::Line(line) => line,
-            Incoming::Idle => return Err(EndpointError::Handshake("handshake timed out".into())),
+            Incoming::Idle => {
+                return Err(EndpointError::Handshake(acb_i18n::t!(
+                    "kernel.endpoint.handshake_timeout"
+                )));
+            }
             Incoming::Closed => {
-                return Err(EndpointError::Handshake(
-                    "connection closed before handshake".into(),
-                ));
+                return Err(EndpointError::Handshake(acb_i18n::t!(
+                    "kernel.endpoint.handshake_closed"
+                )));
             }
         };
         let frame = decode(&line).map_err(|error| EndpointError::Protocol(error.to_string()))?;
@@ -416,9 +443,12 @@ pub fn run_connection<S: Store>(
     // 连上就吭一声：以后「它不理我」时，一眼能看出是不是这里断了。
     if let Ok(peer) = stream.peer_addr() {
         eprintln!(
-            "endpoint: harness connected ({}), representing sessions [{}]",
-            peer,
-            sessions.join(", ")
+            "{}",
+            acb_i18n::t!(
+                "kernel.endpoint.harness_connected",
+                peer = peer,
+                sessions = sessions.join(", ")
+            )
         );
     }
 
@@ -557,7 +587,13 @@ pub fn run_connection<S: Store>(
                             let sent = prepared.execute();
                             let mut guard = lock(bridge);
                             if let Err(error) = guard.finish_send(prepared, sent) {
-                                eprintln!("failed to send turn error notice: {error:?}");
+                                eprintln!(
+                                    "{}",
+                                    acb_i18n::t!(
+                                        "kernel.endpoint.turn_error_notice_send_failed",
+                                        error = format!("{error:?}")
+                                    )
+                                );
                             }
                         }
                         replies
@@ -587,12 +623,21 @@ pub fn run_connection<S: Store>(
     // 顺带报一下队列：要是断的时候还压着活，就是「没人接了」，一眼能看出。
     match &outcome {
         Ok(()) => eprintln!(
-            "endpoint: harness disconnected (sessions [{}]); {queued} pending turn(s) still queued",
-            session.sessions().join(", ")
+            "{}",
+            acb_i18n::t!(
+                "kernel.endpoint.harness_disconnected",
+                sessions = session.sessions().join(", "),
+                queued = queued
+            )
         ),
         Err(error) => eprintln!(
-            "endpoint: harness connection ended abnormally (sessions [{}]): {error}; {queued} pending turn(s) still queued",
-            session.sessions().join(", ")
+            "{}",
+            acb_i18n::t!(
+                "kernel.endpoint.harness_connection_abnormal",
+                sessions = session.sessions().join(", "),
+                error = error,
+                queued = queued
+            )
         ),
     }
     outcome
@@ -618,7 +663,10 @@ pub fn serve<S: Store + Send + 'static>(
                 std::thread::spawn(move || {
                     // 一条连接坏了不影响别的连接，但要说清楚为什么坏的。
                     if let Err(error) = run_connection(&bridge, stream, &controls) {
-                        eprintln!("endpoint: connection ended: {error}");
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!("kernel.endpoint.connection_ended", error = error)
+                        );
                     }
                 });
             }
@@ -627,7 +675,10 @@ pub fn serve<S: Store + Send + 'static>(
             }
             Err(error) => {
                 // 单个连接建不起来不算致命，接着等下一个。
-                eprintln!("endpoint: failed to accept connection: {error}");
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("kernel.endpoint.accept_failed", error = error)
+                );
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
@@ -669,14 +720,15 @@ fn read_line(
     loop {
         if let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = buffer.drain(..=position).collect();
-            let text = String::from_utf8(line)
-                .map_err(|error| EndpointError::Protocol(format!("not UTF-8: {error}")))?;
+            let text = String::from_utf8(line).map_err(|error| {
+                EndpointError::Protocol(acb_i18n::t!("kernel.endpoint.not_utf8", error = error))
+            })?;
             return Ok(Incoming::Line(text));
         }
         if buffer.len() > acb_proto::frame::MAX_FRAME_BYTES {
-            return Err(EndpointError::Protocol(
-                "frame too large without a newline".into(),
-            ));
+            return Err(EndpointError::Protocol(acb_i18n::t!(
+                "kernel.endpoint.frame_too_large_without_newline"
+            )));
         }
 
         let mut chunk = [0_u8; 8192];
@@ -685,9 +737,9 @@ fn read_line(
                 return if buffer.is_empty() {
                     Ok(Incoming::Closed)
                 } else {
-                    Err(EndpointError::Protocol(
-                        "connection closed mid-frame".into(),
-                    ))
+                    Err(EndpointError::Protocol(acb_i18n::t!(
+                        "kernel.endpoint.connection_closed_mid_frame"
+                    )))
                 };
             }
             Ok(read) => buffer.extend_from_slice(&chunk[..read]),

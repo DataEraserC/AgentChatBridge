@@ -308,7 +308,7 @@ pub fn decode(line: &str) -> Result<Frame, DecodeError> {
         .get("frame")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| DecodeError::MissingField {
-            detail: "missing `frame` field".into(),
+            detail: acb_i18n::t!("proto.frame.missing_frame_field"),
         })?;
 
     match tag {

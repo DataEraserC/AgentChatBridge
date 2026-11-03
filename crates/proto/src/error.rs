@@ -7,28 +7,28 @@ use thiserror::Error;
 /// 构造协议类型时的错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProtoError {
-    #[error("connection name must not be empty")]
+    #[error("{}", acb_i18n::t!("proto.connection.empty_name"))]
     EmptyConnection,
-    #[error("room path must not be empty (write it as segment/segment, e.g. group/123)")]
+    #[error("{}", acb_i18n::t!("proto.room.empty_path"))]
     EmptyPath,
-    #[error("connection name or path segment must not contain a separator (: or /): {0}")]
+    #[error("{}", acb_i18n::t!("proto.connection.separator", part = .0))]
     SeparatorInPart(String),
-    #[error("turn ticket must not be empty")]
+    #[error("{}", acb_i18n::t!("proto.ticket.empty"))]
     EmptyTicket,
-    #[error("frame encode failed: {0}")]
+    #[error("{}", acb_i18n::t!("proto.frame.encode_failed", detail = .0))]
     Encode(String),
 }
 
 /// 解帧失败。除了「太大」，其余都不是断连理由之外的错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DecodeError {
-    #[error("frame too large: {size} bytes (limit {max})")]
+    #[error("{}", acb_i18n::t!("proto.frame.too_large", size = size, max = max))]
     TooLarge { size: usize, max: usize },
-    #[error("not valid JSON: {detail}")]
+    #[error("{}", acb_i18n::t!("proto.json.invalid", detail = detail))]
     NotJson { detail: String },
-    #[error("unknown frame: {frame}")]
+    #[error("{}", acb_i18n::t!("proto.frame.unknown", frame = frame))]
     UnknownFrame { frame: String },
-    #[error("frame is missing a required field: {detail}")]
+    #[error("{}", acb_i18n::t!("proto.frame.missing_field", detail = detail))]
     MissingField { detail: String },
 }
 

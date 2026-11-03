@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "桥的核心：订阅、唤醒、流水、水位、笔记"
 
 [dependencies]
+acb-i18n = { workspace = true }
 acb-proto = { path = "../proto" }
 acb-adapter-api = { path = "../adapter-api" }
 # 记忆仓库只用本地路径（裸仓库 + worktree），不需要 https/ssh 传输，关掉默认 feature

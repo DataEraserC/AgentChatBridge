@@ -42,6 +42,7 @@ import { TOOLS } from "../../shared/tools.mjs"
 import { McpServer } from "./mcp-server.mjs"
 import { McpHttpServer } from "./mcp-http-server.mjs"
 import { DshClient } from "./dsh-client.mjs"
+import { t } from "../../shared/i18n.mjs"
 
 const log = (level, message) => {
   // stdout 是 MCP 通道，一个字都不能碰；诊断全走 stderr。
@@ -85,7 +86,7 @@ function parseModelRef(text) {
   if (!value) return null
   const slash = value.indexOf("/")
   if (slash <= 0 || slash === value.length - 1) {
-    throw new Error(`session model must be provider/model (got ${value})`)
+    throw new Error(t("dsh.model_ref_invalid", { value }))
   }
   return { provider: value.slice(0, slash), model: value.slice(slash + 1) }
 }
@@ -93,7 +94,7 @@ function parseModelRef(text) {
 async function main() {
   const config = readConfig()
   if (!config.token) {
-    log("error", "ACB_TOKEN is missing: the dsh driver cannot start (both the tool surface and turn driving need a device token)")
+    log("error", t("dsh.token_missing"))
     process.exit(2)
   }
 
@@ -134,9 +135,9 @@ async function main() {
     .connect()
     .then(() => {
       driver.seedMaps(link.sessionMaps)
-      log("info", `connected to bridge; bound sessions ${link.sessions.join(", ")}`)
+      log("info", t("dsh.bridge_connected", { sessions: link.sessions.join(", ") }))
     })
-    .catch((error) => log("warn", `cannot reach the bridge yet: ${error.message}; retrying`))
+    .catch((error) => log("warn", t("dsh.bridge_unreachable", { error: error.message })))
 
   if (config.mcpPort > 0) {
     // 生产：streamable-http 常驻模式。driver 自己监听端口，dsh 的 MCP client 主动连。
@@ -148,7 +149,11 @@ async function main() {
       log,
     })
     const actualPort = await mcpHttp.start({ port: config.mcpPort })
-    log("info", `dsh driver ready (streamable-http): bridge ${config.endpoint}, dsh ${config.dshBaseUrl}, MCP http://127.0.0.1:${actualPort}/mcp`)
+    log("info", t("dsh.driver_ready_http", {
+      endpoint: config.endpoint,
+      dshBaseUrl: config.dshBaseUrl,
+      port: actualPort,
+    }))
 
     process.on("SIGINT", () => {
       link.close()
@@ -167,7 +172,7 @@ async function main() {
     // stdio 挂上（dsh 拉起本进程时，stdin/stdout 已经就位）。
     mcp.start()
 
-    log("info", `dsh driver ready (stdio): bridge ${config.endpoint}, dsh ${config.dshBaseUrl}`)
+    log("info", t("dsh.driver_ready_stdio", { endpoint: config.endpoint, dshBaseUrl: config.dshBaseUrl }))
 
     process.on("SIGINT", () => {
       link.close()
@@ -225,7 +230,7 @@ class TurnDriver {
     // 新 dsh 会话的上下文是空的，人格要重新注入。
     this.personas.delete(acbSession)
     this.generations.set(acbSession, Date.now().toString(36))
-    this.log("info", `session ${acbSession} reset; the next turn will create a new id`)
+    this.log("info", t("dsh.session_reset", { session: acbSession }))
   }
 
   /**
@@ -240,7 +245,7 @@ class TurnDriver {
         this.resetSession(session)
         link.controlResult({ id, session, command, result: { ok: true } })
       } catch (error) {
-        this.log("error", `failed to reset session ${session}: ${error?.message ?? error}`)
+        this.log("error", t("dsh.reset_failed", { session, error: error?.message ?? error }))
         link.controlResult({ id, session, command, error: String(error?.message ?? error) })
       }
       return
@@ -254,7 +259,7 @@ class TurnDriver {
           id,
           session,
           command,
-          error: `session ${session} has no dsh-side mapping (no turn has run)`,
+          error: t("dsh.no_dsh_mapping", { session }),
         })
         return
       }
@@ -262,14 +267,14 @@ class TurnDriver {
         await this.dsh.cancel(sid)
         link.controlResult({ id, session, command, result: { ok: true, dsh_session: sid } })
       } catch (error) {
-        this.log("error", `failed to interrupt session ${session}: ${error?.message ?? error}`)
+        this.log("error", t("dsh.interrupt_failed", { session, error: error?.message ?? error }))
         link.controlResult({ id, session, command, error: String(error?.message ?? error) })
       }
       return
     }
     // 不认识的指令：报错，别默默吞掉。
-    this.log("warn", `unknown control command: ${command}`)
-    link.controlResult({ id, session, command, error: `unknown command ${command}` })
+    this.log("warn", t("dsh.unknown_control", { command }))
+    link.controlResult({ id, session, command, error: t("dsh.unknown_command", { command }) })
   }
 
   run(delivery, link) {
@@ -287,10 +292,15 @@ class TurnDriver {
       let text = this.#composePrompt(delivery)
       const model = modelRef
         ? `${modelRef.provider}/${modelRef.model}`
-        : "(dsh default)"
+        : t("dsh.model_default")
       this.log(
         "debug",
-        `turn start ${delivery.ticket}: ${delivery.room.connection}:${delivery.room.path.join("/")}, ${delivery.records.length} record(s), model ${model}`,
+        t("dsh.turn_start", {
+          ticket: delivery.ticket,
+          room: `${delivery.room.connection}:${delivery.room.path.join("/")}`,
+          count: delivery.records.length,
+          model,
+        }),
       )
       // prompt 投话，follow 等这一轮真正结束（turn/end）。
       try {
@@ -300,7 +310,7 @@ class TurnDriver {
         // dsh 重启/清理后旧 sessionId 可能失效：重建会话、重新钉模型和人格，再试一次。
         this.log(
           "warn",
-          `dsh session ${sessionId} is no longer valid; recreating and retrying: ${error?.message ?? error}`,
+          t("dsh.session_invalid", { session: sessionId, error: error?.message ?? error }),
         )
         this.sessions.delete(delivery.session)
         this.modelPinned.delete(sessionId)
@@ -317,19 +327,19 @@ class TurnDriver {
       )
       if (turnFailure) {
         failure = turnFailure
-        this.log("error", `turn failed: ${failure}`)
+        this.log("error", t("dsh.turn_failed", { error: failure }))
         // 失败/中止不丢会话映射：下次开轮继续用同一个 dsh 会话，不新建。
         // 只有显式 reset（handleControl）才解除 acb↔harness 会话关联。
       }
     } catch (error) {
       failure = error?.message ?? String(error)
-      this.log("error", `turn failed: ${failure}`)
+      this.log("error", t("dsh.turn_failed", { error: failure }))
       // 同上：异常也不丢映射，避免「一轮失败就换一个新会话」。
     } finally {
       try {
         link.endTurn(delivery.ticket, failure)
       } catch (error) {
-        this.log("warn", `failed to send turn_end: ${error.message}`)
+        this.log("warn", t("dsh.turn_end_failed", { error: error.message }))
       }
     }
   }
@@ -348,7 +358,10 @@ class TurnDriver {
       const updated = this.personas.has(delivery.session) ? "[人格已更新]\n" : ""
       text = `${updated}${personaText}\n\n${text}`
       this.personas.set(delivery.session, signature)
-      this.log("info", `injected persona ${delivery.persona?.id ?? ""} into session ${delivery.session}`)
+      this.log("info", t("dsh.persona_injected", {
+        persona: delivery.persona?.id ?? "",
+        session: delivery.session,
+      }))
     }
     return text
   }
@@ -366,7 +379,7 @@ class TurnDriver {
       if (!map?.session || !map?.harness_session) continue
       if (this.sessions.has(map.session)) continue
       this.sessions.set(map.session, map.harness_session)
-      this.log("info", `reused stored session: ${map.session} -> ${map.harness_session}`)
+      this.log("info", t("dsh.session_reused", { session: map.session, harnessSession: map.harness_session }))
     }
   }
 
@@ -403,9 +416,14 @@ class TurnDriver {
     try {
       await this.dsh.selectModel(sessionId, { provider, model: modelId, reasoningEffort })
       this.modelPinned.set(sessionId, key)
-      this.log("info", `session ${sessionId} model pinned to ${provider}/${modelId}${reasoningEffort ? ` (${reasoningEffort})` : ""}`)
+      this.log("info", t("dsh.model_pinned", {
+        session: sessionId,
+        provider,
+        modelId,
+        effort: reasoningEffort ? t("dsh.effort_suffix", { effort: reasoningEffort }) : "",
+      }))
     } catch (error) {
-      throw new Error(`session model ${provider}/${modelId} is unavailable: ${error?.message ?? error}`)
+      throw new Error(t("dsh.model_unavailable", { provider, modelId, error: error?.message ?? error }))
     }
   }
 
@@ -426,10 +444,12 @@ class TurnDriver {
       try {
         const ws = await this.dsh.ensureWorkspaceTitle(this.cwd, this.workspaceTitle)
         workspaceId = ws.workspaceId
-        if (ws.created) this.log("info", `dsh workspace ${this.cwd} created and named "${this.workspaceTitle}"`)
+        if (ws.created) {
+          this.log("info", t("dsh.workspace_created", { cwd: this.cwd, title: this.workspaceTitle }))
+        }
       } catch (error) {
         // workspace 备不出来不挡开轮：会话照建，只是 GUI 里没分组。
-        this.log("warn", `failed to prepare dsh workspace (session still created, just ungrouped): ${error?.message ?? error}`)
+        this.log("warn", t("dsh.workspace_failed", { error: error?.message ?? error }))
       }
     }
     let sessionId
@@ -447,7 +467,7 @@ class TurnDriver {
       // 不硬顶，换一个带代次的 id 新建，保住「能开轮」这个主要矛盾。
       if (/conflict|belongs to/i.test(message)) {
         const fallback = `${fixed}-r${Date.now().toString(36)}`
-        this.log("warn", `dsh session ${fixed} has an id/cwd conflict; creating ${fallback} instead: ${message}`)
+        this.log("warn", t("dsh.session_conflict", { fixed, fallback, error: message }))
         sessionId = await this.dsh.createSession({
           sessionId: fallback,
           ...(workspaceId ? { workspaceId } : this.cwd ? { cwd: this.cwd } : {}),
@@ -458,7 +478,12 @@ class TurnDriver {
       }
     }
     this.sessions.set(session, sessionId)
-    this.log("info", `dsh session ${sessionId} (${fixed}${this.cwd ? `, grouped under ${this.cwd}` : ""}${this.preset ? `, preset ${this.preset}` : ""})`)
+    this.log("info", t("dsh.session_ready", {
+      sessionId,
+      fixed,
+      grouped: this.cwd ? t("dsh.session_grouped", { cwd: this.cwd }) : "",
+      preset: this.preset ? t("dsh.session_preset", { preset: this.preset }) : "",
+    }))
     // 建好会话就把映射回报给桥，让控制台能查到「acb 会话 ↔ dsh 会话」的对应关系。
     // 用 report_map 指令，result 里带 session_id + meta（这里放固定 id 和分组）。
     if (link) {
@@ -507,13 +532,16 @@ class TurnDriver {
           interrupted = true
           this.log(
             "warn",
-            `turn exceeded ${Math.round(timeoutMs / 1000)}s without finishing (${sessionId}); interrupting the dsh session`,
+            t("dsh.turn_timeout_interrupt", {
+              seconds: Math.round(timeoutMs / 1000),
+              session: sessionId,
+            }),
           )
           try {
             await this.dsh.cancel(sessionId)
           } catch (error) {
             // 打断失败不代表这轮失败了：继续等 turn/end，宽限期内到就算数。
-            this.log("warn", `interrupt was not delivered (still waiting for turn/end): ${error?.message ?? error}`)
+            this.log("warn", t("dsh.interrupt_undelivered", { error: error?.message ?? error }))
           }
           deadline = Date.now() + 30_000
           continue
@@ -614,7 +642,7 @@ import { fileURLToPath } from "node:url"
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
 if (isMain) {
   main().catch((error) => {
-    log("error", `driver failed to start: ${error?.stack ?? error}`)
+    log("error", t("dsh.driver_start_failed", { error: error?.stack ?? error }))
     process.exit(1)
   })
 }

@@ -21,6 +21,7 @@
 
 import http from "node:http"
 import { dispatch } from "./mcp-core.mjs"
+import { t } from "../../shared/i18n.mjs"
 
 /**
  * 一个 streamable HTTP MCP server。`tools` 是 [{ name, description, inputSchema }]，
@@ -45,7 +46,7 @@ export class McpHttpServer {
       server.listen(port, host, () => {
         this.server = server
         this.port = server.address().port
-        this.log("info", `MCP streamable-http endpoint ready: http://${host}:${this.port}/mcp`)
+        this.log("info", t("dsh.mcp_http_ready", { host, port: this.port }))
         resolve(this.port)
       })
     })

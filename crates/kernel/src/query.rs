@@ -70,23 +70,33 @@ impl std::fmt::Display for QueryError {
         match self {
             Self::UnknownField { field, available } => write!(
                 formatter,
-                "[bad_field] unknown field {field}; fields present in this data: {}",
-                available.join(" / ")
+                "{}",
+                acb_i18n::t!(
+                    "kernel.query.unknown_field",
+                    field = field,
+                    available = available.join(" / ")
+                )
             ),
             Self::UnknownOp { op } => write!(
                 formatter,
-                "[bad_params] unknown comparison operator {op}; available: {}",
-                OPS.join(" / ")
+                "{}",
+                acb_i18n::t!(
+                    "kernel.query.unknown_op",
+                    op = op,
+                    available = OPS.join(" / ")
+                )
             ),
             Self::BadValue { field, detail } => {
                 write!(
                     formatter,
-                    "[bad_params] invalid value for field {field}: {detail}"
+                    "{}",
+                    acb_i18n::t!("kernel.query.bad_value", field = field, detail = detail)
                 )
             }
             Self::BadOrder { text } => write!(
                 formatter,
-                "[bad_params] order_by must be \"field\" or \"field desc/asc\"; got \"{text}\""
+                "{}",
+                acb_i18n::t!("kernel.query.bad_order", text = text)
             ),
         }
     }
@@ -115,7 +125,7 @@ pub fn apply(items: &[Value], query: &Query) -> Result<Outcome, QueryError> {
         if op == "in" && !filter.value.is_array() {
             return Err(QueryError::BadValue {
                 field: filter.field.clone(),
-                detail: "op=in 时 value 要给数组，如 [\"admin\", \"owner\"]".to_owned(),
+                detail: acb_i18n::t!("kernel.query.op_in_requires_array"),
             });
         }
         check_field(&filter.field, &available, items)?;

@@ -32,7 +32,7 @@ impl RouteWorker {
     pub(crate) fn enqueue(&self, actions: Vec<PreparedRouteAction>) {
         for action in actions {
             if self.tx.send(action).is_err() {
-                eprintln!("route action worker has stopped; dropping remaining actions");
+                eprintln!("{}", acb_i18n::t!("kernel.route_worker.stopped"));
                 break;
             }
         }
@@ -59,7 +59,13 @@ fn run_action<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, action: PreparedRouteAct
             let result = prepared.execute();
             let mut guard = lock(bridge);
             if let Err(error) = guard.finish_send(prepared, result) {
-                eprintln!("route send failed: {error:?}");
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.route_worker.send_failed",
+                        error = format!("{error:?}")
+                    )
+                );
             }
         }
         PreparedRouteAction::Task(task) => run_task(bridge, task),
@@ -70,7 +76,14 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
     let outcome = match task::run(&task.handler, &task.params) {
         Ok(outcome) => outcome,
         Err(error) => {
-            eprintln!("route task {} failed: {error}", task.handler);
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.route_worker.task_failed",
+                    handler = task.handler,
+                    error = error
+                )
+            );
             return;
         }
     };
@@ -95,7 +108,13 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
-                eprintln!("failed to assemble route task result into a send: {error:?}");
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.route_worker.task_result_assemble_failed",
+                        error = format!("{error:?}")
+                    )
+                );
                 return;
             }
         };
@@ -103,20 +122,36 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
             Ok(sent) => {
                 let mut guard = lock(bridge);
                 if let Err(error) = guard.finish_send(prepared, Ok(sent)) {
-                    eprintln!("failed to send route task result: {error:?}");
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "kernel.route_worker.task_result_send_failed",
+                            error = format!("{error:?}")
+                        )
+                    );
                 }
                 return;
             }
             Err(OutboundError::Unsupported(detail)) if index + 1 < total => {
                 eprintln!(
-                    "route task candidate {} is unsupported by the platform: {detail}; trying the next one",
-                    index + 1
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.route_worker.candidate_unsupported",
+                        index = index + 1,
+                        detail = detail
+                    )
                 );
             }
             Err(error) => {
                 let mut guard = lock(bridge);
                 if let Err(error) = guard.finish_send(prepared, Err(error)) {
-                    eprintln!("failed to send route task result: {error:?}");
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "kernel.route_worker.task_result_send_failed",
+                            error = format!("{error:?}")
+                        )
+                    );
                 }
                 return;
             }

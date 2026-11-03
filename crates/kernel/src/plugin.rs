@@ -381,41 +381,41 @@ pub struct ManagerHealth {
 /// 插件系统错误。工具调用不在这里——那是 `acb_proto::ToolError`。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PluginError {
-    #[error("invalid provider id: {0} (must be namespace.name)")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.invalid_provider_id", id = .0))]
     InvalidProviderId(String),
-    #[error("unknown provider: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.unknown_provider", id = .0))]
     UnknownProvider(String),
-    #[error("duplicate provider registration: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.duplicate_provider", id = .0))]
     DuplicateProvider(String),
-    #[error("provider {id} does not support extension point: {point:?}")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.unsupported_extension_point", id = id, point = format!("{:?}", point)))]
     UnsupportedExtensionPoint { id: String, point: ExtensionPoint },
-    #[error("provider {id} returned {found:?}, but {expected:?} was required")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.wrong_provider_kind", id = id, found = format!("{:?}", found), expected = format!("{:?}", expected)))]
     WrongProviderKind {
         id: String,
         expected: ExtensionPoint,
         found: ExtensionPoint,
     },
-    #[error("provider {id} API version {found} is incompatible (requires {required})")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.api_version", id = id, found = found, required = required))]
     ApiVersion {
         id: String,
         found: u32,
         required: u32,
     },
-    #[error("provider {id} is missing capability: {capability:?}")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.missing_capability", id = id, capability = format!("{:?}", capability)))]
     MissingCapability { id: String, capability: Capability },
-    #[error("duplicate namespace: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.duplicate_namespace", namespace = .0))]
     DuplicateNamespace(String),
-    #[error("namespace {0} is a built-in reserved name; out-of-tree managers cannot use it")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.reserved_namespace", namespace = .0))]
     ReservedNamespace(String),
-    #[error("subtree manager {namespace} error: {detail}")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.manager_error", namespace = namespace, detail = detail))]
     Manager { namespace: String, detail: String },
-    #[error("provider {id} error: {detail}")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.provider_error", id = id, detail = detail))]
     Provider { id: String, detail: String },
-    #[error("manager subtree too deep: {namespace} (limit {max} levels)")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.manager_depth", namespace = namespace, max = max))]
     ManagerDepth { namespace: String, max: usize },
-    #[error("manager cycle: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.manager_cycle", chain = .0))]
     ManagerCycle(String),
-    #[error("plugin load failed: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.plugin.load_failed", detail = .0))]
     Loader(String),
 }
 
@@ -1113,8 +1113,9 @@ pub trait PluginLoader: Send + Sync {
 
     /// 卸载这个 loader 安装的 provider。默认不支持——动态 loader 再覆盖。
     fn unload(&self, _manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
-        Err(PluginError::Loader(format!(
-            "this loader does not support unloading {id}"
+        Err(PluginError::Loader(acb_i18n::t!(
+            "kernel.plugin.loader_no_unload",
+            id = id
         )))
     }
 }
@@ -1347,9 +1348,9 @@ impl PluginManager {
             });
         }
         if manifest.extensions.is_empty() {
-            return Err(PluginError::Loader(format!(
-                "{} loader declares no extension points",
-                manifest.kind.as_str()
+            return Err(PluginError::Loader(acb_i18n::t!(
+                "kernel.plugin.loader_no_extensions",
+                loader = manifest.kind.as_str()
             )));
         }
         for point in &manifest.extensions {
@@ -1486,7 +1487,10 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(AdapterError::Create(
                 connection.id.clone(),
-                format!("manager {} is not installed", id.namespace()),
+                acb_i18n::t!(
+                    "kernel.plugin.manager_not_installed",
+                    namespace = id.namespace()
+                ),
             ));
         };
 
@@ -1496,10 +1500,10 @@ impl PluginManager {
             }
             Ok(other) => Err(AdapterError::Create(
                 connection.id.clone(),
-                format!(
-                    "{} returned {:?}, not a platform adapter",
-                    id,
-                    other.extension_point()
+                acb_i18n::t!(
+                    "kernel.plugin.not_a_platform_adapter",
+                    id = id,
+                    found = format!("{:?}", other.extension_point())
                 ),
             )),
             Err(error) => Err(AdapterError::Create(
@@ -1714,7 +1718,7 @@ impl PluginManager {
         if namespace.is_empty() {
             return Err(PluginError::Manager {
                 namespace: String::new(),
-                detail: "namespace must not be empty".to_owned(),
+                detail: acb_i18n::t!("kernel.plugin.namespace_empty").to_owned(),
             });
         }
         if namespace == BUILTIN_NAMESPACE {
@@ -1737,8 +1741,7 @@ impl PluginManager {
         if !namespace_ok {
             return Err(PluginError::Manager {
                 namespace,
-                detail: "namespace may only contain letters, digits, underscores, and hyphens"
-                    .to_owned(),
+                detail: acb_i18n::t!("kernel.plugin.namespace_charset").to_owned(),
             });
         }
         if self.managers.contains_key(&namespace)
@@ -1770,18 +1773,19 @@ impl PluginManager {
             {
                 return Err(PluginError::Manager {
                     namespace: namespace.clone(),
-                    detail: format!(
-                        "provider {} declares no summary (the agent needs to know what it does)",
-                        descriptor.id
+                    detail: acb_i18n::t!(
+                        "kernel.plugin.provider_no_summary",
+                        provider = descriptor.id
                     ),
                 });
             }
             if descriptor.id.namespace() != namespace {
                 return Err(PluginError::Manager {
                     namespace: namespace.clone(),
-                    detail: format!(
-                        "descriptor {} namespace does not match manager namespace {}",
-                        descriptor.id, namespace
+                    detail: acb_i18n::t!(
+                        "kernel.plugin.descriptor_namespace_mismatch",
+                        descriptor = descriptor.id,
+                        namespace = namespace
                     ),
                 });
             }
@@ -1807,7 +1811,10 @@ impl PluginManager {
                 if kind.is_empty() {
                     return Err(PluginError::Manager {
                         namespace: namespace.clone(),
-                        detail: format!("adapter descriptor {} declares no kind", descriptor.id),
+                        detail: acb_i18n::t!(
+                            "kernel.plugin.adapter_no_kind",
+                            descriptor = descriptor.id
+                        ),
                     });
                 }
                 let duplicate = self.adapters.contains_key(kind)
@@ -1819,16 +1826,17 @@ impl PluginManager {
                         })
                     });
                 if duplicate {
-                    return Err(PluginError::DuplicateProvider(format!(
-                        "adapter kind {kind}"
+                    return Err(PluginError::DuplicateProvider(acb_i18n::t!(
+                        "kernel.plugin.duplicate_adapter_kind",
+                        kind = kind
                     )));
                 }
             } else if descriptor.kind.is_some() {
                 return Err(PluginError::Manager {
                     namespace: namespace.clone(),
-                    detail: format!(
-                        "only platform adapters may declare kind; {} declared one",
-                        descriptor.id
+                    detail: acb_i18n::t!(
+                        "kernel.plugin.kind_only_for_adapters",
+                        descriptor = descriptor.id
                     ),
                 });
             }

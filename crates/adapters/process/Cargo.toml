@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "外置进程平台适配器：stdio 上的 JSON 行 wire 协议"
 
 [dependencies]
+acb-i18n = { workspace = true }
 acb-adapter-api = { path = "../../adapter-api" }
 acb-kernel = { path = "../../kernel" }
 acb-proto = { path = "../../proto" }

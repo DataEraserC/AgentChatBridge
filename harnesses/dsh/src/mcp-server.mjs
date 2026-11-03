@@ -12,6 +12,7 @@
 // 聊天平台——所以能单独测（test/mcp-server.test.mjs 喂 JSON-RPC 帧验它）。
 
 import readline from "node:readline"
+import { t } from "../../shared/i18n.mjs"
 
 const PROTOCOL_VERSION = "2024-11-05"
 
@@ -41,7 +42,7 @@ export class McpServer {
       try {
         message = JSON.parse(text)
       } catch {
-        this.log("warn", `received non-JSON MCP message: ${text.slice(0, 200)}`)
+        this.log("warn", t("dsh.mcp_non_json", { text: text.slice(0, 200) }))
         return
       }
       this.#dispatch(message)
@@ -84,7 +85,7 @@ export class McpServer {
         this.#handleCall(message)
         return
       default:
-        this.#respond(message.id, null, -32601, `unknown MCP method ${message.method}`)
+        this.#respond(message.id, null, -32601, t("shared.mcp_unknown_method", { method: message.method }))
     }
   }
 

@@ -9,6 +9,8 @@
 // 这个文件不认识 acb 桥、不认识 dsh、不认识任何聊天平台，也不认识任何 transport
 // ——所以能单独测。
 
+import { t } from "../../shared/i18n.mjs"
+
 const PROTOCOL_VERSION = "2024-11-05"
 
 /**
@@ -46,7 +48,7 @@ export function dispatch(message, { name = "acb", version = "0.1.0", tools = [],
     case "tools/call":
       return [callResult(message.id, message.params, onCall)]
     default:
-      return [err(message.id, -32601, `unknown MCP method ${message.method}`)]
+      return [err(message.id, -32601, t("shared.mcp_unknown_method", { method: message.method }))]
   }
 }
 

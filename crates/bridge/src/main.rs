@@ -33,10 +33,14 @@ use console::Console;
 const PRUNE_EVERY: Duration = Duration::from_secs(300);
 
 fn main() -> ExitCode {
+    acb_i18n::init();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: acb-bridge failed to start: {error}");
+            eprintln!(
+                "{}",
+                acb_i18n::t!("bridge.main.start_failed", error = error)
+            );
             ExitCode::FAILURE
         }
     }
@@ -54,14 +58,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let warnings = config.warnings();
     if !warnings.is_empty() {
         for warning in &warnings {
-            eprintln!("warning: {warning}");
+            eprintln!(
+                "{}",
+                acb_i18n::t!("bridge.main.config_warning", warning = warning)
+            );
         }
-        eprintln!("continuing with the configured warnings in 3 seconds (Ctrl-C stops).");
+        eprintln!("{}", acb_i18n::t!("bridge.main.warning_continue"));
         std::thread::sleep(Duration::from_secs(3));
     }
 
     if options.check_only {
-        println!("config OK (check only, not started)");
+        println!("{}", acb_i18n::t!("bridge.main.check_ok"));
         return Ok(());
     }
 
@@ -70,8 +77,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = SqliteStore::open(&config.storage.path)?;
     let counts = store.counts()?;
     println!(
-        "store: {} ({} record(s), {} room(s), {} note(s))",
-        config.storage.path, counts.records, counts.rooms, counts.notes
+        "{}",
+        acb_i18n::t!(
+            "bridge.main.store_summary",
+            path = config.storage.path,
+            records = counts.records,
+            rooms = counts.rooms,
+            notes = counts.notes
+        )
     );
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -161,12 +174,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let controls = controls.clone();
             std::thread::spawn(move || {
                 if let Err(error) = serve(listener, bridge, shutdown, controls) {
-                    eprintln!("error: endpoint stopped: {error}");
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("bridge.main.endpoint_stopped", error = error)
+                    );
                 }
             });
-            println!("endpoint listening on {}", endpoint.listen);
+            println!(
+                "{}",
+                acb_i18n::t!("bridge.main.endpoint_listening", listen = endpoint.listen)
+            );
         }
-        None => println!("no [endpoint] configured; harness connections are disabled"),
+        None => println!("{}", acb_i18n::t!("bridge.main.endpoint_disabled")),
     }
 
     // 控制台：可远程访问的管理 HTTP 服务（ADR-0018）。
@@ -183,9 +202,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::spawn(move || {
                 Console::serve(listener, console_service, shutdown);
             });
-            println!("console listening on {} (token auth)", console.listen);
+            println!(
+                "{}",
+                acb_i18n::t!("bridge.main.console_listening", listen = console.listen)
+            );
         }
-        None => println!("no [console] configured; console disabled"),
+        None => println!("{}", acb_i18n::t!("bridge.main.console_disabled")),
     }
 
     // 文件中继：平台在别的文件系统命名空间里时（典型：平台在容器、agent 在宿主机），
@@ -200,11 +222,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let shutdown = Arc::clone(&shutdown);
             std::thread::spawn(move || FileRelay::serve(listener, relay, shutdown));
             println!(
-                "file relay listening on {}; platforms fetch from {} (stored in {})",
-                relay_config.listen, relay_config.public_base, relay_config.dir
+                "{}",
+                acb_i18n::t!(
+                    "bridge.main.file_relay_listening",
+                    listen = relay_config.listen,
+                    public_base = relay_config.public_base,
+                    dir = relay_config.dir
+                )
             );
         }
-        None => println!("no [file_relay] configured; local file paths pass through"),
+        None => println!("{}", acb_i18n::t!("bridge.main.file_relay_disabled")),
     }
 
     {
@@ -237,14 +264,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     guard.tick_clock(now)
                 };
                 if queued > 0 {
-                    println!("clock: queued {queued} scheduled check(s)");
+                    println!(
+                        "{}",
+                        acb_i18n::t!("bridge.main.clock_queued", queued = queued)
+                    );
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
         });
     }
 
-    println!("bridge running; press Ctrl-C to stop");
+    println!("{}", acb_i18n::t!("bridge.main.running"));
     while !shutdown.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_secs(3600));
     }
@@ -270,13 +300,21 @@ fn prune_once(bridge: &Mutex<Bridge<SqliteStore>>) {
         Ok(pruned) => {
             for item in pruned {
                 println!(
-                    "prune: {} removed {} read record(s), kept {}",
-                    item.room, item.deleted, item.kept
+                    "{}",
+                    acb_i18n::t!(
+                        "bridge.main.prune",
+                        room = item.room,
+                        deleted = item.deleted,
+                        kept = item.kept
+                    )
                 );
             }
         }
         Err(error) => {
-            eprintln!("warning: prune failed (send/receive unaffected, retry next cycle): {error}")
+            eprintln!(
+                "{}",
+                acb_i18n::t!("bridge.main.prune_failed", error = error)
+            )
         }
     }
 }
@@ -296,14 +334,18 @@ impl Options {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--config" => {
-                    config = args.next().ok_or("--config requires a file path")?;
+                    config = args
+                        .next()
+                        .ok_or(acb_i18n::t!("bridge.main.config_arg_required"))?;
                 }
                 "--check" => check_only = true,
                 "--help" | "-h" => {
-                    println!("usage: acb-bridge [--config PATH] [--check]");
+                    println!("{}", acb_i18n::t!("bridge.main.usage"));
                     std::process::exit(0);
                 }
-                other => return Err(format!("unknown argument: {other} (see --help)").into()),
+                other => {
+                    return Err(acb_i18n::t!("bridge.main.unknown_arg", arg = other).into());
+                }
             }
         }
 
@@ -312,63 +354,117 @@ impl Options {
 }
 
 fn print_summary(config: &Config, path: &str) {
-    println!("config: {path}");
+    println!("{}", acb_i18n::t!("bridge.main.config_path", path = path));
 
-    println!("  connections: {}", config.connections.len());
+    println!(
+        "{}",
+        acb_i18n::t!(
+            "bridge.main.connections_count",
+            count = config.connections.len()
+        )
+    );
     for connection in &config.connections {
+        let url = connection
+            .url
+            .clone()
+            .unwrap_or_else(|| acb_i18n::t!("bridge.main.no_url"));
         println!(
-            "    - {} ({}, {}, {}) -> {}, account {}",
-            connection.id,
-            connection.platform,
-            connection.kind,
-            connection.transport.as_str(),
-            connection.url.as_deref().unwrap_or("(none)"),
-            connection.account
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.connection_line",
+                id = connection.id,
+                platform = connection.platform,
+                kind = connection.kind,
+                transport = connection.transport.as_str(),
+                url = url,
+                account = connection.account
+            )
         );
     }
 
-    println!("  personas: {}", config.personas.len());
+    println!(
+        "{}",
+        acb_i18n::t!("bridge.main.personas_count", count = config.personas.len())
+    );
     for persona in &config.personas {
-        println!("    - {} ({})", persona.id, persona.name);
+        println!(
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.persona_line",
+                id = persona.id,
+                name = persona.name
+            )
+        );
     }
 
-    println!("  memories: {}", config.memories.len());
+    println!(
+        "{}",
+        acb_i18n::t!("bridge.main.memories_count", count = config.memories.len())
+    );
     for memory in &config.memories {
         println!(
-            "    - {} ({}, {} @ {})",
-            memory.id, memory.name, memory.kind, memory.location
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.memory_line",
+                id = memory.id,
+                name = memory.name,
+                kind = memory.kind,
+                location = memory.location
+            )
         );
     }
 
-    println!("  sessions: {}", config.sessions.len());
+    println!(
+        "{}",
+        acb_i18n::t!("bridge.main.sessions_count", count = config.sessions.len())
+    );
     for session in &config.sessions {
         println!(
-            "    - {} (harness {}, persona {}, memories {:?}, {} subscription(s))",
-            session.id,
-            session.harness,
-            session.persona,
-            session.memories,
-            session.subscriptions.len()
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.session_line",
+                id = session.id,
+                harness = session.harness,
+                persona = session.persona,
+                memories = format!("{:?}", session.memories),
+                subscriptions = session.subscriptions.len()
+            )
         );
         for subscription in &session.subscriptions {
-            println!("      - {}", subscription.room);
+            println!(
+                "{}",
+                acb_i18n::t!("bridge.main.subscription_line", room = subscription.room)
+            );
         }
     }
 
     let retention = config.retention;
     if retention.enabled() {
         let by_count = if retention.max_records_per_room > 0 {
-            format!("keep {} per room", retention.max_records_per_room)
+            acb_i18n::t!(
+                "bridge.main.retention_by_count",
+                count = retention.max_records_per_room
+            )
         } else {
-            "no per-room count limit".to_owned()
+            acb_i18n::t!("bridge.main.retention_no_count")
         };
         let by_age = if retention.max_age_days > 0 {
-            format!("at most {} day(s)", retention.max_age_days)
+            acb_i18n::t!(
+                "bridge.main.retention_by_age",
+                days = retention.max_age_days
+            )
         } else {
-            "no age limit".to_owned()
+            acb_i18n::t!("bridge.main.retention_no_age")
         };
-        println!("  retention: {by_count}, {by_age} (read records only; unread are never pruned)");
+        println!(
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.retention_line",
+                by_count = by_count,
+                by_age = by_age
+            )
+        );
     } else {
-        println!("  retention: disabled (the store only grows)");
+        println!("{}", acb_i18n::t!("bridge.main.retention_disabled"));
     }
 }

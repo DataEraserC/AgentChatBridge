@@ -25,9 +25,7 @@ pub(crate) enum TaskOutcome {
 pub(crate) fn run(handler: &str, params: &Value) -> Result<TaskOutcome, String> {
     match handler {
         "exec" => exec(params),
-        other => Err(format!(
-            "unknown task handler: {other} (only exec is supported)"
-        )),
+        other => Err(acb_i18n::t!("kernel.task.unknown_handler", handler = other)),
     }
 }
 
@@ -35,16 +33,16 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
     let command = params
         .get("command")
         .and_then(Value::as_array)
-        .ok_or_else(|| "exec task requires a command array".to_owned())?;
+        .ok_or_else(|| acb_i18n::t!("kernel.task.command_array_required"))?;
     let mut parts = Vec::with_capacity(command.len());
     for item in command {
         let part = item
             .as_str()
-            .ok_or_else(|| "every item in exec command must be a string".to_owned())?;
+            .ok_or_else(|| acb_i18n::t!("kernel.task.command_item_not_string"))?;
         parts.push(part.to_owned());
     }
     if parts.is_empty() {
-        return Err("exec command must not be empty".to_owned());
+        return Err(acb_i18n::t!("kernel.task.command_empty"));
     }
 
     let cwd = params.get("cwd").and_then(Value::as_str);
@@ -54,8 +52,9 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            std::fs::create_dir_all(dir)
-                .map_err(|error| format!("failed to create task directory {dir}: {error}"))?;
+            std::fs::create_dir_all(dir).map_err(|error| {
+                acb_i18n::t!("kernel.task.create_dir_failed", dir = dir, error = error)
+            })?;
         }
     }
 
@@ -75,9 +74,13 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
         command.current_dir(dir);
     }
     command.stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("failed to start {}: {error}", parts[0]))?;
+    let mut child = command.spawn().map_err(|error| {
+        acb_i18n::t!(
+            "kernel.task.start_failed",
+            command = parts[0],
+            error = error
+        )
+    })?;
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let status = loop {
@@ -87,27 +90,24 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!(
-                        "task exceeded {} seconds and was killed",
-                        timeout_ms / 1000
+                    return Err(acb_i18n::t!(
+                        "kernel.task.timeout_killed",
+                        seconds = timeout_ms / 1000
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(error) => return Err(format!("failed to wait for task: {error}")),
+            Err(error) => return Err(acb_i18n::t!("kernel.task.wait_failed", error = error)),
         }
     };
     if !status.success() {
-        return Err(format!(
-            "task exited with code {} (stderr not captured)",
-            status
-        ));
+        return Err(acb_i18n::t!("kernel.task.exit_code", code = status));
     }
 
     let mut stdout = String::new();
     if let Some(mut pipe) = child.stdout.take() {
         pipe.read_to_string(&mut stdout)
-            .map_err(|error| format!("failed to read task output: {error}"))?;
+            .map_err(|error| acb_i18n::t!("kernel.task.read_output_failed", error = error))?;
     }
     let stdout = stdout.trim();
 
@@ -117,7 +117,7 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
         match kind.as_str() {
             "text" => {
                 if stdout.is_empty() {
-                    return Err("task produced no output; cannot send text".to_owned());
+                    return Err(acb_i18n::t!("kernel.task.no_output_for_text"));
                 }
                 candidates.push(vec![Element::text(stdout)]);
             }
@@ -130,14 +130,10 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
                             .rev()
                             .map(str::trim)
                             .find(|line| !line.is_empty())
-                            .ok_or_else(|| {
-                                "task output has no file path (the last stdout line must be the artifact path)".to_owned()
-                            })?
+                            .ok_or_else(|| acb_i18n::t!("kernel.task.no_artifact_path"))?
                             .to_owned();
                         if !Path::new(&path).is_file() {
-                            return Err(format!(
-                                "task reported artifact {path}, but the file does not exist"
-                            ));
+                            return Err(acb_i18n::t!("kernel.task.artifact_missing", path = path));
                         }
                         file_path = Some(path.clone());
                         path
@@ -161,8 +157,9 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
                 }
             }
             other => {
-                return Err(format!(
-                    "exec send only supports none / text / file / video; got {other:?}"
+                return Err(acb_i18n::t!(
+                    "kernel.task.unknown_send_kind",
+                    kind = format!("{other:?}")
                 ));
             }
         }
@@ -181,17 +178,17 @@ fn send_kinds(params: &Value) -> Result<Vec<String>, String> {
             for item in items {
                 let kind = item
                     .as_str()
-                    .ok_or_else(|| "every item in exec send array must be a string".to_owned())?;
+                    .ok_or_else(|| acb_i18n::t!("kernel.task.send_item_not_string"))?;
                 kinds.push(kind.to_owned());
             }
         }
         Some(_) => {
-            return Err("exec send must be a string or an array of strings".to_owned());
+            return Err(acb_i18n::t!("kernel.task.send_kind_invalid"));
         }
     }
     if kinds.iter().any(|kind| kind == "none") {
         if kinds.len() > 1 {
-            return Err("none in send cannot be mixed with other values".to_owned());
+            return Err(acb_i18n::t!("kernel.task.none_cannot_mix"));
         }
         return Ok(Vec::new());
     }

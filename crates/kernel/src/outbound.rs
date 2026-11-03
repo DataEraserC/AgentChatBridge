@@ -98,17 +98,17 @@ pub struct Sent {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum OutboundError {
     /// 平台明确拒收（被踢了、没权限、内容违规）。
-    #[error("platform rejected: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.platform_rejected", detail = .0))]
     Rejected(String),
     /// 适配器编不出来（比如平台不支持这种元素，也降级不了）。
-    #[error("platform does not support this content: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.unsupported_content", detail = .0))]
     Unsupported(String),
     /// 通道本身没通（连接断了、账号掉线）。
-    #[error("send channel unavailable: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.send_unavailable", detail = .0))]
     Unavailable(String),
     /// 等平台回话超时。请求已经交给适配器，但平台没在时限内回话——
     /// **结果可能已经成功，也可能还在处理**；不能当成明确失败让 agent 重发。
-    #[error("timed out waiting for the platform: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.timeout", detail = .0))]
     Timeout(String),
 }
 
@@ -572,29 +572,29 @@ impl Risk {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CallError {
     /// 方法名不存在。`suggestion` 是最近似的名字，让模型一轮就能改对。
-    #[error("no such method: {method}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.unknown_method", method = method))]
     UnknownMethod {
         method: String,
         suggestion: Option<String>,
     },
     /// 这个平台本身没这能力（Satori 里对应 404）。
-    #[error("unsupported by platform: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.unsupported_platform", detail = .0))]
     UnsupportedPlatform(String),
     /// 平台有，我们的适配器还没写（Satori 里对应 501）。
-    #[error("adapter does not implement it yet: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.not_implemented", detail = .0))]
     NotImplemented(String),
     /// 有这能力，但这个号没权限，或者按配置没开给模型。
-    #[error("not allowed: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.forbidden", detail = .0))]
     Forbidden(String),
     /// 参数不对。
-    #[error("invalid parameters: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.bad_params", detail = .0))]
     BadParams(String),
     /// 通道不通：连接断了、账号掉线。
-    #[error("channel unavailable: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.channel_unavailable", detail = .0))]
     Unavailable(String),
     /// 等平台回话超时。请求已经交给适配器，平台没在时限内回话；
     /// **可能已经执行**（大文件上传尤其常见），不要直接重发。
-    #[error("timed out waiting for the platform: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.outbound.timeout", detail = .0))]
     Timeout(String),
 }
 
@@ -627,9 +627,10 @@ pub trait Outbound: Send {
         params: &Value,
     ) -> Result<CallOutcome, CallError> {
         let _ = (room, params);
-        Err(CallError::UnsupportedPlatform(format!(
-            "this connection ({}) declares no platform methods; cannot call {method}",
-            room.connection
+        Err(CallError::UnsupportedPlatform(acb_i18n::t!(
+            "kernel.outbound.connection_without_methods",
+            connection = room.connection,
+            method = method
         )))
     }
 }
@@ -704,9 +705,10 @@ impl Outbound for Outbounds {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         match self.handle_for(&room.connection) {
             Some(outbound) => outbound.send(room, elements),
-            None => Err(OutboundError::Unavailable(format!(
-                "no connection named {}; cannot send to {}",
-                room.connection, room
+            None => Err(OutboundError::Unavailable(acb_i18n::t!(
+                "kernel.outbound.no_connection_send",
+                connection = room.connection,
+                room = room
             ))),
         }
     }
@@ -727,9 +729,10 @@ impl Outbound for Outbounds {
     ) -> Result<CallOutcome, CallError> {
         match self.handle_for(&room.connection) {
             Some(outbound) => outbound.call(room, method, params),
-            None => Err(CallError::Unavailable(format!(
-                "no connection named {}; cannot call {}",
-                room.connection, room
+            None => Err(CallError::Unavailable(acb_i18n::t!(
+                "kernel.outbound.no_connection_call",
+                connection = room.connection,
+                room = room
             ))),
         }
     }

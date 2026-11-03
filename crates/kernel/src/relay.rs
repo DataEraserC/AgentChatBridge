@@ -29,17 +29,17 @@ const KEEP_FOR: Duration = Duration::from_secs(24 * 3600);
 /// 收文件失败的几种原因。每种都能让模型一轮就知道该改什么。
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
-    #[error("file not found: {}", .0.display())]
+    #[error("{}", acb_i18n::t!("kernel.relay.not_found", path = .0.display()))]
     NotFound(PathBuf),
-    #[error("not a regular file: {}", .0.display())]
+    #[error("{}", acb_i18n::t!("kernel.relay.not_a_file", path = .0.display()))]
     NotAFile(PathBuf),
-    #[error("file too large: {} is {size} bytes (limit {limit} bytes)", .path.display())]
+    #[error("{}", acb_i18n::t!("kernel.relay.too_big", path = .path.display(), size = size, limit = limit))]
     TooBig {
         path: PathBuf,
         size: u64,
         limit: u64,
     },
-    #[error("cannot accept file ({}): {error}", .path.display())]
+    #[error("{}", acb_i18n::t!("kernel.relay.io_error", path = .path.display(), error = error))]
     Io {
         path: PathBuf,
         #[source]
@@ -168,7 +168,10 @@ impl FileRelay {
                     let relay = Arc::clone(&relay);
                     std::thread::spawn(move || {
                         if let Err(error) = handle_connection(stream, &relay) {
-                            eprintln!("file relay: request was not fully handled: {error}");
+                            eprintln!(
+                                "{}",
+                                acb_i18n::t!("kernel.relay.request_unhandled", error = error)
+                            );
                         }
                     });
                 }

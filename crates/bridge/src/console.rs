@@ -67,7 +67,10 @@ impl<S: Store + Send + 'static> Console<S> {
                     let console = Arc::clone(&console);
                     std::thread::spawn(move || {
                         if let Err(error) = console.handle(stream) {
-                            eprintln!("console: failed to handle request: {error}");
+                            eprintln!(
+                                "{}",
+                                acb_i18n::t!("bridge.console.handle_failed", error = error)
+                            );
                         }
                     });
                 }
@@ -75,7 +78,10 @@ impl<S: Store + Send + 'static> Console<S> {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 Err(error) => {
-                    eprintln!("console: failed to accept connection: {error}");
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("bridge.console.accept_failed", error = error)
+                    );
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
@@ -105,13 +111,9 @@ impl<S: Store + Send + 'static> Console<S> {
             }
         }
         let Some(header_end) = header_end else {
-            return write_response(
-                &mut stream,
-                400,
-                "application/json",
-                r#"{"error":"请求头不完整"}"#,
-                &[],
-            );
+            let body =
+                json!({"error": acb_i18n::t!("bridge.console.incomplete_headers")}).to_string();
+            return write_response(&mut stream, 400, "application/json", &body, &[]);
         };
         let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
         let (method, path, auth) = parse_request_line(&header_text);
@@ -147,13 +149,8 @@ impl<S: Store + Send + 'static> Console<S> {
                     &[],
                 );
             }
-            return write_response(
-                &mut stream,
-                401,
-                "application/json",
-                r#"{"error":"未授权：带 Authorization: Bearer <token>"}"#,
-                &[],
-            );
+            let body = json!({"error": acb_i18n::t!("bridge.console.unauthorized")}).to_string();
+            return write_response(&mut stream, 401, "application/json", &body, &[]);
         }
 
         // 管理页。route 只管 JSON API。进门带 ?token= 时顺手种个 cookie：
@@ -218,7 +215,10 @@ impl<S: Store + Send + 'static> Console<S> {
                 let discarded = bridge.discard_staged_config();
                 (200, json!({"ok": true, "discarded": discarded}).to_string())
             }
-            _ => (404, json!({"error":"no such endpoint"}).to_string()),
+            _ => (
+                404,
+                json!({"error": acb_i18n::t!("bridge.console.no_endpoint")}).to_string(),
+            ),
         }
     }
 
@@ -278,8 +278,12 @@ impl<S: Store + Send + 'static> Console<S> {
                 "account": c.account,
                 "admin_qqs": c.admin_qqs,
                 "allow_destructive": match &c.allow_destructive {
-                    DestructivePolicy::None => json!("deny all by default"),
-                    DestructivePolicy::All => json!("allow all"),
+                    DestructivePolicy::None => {
+                        json!(acb_i18n::t!("bridge.console.destructive_none"))
+                    }
+                    DestructivePolicy::All => {
+                        json!(acb_i18n::t!("bridge.console.destructive_all"))
+                    }
                     DestructivePolicy::Only(methods) => json!(methods),
                 },
             })).collect::<Vec<_>>(),
@@ -329,8 +333,12 @@ impl<S: Store + Send + 'static> Console<S> {
             ),
             Err(error) => (
                 500,
-                json!({"error": format!("failed to read config file {}: {error}", self.config_path)})
-                    .to_string(),
+                json!({"error": acb_i18n::t!(
+                    "bridge.console.read_config_failed",
+                    path = self.config_path,
+                    error = error
+                )})
+                .to_string(),
             ),
         }
     }
@@ -348,7 +356,7 @@ impl<S: Store + Send + 'static> Console<S> {
             Err(error) => {
                 return (
                     400,
-                    json!({"error": format!("body must be JSON: {{\"text\": \"...\"}} ({error})")})
+                    json!({"error": acb_i18n::t!("bridge.console.body_json_text", error = error)})
                         .to_string(),
                 );
             }
@@ -356,7 +364,7 @@ impl<S: Store + Send + 'static> Console<S> {
         let Some(text) = parsed.get("text").and_then(serde_json::Value::as_str) else {
             return (
                 400,
-                json!({"error": "body must contain a text field (raw config TOML)"}).to_string(),
+                json!({"error": acb_i18n::t!("bridge.console.body_text_required")}).to_string(),
             );
         };
 
@@ -367,7 +375,10 @@ impl<S: Store + Send + 'static> Console<S> {
                 return (
                     400,
                     json!({
-                        "error": format!("config failed to parse; nothing was written: {error}"),
+                        "error": acb_i18n::t!(
+                            "bridge.console.config_parse_failed",
+                            error = error
+                        ),
                         "saved": false,
                     })
                     .to_string(),
@@ -392,7 +403,7 @@ impl<S: Store + Send + 'static> Console<S> {
             Err(error) => {
                 return (
                     400,
-                    json!({"error": format!("body must be JSON: {{\"ops\":[...]}} ({error})")})
+                    json!({"error": acb_i18n::t!("bridge.console.body_json_ops", error = error)})
                         .to_string(),
                 );
             }
@@ -400,13 +411,13 @@ impl<S: Store + Send + 'static> Console<S> {
         let Some(ops) = parsed.get("ops").and_then(serde_json::Value::as_array) else {
             return (
                 400,
-                json!({"error": "body must contain an ops array"}).to_string(),
+                json!({"error": acb_i18n::t!("bridge.console.ops_required")}).to_string(),
             );
         };
         if ops.is_empty() {
             return (
                 400,
-                json!({"error": "ops is empty; nothing to save"}).to_string(),
+                json!({"error": acb_i18n::t!("bridge.console.ops_empty")}).to_string(),
             );
         }
 
@@ -415,8 +426,12 @@ impl<S: Store + Send + 'static> Console<S> {
             Err(error) => {
                 return (
                     500,
-                    json!({"error": format!("failed to read config file {}: {error}", self.config_path)})
-                        .to_string(),
+                    json!({"error": acb_i18n::t!(
+                        "bridge.console.read_config_failed",
+                        path = self.config_path,
+                        error = error
+                    )})
+                    .to_string(),
                 );
             }
         };
@@ -432,7 +447,10 @@ impl<S: Store + Send + 'static> Console<S> {
                 return (
                     400,
                     json!({
-                        "error": format!("patched config failed to parse; nothing was written: {error}"),
+                        "error": acb_i18n::t!(
+                            "bridge.console.patched_config_parse_failed",
+                            error = error
+                        ),
                         "saved": false,
                     })
                     .to_string(),
@@ -466,7 +484,10 @@ impl<S: Store + Send + 'static> Console<S> {
                 return Err((
                     400,
                     json!({
-                        "error": format!("the configured provider does not exist or is unavailable: {error}"),
+                        "error": acb_i18n::t!(
+                            "bridge.console.provider_unavailable",
+                            error = error
+                        ),
                         "saved": false,
                     }),
                 ));
@@ -479,13 +500,27 @@ impl<S: Store + Send + 'static> Console<S> {
         if let Some(old_text) = &old_text {
             let backup_path = format!("{}.bak", self.config_path);
             if let Err(error) = std::fs::write(&backup_path, old_text) {
-                eprintln!("console: failed to back up config to {backup_path}: {error}");
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "bridge.console.backup_failed",
+                        path = backup_path,
+                        error = error
+                    )
+                );
             }
         }
         if let Err(error) = std::fs::write(&self.config_path, text) {
             return Err((
                 500,
-                json!({"error": format!("failed to write config file {}: {error}", self.config_path), "saved": false}),
+                json!({
+                    "error": acb_i18n::t!(
+                        "bridge.console.write_config_failed",
+                        path = self.config_path,
+                        error = error
+                    ),
+                    "saved": false
+                }),
             ));
         }
 
@@ -497,7 +532,7 @@ impl<S: Store + Send + 'static> Console<S> {
         Ok(json!({
             "ok": true,
             "saved": true,
-            "note": "saved and staged; takes effect on the next message/turn (reloaded at turn boundaries, ADR-0009)",
+            "note": acb_i18n::t!("bridge.console.saved_note"),
             "changes": changes,
             "hot_reload": hot,
             "needs_restart": restart,
@@ -566,7 +601,7 @@ impl<S: Store + Send + 'static> Console<S> {
         let Ok(id) = rest.parse::<i64>() else {
             return (
                 400,
-                json!({"error": "path must be /api/feedback/:id/status"}).to_string(),
+                json!({"error": acb_i18n::t!("bridge.console.feedback_path")}).to_string(),
             );
         };
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
@@ -577,7 +612,7 @@ impl<S: Store + Send + 'static> Console<S> {
         if !["open", "acked", "resolved", "wontfix"].contains(&status) {
             return (
                 400,
-                json!({"error": "status must be open / acked / resolved / wontfix"}).to_string(),
+                json!({"error": acb_i18n::t!("bridge.console.bad_feedback_status")}).to_string(),
             );
         }
         let note = parsed.get("note").and_then(serde_json::Value::as_str);
@@ -590,7 +625,8 @@ impl<S: Store + Send + 'static> Console<S> {
             ),
             Ok(false) => (
                 404,
-                json!({"error": format!("no feedback with id {id}")}).to_string(),
+                json!({"error": acb_i18n::t!("bridge.console.feedback_not_found", id = id)})
+                    .to_string(),
             ),
             Err(error) => (500, json!({"error": error.to_string()}).to_string()),
         }
@@ -609,7 +645,7 @@ impl<S: Store + Send + 'static> Console<S> {
         if session.is_empty() {
             return (
                 400,
-                json!({"error":"session id must not be empty"}).to_string(),
+                json!({"error": acb_i18n::t!("bridge.console.session_id_empty")}).to_string(),
             );
         }
         // 确认会话存在。
@@ -620,7 +656,8 @@ impl<S: Store + Send + 'static> Console<S> {
         if !exists {
             return (
                 404,
-                json!({"error": format!("no such session {session}")}).to_string(),
+                json!({"error": acb_i18n::t!("bridge.console.session_not_found", session = session)})
+                    .to_string(),
             );
         }
         // 发 control 帧（reset / interrupt）给管理这个会话的 harness。
@@ -634,13 +671,22 @@ impl<S: Store + Send + 'static> Console<S> {
         if delivered {
             (
                 200,
-                json!({"ok": true, "session": session, "note": format!("{command} command sent")})
-                    .to_string(),
+                json!({
+                    "ok": true,
+                    "session": session,
+                    "note": acb_i18n::t!("bridge.console.command_sent", command = command)
+                })
+                .to_string(),
             )
         } else {
             (
                 409,
-                json!({"ok": false, "session": session, "error": "no harness manages this session (it may not be connected)"}).to_string(),
+                json!({
+                    "ok": false,
+                    "session": session,
+                    "error": acb_i18n::t!("bridge.console.no_harness", session = session)
+                })
+                .to_string(),
             )
         }
     }
@@ -870,67 +916,58 @@ fn reload_impact(old: &acb_kernel::Config, new: &acb_kernel::Config) -> (Vec<Str
     let mut restart = Vec::new();
 
     if old.sessions != new.sessions {
-        hot.push(
-            "sessions (sessions/subscriptions/wake policy/persona and memory mounts)".to_owned(),
-        );
+        hot.push(acb_i18n::t!("bridge.console.hot_sessions"));
     }
     if old.harnesses != new.harnesses {
-        hot.push("harnesses".to_owned());
+        hot.push(acb_i18n::t!("bridge.console.hot_harnesses"));
     }
     if old.personas != new.personas {
-        hot.push("personas".to_owned());
+        hot.push(acb_i18n::t!("bridge.console.hot_personas"));
     }
     if old.memories != new.memories {
-        hot.push("memories (memory repository declarations)".to_owned());
+        hot.push(acb_i18n::t!("bridge.console.hot_memories"));
     }
     if old.retention != new.retention {
-        hot.push("retention".to_owned());
+        hot.push(acb_i18n::t!("bridge.console.hot_retention"));
     }
     if old.default_on_turn_error != new.default_on_turn_error {
-        hot.push("default_on_turn_error (default turn error action)".to_owned());
+        hot.push(acb_i18n::t!("bridge.console.hot_turn_error"));
     }
     if old.delivery_limit != new.delivery_limit {
-        hot.push("delivery_limit (per-turn delivery limit)".to_owned());
+        hot.push(acb_i18n::t!("bridge.console.hot_delivery_limit"));
     }
     if old.turn_timeout_secs != new.turn_timeout_secs {
-        hot.push("turn_timeout_secs (per-turn timeout, 0=off)".to_owned());
+        hot.push(acb_i18n::t!("bridge.console.hot_turn_timeout"));
     }
     match (&old.file_relay, &new.file_relay) {
         (Some(a), Some(b)) => {
             if a.public_base != b.public_base || a.dir != b.dir {
-                hot.push(
-                    "file_relay.public_base/dir (rebuilt by the publisher next turn)".to_owned(),
-                );
+                hot.push(acb_i18n::t!("bridge.console.hot_file_relay"));
             }
             if a.listen != b.listen {
-                restart.push(
-                    "file_relay.listen (file server listen address bound at startup)".to_owned(),
-                );
+                restart.push(acb_i18n::t!("bridge.console.restart_file_relay_listen"));
             }
         }
         (None, Some(_)) | (Some(_), None) => {
-            restart.push("file_relay (adding/removing restarts or stops the file server; listen address fixed at startup)".to_owned());
+            restart.push(acb_i18n::t!("bridge.console.restart_file_relay_toggle"));
         }
         (None, None) => {}
     }
 
     if old.endpoint != new.endpoint {
-        restart.push("endpoint (listen address bound at startup)".to_owned());
+        restart.push(acb_i18n::t!("bridge.console.restart_endpoint"));
     }
     if old.console != new.console {
-        restart.push("console (listen address and token fixed at startup)".to_owned());
+        restart.push(acb_i18n::t!("bridge.console.restart_console"));
     }
     if old.connections != new.connections {
-        restart.push("connections (connection threads hold old connection info; changing url/token requires a restart)".to_owned());
+        restart.push(acb_i18n::t!("bridge.console.restart_connections"));
     }
     if old.storage != new.storage {
-        restart.push(
-            "storage (the store is opened at startup; changing the path swaps the bridge)"
-                .to_owned(),
-        );
+        restart.push(acb_i18n::t!("bridge.console.restart_storage"));
     }
     if old.worktrees_root != new.worktrees_root {
-        restart.push("worktrees_root (existing memory worktrees live under the old root; changing the root requires a restart)".to_owned());
+        restart.push(acb_i18n::t!("bridge.console.restart_worktrees_root"));
     }
 
     (hot, restart)

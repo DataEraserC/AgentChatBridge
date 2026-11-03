@@ -25,10 +25,10 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StorageError {
     /// 后端自身出错（数据库打不开、写入失败等）。
-    #[error("storage backend error: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.storage.backend_error", detail = .0))]
     Backend(String),
     /// 确认了一条不存在的记录——调用方拿错了编号。
-    #[error("room {room} has no record with id {id}")]
+    #[error("{}", acb_i18n::t!("kernel.storage.unknown_record", room = room, id = id))]
     UnknownRecord { room: String, id: u64 },
 }
 

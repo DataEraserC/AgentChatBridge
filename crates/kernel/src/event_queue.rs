@@ -77,8 +77,11 @@ pub fn drain_events<S: Store + Send + 'static>(
                     };
                     if !controls.send_control(frame) {
                         eprintln!(
-                            "route interrupt: session {} has no harness connection; interrupt was not delivered",
-                            interrupt.session
+                            "{}",
+                            acb_i18n::t!(
+                                "kernel.event_queue.interrupt_no_connection",
+                                session = interrupt.session
+                            )
                         );
                     }
                 }
@@ -86,7 +89,10 @@ pub fn drain_events<S: Store + Send + 'static>(
 
                 if let Err(error) = result {
                     // 记不下来是真问题，说清楚，别装作没事。
-                    eprintln!("event queue: failed to write this event to the record log: {error}");
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("kernel.event_queue.record_write_failed", error = error)
+                    );
                 }
             }
             Err(RecvTimeoutError::Timeout) => continue,

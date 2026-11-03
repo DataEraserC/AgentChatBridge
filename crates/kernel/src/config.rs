@@ -714,7 +714,11 @@ fn policy_options(
     label: &str,
 ) -> Result<serde_json::Value, ConfigError> {
     serde_json::to_value(table).map_err(|error| ConfigError::ParseFailed {
-        detail: format!("failed to parse {label} options: {error}"),
+        detail: acb_i18n::t!(
+            "kernel.config.policy_options_failed",
+            label = label,
+            error = error
+        ),
     })
 }
 
@@ -738,172 +742,162 @@ fn matches_any(names: &[String], text: &str) -> bool {
 /// 配置错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigError {
-    #[error("failed to parse config: {detail}")]
+    #[error("{}", acb_i18n::t!("kernel.config.parse_failed", detail = detail))]
     ParseFailed { detail: String },
-    #[error(
-        "config references environment variable {name}, but it is not set in the process environment"
-    )]
+    #[error("{}", acb_i18n::t!("kernel.config.missing_env", name = name))]
     MissingEnv { name: String },
-    #[error("invalid environment variable syntax in config: {detail}")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_env_ref", detail = detail))]
     BadEnvRef { detail: String },
-    #[error("session {session} has an empty {field}")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_field", session = session, field = field))]
     EmptyField {
         session: String,
         field: &'static str,
     },
-    #[error("duplicate session id: {session}")]
+    #[error("{}", acb_i18n::t!("kernel.config.duplicate_session", session = session))]
     DuplicateSession { session: String },
-    #[error("session {session} subscribes to room {room} more than once")]
+    #[error("{}", acb_i18n::t!("kernel.config.duplicate_room", session = session, room = room))]
     DuplicateRoom { session: String, room: String },
-    #[error("session {session} has an invalid room id: {room} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_room", session = session, room = room, detail = detail))]
     BadRoom {
         session: String,
         room: String,
         detail: String,
     },
-    #[error(
-        "session {session} subscribes to {room}, but there is no connection named {connection}"
-    )]
+    #[error("{}", acb_i18n::t!("kernel.config.unknown_connection", session = session, room = room, connection = connection))]
     UnknownConnection {
         session: String,
         room: String,
         connection: String,
     },
-    #[error("session {session} room {room}: accumulate must be a positive integer")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_accumulate", session = session, room = room))]
     BadAccumulate { session: String, room: String },
-    #[error(
-        "session {session} room {room}: wake event {event} does not belong to the room's platform {platform}"
-    )]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_wake_event", session = session, room = room, event = event, platform = platform))]
     BadWakeEvent {
         session: String,
         room: String,
         event: String,
         platform: String,
     },
-    #[error("session {session} room {room}: invalid wake provider {provider} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_wake_provider", session = session, room = room, provider = provider, detail = detail))]
     BadWakeProvider {
         session: String,
         room: String,
         provider: String,
         detail: String,
     },
-    #[error("session {session}: invalid access provider {provider} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_access_provider", session = session, provider = provider, detail = detail))]
     BadAccessProvider {
         session: String,
         provider: String,
         detail: String,
     },
-    #[error("session {session}: invalid access room {room} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_access_room", session = session, room = room, detail = detail))]
     BadAccessRoom {
         session: String,
         room: String,
         detail: String,
     },
-    #[error("session {session} lists access room {room} more than once")]
+    #[error("{}", acb_i18n::t!("kernel.config.duplicate_access_room", session = session, room = room))]
     DuplicateAccessRoom { session: String, room: String },
-    #[error("session {session} access room {room} references unknown connection {connection}")]
+    #[error("{}", acb_i18n::t!("kernel.config.unknown_access_connection", session = session, room = room, connection = connection))]
     UnknownAccessConnection {
         session: String,
         room: String,
         connection: String,
     },
-    #[error("session {session}: invalid delivery provider {provider} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_delivery_provider", session = session, provider = provider, detail = detail))]
     BadDeliveryProvider {
         session: String,
         provider: String,
         detail: String,
     },
-    #[error("session {session}: invalid send hook provider {provider} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_send_hook_provider", session = session, provider = provider, detail = detail))]
     BadSendHookProvider {
         session: String,
         provider: String,
         detail: String,
     },
-    #[error("session {session}: invalid turn error provider {provider} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_turn_error_provider", session = session, provider = provider, detail = detail))]
     BadTurnErrorProvider {
         session: String,
         provider: String,
         detail: String,
     },
-    #[error("session {session} room {room}: invalid clock provider {provider} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_clock_provider", session = session, room = room, provider = provider, detail = detail))]
     BadClockProvider {
         session: String,
         room: String,
         provider: String,
         detail: String,
     },
-    #[error("session {session} access token must not be empty")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_token", session = session))]
     EmptyToken { session: String },
-    #[error("session {session} references unknown persona {persona}")]
+    #[error("{}", acb_i18n::t!("kernel.config.unknown_persona", session = session, persona = persona))]
     UnknownPersona { session: String, persona: String },
-    #[error("session {session} references unknown memory {memory}")]
+    #[error("{}", acb_i18n::t!("kernel.config.unknown_memory", session = session, memory = memory))]
     UnknownMemory { session: String, memory: String },
-    #[error("duplicate persona id: {persona}")]
+    #[error("{}", acb_i18n::t!("kernel.config.duplicate_persona", persona = persona))]
     DuplicatePersona { persona: String },
-    #[error("persona {persona} has an empty {field}")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_persona_field", persona = persona, field = field))]
     EmptyPersonaField {
         persona: String,
         field: &'static str,
     },
-    #[error("duplicate memory id: {memory}")]
+    #[error("{}", acb_i18n::t!("kernel.config.duplicate_memory", memory = memory))]
     DuplicateMemory { memory: String },
-    #[error("memory {memory} has an empty {field}")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_memory_field", memory = memory, field = field))]
     EmptyMemoryField { memory: String, field: &'static str },
-    #[error("memory {memory} has unknown kind: {kind} (only git is supported)")]
+    #[error("{}", acb_i18n::t!("kernel.config.unknown_memory_kind", memory = memory, kind = kind))]
     UnknownMemoryKind { memory: String, kind: String },
-    #[error("duplicate harness id: {harness}")]
+    #[error("{}", acb_i18n::t!("kernel.config.duplicate_harness", harness = harness))]
     DuplicateHarness { harness: String },
-    #[error("harness {harness} has an empty {field}")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_harness_field", harness = harness, field = field))]
     EmptyHarnessField {
         harness: String,
         field: &'static str,
     },
-    #[error("session {session} references unknown harness {harness}")]
+    #[error("{}", acb_i18n::t!("kernel.config.unknown_harness", session = session, harness = harness))]
     UnknownHarness { session: String, harness: String },
-    #[error("invalid endpoint listen address: {address} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_listen", address = address, detail = detail))]
     BadListen { address: String, detail: String },
-    #[error("connection name must not be empty")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_connection_id"))]
     EmptyConnectionId,
-    #[error("duplicate connection name: {connection}")]
+    #[error("{}", acb_i18n::t!("kernel.config.duplicate_connection", connection = connection))]
     DuplicateConnection { connection: String },
-    #[error("connection {connection} platform must not be empty")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_connection_platform", connection = connection))]
     EmptyConnectionPlatform { connection: String },
-    #[error("connection {connection} kind must not be empty")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_connection_kind", connection = connection))]
     EmptyConnectionKind { connection: String },
-    #[error("connection {connection} has unknown transport: {transport} (must not be empty)")]
+    #[error("{}", acb_i18n::t!("kernel.config.unknown_transport", connection = connection, transport = transport))]
     UnknownTransport {
         connection: String,
         transport: String,
     },
-    #[error(
-        "connection {connection} has invalid URL: {url} (ws-client requires ws://host:port/path)"
-    )]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_url", connection = connection, url = url))]
     BadUrl { connection: String, url: String },
-    #[error(
-        "connection {connection} account must not be empty; the bridge uses it to tell which messages are its own"
-    )]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_account", connection = connection))]
     EmptyAccount { connection: String },
-    #[error("dynamic plugin path must not be empty")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_plugin_path"))]
     EmptyPluginPath,
-    #[error("duplicate dynamic plugin path: {path}")]
+    #[error("{}", acb_i18n::t!("kernel.config.duplicate_plugin_path", path = path))]
     DuplicatePluginPath { path: String },
-    #[error("connection {connection}: invalid receive provider {provider} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_receive_provider", connection = connection, provider = provider, detail = detail))]
     BadReceiveProvider {
         connection: String,
         provider: String,
         detail: String,
     },
-    #[error("connection {connection}: invalid route provider {provider} ({detail})")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_route_provider", connection = connection, provider = provider, detail = detail))]
     BadRouteProvider {
         connection: String,
         provider: String,
         detail: String,
     },
-    #[error("storage path must not be empty (defaults to {DEFAULT_STORAGE_PATH})")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_storage_path", default = DEFAULT_STORAGE_PATH))]
     EmptyStoragePath,
-    #[error("worktree root must not be empty (defaults to {DEFAULT_WORKTREES_ROOT})")]
+    #[error("{}", acb_i18n::t!("kernel.config.empty_worktrees_root", default = DEFAULT_WORKTREES_ROOT))]
     EmptyWorktreesRoot,
-    #[error("invalid turn error action: {action} (use log or send:connection:segment/segment)")]
+    #[error("{}", acb_i18n::t!("kernel.config.bad_turn_error_action", action = action))]
     BadTurnErrorAction { action: String },
 }
 
@@ -928,9 +922,10 @@ fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
             (&rest[start + 2..], "}")
         };
         let end = after.find(close).ok_or_else(|| ConfigError::BadEnvRef {
-            detail: format!(
-                "missing `{close}` after `{}`",
-                &rest[start..start + 2 + raw as usize]
+            detail: acb_i18n::t!(
+                "kernel.config.missing_close",
+                open = &rest[start..start + 2 + raw as usize],
+                close = close
             ),
         })?;
         let (name, fallback) = match after[..end].split_once(":-") {
@@ -943,7 +938,7 @@ fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
         {
             return Err(ConfigError::BadEnvRef {
-                detail: format!("`${{{name}}}` is not a valid environment variable name"),
+                detail: acb_i18n::t!("kernel.config.invalid_env_name", name = name),
             });
         }
         let value = match std::env::var(name) {
@@ -1033,7 +1028,7 @@ impl Config {
                 if address.parse::<std::net::SocketAddr>().is_err() {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "must be host:port, e.g. 127.0.0.1:7700".into(),
+                        detail: acb_i18n::t!("kernel.config.listen_host_port"),
                     });
                 }
                 Some(EndpointConfig { listen: address })
@@ -1047,15 +1042,14 @@ impl Config {
                 if address.parse::<std::net::SocketAddr>().is_err() {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "console must be host:port, e.g. 127.0.0.1:3100".into(),
+                        detail: acb_i18n::t!("kernel.config.console_host_port"),
                     });
                 }
                 let token = raw.token.trim().to_owned();
                 if token.is_empty() {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "the console is remotely accessible; token must not be empty"
-                            .into(),
+                        detail: acb_i18n::t!("kernel.config.console_token_empty"),
                     });
                 }
                 Some(ConsoleConfig {
@@ -1078,9 +1072,9 @@ impl Config {
                 if mode != FILE_RELAY_MODE_FILE_SERVER {
                     return Err(ConfigError::BadListen {
                         address: mode.clone(),
-                        detail: format!(
-                            "file_relay.mode only accepts \"{FILE_RELAY_MODE_FILE_SERVER}\" (the only \
-                             implemented mode); leave it empty or write file-server"
+                        detail: acb_i18n::t!(
+                            "kernel.config.file_relay_mode",
+                            mode = FILE_RELAY_MODE_FILE_SERVER
                         ),
                     });
                 }
@@ -1088,17 +1082,14 @@ impl Config {
                 if address.parse::<std::net::SocketAddr>().is_err() {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "file relay must be host:port, e.g. 0.0.0.0:3131".into(),
+                        detail: acb_i18n::t!("kernel.config.file_relay_host_port"),
                     });
                 }
                 let public_base = raw.public_base.trim().trim_end_matches('/').to_owned();
                 if !public_base.starts_with("http://") && !public_base.starts_with("https://") {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "file_relay.public_base must be the full URL the platform uses to \
-                                 reach the bridge, e.g. http://10.89.0.1:3131 (usually the host \
-                                 gateway when the platform runs in a container)"
-                            .into(),
+                        detail: acb_i18n::t!("kernel.config.file_relay_public_base"),
                     });
                 }
                 Some(FileRelayConfig {
@@ -1473,10 +1464,10 @@ impl Config {
         }
         for (room, sessions) in rooms {
             if sessions.len() > 1 {
-                warnings.push(format!(
-                    "room {room} is subscribed by multiple sessions ({}): each session has its own \
-                     watermark, so specify the session when sending to this room.",
-                    sessions.join(", ")
+                warnings.push(acb_i18n::t!(
+                    "kernel.config.shared_room",
+                    room = room,
+                    sessions = sessions.join(", ")
                 ));
             }
         }
@@ -1519,7 +1510,7 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
         let Some(address) = url.as_deref() else {
             return Err(ConfigError::BadUrl {
                 connection: id,
-                url: "(empty)".into(),
+                url: acb_i18n::t!("kernel.config.empty_url"),
             });
         };
         if !(address.starts_with("ws://") && address.len() > "ws://".len()) {
@@ -1537,7 +1528,11 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
     };
 
     let options = serde_json::to_value(&raw.options).map_err(|error| ConfigError::ParseFailed {
-        detail: format!("failed to parse options for connection {id}: {error}"),
+        detail: acb_i18n::t!(
+            "kernel.config.connection_options_failed",
+            connection = id,
+            error = error
+        ),
     })?;
 
     let receive = build_receive(&id, raw.receive)?;
@@ -1589,13 +1584,16 @@ fn build_routes(connection: &str, raw: Vec<RawRoute>) -> Result<Vec<RoutePolicy>
                 return Err(ConfigError::BadRouteProvider {
                     connection: connection.to_owned(),
                     provider: format!("routes[{index}]"),
-                    detail: "provider must not be empty".to_owned(),
+                    detail: acb_i18n::t!("kernel.config.provider_empty").to_owned(),
                 });
             }
         };
         routes.push(RoutePolicy {
             provider,
-            options: policy_options(route.options, "route policy")?,
+            options: policy_options(
+                route.options,
+                &acb_i18n::t!("kernel.config.label.route_policy"),
+            )?,
         });
     }
     Ok(routes)
@@ -1617,7 +1615,10 @@ fn build_receive(connection: &str, raw: RawReceive) -> Result<ReceivePolicy, Con
     };
     Ok(ReceivePolicy {
         provider,
-        options: policy_options(raw.options, "receive policy")?,
+        options: policy_options(
+            raw.options,
+            &acb_i18n::t!("kernel.config.label.receive_policy"),
+        )?,
     })
 }
 
@@ -1663,7 +1664,10 @@ fn build_clock(
         provider,
         interval_secs: raw.interval_secs,
         idle_secs: raw.idle_secs,
-        options: policy_options(raw.options, "clock policy")?,
+        options: policy_options(
+            raw.options,
+            &acb_i18n::t!("kernel.config.label.clock_policy"),
+        )?,
     })
 }
 
@@ -1744,7 +1748,10 @@ fn build_access(
         provider,
         rooms,
         origins,
-        options: policy_options(raw.options, "access policy")?,
+        options: policy_options(
+            raw.options,
+            &acb_i18n::t!("kernel.config.label.access_policy"),
+        )?,
     })
 }
 
@@ -1766,7 +1773,10 @@ fn build_delivery(session: &str, raw: RawDelivery) -> Result<DeliveryPolicy, Con
     };
     Ok(DeliveryPolicy {
         provider,
-        options: policy_options(raw.options, "delivery policy")?,
+        options: policy_options(
+            raw.options,
+            &acb_i18n::t!("kernel.config.label.delivery_policy"),
+        )?,
     })
 }
 
@@ -1807,7 +1817,10 @@ fn build_turn_error(session: &str, raw: RawTurnError) -> Result<TurnErrorPolicy,
     };
     Ok(TurnErrorPolicy {
         provider,
-        options: policy_options(raw.options, "turn error policy")?,
+        options: policy_options(
+            raw.options,
+            &acb_i18n::t!("kernel.config.label.turn_error_policy"),
+        )?,
     })
 }
 
@@ -1859,7 +1872,10 @@ fn build_wake(session: &str, room: &RoomId, raw: RawWake) -> Result<WakePolicy, 
         events: normalize_list(raw.events.unwrap_or(default.events)),
         keywords: raw.keywords.unwrap_or(default.keywords),
         ignore_speakers: raw.ignore_speakers.unwrap_or(default.ignore_speakers),
-        options: policy_options(raw.options, "wake policy")?,
+        options: policy_options(
+            raw.options,
+            &acb_i18n::t!("kernel.config.label.wake_policy"),
+        )?,
     })
 }
 

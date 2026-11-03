@@ -35,7 +35,12 @@ impl TryFrom<WireManifest> for AdapterManifest {
                 "receive_events" => AdapterCapability::ReceiveEvents,
                 "send" => AdapterCapability::Send,
                 "catalog" => AdapterCapability::Catalog,
-                other => return Err(format!("unknown adapter capability: {other}")),
+                other => {
+                    return Err(acb_i18n::t!(
+                        "kernel.wire.unknown_adapter_capability",
+                        capability = other
+                    ));
+                }
             });
         }
         let transports = manifest
@@ -54,7 +59,7 @@ impl TryFrom<WireManifest> for AdapterManifest {
             .map(Cow::Owned)
             .collect::<Vec<_>>();
         let metadata = PluginMetadata::try_from(manifest.metadata)
-            .map_err(|detail| format!("metadata: {detail}"))?;
+            .map_err(|detail| acb_i18n::t!("kernel.wire.metadata", detail = detail))?;
         Ok(AdapterManifest {
             id: Cow::Owned(manifest.id),
             platform: Cow::Owned(manifest.platform),
@@ -77,10 +82,9 @@ impl TryFrom<WirePluginMetadata> for PluginMetadata {
     fn try_from(metadata: WirePluginMetadata) -> Result<Self, Self::Error> {
         let mut effects = Vec::with_capacity(metadata.effects.len());
         for effect in &metadata.effects {
-            effects.push(
-                PluginEffect::parse(effect)
-                    .ok_or_else(|| format!("unknown plugin effect: {effect}"))?,
-            );
+            effects.push(PluginEffect::parse(effect).ok_or_else(|| {
+                acb_i18n::t!("kernel.wire.unknown_plugin_effect", effect = effect)
+            })?);
         }
         Ok(Self {
             title: metadata.title.map(Cow::Owned),
@@ -139,10 +143,10 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
     fn try_from(spec: WireMethodSpec) -> Result<Self, Self::Error> {
         let name = spec.name.trim();
         if name.is_empty() {
-            return Err("method name must not be empty".into());
+            return Err(acb_i18n::t!("kernel.wire.method_name_empty"));
         }
         if !name.contains('.') {
-            return Err(format!("method name must be resource.method: {name}"));
+            return Err(acb_i18n::t!("kernel.wire.method_name_format", name = name));
         }
 
         let risk = parse_risk(&spec.risk)?;
@@ -186,7 +190,7 @@ impl TryFrom<WireParamSpec> for ParamSpec {
     fn try_from(param: WireParamSpec) -> Result<Self, Self::Error> {
         let name = param.name.trim();
         if name.is_empty() {
-            return Err("parameter name must not be empty".into());
+            return Err(acb_i18n::t!("kernel.wire.parameter_name_empty"));
         }
         let ty = parse_param_type(&param.ty)?;
         let values = param.values.into_iter().map(Cow::Owned).collect::<Vec<_>>();
@@ -207,12 +211,17 @@ impl TryFrom<WireTargetSpec> for TargetSpec {
         let param = target.param.trim();
         let room_kind = target.room_kind.trim();
         if param.is_empty() || room_kind.is_empty() {
-            return Err("target parameter param / room_kind must not be empty".into());
+            return Err(acb_i18n::t!("kernel.wire.target_parameter_empty"));
         }
         let role = match target.role.as_str() {
             "room" => TargetRole::Room,
             "member" => TargetRole::Member,
-            other => return Err(format!("unknown target role: {other} (room / member)")),
+            other => {
+                return Err(acb_i18n::t!(
+                    "kernel.wire.unknown_target_role",
+                    role = other
+                ));
+            }
         };
         Ok(TargetSpec {
             param: Cow::Owned(param.to_owned()),
@@ -248,7 +257,7 @@ pub fn convert_catalog(specs: Vec<WireMethodSpec>) -> Result<Arc<[MethodSpec]>, 
             .iter()
             .any(|existing: &MethodSpec| existing.name.as_ref() == name.as_str())
         {
-            return Err(format!("duplicate method name: {name}"));
+            return Err(acb_i18n::t!("kernel.wire.duplicate_method", name = name));
         }
         methods.push(MethodSpec::try_from(spec)?);
     }
@@ -284,7 +293,7 @@ pub fn send_error(error: WireError) -> OutboundError {
         | WireError::NotImplemented { detail } => OutboundError::Unsupported(detail),
         WireError::Unavailable { detail } => OutboundError::Unavailable(detail),
         WireError::UnknownMethod { method, .. } => {
-            OutboundError::Unsupported(format!("no send method: {method}"))
+            OutboundError::Unsupported(acb_i18n::t!("kernel.wire.no_send_method", method = method))
         }
         WireError::BadParams { detail } => OutboundError::Rejected(detail),
     }
@@ -298,7 +307,10 @@ fn parse_param_type(text: &str) -> Result<ParamType, String> {
         "string_list" => Ok(ParamType::StringList),
         "object" => Ok(ParamType::Object),
         "any" => Ok(ParamType::Any),
-        other => Err(format!("unknown parameter type: {other}")),
+        other => Err(acb_i18n::t!(
+            "kernel.wire.unknown_parameter_type",
+            ty = other
+        )),
     }
 }
 
@@ -307,7 +319,7 @@ fn parse_risk(text: &str) -> Result<Risk, String> {
         "read" => Ok(Risk::Read),
         "write" => Ok(Risk::Write),
         "destructive" => Ok(Risk::Destructive),
-        other => Err(format!("unknown risk level: {other}")),
+        other => Err(acb_i18n::t!("kernel.wire.unknown_risk_level", risk = other)),
     }
 }
 
@@ -315,7 +327,7 @@ fn parse_scope(text: &str) -> Result<Scope, String> {
     match text {
         "room" => Ok(Scope::Room),
         "connection" => Ok(Scope::Connection),
-        other => Err(format!("unknown scope: {other}")),
+        other => Err(acb_i18n::t!("kernel.wire.unknown_scope", scope = other)),
     }
 }
 
@@ -325,7 +337,7 @@ fn parse_effect(text: &str) -> Result<Effect, String> {
         "write" => Ok(Effect::Write),
         "send" => Ok(Effect::Send),
         "delete" => Ok(Effect::Delete),
-        other => Err(format!("unknown effect: {other}")),
+        other => Err(acb_i18n::t!("kernel.wire.unknown_effect", effect = other)),
     }
 }
 
@@ -334,7 +346,10 @@ fn parse_record(text: &str) -> Result<RecordMode, String> {
         "none" => Ok(RecordMode::None),
         "message" => Ok(RecordMode::Message),
         "event" => Ok(RecordMode::Event),
-        other => Err(format!("unknown record mode: {other}")),
+        other => Err(acb_i18n::t!(
+            "kernel.wire.unknown_record_mode",
+            mode = other
+        )),
     }
 }
 

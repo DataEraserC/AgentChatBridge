@@ -24,9 +24,9 @@ pub enum Parsed {
 /// 事件解析失败：格式不对或缺关键字段。缺字段说明对面不按 OneBot 11 说话，不能猜。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EventError {
-    #[error("event is missing {0}")]
+    #[error("{}", acb_i18n::t!("adapter.onebot11.event_missing_field", field = .0))]
     Missing(&'static str),
-    #[error("invalid room id: {0}")]
+    #[error("{}", acb_i18n::t!("adapter.onebot11.invalid_room_id", room = .0))]
     BadRoom(String),
 }
 
@@ -52,10 +52,16 @@ pub fn parse(connection: &str, event: &Value, admin_qqs: &[String]) -> Result<Pa
         // 心跳每几秒一次，进流水只会把记录撑爆。
         Some("meta_event") => Ok(Parsed::Ignored("心跳/生命周期".into())),
         Some("request") => request(connection, event, at, admin_qqs),
-        other => Ok(Parsed::Ignored(format!(
-            "unrecognized event: {}",
-            other.unwrap_or("missing post_type")
-        ))),
+        other => {
+            let name = match other {
+                Some(name) => name.to_owned(),
+                None => acb_i18n::t!("adapter.onebot11.missing_post_type"),
+            };
+            Ok(Parsed::Ignored(acb_i18n::t!(
+                "adapter.onebot11.unrecognized_event",
+                name = name
+            )))
+        }
     }
 }
 

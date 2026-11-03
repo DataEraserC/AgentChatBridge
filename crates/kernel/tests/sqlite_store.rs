@@ -501,10 +501,13 @@ fn a_newer_schema_is_refused_instead_of_being_written_to() {
 
     let error = acb_kernel::SqliteStore::open(db.path()).expect_err("应当拒绝打开");
     let message = error.to_string();
-    assert!(message.contains("99"), "要说清库是第几版：{message}");
     assert!(
-        message.contains(&format!("第 {} 版", acb_kernel::SCHEMA_VERSION)),
-        "也要说清程序认识第几版：{message}"
+        message.contains("99"),
+        "must state the database version: {message}"
+    );
+    assert!(
+        message.contains(&format!("version {}", acb_kernel::SCHEMA_VERSION)),
+        "must state which version the program understands: {message}"
     );
 }
 
