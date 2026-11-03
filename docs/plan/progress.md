@@ -528,6 +528,73 @@
   - ADR-0030 D3 措辞等用户确认，不改原文。
   - 可否回退：手动回滚路径（Nix generation + 插件 LKG 列表）已存在，自动回滚可后加。
 
+## 2026-11-04 05:10 CST — 上下文注入片段协议设计（只出文档，待确认）
+
+- 任务编号：代行决策 3a 补协议设计（用户要求：文档出来后等确认再实施）
+- 做了什么：新增 `docs/plan/context-injection-protocol.md`，覆盖：
+  - `Delivery.prompts: Vec<PromptFragment{source,text,priority,truncated}>`，可选、默认空；
+  - `PromptProvider` 只给 session/room/platform/reason，不交记录列表、Store、票、水位；
+  - 会话级 provider 引用作为开关；空列表 = 关闭；
+  - 预算：单段 2000 字符、整轮 6000 字符、最多 8 段；优先级降序 + source 字典序；
+  - 超限：裁剪标 `truncated`，整段放不下就跳过并留日志；首段超整轮上限才裁剪；
+  - 失败：provider `Err` 丢该来源；同步调用、不设 core 超时；provider 契约要求快/只读；
+  - 审计：不写 store（避免污染水位/历史），只写 journald 结构化日志，`source` 随投递可见；
+  - harness：人格之后、记录之前，独立 `[插件上下文]` 块 + 来源标签，不进入 `records`；
+  - 兼容：加法字段，不改 `PROTOCOL_VERSION`；旧 harness 忽略。
+- 证据：文档 197 行；未改任何代码/协议/harness（符合「只出文档」）。
+- commit：`6d05dc1 docs(plan): design declarative prompt fragment protocol`
+- 阻塞原因：**实施等待用户确认**（开关形态、上限数值、审计环、harness 渲染位置）。
+- 可回退：纯文档，删除即无影响。
+
+## 2026-11-04 05:10 CST — 下一项：ToolAccess 只读否决点
+
+- 任务编号：tool-access（代行决策 3b 落地；计划中 §7 第 6 项）
+- **完成时用户能做什么**：
+  - 安装一个 `ToolAccessProvider` 插件后，可以按工具名、会话、房间、平台、来源发送者、
+    是否管理员、参数拒绝任意 core 工具调用；
+  - 被拒绝时 agent 收到 `[tool_denied] <provider>: <reason>`，能知道原因而不是笼统失败；
+  - 插件说 Allow 不能越过 core 的已知工具/轮次/访问边界；core 仍先判，插件只能加否决；
+  - 卸载插件后否决点随 namespace 一起消失，不需要重启桥。
+- **验收标准**：
+  1. 单个工具被拒绝，其它工具照常；拒绝前不产生发送/平台 I/O 等副作用；
+  2. provider 返回错误时按失败关闭（拒绝），并留 provider id 与原因；
+  3. `Allow` 不能覆盖 core 的越权拒绝（未订阅房间仍被 core 拒绝）；
+  4. 卸载 namespace 后 `check_tool_access` 不再命中；
+  5. `cargo test --workspace`、dsh/opencode harness 测试全绿。
+- 做了什么：
+  - `plugin.rs`：`ToolAccessProvider` / `ToolAccessContext` / `ToolAccessVerdict`；
+    `ExtensionPoint::ToolAccess`、`Capability::ToolAccessDecision`、
+    `ProviderOptions::ToolAccess` / `ProviderInstance::ToolAccess`；
+    `register_tool_access` + `check_tool_access`（provider id 排序、首个 Deny 生效、
+    Err/实例化失败按失败关闭）；卸载清理。
+  - `engine.rs`：`check_tool_access` 组装上下文（platform、is_admin、live）；
+    `tool_call` 与 `begin_tool_call` 在匹配分支/副作用之前各调用一次。
+  - `lib.rs`：导出三个新类型；i18n 中英六条。
+  - `crates/kernel/tests/tool_access_flow.rs`（新）：拒绝单工具 + 上下文断言、
+    Allow 不能覆盖 core、provider 出错失败关闭。
+  - `plugin.rs` 单元测试：卸载 namespace 后否决点不残留。
+- 证据：
+  - `cargo test -p acb-kernel --test tool_access_flow` → 3/3；
+  - `cargo test -p acb-kernel --lib` → 163/163；
+  - `cargo test --workspace` 全绿；
+  - `npm test`：dsh 34/34、opencode 42/42。
+- commit：`4aac32c feat(plugin): add deny-only tool access provider`
+- 边界与未验证：
+  - `begin_tool_call` 的守卫与 `tool_call` 共用同一函数，但未新增 TCP 级 endpoint 用例；
+    两条入口的调用点已代码审查，provider 契约声明「同一次调用可能被问两次」。
+  - `plugin_tool_call` 只按外层工具名判定；插件工具的内层名字暂不能单独拒绝（已记入后续）。
+  - provider 是全局安装即生效，没有会话级配置开关；要关就卸载插件或让它返回 Allow。
+- 可回退：删除 ToolAccess 扩展点、两个调用点与测试即可；core 判定完全不依赖它。
+
+## 计划剩余项的阻塞原因（按用户要求跳过）
+
+| 项 | 阻塞原因 |
+|---|---|
+| 上下文注入实施 | 协议设计待用户确认（`6d05dc1`） |
+| supervisor 自动回滚 / ADR-0030 D3 措辞 | 待用户拍板；自动回滚还缺可信健康判据 |
+| T9 memory 远端/多机拓扑 | 需要先定 ADR（权威源、凭据、冲突策略），且涉及 agenix；用户拍板前不动 |
+| T10 扩展工厂 | 依赖插件分发边界（N7/N10/N11/N12）拍板，当前明确不做安装器/市场 |
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，

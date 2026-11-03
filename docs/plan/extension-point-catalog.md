@@ -34,10 +34,11 @@
 | 10 | `ManagerPlugin` | `manifest / descriptors / instantiate / children / reload / shutdown / health / details / root` | 装载、轮次边界 reload、退出 | 管理子树生命周期 | 由子树 provider 决定 | 否 |
 | 11 | `PluginLoader` | `manifest / install / unload / can_unload / inactive / reload` | 启动装载、热卸载/重载 | **拦截**（能否卸载/重载） | 否 | 否 |
 | 12 | 声明式扩展目录 | `manifest.toml` + 规则；`Action = Pass \| Drop \| Send{room,elements,store,wake}` | 入库前路由 | 同 Route | 可产生 Send | 可指定房间 |
-| 13 | 任务 handler | `task::run(&handler, &params)`（当前只认 `exec`） | 路由 `Task` 动作之后，route worker 执行 | 无插件扩展点 | 由 handler 自己 | 否 |
+| 13 | 任务 handler | `TaskHandler::handle(&task_id, &payload) -> TaskOutcome`；内置 `exec` 兜底 | 路由 `Task` 动作之后，route worker 执行 | 无插件扩展点 | 由 handler 自己 | 否 |
 | 14 | 插件生命周期 | `PluginInfo{source,health,lifecycle,capabilities,...}`；控制台 `POST /api/plugins/*` | 目录展示 / 轮次边界执行 | 控制卸载/重载 | 否 | 否 |
 | 15 | `RecordObserver` | `observe(&Record)` | 记录 append 之后 | 只读旁路 | 否 | 否 |
 | 16 | `ToolProvider` | `tools() -> Vec<ToolSpec>`；`call(&ToolCallContext, tool, args) -> Value` | `plugin_tools` / `plugin_tool_call` 调用时 | 只读旁路（插件自己的 I/O 由插件负责） | 由工具自己 | 否 |
+| 17 | `ToolAccessProvider` | `check(&ToolAccessContext) -> Allow \| Deny{reason}`；错误按失败关闭处理 | core 已知工具/轮次判定之后、任何副作用之前 | **只能否决**，不能覆盖 core 判定 | 否 | 否 |
 
 补充：`describe_plugins`、`extensions_list/read/write/reload`、`task_list/get`、
 `feedback_*` 是**工具面**，不是扩展点；它们让 agent 观察/操作扩展与状态。
@@ -50,12 +51,12 @@
 | 发送后审计/统计 | `SendHook::after_send` | 只能看回执，不能撤回 |
 | 入站拒绝（机器人/噪声/黑名单） | `ReceiveProvider` | 只能整条 Drop，不能改内容 |
 | 去重/限流（入站、发送） | `ReceiveProvider` + module 内存状态；发送用 `SendHook` 拒绝 | 跨重启状态需插件自己持久化 |
-| 命令与后台任务 | `RouteProvider` + `RouteAction::Task{exec}` | 任务 handler 目前只有 `exec` |
+| 命令与后台任务 | `RouteProvider` + `RouteAction::Task{handler, params}` | 内置 `exec` 或插件 `TaskHandler` |
 | 定时任务/例行检查 | `ClockProvider` + `is_due` | 只能决定「开不开轮」，不能注入内容 |
 | 唤醒策略（平台特有语义） | `WakeProvider`，读 `platform/event/tags` | 不能绕过轮次边界；直接唤醒需高信任 `RouteAction::Wake` |
 | 投递裁剪（按规则跳记录） | `DeliveryComposer` | 只能选编号，不能改内容 |
 | 失败通知 | `TurnErrorProvider` | 只能 Log / Send |
-| 人设/提示词注入 | **做不完整**：delivery 只能选已有记录；人设由 core 配 | 缺口，见 §3 |
+| 人设/提示词注入 | **做不完整**：delivery 只能选已有记录；人设由 core 配 | 缺口，声明式方案见 `context-injection-protocol.md`（待确认） |
 | 记忆 | core 的 `memory_*` 工具 | 插件无法注册自己的记忆工具 |
 | 多平台转发 | `RouteProvider` 匹配 + `RouteAction::Send` 到别的房间 | 受 access 校验；不能跨会话发送 |
 | 平台能力扩展 | `PlatformAdapterFactory` | 必须写适配器 crate |
