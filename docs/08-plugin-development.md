@@ -73,6 +73,40 @@ core ──▶ 插件   create(WireInstanceConfig) / invoke(CoreMessage) / Shutd
 更完整的 conformance fixture 见 `crates/adapters/dynamic-fixture` 和
 `crates/plugins/wake-fixture`。
 
+## 嵌套 manager
+
+`ManagerPlugin::children()` 返回子 manager；Root 先安装父 manager，再递归安装子 manager，
+并统一做 namespace、descriptor、capability、深度（`MAX_MANAGER_DEPTH = 4`）和环路审计。
+
+```rust
+struct Parent;
+
+impl ManagerPlugin for Parent {
+    fn manifest(&self) -> ManagerManifest {
+        ManagerManifest::new("parent", PLUGIN_API_VERSION, Vec::new())
+    }
+    fn descriptors(&self) -> Vec<ProviderDescriptor> { Vec::new() }
+    fn instantiate(&self, id: &ProviderId, _: ProviderOptions<'_>) -> Result<ProviderInstance, PluginError> {
+        Err(PluginError::UnknownProvider(id.to_string()))
+    }
+    fn children(&self) -> Vec<Arc<dyn ManagerPlugin>> {
+        vec![Arc::new(Child)]
+    }
+}
+
+let mut plugins = PluginManager::with_native_builtins();
+plugins.install_manager(Arc::new(Parent))?;
+```
+
+子 manager 的 provider 用子 manager 自己的 namespace：`child.always`。manager 树是
+安装/生命周期结构，**不编码进 provider id**；`ProviderId` 的 namespace 只有第一段，
+所以配置写 `child.always`，不是 `parent.child.always`。
+
+可独立构建的完整示例：
+[`examples/dynamic/nested-manager`](https://github.com/DataEraserC/AgentChatBridge/tree/dev_20261025/examples/dynamic/nested-manager)。
+它演示父容器不提供 provider、子 manager 提供 `child.always`、配置可解析，以及
+`manager_health()` 先父后子的顺序。
+
 ## 写一个外置进程适配器
 
 桥按连接配置启动子进程，双方在 stdin/stdout 上一行一条 JSON：
