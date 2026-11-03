@@ -222,12 +222,7 @@ fn large_task_list_is_indexed_and_task_get_keeps_detail() {
 
     let id = tasks[0]["id"].as_str().expect("id");
     let got = lock(&bridge)
-        .tool_call(
-            &ticket,
-            &["main".to_owned()],
-            "task_get",
-            json!({"id": id}),
-        )
+        .tool_call(&ticket, &["main".to_owned()], "task_get", json!({"id": id}))
         .expect("详情仍给全文");
     assert!(got.get("result").is_some());
     assert!(got.get("error").is_some());

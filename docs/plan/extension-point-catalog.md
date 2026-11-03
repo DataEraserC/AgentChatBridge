@@ -36,6 +36,8 @@
 | 12 | 声明式扩展目录 | `manifest.toml` + 规则；`Action = Pass \| Drop \| Send{room,elements,store,wake}` | 入库前路由 | 同 Route | 可产生 Send | 可指定房间 |
 | 13 | 任务 handler | `task::run(&handler, &params)`（当前只认 `exec`） | 路由 `Task` 动作之后，route worker 执行 | 无插件扩展点 | 由 handler 自己 | 否 |
 | 14 | 插件生命周期 | `PluginInfo{source,health,lifecycle,capabilities,...}`；控制台 `POST /api/plugins/*` | 目录展示 / 轮次边界执行 | 控制卸载/重载 | 否 | 否 |
+| 15 | `RecordObserver` | `observe(&Record)` | 记录 append 之后 | 只读旁路 | 否 | 否 |
+| 16 | `ToolProvider` | `tools() -> Vec<ToolSpec>`；`call(&ToolCallContext, tool, args) -> Value` | `plugin_tools` / `plugin_tool_call` 调用时 | 只读旁路（插件自己的 I/O 由插件负责） | 由工具自己 | 否 |
 
 补充：`describe_plugins`、`extensions_list/read/write/reload`、`task_list/get`、
 `feedback_*` 是**工具面**，不是扩展点；它们让 agent 观察/操作扩展与状态。
@@ -57,15 +59,16 @@
 | 记忆 | core 的 `memory_*` 工具 | 插件无法注册自己的记忆工具 |
 | 多平台转发 | `RouteProvider` 匹配 + `RouteAction::Send` 到别的房间 | 受 access 校验；不能跨会话发送 |
 | 平台能力扩展 | `PlatformAdapterFactory` | 必须写适配器 crate |
-| 工具面扩展 | **无扩展点** | 缺口，见 §3 |
+| 工具面扩展 | `ToolProvider` + `plugin_tools` / `plugin_tool_call` | 插件工具按索引发现，schema 按需查 |
+| 全量记录观察（统计/审计） | `RecordObserver`，append 后只读调用 | 不能改记录、不能开轮 |
 
 ## 3. 需要新 hook 才能做的事（缺口与建议签名）
 
 | 缺口 | 今天为什么不行 | 建议 hook / 签名 | 优先级 |
 |---|---|---|---|
-| 观察**每一条**入站记录（统计、审计、索引） | `RouteProvider` 能被 Drop/Handle 提前截断，`WakeProvider` 是按订阅者判定，都不是通用观察点 | `RecordObserver`：`fn observe(&self, ctx: &RecordContext, record: &Record)`，append 之后同步调用，只读、无返回值 | 高 |
-| 插件提供工具 | 工具表 `TOOL_NAMES` 写死在 core | `ToolProvider`：`fn tools(&self) -> Vec<ToolSpec>`；`fn call(&self, ctx: &ToolCallContext, args: Value) -> Result<ToolOutput, ToolError>` | 高 |
-| 任务 handler 可扩展 | `task::run` 只认 `exec`（ADR-0029 D5 未落地） | `TaskHandler`：`fn run(&self, ctx: &TaskContext, params: &Value) -> Result<TaskOutcome, TaskError>` | 高 |
+| ~~观察**每一条**入站记录~~（已落地） | — | `RecordObserver`：`observe(&Record)`，append 之后同步只读；测试见 `observer_flow.rs` | 已完成 |
+| ~~插件提供工具~~（已落地） | — | `ToolProvider`：`tools() -> Vec<ToolSpec>` + `call(&ToolCallContext, tool, args)`；通过 `plugin_tools` 索引发现，`plugin_tool_call` 调用 | 已完成 |
+| 任务 handler 可扩展 | `task::run` 只认 `exec`（ADR-0029 D5 未落地，随 T8 做） | `TaskHandler`：`fn run(&self, ctx: &TaskContext, params: &Value) -> Result<TaskOutcome, TaskError>` | 高 |
 | 跨轮次/跨重启状态 | 插件只能自己找地方存 | `PluginState`：`get/set/delete(namespace, key, ttl)`，由 core 提供作用域和上限 | 中 |
 | 发送目标改写 | `before_send` 只给元素，room 已定；随便改会绕过 access | `SendTargetHook`：`fn rewrite_target(&self, ctx) -> Option<RoomId>`，core 收到后**重新跑 access** | 中 |
 | 按会话速率限制（发送/入站） | 可用 send/receive hook 做，但没有统一状态 | 先用 `PluginState` + 现有 hook；暂不加新 hook | 低 |

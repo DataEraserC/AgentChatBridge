@@ -53,9 +53,10 @@ pub use plugin::{
     IntervalIdleClockProvider, LoaderKind, LoaderManifest, MAX_MANAGER_DEPTH, ManagerHealth,
     ManagerManifest, ManagerPlugin, NativeLoader, PLUGIN_API_VERSION, PluginError, PluginLoader,
     PluginManager, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions,
-    ReceiveDecision, ReceiveProvider, ReceiveRequest, ReloadScope, RouteAction, RouteContext,
-    RouteDecision, RouteProvider, SendContext, SendHook, SendOrigin, SubscribedAccessProvider,
-    TurnErrorProvider, TurnErrorRequest, WakeContext, WakeProvider, default_delivery_plan,
+    ReceiveDecision, ReceiveProvider, ReceiveRequest, RecordObserver, ReloadScope, RouteAction,
+    RouteContext, RouteDecision, RouteProvider, SendContext, SendHook, SendOrigin,
+    SubscribedAccessProvider, ToolCallContext, ToolProvider, ToolSpec, TurnErrorProvider,
+    TurnErrorRequest, WakeContext, WakeProvider, default_delivery_plan,
 };
 pub use plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetadata, PluginSource};
 pub use relay::{FileRelay, RelayError};

@@ -42,6 +42,9 @@ pub const TOOL_NAMES: &[&str] = &[
     "feedback_list",
     "feedback_get",
     "feedback_reply",
+    // 插件工具：索引 + 通用调用口。插件自己的工具不必挤进 core 工具表。
+    "plugin_tools",
+    "plugin_tool_call",
     // 记忆：文件层
     "memory_read",
     "memory_write",
@@ -389,6 +392,25 @@ pub struct FeedbackGetArgs {
 pub struct FeedbackReplyArgs {
     pub id: i64,
     pub text: String,
+}
+
+/// 插件工具索引：不给 name 只给 name + summary；给 name 返回完整 schema。
+#[derive(Debug, Default, Deserialize)]
+pub struct PluginToolsArgs {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+}
+
+/// 调用插件工具：工具名 + 原样参数。
+#[derive(Debug, Deserialize)]
+pub struct PluginToolCallArgs {
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
 }
 
 /// 记忆工具公共参数：操作哪个记忆 + worktree 内的相对路径。
