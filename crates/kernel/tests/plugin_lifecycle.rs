@@ -383,7 +383,7 @@ fn referenced_plugin_rejects_unload() {
     let mut bridge = bridge(&config_with_wake("testplg.wake"), loader);
 
     let unload = bridge.queue_unload("testplg.wake");
-    let error = unload.err().expect("被引用时必须拒绝");
+    let error = unload.expect_err("被引用时必须拒绝");
     let text = error.to_string();
     assert!(
         text.contains("testplg.wake") && text.contains("session:main wake"),
@@ -404,7 +404,7 @@ fn access_reference_also_blocks_unload_and_reload() {
     let mut bridge = bridge(&config_with_access("testplg.wake"), loader);
 
     let unload = bridge.queue_unload("testplg.wake");
-    let error = unload.err().expect("access 引用也必须拒绝");
+    let error = unload.expect_err("access 引用也必须拒绝");
     assert!(
         error.to_string().contains("session:main access"),
         "错误要指出 access 引用：{error}"

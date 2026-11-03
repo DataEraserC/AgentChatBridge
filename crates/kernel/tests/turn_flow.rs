@@ -3039,6 +3039,8 @@ impl Drop for TempRelayDir {
 }
 
 #[test]
+// 测试名保持中文可读性；URL 是专有名词，不应为 lint 改名。
+#[allow(non_snake_case)]
 fn 发送时本机文件换成中继URL_别的路径不动() {
     let temp = TempRelayDir::new("send");
     let source = temp.0.join("截图 01.png");

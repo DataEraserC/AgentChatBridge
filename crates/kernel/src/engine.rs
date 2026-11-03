@@ -421,6 +421,10 @@ pub struct WakeAuditEntry {
 
 /// `begin_tool_call` 的两种结果：不需要平台 I/O 的已经做完了；需要平台的交给 endpoint
 /// 在锁外执行，再回来 `finish`。
+///
+/// 变体大小差异来自锁外执行的 prepared 结构；它们在每次工具调用里只活很短，
+/// 为统一大小额外 box 不值得。
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ToolCallStart {
     Done(Value),
     Platform(PreparedPlatformCall),
@@ -1889,7 +1893,7 @@ impl<S: Store> Bridge<S> {
                     );
                     return Ok(());
                 };
-                let task_id = self.create_task_record(&room, &session, &handler, &params);
+                let task_id = self.create_task_record(room, &session, &handler, &params);
                 self.pending_route_actions
                     .push(PreparedRouteAction::Task(PreparedTask {
                         task_id,
@@ -3636,6 +3640,9 @@ impl<S: Store> Bridge<S> {
         Ok(Some(record.at))
     }
 
+    /// 入队一轮唤醒。参数已经按语义拆开，合并成结构体会让调用点更难读，
+    /// 这里保留 8 个参数。
+    #[allow(clippy::too_many_arguments)]
     fn enqueue(
         &mut self,
         session: String,
@@ -4004,7 +4011,7 @@ impl<S: Store> Bridge<S> {
             .since(room, watermark, usize::MAX)?
             .into_iter()
             .filter(|record| record.sender.id == account)
-            .map(|record| record.id as u64)
+            .map(|record| record.id)
             .collect();
         if own.is_empty() {
             return Ok(());
@@ -4833,7 +4840,7 @@ impl<S: Store> Bridge<S> {
                     .catalog()
                     .into_iter()
                     .filter(|info| {
-                        extension.map_or(true, |extension| info.extension.as_str() == extension)
+                        extension.is_none_or(|extension| info.extension.as_str() == extension)
                     })
                     .map(|info| info.to_json())
                     .collect();
@@ -5085,16 +5092,16 @@ impl<S: Store> Bridge<S> {
         }
 
         // 缩了范围：命中的方法连参数表一起给。
-        let terms = query.as_deref().map(expand_query).unwrap_or_default();
+        let terms = query.map(expand_query).unwrap_or_default();
         let hits: Vec<&MethodSpec> = methods
             .iter()
-            .filter(|method| group.map_or(true, |group| method.group() == group))
-            .filter(|method| tag.map_or(true, |tag| method.has_tag(tag)))
+            .filter(|method| group.is_none_or(|group| method.group() == group))
+            .filter(|method| tag.is_none_or(|tag| method.has_tag(tag)))
             .filter(|method| terms.is_empty() || terms.iter().any(|term| method.matches(term)))
             .collect();
 
         if hits.is_empty() {
-            return Err(no_match(&methods, group, tag, query.as_deref()));
+            return Err(no_match(&methods, group, tag, query));
         }
 
         Ok(json!({

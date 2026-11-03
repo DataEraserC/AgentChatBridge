@@ -521,7 +521,7 @@ pub fn git_diff(worktree: &Path) -> Result<String, ToolError> {
     let opts = git2::DiffFormat::Patch;
     diff.print(opts, |_delta, _hunk, line| {
         let content = std::str::from_utf8(line.content()).unwrap_or("");
-        let _ = out.push_str(content);
+        out.push_str(content);
         true
     })
     .map_err(|error| {

@@ -341,7 +341,7 @@ mod tests {
         let items: Vec<Value> = (0..3000).map(|i| json!({ "id": i })).collect();
         let out = fit("friend.list", Value::Array(items), &dir());
         assert_eq!(out["_page"]["total"], 3000);
-        assert!(out["items"].as_array().expect("数组还在").len() > 0);
+        assert!(!out["items"].as_array().expect("数组还在").is_empty());
         // 关键：结果必须是能解析的 JSON，不是半截字符串。
         assert!(serde_json::to_string(&out).is_ok());
     }

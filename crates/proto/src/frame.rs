@@ -203,6 +203,10 @@ impl ToolError {
 }
 
 /// 一帧。
+///
+/// `TurnStart` 比其它变体大（约 432B），但帧是短命协议对象；为省一次堆分配给
+/// 所有变体加 indirection 不划算，这里明确接受。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "frame", rename_all = "snake_case")]
 pub enum Frame {

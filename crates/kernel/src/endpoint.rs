@@ -456,7 +456,7 @@ pub fn run_connection<S: Store>(
 
     // 控制指令通道：本连接把「代表哪些会话」的 sender 注册出去，控制台据此推 control 帧。
     let (control_tx, control_rx) = std::sync::mpsc::channel::<Frame>();
-    controls.register(&session.sessions().to_vec(), control_tx);
+    controls.register(session.sessions(), control_tx);
 
     let outcome = 'conn: loop {
         // 1. 有活就发过去。引擎层会跳过「已经在跑」的会话，所以一条连接能同时
@@ -610,7 +610,7 @@ pub fn run_connection<S: Store>(
     };
 
     // 断连就注销控制指令通道，别让控制台往死通道上推。
-    controls.unregister(&session.sessions().to_vec());
+    controls.unregister(session.sessions());
 
     // 无论怎么结束，都要把没跑完的轮次放掉。
     let queued = {

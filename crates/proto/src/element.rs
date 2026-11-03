@@ -325,7 +325,7 @@ mod compat_tests {
 
     #[test]
     fn media_urls_lists_every_bearing_element() {
-        let elements = vec![
+        let elements = [
             Element::text("看"),
             Element::Image {
                 url: "a.png".into(),

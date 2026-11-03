@@ -176,6 +176,7 @@ fn session_op(
 /// - 删除：`{"op":"subscription","session":"main","room":"qq:group/123","remove":true}`
 /// - 增改：`{"op":"subscription","session":"main","connection":"qq","room":"group/456","wake":{...}}`
 ///   已存在就只动 wake 里出现的键（null = 删键回到默认），不存在就整条新建。
+///
 /// `room` 写 `qq:group/123`（带连接前缀）或 `group/123`（配 connection 字段）都行。
 fn subscription_op(
     doc: &mut DocumentMut,
@@ -642,7 +643,7 @@ fn upsert_named_table(
     if let Some(table) = existing {
         for field in fields {
             if let Some(text) = op.get(*field).and_then(serde_json::Value::as_str) {
-                table.insert(*field, value(text.to_owned()));
+                table.insert(field, value(text.to_owned()));
                 changes.push(acb_i18n::t!(
                     "bridge.patch.entry_field_updated",
                     label = label,
@@ -664,7 +665,7 @@ fn upsert_named_table(
                 label = label,
                 field = field
             ))?;
-        table.insert(*field, value(text.to_owned()));
+        table.insert(field, value(text.to_owned()));
     }
     array.push(table);
     changes.push(acb_i18n::t!("bridge.patch.entry_created", label = label));
@@ -781,8 +782,6 @@ fn set_or_remove_int(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_patch;
-
     fn base() -> String {
         r#"
 # 用户手写的注释：机器人主会话

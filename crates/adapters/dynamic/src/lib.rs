@@ -159,7 +159,11 @@ impl UnloadSafeLibrary {
         Ok(handle)
     }
 
-    pub fn invoke(&self, handle: *mut c_void, request_json: &str) -> Result<String, String> {
+    /// # Safety
+    ///
+    /// `handle` 必须来自本 loader 的 `create` 且尚未 `destroy`；调用方要保证同一
+    /// handle 不被并发使用。
+    pub unsafe fn invoke(&self, handle: *mut c_void, request_json: &str) -> Result<String, String> {
         let function = self
             .table
             .invoke
@@ -175,7 +179,11 @@ impl UnloadSafeLibrary {
         take_c_string(&self.table, pointer, "invoke")
     }
 
-    pub fn destroy(&self, handle: *mut c_void) {
+    /// # Safety
+    ///
+    /// `handle` 必须来自本 loader 的 `create`，且只能 `destroy` 一次；调用后该 handle
+    /// 不得再被使用。
+    pub unsafe fn destroy(&self, handle: *mut c_void) {
         if let Some(function) = self.table.destroy {
             unsafe { function(handle) };
         }
