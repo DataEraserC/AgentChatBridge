@@ -63,17 +63,24 @@ agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例
 
 ### T4. 实现 unload-safe native plugin（ADR-0030）
 
-- [ ] 在 `crates/adapter-api` 增加 ABI v2：`acb_plugin_entry_v2`、`AcbPluginV2`、
+#### T4a：ABI v2 与 loader 级卸载（已完成）
+
+- [x] 在 `crates/adapter-api` 增加 ABI v2：`acb_plugin_entry_v2`、`AcbPluginV2`、
       `struct_size`、`flags`、`UNLOAD_SAFE`。
-- [ ] `acb-adapter-dynamic` 支持 v2：先找 v2 符号，回退 v1；只对 `UNLOAD_SAFE` 走卸载。
+- [x] 增加 `UnloadSafeLibrary`：只接受 `UNLOAD_SAFE`，提供 manifest/create/invoke/destroy/unload。
+- [x] 增加最小 C fixture：加载 → invoke → destroy → dlclose → 重新加载。
+- [x] 非 `UNLOAD_SAFE` 插件拒绝加载并明确报错；v1 行为保持不变。
+- 实测：`cargo test -p acb-adapter-dynamic --test unload_v2` 2/2 通过；`cargo test --workspace` 全通过。
+- 边界：`UnloadSafeLibrary` 目前是独立的 loader 级 API，尚未注册进 `PluginManager`；
+  Root 安全点卸载、策略 provider 生命周期和平台适配器卸载留给 T4b。
+
+#### T4b：接入 Root（待做）
+
+- [ ] `DynamicLoader` 识别 v2，并把 `UNLOAD_SAFE` 插件登记到可卸载注册表。
 - [ ] Root / `PluginLoader` 增加安全点卸载：停止新调用 → 轮次边界 → destroy → 丢弃实例 → dlclose。
 - [ ] 第一版只覆盖策略扩展点（wake/access/delivery/send/turn_error/clock/receive/route）；
       平台适配器后置。
-- [ ] 增加最小 C 插件 fixture：加载 → invoke → destroy → dlclose → 重新加载。
-- [ ] 非 `UNLOAD_SAFE` 插件拒绝卸载并明确报错；v1 行为保持不变。
-- 改动：`crates/adapter-api`、`crates/adapters/dynamic`、`crates/kernel/src/plugin.rs`、
-  `examples/dynamic/unload-safe-c/`（或等价 fixture）、`docs/08-plugin-development.md`。
-- 验收：C fixture 能完成一次完整卸载/重载；桥不崩溃；v1 `.so` 仍能加载。
+- [ ] 控制台/工具暴露卸载入口与审计记录。
 
 ### T5. 增加 PluginManager 嵌套样例
 

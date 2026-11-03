@@ -34,6 +34,14 @@ pub mod abi {
     /// 唯一的导出符号名。
     pub const ENTRY_SYMBOL: &[u8] = b"acb_adapter_entry_v1\0";
 
+    /// unload-safe native plugin ABI v2（ADR-0030）。
+    pub const ABI_VERSION_V2: u32 = 2;
+    pub const ENTRY_SYMBOL_V2: &[u8] = b"acb_plugin_entry_v2\0";
+    /// 插件声明：满足卸载契约，允许 loader 在安全点 dlclose。
+    pub const PLUGIN_FLAG_UNLOAD_SAFE: u32 = 1;
+
+    pub type EntryFnV2 = unsafe extern "C" fn() -> *const AcbPluginV2;
+
     pub type SubmitEventFn = unsafe extern "C" fn(ctx: *mut c_void, message_json: *const c_char);
     pub type ShouldStopFn = unsafe extern "C" fn(ctx: *mut c_void) -> i32;
     pub type LogFn =
@@ -68,6 +76,20 @@ pub mod abi {
         /// 按 `WireConnection` JSON 创建实例；返回不透明的 handle。
         pub create: Option<CreateFn>,
         /// 请求是 `CoreMessage` JSON，返回 `AdapterMessage` JSON（`Reply` 或 `Log`）。
+        pub invoke: Option<InvokeFn>,
+        pub destroy: Option<DestroyFn>,
+        pub free_string: Option<FreeStringFn>,
+    }
+
+    /// ABI v2 函数表。字段前缀与 v1 兼容，额外带 struct_size 和 flags。
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct AcbPluginV2 {
+        pub abi_version: u32,
+        pub struct_size: u32,
+        pub flags: u32,
+        pub manifest: Option<ManifestFn>,
+        pub create: Option<CreateFn>,
         pub invoke: Option<InvokeFn>,
         pub destroy: Option<DestroyFn>,
         pub free_string: Option<FreeStringFn>,
