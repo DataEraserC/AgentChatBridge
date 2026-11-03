@@ -1,7 +1,9 @@
-# 回调 panic 策略（评估结论，2026-11-04）
+# 回调 panic 策略（2026-11-04）
+
+状态：Observer / Route / ToolProvider 的 catch 已实施；PromptProvider 已有线程隔离；
+动态库 / FFI 仍需插件自己 catch。测试见 `callback_panic.rs` 与 `panic_stress.rs`。
 
 范围：`RecordObserver` / `RouteProvider` / `ToolProvider` / `PromptProvider`。
-只出结论，不改代码。
 
 ## 0. 结论摘要
 
@@ -121,15 +123,17 @@ catch 之后不能静默。每个 panic 至少记录：
 
 ---
 
-## 5. 实施顺序建议（未来）
+## 5. 实施状态（2026-11-04）
 
-1. Observer：包每个 `observe` 调用，catch + 日志 + 继续；补测试（panic 后记录仍入库、
-   唤醒仍发生、后续工具可用）。
-2. Tool：包 `plugin_tool_call` 的 provider 调用，catch + `ToolError::Internal`；
-   补测试（panic 后轮次仍可收、其它工具可用）。
-3. Route：包 `decide` 调用，catch → Pass + 日志；补测试（消息仍入库/唤醒）。
-4. Prompt：保持现有线程隔离；补断言 catch 后的审计日志字段。
-5. 动态库：不提供 core catch；在插件开发文档里写清楚“FFI 入口必须自己
-   catch_unwind，返回 wire error；否则进程退出由 supervisor 重启”。
-
-本文件只定策略，不改实现。
+1. Observer：已包 `catch_unwind`，panic 跳过该来源并记日志；测试覆盖记录入库、唤醒、
+   其它观察者、再次调用、锁不中毒。
+2. Route：已包 `catch_unwind`，panic 按 `Pass` 处理并记日志；测试覆盖下一条路由继续、
+   入库/唤醒、`pending_route_actions` 为 0。
+3. Tool：已包 `catch_unwind`，返回 `[tool_panic]` 错误；测试覆盖同轮其它工具可用、
+   再次调用仍返回错误、下一轮工具索引可用。
+4. Prompt：保持现有线程隔离；`prompt_flow` 固定 panic 后跳过。
+5. 动态库：不提供 core catch；插件开发文档需写清“FFI 入口必须自己 catch_unwind，
+   返回 wire error；否则进程退出由 supervisor 重启”。
+6. 压力验证：`panic_stress.rs` 连续 200 次 Observer+Route+Tool panic，断言
+   `queued_turns` / `pending_route_actions` 无残留、RSS 增长在宽松上限内、provider
+   生命周期与 `lastError` 不变、压力后仍可服务。
