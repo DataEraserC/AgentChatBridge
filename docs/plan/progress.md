@@ -72,7 +72,7 @@
   - `cargo test -p acb-kernel --test task_flow` → 2/2。
   - `cargo test --workspace` → 全部通过（42 个 test 汇总，0 failed）。
   - `npm test` dsh 34/34、opencode 42/42；`node --check harnesses/shared/tools.mjs` 通过。
-- commit：见本条追加后的下一次提交（T7a）。
+- commit：`0b39dbd feat(task): record background task status and results`
 - 偏离说明：
   - 任务记录先放进程内、上限 200，不落库；换取小步可验证，持久化/重启保留留给 T7 后续。
   - T7 拆成 T7a（记录/查询）、T7b（合成事件/wake_on/自触发防护）、T7c（feedback reply），
