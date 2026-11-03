@@ -347,8 +347,14 @@
     active turn 计入快照、leftovers 可报告。
 - 证据：
   - `cargo test -p acb-kernel --test drain_flow` → 3/3；
-  - `cargo test --workspace` → 全通过（exit 0）；`cargo fmt` 无差异。
-- commit：`TBD`。
+  - `cargo test --workspace` → 全通过（exit 0）；`cargo fmt` 无差异；
+  - 实机：restart 后 `curl /healthz` 返回 `state=ready`、`schema_version=11`；
+  - 实机：`systemctl --user reload` 触发 SIGHUP → 日志「收到信号 1，开始排空」
+    → 进程退出 75 → systemd 自动重启（Invocation 变化，health 再次 ready）。
+  - 实机发现：NixOS 无 `/bin/kill`，ExecReload 必须用
+    `/run/current-system/sw/bin/kill`；已修正。
+- commit：`dee2630 feat(runtime): drain before exit and expose loopback health probe`
+  （ExecReload 路径修正另见下一次 docs/unit 提交）。
 - 偏离说明：`/healthz` 复用控制台 HTTP 端口（不强开 3101），用 loopback 限制 +
   token 鉴权保证只给本机；代价是控制台若绑 0.0.0.0，探针路径也走同一端口。
 - 未决问题：自动回滚/插件 LKG 提升逻辑是否要做；drain 参数是否配置化。
