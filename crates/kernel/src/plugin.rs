@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -31,6 +32,31 @@ use crate::plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetada
 
 /// 插件 API 版本。provider / manager / loader 的 manifest 都要对得上。
 pub const PLUGIN_API_VERSION: u32 = 1;
+
+/// 从 `catch_unwind` 的 payload 里取出可读文本，尽量不丢 panic 信息。
+pub(crate) fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return (*text).to_owned();
+    }
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    "non-string panic payload".to_owned()
+}
+
+/// 观察者只读旁路：单个 panic 只跳过它自己，不能挡住记录入库后的唤醒调度。
+fn observe_one(id: &ProviderId, observer: &Arc<dyn RecordObserver>, record: &Record) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| observer.observe(record))) {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "kernel.plugin.observer_panicked",
+                id = id,
+                panic = panic_text(payload)
+            )
+        );
+    }
+}
 
 /// 内置 wake provider 的 id。默认订阅没有显式写 provider 时用它。
 pub const DEFAULT_WAKE_PROVIDER: &str = "acb.wake.default";
@@ -2353,14 +2379,14 @@ impl PluginManager {
         ids.sort();
         for id in ids {
             if let Some(observer) = self.observers.get(id) {
-                observer.observe(record);
+                observe_one(id, observer, record);
                 continue;
             }
             let Some(manager) = self.managers.get(id.namespace()) else {
                 continue;
             };
             match manager.instantiate(id, ProviderOptions::Observer) {
-                Ok(ProviderInstance::Observer(observer)) => observer.observe(record),
+                Ok(ProviderInstance::Observer(observer)) => observe_one(id, &observer, record),
                 Ok(other) => eprintln!(
                     "{}",
                     acb_i18n::t!(

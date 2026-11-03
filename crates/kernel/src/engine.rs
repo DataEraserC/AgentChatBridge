@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1638,7 +1639,25 @@ impl<S: Store> Bridge<S> {
                 tags: &tags_ref,
                 sessions: &sessions,
             };
-            match provider.decide(policy, &context) {
+            let decision =
+                match catch_unwind(AssertUnwindSafe(|| provider.decide(policy, &context))) {
+                    Ok(decision) => decision,
+                    Err(payload) => {
+                        // 路由是命令/匹配层，不是安全闸门：panic 按 Pass 处理，避免静默丢消息。
+                        // core 在收到完整 decision 前不会写 pending 动作，这里没有半成品要回滚。
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "kernel.engine.route_panicked",
+                                provider = policy.provider,
+                                room = room,
+                                panic = crate::plugin::panic_text(payload)
+                            )
+                        );
+                        RouteDecision::Pass
+                    }
+                };
+            match decision {
                 RouteDecision::Pass => continue,
                 decision => {
                     handled = Some((policy.provider.clone(), decision));
@@ -2709,7 +2728,8 @@ impl<S: Store> Bridge<S> {
             }
             "plugin_tool_call" => {
                 let args: PluginToolCallArgs = parse(args)?;
-                let Some((_, provider)) = self.plugins.tool_provider_for(&args.tool) else {
+                let Some((provider_id, provider)) = self.plugins.tool_provider_for(&args.tool)
+                else {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
                         acb_i18n::t!("kernel.engine.unknown_tool", tool = args.tool),
@@ -2721,7 +2741,35 @@ impl<S: Store> Bridge<S> {
                     origin_sender: origin_sender.as_deref(),
                     live,
                 };
-                provider.call(&context, &args.tool, args.arguments)
+                // 工具插件 panic 不能带走轮次或毒化 Bridge 锁；按一次普通失败返回。
+                match catch_unwind(AssertUnwindSafe(|| {
+                    provider.call(&context, &args.tool, args.arguments)
+                })) {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        let panic = crate::plugin::panic_text(payload);
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "kernel.engine.tool_panicked",
+                                provider = provider_id,
+                                tool = args.tool,
+                                session = turn_session,
+                                room = room,
+                                panic = panic
+                            )
+                        );
+                        Err(ToolError::new(
+                            ErrorCode::Internal,
+                            acb_i18n::t!(
+                                "kernel.engine.tool_panicked_message",
+                                provider = provider_id,
+                                tool = args.tool,
+                                panic = panic
+                            ),
+                        ))
+                    }
+                }
             }
             // 记忆：文件层。
             "memory_read" => {
