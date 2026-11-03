@@ -53,6 +53,34 @@
   `crates/kernel/src/route_worker.rs`、`crates/kernel/src/task.rs`、`engine.rs` 工具分派。
 - 未决问题：用户需在 A/B 方案中拍板；T7 是否接受 T7a/T7b/T7c 拆分。
 
+## 2026-11-04 01:31 CST — D/T7a：任务记录与查询
+
+- 任务编号：D / T7a
+- 做了什么：
+  - `crates/kernel/src/engine.rs`
+    - 新增 `TaskStatus` / `TaskRecord` / `Bridge::tasks` / `task_seq`；
+    - `create_task_record`、`mark_task_running`、`finish_task`；
+    - `task_list` / `task_get`，按会话隔离，任务结束后仍可查询；
+    - route `task` 动作创建记录并写入 `PreparedTask.task_id`。
+  - `crates/kernel/src/route_worker.rs`
+    - 任务开始/结束写回 Bridge；成功/失败/发送失败/候选不支持都落记录；
+    - 参数摘要只保留前 200 字符，避免把长命令/环境原样塞回模型。
+  - `crates/kernel/src/tools.rs`、`harnesses/shared/tools.mjs`
+    - 增加 `task_list` / `task_get` schema。
+  - `crates/kernel/src/lib.rs` 导出 `TaskRecord` / `TaskStatus`。
+- 证据：
+  - `cargo test -p acb-kernel --test task_flow` → 2/2。
+  - `cargo test --workspace` → 全部通过（42 个 test 汇总，0 failed）。
+  - `npm test` dsh 34/34、opencode 42/42；`node --check harnesses/shared/tools.mjs` 通过。
+- commit：见本条追加后的下一次提交（T7a）。
+- 偏离说明：
+  - 任务记录先放进程内、上限 200，不落库；换取小步可验证，持久化/重启保留留给 T7 后续。
+  - T7 拆成 T7a（记录/查询）、T7b（合成事件/wake_on/自触发防护）、T7c（feedback reply），
+    先交付可独立验证的查询面；合成事件与唤醒尚未做。
+- 下一步入口：T7b；读 `engine.rs` 的 `ingest` / `enqueue`、`task_worker` 完成路径、
+  `RouteContext` 与 `TurnReason`，设计 `kind=task` 合成事件与 `wake_on`。
+- 未决问题：`task` 记录是否需要在 SQLite 持久化；`wake_on` 默认值；直接唤醒 API 的限流策略。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，

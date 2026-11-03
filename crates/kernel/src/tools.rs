@@ -33,6 +33,9 @@ pub const TOOL_NAMES: &[&str] = &[
     "extensions_read",
     "extensions_write",
     "extensions_reload",
+    // 后台任务记录（T7a）。
+    "task_list",
+    "task_get",
     // 反馈：把「哪里卡住了」写回桥里（ADR-0021）。活干不下去时用它，不要直接摸平台端口。
     "report_feedback",
     // 记忆：文件层
@@ -286,6 +289,23 @@ pub struct ExtensionsWriteArgs {
 pub struct ExtensionsReloadArgs {
     #[serde(default)]
     pub namespace: Option<String>,
+}
+
+/// 后台任务列表：按状态过滤 + 分页。
+#[derive(Debug, Default, Deserialize)]
+pub struct TaskListArgs {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+}
+
+/// 后台任务详情。
+#[derive(Debug, Deserialize)]
+pub struct TaskGetArgs {
+    pub id: String,
 }
 
 /// 调一个平台方法。`params` 是任意 map，core 不认识里面任何字段，原样转给适配器。
