@@ -44,6 +44,7 @@ unsafe extern "C" fn example_manifest() -> *mut c_char {
         event_tags: Vec::new(),
         supports_at: false,
         supports_reply: false,
+        text_limit: None,
         extension: "wake".into(),
         metadata: WirePluginMetadata {
             title: Some("示例 wake provider".into()),

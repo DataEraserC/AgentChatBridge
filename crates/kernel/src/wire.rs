@@ -74,6 +74,7 @@ impl TryFrom<WireManifest> for AdapterManifest {
             event_tags: event_tags.into(),
             supports_at: manifest.supports_at,
             supports_reply: manifest.supports_reply,
+            text_limit: manifest.text_limit,
             metadata,
         })
     }
@@ -492,6 +493,7 @@ mod tests {
             event_tags: Vec::new(),
             supports_at: true,
             supports_reply: true,
+            text_limit: None,
             extension: "platform_adapter".into(),
             metadata: WirePluginMetadata::default(),
         };
@@ -518,6 +520,7 @@ mod tests {
             event_tags: vec!["mention".into()],
             supports_at: true,
             supports_reply: true,
+            text_limit: Some(4000),
             extension: "platform_adapter".into(),
             metadata: WirePluginMetadata::default(),
         })
@@ -535,6 +538,7 @@ mod tests {
                 .any(|tag| tag.as_ref() == "mention")
         );
         assert!(manifest.supports_at && manifest.supports_reply);
+        assert_eq!(manifest.text_limit, Some(4000));
         assert_eq!(manifest.kind, "demo");
         assert!(
             manifest

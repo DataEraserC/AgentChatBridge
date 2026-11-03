@@ -58,6 +58,8 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
     event_tags: Cow::Borrowed(EVENT_TAGS),
     supports_at: true,
     supports_reply: true,
+    // QQ 客户端/协议实现的长消息上限不统一，不谎报一个数字；等有可验证来源再填。
+    text_limit: None,
     metadata: PluginMetadata {
         title: Some(Cow::Borrowed("OneBot 11")),
         summary: Some(Cow::Borrowed("QQ 群与私聊：收消息、发消息、平台方法目录")),

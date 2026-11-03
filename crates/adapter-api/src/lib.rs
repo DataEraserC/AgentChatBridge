@@ -123,6 +123,9 @@ pub struct WireManifest {
     /// 入站记录里的 `reply_to_self` 是否可信。
     #[serde(default)]
     pub supports_reply: bool,
+    /// 单条文本消息的建议上限（字符）；None = 未声明，不等于无限。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_limit: Option<usize>,
     /// `platform_adapter`（默认）或 `wake`。
     #[serde(default = "default_extension")]
     pub extension: String,
@@ -534,6 +537,9 @@ pub struct WireAdapterInfo {
     pub supports_at: bool,
     #[serde(default)]
     pub supports_reply: bool,
+    /// 单条文本消息的建议上限（字符）；None = 未声明，不等于无限。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_limit: Option<usize>,
 }
 
 /// 适配器 → core。
@@ -659,6 +665,7 @@ mod tests {
                 event_tags: vec!["poke".into()],
                 supports_at: true,
                 supports_reply: true,
+                text_limit: Some(4000),
             },
         };
         let line = encode_line(&hello).expect("能编码");

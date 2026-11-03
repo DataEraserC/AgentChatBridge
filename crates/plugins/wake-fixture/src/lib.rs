@@ -66,6 +66,7 @@ unsafe extern "C" fn wake_manifest() -> *mut c_char {
         event_tags: Vec::new(),
         supports_at: false,
         supports_reply: false,
+        text_limit: None,
         extension: extension.clone(),
         metadata: WirePluginMetadata {
             title: Some(format!("{extension} 夹具")),

@@ -75,6 +75,8 @@ fn process_adapter_speaks_the_wire_protocol() {
     );
     assert!(manifest.supports_at);
     assert!(manifest.supports_reply);
+    // 上限是数据：子进程说什么就是什么，core 不按平台名猜。
+    assert_eq!(manifest.text_limit, Some(4000));
     assert_eq!(manifest.platform.as_ref(), "fixture");
 
     let catalog = outbound.catalog("fixture");
