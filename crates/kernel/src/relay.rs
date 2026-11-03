@@ -162,15 +162,34 @@ impl FileRelay {
         Some((path, meta.len()))
     }
 
-    /// 清掉过期的收存文件。只在桥启动时跑一次；跑着的桥不清（省事，文件也不大）。
-    pub fn sweep_expired(&self) {
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            return;
+    /// 清掉过期的收存文件。桥启动时跑一次，运行中由后台线程定期再跑。
+    ///
+    /// 返回删掉的目录数；单个目录删除失败只记日志，不影响其它目录和主流程。
+    pub fn sweep_expired(&self) -> usize {
+        self.sweep_expired_older_than(KEEP_FOR)
+    }
+
+    fn sweep_expired_older_than(&self, keep: Duration) -> usize {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return 0,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.relay.sweep_failed",
+                        path = self.root.display(),
+                        error = error
+                    )
+                );
+                return 0;
+            }
         };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or(0);
+        let mut removed = 0;
         for entry in entries.flatten() {
             let Ok(meta) = entry.metadata() else { continue };
             if !meta.is_dir() {
@@ -182,10 +201,21 @@ impl FileRelay {
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map(|since| now.saturating_sub(since.as_secs()))
                 .unwrap_or(0);
-            if age > KEEP_FOR.as_secs() {
-                let _ = fs::remove_dir_all(entry.path());
+            if age >= keep.as_secs() {
+                match fs::remove_dir_all(entry.path()) {
+                    Ok(()) => removed += 1,
+                    Err(error) => eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "kernel.relay.sweep_failed",
+                            path = entry.path().display(),
+                            error = error
+                        )
+                    ),
+                }
             }
         }
+        removed
     }
 
     /// 起文件服务。阻塞当前线程；每条连接一个短命线程，读完即关。
@@ -398,6 +428,19 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn sweep_removes_entries_older_than_the_retention_window() {
+        let temp = TempDir::new("sweep");
+        let relay = FileRelay::new(temp.0.join("store"), "http://x");
+        let source = temp.0.join("a.bin");
+        fs::write(&source, b"bytes").expect("能写源文件");
+        relay.publish(&source).expect("能收下");
+
+        // 用零窗口让刚写出的目录也算过期：测试不依赖真实 24 小时的等待。
+        assert_eq!(relay.sweep_expired_older_than(Duration::ZERO), 1);
+        assert!(fs::read_dir(relay.root()).expect("能读根").next().is_none());
     }
 
     #[test]

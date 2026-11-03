@@ -33,6 +33,10 @@ use console::Console;
 /// 真需要更勤/更懒再做成配置项。
 const PRUNE_EVERY: Duration = Duration::from_secs(300);
 
+/// 文件中继过期目录的清理周期。保留期是 24h；每小时扫一次意味着过期文件最多多留
+/// 1 小时。单次扫描只 read_dir 一层并删除过期 token 目录，成本可忽略。
+const RELAY_SWEEP_EVERY: Duration = Duration::from_secs(3600);
+
 /// 排空预算：到点还在跑就强制退出（内存任务记录会丢，消息不丢）。
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// 排空期间的轮询间隔。
@@ -258,7 +262,33 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     match &config.file_relay {
         Some(relay_config) => {
             let relay = Arc::new(FileRelay::new(&relay_config.dir, &relay_config.public_base));
-            relay.sweep_expired();
+            let removed = relay.sweep_expired();
+            if removed > 0 {
+                println!(
+                    "{}",
+                    acb_i18n::t!("bridge.main.file_relay_swept", count = removed)
+                );
+            }
+            // 运行中定期清理：长期运行的桥不能只靠重启来削过期文件。
+            {
+                let relay = Arc::clone(&relay);
+                let shutdown = Arc::clone(&shutdown);
+                std::thread::spawn(move || {
+                    while !shutdown.load(Ordering::Relaxed) {
+                        std::thread::sleep(RELAY_SWEEP_EVERY);
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let removed = relay.sweep_expired();
+                        if removed > 0 {
+                            println!(
+                                "{}",
+                                acb_i18n::t!("bridge.main.file_relay_swept", count = removed)
+                            );
+                        }
+                    }
+                });
+            }
             let listener = std::net::TcpListener::bind(&relay_config.listen)?;
             let shutdown = Arc::clone(&shutdown);
             std::thread::spawn(move || FileRelay::serve(listener, relay, shutdown));
