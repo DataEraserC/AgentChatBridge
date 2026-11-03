@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -57,6 +57,10 @@ pub const RESTART_DELAY: Duration = Duration::from_millis(500);
 pub const MAX_RESTART_DELAY: Duration = Duration::from_secs(10);
 /// 退出时给子进程收尾的时间，过了就 kill。
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+/// 写入队列深度。64 行足够吸收一次突发；队列写满说明子进程已经不读 stdin。
+const WRITE_QUEUE_LINES: usize = 64;
+/// 单行写入排队的最长等待。超过就认为子进程停止读取：标记连接不可用并杀掉重启。
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 static TRANSPORTS: &[Cow<'static, str>] = &[Cow::Borrowed("process")];
 static CAPABILITIES: &[AdapterCapability] = &[
@@ -222,11 +226,14 @@ struct HelloData {
     info: WireAdapterInfo,
 }
 
-/// 一条连接的共享进程状态。重启时换 stdin、清 pending，但 outbound 句柄不变。
+/// 一条连接的共享进程状态。重启时换 writer、清 pending，但 outbound 句柄不变。
 struct SharedProcess {
-    stdin: Mutex<Option<ChildStdin>>,
+    /// 写入队列的发送端；真正的 stdin 由 writer 线程独占，写阻塞不会占住调用方。
+    writer: Mutex<Option<SyncSender<Vec<u8>>>>,
     pending: Pending,
     alive: Arc<AtomicBool>,
+    /// 写入超时或写失败；supervise 看到后杀掉子进程走重启流程。
+    write_failed: Arc<AtomicBool>,
     catalog: Mutex<Arc<[MethodSpec]>>,
     /// 子进程 hello 里声明的入站能力；重启时跟着新 hello 更新。
     info: Mutex<WireAdapterInfo>,
@@ -251,24 +258,26 @@ fn spawn_process(
     let restart_events = events.clone();
 
     let shared = Arc::new(SharedProcess {
-        stdin: Mutex::new(None),
+        writer: Mutex::new(None),
         pending: Arc::new(Mutex::new(HashMap::new())),
         alive: Arc::new(AtomicBool::new(false)),
+        write_failed: Arc::new(AtomicBool::new(false)),
         catalog: Mutex::new(Arc::from(Vec::<MethodSpec>::new())),
         info: Mutex::new(WireAdapterInfo::default()),
     });
 
-    let (child, stdin, catalog, info) = start_child(
+    let (child, writer, catalog, info) = start_child(
         &config,
         &connection_id,
         events,
         Arc::clone(&shared.pending),
         Arc::clone(&shared.alive),
+        Arc::clone(&shared.write_failed),
     )?;
     *shared
-        .stdin
+        .writer
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stdin);
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(writer);
     *shared
         .catalog
         .lock()
@@ -333,7 +342,8 @@ fn start_child(
     events: EventQueue,
     pending: Pending,
     alive: Arc<AtomicBool>,
-) -> Result<(Child, ChildStdin, Arc<[MethodSpec]>, WireAdapterInfo), String> {
+    write_failed: Arc<AtomicBool>,
+) -> Result<(Child, SyncSender<Vec<u8>>, Arc<[MethodSpec]>, WireAdapterInfo), String> {
     let mut command = Command::new(&config.program);
     command
         .args(&config.args)
@@ -418,8 +428,15 @@ fn start_child(
         stop_child(&mut child);
         acb_i18n::t!("adapter.process.catalog_invalid", detail = detail)
     })?;
+    let writer = spawn_writer(
+        connection.to_owned(),
+        stdin,
+        Arc::clone(&alive),
+        write_failed,
+        WRITE_QUEUE_LINES,
+    );
 
-    Ok((child, stdin, catalog, hello.info))
+    Ok((child, writer, catalog, hello.info))
 }
 
 /// 守着子进程：退出就按退避重启，桥要停才收尾。
@@ -433,10 +450,10 @@ fn supervise(
 ) {
     let mut delay = RESTART_DELAY;
     loop {
-        let shutdown = wait_for_exit(&host_shutdown, &shared.stdin, &mut child, &connection);
+        let shutdown = wait_for_exit(&host_shutdown, &shared, &mut child, &connection);
         shared.alive.store(false, Ordering::Relaxed);
         *shared
-            .stdin
+            .writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         let waiting = std::mem::take(
@@ -475,12 +492,14 @@ fn supervise(
             events.clone(),
             Arc::clone(&shared.pending),
             Arc::clone(&shared.alive),
+            Arc::clone(&shared.write_failed),
         ) {
-            Ok((new_child, stdin, catalog, info)) => {
+            Ok((new_child, writer, catalog, info)) => {
+                shared.write_failed.store(false, Ordering::Relaxed);
                 *shared
-                    .stdin
+                    .writer
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stdin);
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(writer);
                 *shared
                     .catalog
                     .lock()
@@ -667,13 +686,23 @@ fn stop_child(child: &mut Child) {
 /// 等子进程退出；桥要停时先发 shutdown，超时就 kill。返回 true 表示是桥要停。
 fn wait_for_exit(
     host_shutdown: &AtomicBool,
-    stdin: &Mutex<Option<ChildStdin>>,
+    shared: &SharedProcess,
     child: &mut Child,
     connection: &str,
 ) -> bool {
     loop {
+        // 写超时/写失败：子进程已经停止读 stdin。杀掉它，让上面的重启流程接管。
+        if shared.write_failed.load(Ordering::Relaxed) {
+            eprintln!(
+                "{}",
+                acb_i18n::t!("adapter.process.write_stalled_kill", connection = connection)
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
         if host_shutdown.load(Ordering::Relaxed) {
-            let _ = write_line(stdin, &CoreMessage::Shutdown);
+            let _ = write_line(shared, connection, &CoreMessage::Shutdown);
             let deadline = Instant::now() + SHUTDOWN_GRACE;
             loop {
                 match child.try_wait() {
@@ -705,18 +734,82 @@ fn wait_for_exit(
     }
 }
 
-fn write_line(stdin: &Mutex<Option<ChildStdin>>, message: &CoreMessage) -> Result<(), String> {
+/// writer 线程独占 stdin；调用方只把编码好的行放进有界队列，不持锁等 I/O。
+fn spawn_writer(
+    connection: String,
+    mut stdin: ChildStdin,
+    alive: Arc<AtomicBool>,
+    write_failed: Arc<AtomicBool>,
+    capacity: usize,
+) -> SyncSender<Vec<u8>> {
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(capacity);
+    thread::spawn(move || {
+        while let Ok(payload) = rx.recv() {
+            if let Err(error) = stdin.write_all(&payload).and_then(|_| stdin.flush()) {
+                write_failed.store(true, Ordering::Relaxed);
+                alive.store(false, Ordering::Relaxed);
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "adapter.process.write_failed_detail",
+                        connection = connection,
+                        error = error
+                    )
+                );
+                break;
+            }
+        }
+    });
+    tx
+}
+
+fn write_line(
+    shared: &SharedProcess,
+    connection: &str,
+    message: &CoreMessage,
+) -> Result<(), String> {
+    write_line_with_timeout(shared, connection, message, WRITE_TIMEOUT)
+}
+
+fn write_line_with_timeout(
+    shared: &SharedProcess,
+    connection: &str,
+    message: &CoreMessage,
+    timeout: Duration,
+) -> Result<(), String> {
     let line = encode_line(message).map_err(|error| error.to_string())?;
-    let mut stdin = stdin
+    let payload = format!("{line}\n").into_bytes();
+    let sender = shared
+        .writer
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let stdin = stdin
-        .as_mut()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
         .ok_or_else(|| acb_i18n::t!("adapter.process.not_running"))?;
-    stdin
-        .write_all(format!("{line}\n").as_bytes())
-        .and_then(|_| stdin.flush())
-        .map_err(|error| acb_i18n::t!("adapter.process.write_failed", error = error))
+    let deadline = Instant::now() + timeout;
+    let mut payload = payload;
+    loop {
+        match sender.try_send(payload) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(acb_i18n::t!("adapter.process.not_running"));
+            }
+            Err(TrySendError::Full(returned)) => {
+                payload = returned;
+                if Instant::now() >= deadline {
+                    shared.write_failed.store(true, Ordering::Relaxed);
+                    shared.alive.store(false, Ordering::Relaxed);
+                    let detail = acb_i18n::t!(
+                        "adapter.process.write_timeout",
+                        connection = connection,
+                        millis = timeout.as_millis()
+                    );
+                    eprintln!("{detail}");
+                    return Err(detail);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
 }
 
 struct ProcessOutbound {
@@ -739,7 +832,7 @@ impl ProcessOutbound {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id, reply_tx);
 
-        if let Err(detail) = write_line(&self.shared.stdin, &message) {
+        if let Err(detail) = write_line(&self.shared, &self.connection, &message) {
             self.shared
                 .pending
                 .lock()
@@ -847,5 +940,78 @@ impl Outbound for ProcessOutbound {
                 "adapter.process.not_call_result"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_timeout_marks_connection_failed_and_supervisor_kills_child() {
+        // 一个只 sleep、不读 stdin 的子进程。
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("能起 sh");
+        let stdin = child.stdin.take().expect("有 stdin");
+
+        let alive = Arc::new(AtomicBool::new(true));
+        let write_failed = Arc::new(AtomicBool::new(false));
+        // 容量 0：writer 一旦卡在写管道，下一次排队就会超时。
+        let writer = spawn_writer(
+            "test".to_owned(),
+            stdin,
+            Arc::clone(&alive),
+            Arc::clone(&write_failed),
+            0,
+        );
+        let shared = SharedProcess {
+            writer: Mutex::new(Some(writer.clone())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            alive: Arc::clone(&alive),
+            write_failed: Arc::clone(&write_failed),
+            catalog: Mutex::new(Arc::from(Vec::<MethodSpec>::new())),
+            info: Mutex::new(WireAdapterInfo::default()),
+        };
+
+        // 1 MiB 远大于管道缓冲；writer 取走后会卡在 write_all。
+        // 容量 0 的队列只在 writer 正等 recv 时才能入队，因此重试到它接手为止。
+        let big = vec![b'x'; 1024 * 1024];
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut pending = Some(big);
+        while let Some(payload) = pending.take() {
+            match writer.try_send(payload) {
+                Ok(()) => break,
+                Err(TrySendError::Full(payload)) => {
+                    assert!(Instant::now() < deadline, "writer 线程没有启动");
+                    pending = Some(payload);
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(TrySendError::Disconnected(_)) => panic!("writer 线程意外退出"),
+            }
+        }
+
+        let error = write_line_with_timeout(
+            &shared,
+            "test",
+            &CoreMessage::Shutdown,
+            Duration::from_millis(100),
+        )
+        .expect_err("子进程不读 stdin 时必须超时");
+        assert!(error.contains("write"), "{error}");
+        assert!(write_failed.load(Ordering::Relaxed));
+        assert!(!alive.load(Ordering::Relaxed));
+
+        // supervise 的检查分支看到 write_failed 后应当杀掉子进程。
+        let host_shutdown = AtomicBool::new(false);
+        assert!(!wait_for_exit(&host_shutdown, &shared, &mut child, "test"));
+        assert!(
+            child.try_wait().expect("能查状态").is_some(),
+            "子进程应已被杀掉"
+        );
     }
 }
