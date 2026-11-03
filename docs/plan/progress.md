@@ -447,6 +447,87 @@
   tool-access 是否进 core、核心清账清单、插件分发边界、回滚边界。
 - 下一步入口：等用户拍板后，按矩阵优先级逐项落地；不为了齐平而加 core 入口。
 
+## 2026-11-04 03:09 CST — T8：TaskHandler（插件后台任务）
+
+- 任务编号：T8 / TaskHandler（用户代行决策实施）
+- 代行决策：
+  - 签名先按最小面：`handle(task_id, payload) -> Result<TaskOutcome>`，不暴露
+    Store、票、水位或 Bridge；任务记录仍是 core 的内存态，插件要持久化就自己存。
+  - 任务记录继续内存 200 条上限（`TASK_KEEP`），**不落 SQLite**。理由：现在没有
+    跨重启恢复需求；一旦落库就要引入 schema 迁移、清理策略与旧数据兼容。
+    **何时该做**：出现「重启后任务要续跑/查询」或控制台要跨实例看任务状态时，
+    单独设计任务表与恢复语义，不在当前扩展点里顺手加。
+  - `TaskHandler` 只给插件一个执行动作，不改 core 调度：仍由 route worker 串行执行，
+    handler 在锁外跑，返回 `TaskOutcome::Send` 后走既有发送管线。
+  - 可否回退：删除 `task.rs` 的 trait、`plugin.rs` 的 Task 扩展点与
+    `route_worker.rs` 的分支即可；`text_limit` 是独立提交，互不牵连。
+- 做了什么：
+  - `crates/kernel/src/task.rs`：公开 `TaskOutcome`，新增 `TaskHandler` trait；
+  - `crates/kernel/src/plugin.rs`：`ExtensionPoint::Task`、`Capability::TaskHandle`、
+    `ProviderOptions::Task`、`ProviderInstance::Task`；`register_task_handler` /
+    `task_handler`；manager 实例化与卸载清理；
+  - `crates/kernel/src/engine.rs`：`Bridge::task_handler` 按名字取执行器；
+  - `crates/kernel/src/route_worker.rs`：插件 handler 优先，取不到回退内置 `exec`；
+  - `crates/kernel/tests/task_flow.rs`：`EchoTask` + `/task plugin` 路由测试；
+  - `crates/kernel/src/plugin.rs` 单元测试：卸载 namespace 后 handler 不残留。
+- 证据：
+  - `cargo test -p acb-kernel --test task_flow` → 4/4；
+  - `cargo test -p acb-kernel --lib` → 162/162；
+  - `cargo test --workspace` 全绿。
+- commit：`f8c11c4 feat(plugin): add task handler extension point`
+- 实施中发现并修正的隐患：`task_handlers` 原先按 handler 名字前缀判归属，名字可以
+  比 provider id 短（如 `echo`），卸载后会残留。已改成存 `(owner ProviderId, handler)`，
+  按注册者 namespace 清理，并加单元测试。**不是默认决策冲突，是接口实现修正。**
+- 未决问题：插件 handler 是否需要调用审计/超时（当前只有内置 `exec` 有超时）；
+  manager 实例化的 task provider 每次调用都重新 instantiate，是否需要缓存。
+- 下一步入口：T8 收尾后，按代行决策做上下文注入的声明式形态。
+
+## 2026-11-04 03:09 CST — 能力表：text_limit 数据化
+
+- 任务编号：能力表补充（用户代行决策实施）
+- 代行决策：
+  - 补 `AdapterManifest.text_limit` / `WireManifest.text_limit` /
+    `WireAdapterInfo.text_limit`，由适配器声明单条文本建议上限；
+    `None` = 未声明，不等于无限。
+  - `edit` 保持不声明，直到真有适配器实现；`reply` / `forward` 这类先不做。
+    理由：能力表只写「真实存在、可验证」的能力，避免 astrbot 那种默认 True 的谎报。
+  - 可否回退：删除字段与三处映射/展示即可；没有消费方依赖它做硬性拒绝。
+- 做了什么：
+  - `crates/kernel/src/adapter.rs`、`crates/adapter-api/src/lib.rs`、`wire.rs`：
+    字段 + wire 转换 + 构建器/测试字面量；
+  - OneBot11、process 适配器声明 `text_limit: None`（不谎报一个数字）；
+  - process 子进程 hello 可声明 `text_limit`，经 `runtime_manifest` 进 core；
+  - `describe_plugins` / 连接摘要输出新增 `text_limit`（`null` = 未声明）；
+  - 测试：wire 转换 + process conformance 断言上限进 manifest。
+- 证据：`cargo test --workspace` 全绿；`cargo fmt --all -- --check` 通过。
+- commit：`b3c5c86 feat(adapter): declare text limit as adapter capability`
+- 事实说明：core 目前**没有**硬编码的平台文本长度上限可替换；本项是把未来切分/
+  提示所需的数据前移，不新增按平台名的分支，也没有让 core 读它做截断。
+- 未决问题：谁消费 `text_limit`（适配器切分、`SendHook`、还是 core 发送计划）；
+  一旦引入消费方，需要补「超限如何报错/分段」的审计。
+
+## 2026-11-04 03:09 CST — 上下文注入 / tool-access / 自动回滚（决策登记，待实施）
+
+- 任务编号：代行决策登记（用户不在）
+- 决策 3a：上下文注入只做「插件贡献 prompt 片段」的声明式形态。
+  - 约束：片段有长度上限、有优先级、可开关、可审计（来源可追到 provider id）；
+    片段与事实记录分离，不写进 `elements` 真值；**不允许**插件任意改写整段对话历史。
+  - 理由：注入会进入模型上下文，必须可解释、可回退、可关；整段改写等于把桥的
+    上下文账本交给插件，破坏可观测性与轮次语义。
+  - 可否回退：片段是附加数据，关掉开关即恢复到现有投递内容。
+  - 状态：未实施。实施前先定协议字段（投递里的片段列表）与审计落点，再动 core。
+- 决策 3b：tool-access 权限判定仍留 core；扩展点只做「允许/拒绝 + 原因」，
+  不允许插件自行放行。
+  - 理由：tool-access 是访问边界，不是策略偏好；放行权一旦外包，审计和默认拒绝
+    都无法保证。
+  - 可否回退：只读判定扩展点，删除后回到 core 默认判定。
+  - 状态：未实施；先在 extension-point-catalog 里补形状，再决定是否值得做。
+- 决策 4：supervisor 自动回滚维持手动。
+  - 前置条件：自动回滚需要**可信健康判据**（能区分「启动完成」与「启动成功但功能
+    坏了」），当前只有 `/healthz` + 进程存活，不足以自动判坏。
+  - ADR-0030 D3 措辞等用户确认，不改原文。
+  - 可否回退：手动回滚路径（Nix generation + 插件 LKG 列表）已存在，自动回滚可后加。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
