@@ -137,3 +137,7 @@ catch 之后不能静默。每个 panic 至少记录：
 6. 压力验证：`panic_stress.rs` 连续 200 次 Observer+Route+Tool panic，断言
    `queued_turns` / `pending_route_actions` 无残留、RSS 增长在宽松上限内、provider
    生命周期与 `lastError` 不变、压力后仍可服务。
+7. `manager.instantiate`：所有解析/实例化入口已改走 `instantiate_safe`；panic 只把
+   该 provider 标为 `Health::Unhealthy` 并写 `lastError`，其它 provider 不受影响。
+   被 `config.toml` 引用的坏 provider 会在 `validate_plugins` 启动检查里返回可行动错误。
+   测试见 `instantiate_panic.rs`（失败不新增注册、好 provider 照常、lastError 可见）。
