@@ -161,6 +161,46 @@
   讨论 core 排空+退出、外部 supervisor 重启、版本/插件回滚边界。仅出设计，不改代码/
   systemd/服务。完成后在本日志补记录。
 
+## 2026-11-04 01:59 CST — T7b-2：高信任模块直接唤醒
+
+- 任务编号：D / T7b-2
+- 代行决策：
+  - 通道用 `RouteAction::Wake`，复用现有路由动作管线；不改 C ABI / JSON wire / 配置格式；
+  - 信任闸门 = 载体来源 builtin / trusted / dynamic + descriptor 声明 `Capability::WakeRequest`；
+  - 限流固定「每来源 6 次 / 60 秒」、审计保留 100 条，先不进配置；
+  - 审计暴露 `Bridge::wake_audit()` 与 `GET /api/plugins` 的 `wakeAudit` 字段。
+  - 理由：高信任模块目前能产生副作用的唯一稳定通道就是路由动作；换成新扩展点或
+    回调 ABI 会同时改 native 插件合同，收益低于成本。固定常量先保证可观察、可回退，
+    等真实调优需求再配置化。
+  - 可否回退：删除 `RouteAction::Wake` 与 `Capability::WakeRequest` 两个变体、对应
+    引擎分支与测试即可；不触碰既有 provider / 配置 / 动态库 ABI。
+- 做了什么：
+  - `crates/kernel/src/plugin.rs`
+    - 新增 `Capability::WakeRequest`（`wake_request`）；
+    - 新增 `RouteAction::Wake { session, room, reason }`。
+  - `crates/kernel/src/engine.rs`
+    - 路由决策记录来源 provider id；`apply_direct_wake` 做信任、订阅、频率检查；
+    - `WakeAuditEntry` / `WakeRequestOutcome` 与 100 条审计环；
+    - `Bridge::wake_audit()` 最新在前的 JSON 视图；
+    - 限流：每来源 6 次 / 60 秒（`WAKE_REQUEST_LIMIT` / `WAKE_REQUEST_WINDOW_MS`）。
+  - `crates/bridge/src/console.rs`：`/api/plugins` 响应附带 `wakeAudit`。
+  - `crates/kernel/tests/direct_wake.rs`（新）：直接唤醒绕过 wake 策略、未声明能力
+    被拒、错误房间/会话被拒、第 7 次限流、省略 session 时唤醒全部订阅者。
+- 证据：
+  - `cargo test -p acb-kernel --test direct_wake` → 5/5；
+  - `cargo test -p acb-kernel --test task_flow` → 3/3；
+  - `cargo test --workspace` → 全通过（exit 0）；
+  - `cargo fmt --all -- --check` 无差异。
+- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- 偏离说明：Lua / 声明式模块即使构造同样的 `Wake` 动作也会被信任检查拒绝；不为 Lua
+  增加解析入口，避免把直通能力漏给 T1 沙箱。代价是这两种载体暂时只能走合成事件。
+- 未决问题：审计是否持久化、限流是否按会话细分、控制台是否要做审计 UI。
+- 新增待办（已完成 T7b 后处理）：
+  - `docs/plan/native-reload-and-supervisor.md`：排空+退出、外部 supervisor、版本/
+    插件回滚边界。只出设计。
+  - `docs/plan/platform-boundary-proposal.md`：平台实现禁止进 core、平台无关能力
+    抽象必须留在 core；附 ADR 措辞建议与复核位置。只出文档，等待用户确认。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，

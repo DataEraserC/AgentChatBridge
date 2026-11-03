@@ -190,10 +190,17 @@ impl<S: Store + Send + 'static> Console<S> {
             ("GET", "/api/sessions") => (200, self.sessions()),
             // 插件目录：只读，描述由插件作者声明；不暴露实际 options / 路径 / token。
             ("GET", "/api/plugins") => {
-                let plugins = lock(&self.bridge).plugin_catalog();
+                let bridge = lock(&self.bridge);
+                let plugins = bridge.plugin_catalog();
+                let wake_audit = bridge.wake_audit();
                 (
                     200,
-                    json!({ "count": plugins.len(), "plugins": plugins }).to_string(),
+                    json!({
+                        "count": plugins.len(),
+                        "plugins": plugins,
+                        "wakeAudit": wake_audit,
+                    })
+                    .to_string(),
                 )
             }
             // 动态插件卸载/重载：只入队，真正的 dlclose/dlopen 在轮次边界执行。

@@ -233,6 +233,8 @@ pub enum Capability {
     ClockDecision,
     ReceiveDecision,
     RouteDecision,
+    /// 允许在路由动作里直接请求唤醒（绕过 wake 策略）。只给高信任载体。
+    WakeRequest,
 }
 
 impl Capability {
@@ -250,6 +252,7 @@ impl Capability {
             Self::ClockDecision => "clock_decision",
             Self::ReceiveDecision => "receive_decision",
             Self::RouteDecision => "route_decision",
+            Self::WakeRequest => "wake_request",
         }
     }
 }
@@ -975,6 +978,18 @@ pub enum RouteAction {
     },
     /// 跑一个后台任务（下载、转码等慢活），完成后按任务结果发送。
     Task { handler: String, params: Value },
+    /// 高信任模块直接请求唤醒，绕过现有 wake 策略。
+    ///
+    /// core 会检查来源 provider 的信任层级（builtin / trusted / dynamic）与
+    /// `WakeRequest` 能力、会话订阅关系和频率上限，每次请求都写审计。
+    Wake {
+        /// 目标会话；省略时唤醒目标房间里所有订阅者。
+        session: Option<String>,
+        /// 目标房间；省略时用触发消息所在房间。
+        room: Option<RoomId>,
+        /// 唤醒原因，带给 agent 并写进审计。
+        reason: Option<String>,
+    },
 }
 
 /// 打断范围。
