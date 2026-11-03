@@ -595,6 +595,48 @@
 | T9 memory 远端/多机拓扑 | 需要先定 ADR（权威源、凭据、冲突策略），且涉及 agenix；用户拍板前不动 |
 | T10 扩展工厂 | 依赖插件分发边界（N7/N10/N11/N12）拍板，当前明确不做安装器/市场 |
 
+## 2026-11-04 06:10 CST — 上下文注入实施（已批准）
+
+- 任务编号：代行决策 3a 实施（用户批准默认值）
+- 做了什么：
+  - `Delivery.prompts: Vec<PromptFragment{source,text,priority,truncated}>`；
+    空列表序列化时省略，旧 harness 行为不变；
+  - `PromptProvider` / `PromptContext` / `PromptDraft`；上下文只含 session/room/platform/
+    reason/wake_reason/now，类型层面拿不到 Store、票、水位；
+  - 会话配置 `prompts = ["provider.id"]`；加入 `provider_references`，被引用禁止热卸载；
+  - core 在独立线程里调用每个 provider，50ms 超时；超时/panic/Err 只跳过该来源；
+  - 预算：单段 2000、整轮 6000、最多 8 段；超限裁剪或整段丢弃，全部写 journald 日志；
+  - harness（dsh 复用 opencode 的 `renderTurn`）新增 `renderPrompts`：人格之后、记录之前，
+    独立 `[插件上下文]` 块，带来源标签，不进入 `records`。
+- 证据：
+  - `cargo test -p acb-kernel --test prompt_flow` → 4/4（正常注入、裁剪/总预算、坏来源隔离、
+    超时跳过）；
+  - `cargo test -p acb-kernel --lib`、`cargo test --workspace` 全绿；
+  - proto 单测：空 `prompts` 不出现在帧里，旧形状可解码；
+  - opencode 44/44（含旧 harness 无字段输出不变）；dsh 34/34。
+- commit：`712bbff feat(plugin): add declarative prompt fragment injection`
+- 偏差说明：设计稿原写“MVP 不设 core 超时”，按用户批准改为 50ms 超时；文档已同步。
+- 未决：超时线程不 join（可能短暂空转）；审计目前只有 journald，没有控制台审计环。
+
+## 2026-11-04 06:10 CST — 剩余项选择：三个小方向
+
+- 背景：todolist 剩下的都是阻塞项（上下文注入已做完；T9/T10/自动回滚等用户）。
+  按用户指示不空转，选以下三个高价值小项；每项独立提交。
+- 选定项与理由：
+  1. **core 内存与延迟基准**：Observer/PromptProvider 已进热路径，但没有可复跑基线；
+     先用数字固定“空插件、100/500 个观察者”的 RSS 与单轮 p50/p95，后续优化才有对照。
+  2. **插件作者最小路径验证**：对外目标是插件作者；文档目前只覆盖 dynamic wake 与声明式
+     route，ToolProvider 没有最小路径。先走一遍并记录卡点，再改文档，避免凭空设计。
+  3. **SQLite 损坏恢复验证**：存储是唯一事实来源；先验证“文件损坏时明确报错、不 panic、
+     不静默建新库”，成本小、能防止最坏的静默数据丢失。
+- **完成时用户能做什么 / 验收标准**：
+  1. 基准：`cargo run --release -p acb-kernel --example core_bench` 输出冷启动 RSS、
+     不同观察者数量下的 RSS/注册耗时、单轮 p50/p95/max；数字写进 progress.md。
+  2. 作者路径：按文档步骤能在不读源码的情况下写出声明式 route 模块；ToolProvider 的
+     最小路径（当前必须 in-process Rust + Manager）与卡点写清楚，文档可直接照抄。
+  3. 存储恢复：损坏的 SQLite 文件启动时报明确错误；不会悄悄新建空库；已有好库仍能读。
+- 纪律：重任务串行；每个小项一提交一推送。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
