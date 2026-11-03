@@ -244,7 +244,7 @@ fn ensure_initial_commit(repo: &git2::Repository, bare: &Path) -> Result<(), Too
     let result = (|| -> Result<(), git2::Error> {
         let signature = git2::Signature::now("ACB", "acb@localhost")?;
         let tree_id = {
-            let mut builder = repo.treebuilder(None)?;
+            let builder = repo.treebuilder(None)?;
             builder.write()?
         };
         let tree = repo.find_tree(tree_id)?;
