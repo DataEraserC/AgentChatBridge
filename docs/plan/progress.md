@@ -101,7 +101,7 @@
 - 证据：
   - 目标测试：config 1/1、plugin_lifecycle 9/9。
   - `cargo test --workspace` → 42 suites 全通过，0 failed。
-- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- commit：`c8908aa refactor(config): centralize provider reference collection`
 - 偏离说明：没有引入 derive 宏；接受“新增 provider-bearing 字段仍需手工加一行”的残余风险，
   换取零新依赖、零配置变更。可扩展性偏好部分满足。
 - 下一步入口：C 的注释/文档标注；之后 T7b。
