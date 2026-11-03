@@ -169,18 +169,21 @@ agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例
   dsh/opencode harness 测试通过。
 - T7a 边界：当时不写 `kind=task` 合成事件、不做 `wake_on`；T7b 已补合成事件与 `wake_on`。
 
-#### T7b：合成事件与唤醒（部分完成）
+#### T7b：合成事件与唤醒（已完成）
 
 - [x] 任务完成写 `kind=task` 合成事件；`wake_on = never|error|always`
       只作为事件发射过滤器，不直接影响唤醒策略。
 - [x] 合成事件跳过 route/receive，只走 store + 现有 wake 策略，避免失败→唤醒→再失败循环。
 - [x] 任务记录新增 `wake_on`、`event_id`、`event_woke`、`event_error`。
-- [ ] 高信任模块直接唤醒 API，带审计与频率限制（T7b-2）。
+- [x] 高信任模块直接唤醒 API（T7b-2）：`RouteAction::Wake` + `Capability::WakeRequest`；
+      只允许 builtin / trusted / dynamic 载体，带订阅校验、每来源 6 次/60 秒限流和审计环。
 - 依据：ADR-0029 D5、D9.4。
 - 实测：`cargo test -p acb-kernel --test task_flow` 3/3；
-      `cargo test --workspace`、dsh/opencode harness 测试通过。
+      `cargo test -p acb-kernel --test direct_wake` 5/5；`cargo test --workspace` 全通过；
+      dsh/opencode harness 测试通过。
 - 代行决策：`wake_on` 缺省 `always`（事件默认发射，但唤醒仍由 wake 策略决定）；
-      任务记录继续内存 + 200 条上限，暂不上 SQLite。
+      任务记录继续内存 + 200 条上限，暂不上 SQLite；直接唤醒上限与审计保留条数先用
+      固定常量，等有真实调优需求再进配置。
 
 #### T7c：反馈回复（待办）
 

@@ -38,12 +38,12 @@ use crate::outbound::{
     OutgoingKind, OutgoingRecord, RecordMode, Risk, Scope, Sent, TargetRole, expand_query,
 };
 use crate::plugin::{
-    AccessAction, AccessDecision, AccessRequest, ClockContext, DefaultDeliveryComposer,
+    AccessAction, AccessDecision, AccessRequest, Capability, ClockContext, DefaultDeliveryComposer,
     DefaultTurnErrorProvider, DeliveryRequest, InterruptScope, PluginError, PluginManager,
     ProviderId, ReceiveDecision, ReceiveRequest, ReloadScope, RouteAction, RouteContext,
     RouteDecision, SendContext, SendHook, SendOrigin, TurnErrorRequest, WakeContext,
 };
-use crate::plugin_meta::PluginLifecycle;
+use crate::plugin_meta::{PluginLifecycle, PluginSource};
 use crate::render;
 use crate::storage::{
     Cursor, MIN_KEPT, Note, NoteKey, NoteKind, PrunePlan, RecordDraft, StorageError, Store,
@@ -69,6 +69,13 @@ const MAX_EXTENSION_FILE_BYTES: u64 = 64 * 1024;
 const TASK_KEEP: usize = 200;
 /// `task_list` 单页上限。
 const TASK_LIST_LIMIT: usize = 100;
+
+/// 高信任模块直接唤醒的频率上限：每个来源在窗口内最多请求几次。
+const WAKE_REQUEST_LIMIT: usize = 6;
+/// 直接唤醒的限流窗口（Unix 毫秒）。
+const WAKE_REQUEST_WINDOW_MS: i64 = 60_000;
+/// 直接唤醒审计保留条数。
+const WAKE_AUDIT_KEEP: usize = 100;
 
 fn extension_namespace(namespace: Option<&str>) -> &str {
     namespace
@@ -361,6 +368,44 @@ pub struct TaskRecord {
     pub event_error: Option<String>,
 }
 
+/// 一次直接唤醒请求的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeRequestOutcome {
+    /// 已排进唤醒队列。
+    Accepted,
+    /// 来源不是高信任载体，或没声明 `wake_request` 能力。
+    Untrusted,
+    /// 超过频率上限。
+    RateLimited,
+    /// 指定会话没有订阅目标房间。
+    NotSubscribed,
+    /// 目标房间没有任何订阅者。
+    NoSubscribers,
+}
+
+impl WakeRequestOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Untrusted => "untrusted",
+            Self::RateLimited => "rate_limited",
+            Self::NotSubscribed => "not_subscribed",
+            Self::NoSubscribers => "no_subscribers",
+        }
+    }
+}
+
+/// 高信任模块直接唤醒的审计记录。只活在本进程，重启清空。
+#[derive(Debug, Clone)]
+pub struct WakeAuditEntry {
+    pub at: i64,
+    pub source: String,
+    pub room: RoomId,
+    pub session: Option<String>,
+    pub reason: Option<String>,
+    pub outcome: WakeRequestOutcome,
+}
+
 /// `begin_tool_call` 的两种结果：不需要平台 I/O 的已经做完了；需要平台的交给 endpoint
 /// 在锁外执行，再回来 `finish`。
 pub(crate) enum ToolCallStart {
@@ -430,6 +475,10 @@ pub struct Bridge<S: Store> {
     tasks: VecDeque<TaskRecord>,
     /// 任务 id 序号；和票前缀一起保证进程内唯一。
     task_seq: u64,
+    /// 直接唤醒审计，按时间从旧到新；超过上限丢最旧的。
+    wake_audit: VecDeque<WakeAuditEntry>,
+    /// 直接唤醒的限流窗口：来源 provider → 最近请求时间。
+    wake_rates: HashMap<ProviderId, VecDeque<i64>>,
     /// 配置版本号：每换一次配置 +1，控制台靠它展示「配置换过没有」。
     config_version: u64,
 }
@@ -503,6 +552,8 @@ impl<S: Store> Bridge<S> {
             manager_errors: HashMap::new(),
             tasks: VecDeque::new(),
             task_seq: 0,
+            wake_audit: VecDeque::new(),
+            wake_rates: HashMap::new(),
             config_version: 0,
         }
     }
@@ -1533,7 +1584,7 @@ impl<S: Store> Bridge<S> {
                 .map(|connection| connection.routes.clone())
                 .unwrap_or_default()
         };
-        let mut handled = None;
+        let mut handled: Option<(ProviderId, RouteDecision)> = None;
         for policy in &route_policies {
             let provider = match self.plugins.resolve_route(&policy.provider, policy) {
                 Ok(provider) => provider,
@@ -1568,7 +1619,7 @@ impl<S: Store> Bridge<S> {
             match provider.decide(policy, &context) {
                 RouteDecision::Pass => continue,
                 decision => {
-                    handled = Some(decision);
+                    handled = Some((policy.provider.clone(), decision));
                     break;
                 }
             }
@@ -1576,7 +1627,7 @@ impl<S: Store> Bridge<S> {
 
         let route_handled = handled.is_some();
         let mut suppressed = draft.suppressed;
-        if let Some(decision) = handled {
+        if let Some((source, decision)) = handled {
             match decision {
                 RouteDecision::Pass => unreachable!("pass must not be placed in handled"),
                 RouteDecision::Drop { reason } => {
@@ -1598,7 +1649,7 @@ impl<S: Store> Bridge<S> {
                     actions,
                 } => {
                     for action in actions {
-                        self.apply_route_action(action, &room, &sessions)?;
+                        self.apply_route_action(action, &room, &sessions, &source)?;
                     }
                     // 要叫醒 AI 就必须有记录可投；`wake` 隐含 `store`。
                     let store = store || wake;
@@ -1739,6 +1790,7 @@ impl<S: Store> Bridge<S> {
         action: RouteAction,
         room: &RoomId,
         sessions: &[String],
+        source: &ProviderId,
     ) -> Result<(), BridgeError> {
         match action {
             RouteAction::Interrupt { scope } => {
@@ -1797,7 +1849,227 @@ impl<S: Store> Bridge<S> {
                     }));
                 Ok(())
             }
+            RouteAction::Wake {
+                session,
+                room: target,
+                reason,
+            } => {
+                self.apply_direct_wake(source, room, session, target, reason);
+                Ok(())
+            }
         }
+    }
+
+    /// 执行一次高信任模块的直接唤醒请求：信任、订阅、频率检查都在这里，
+    /// 通过后按目标写入 `pending`，无论结果都留一条审计。
+    fn apply_direct_wake(
+        &mut self,
+        source: &ProviderId,
+        origin: &RoomId,
+        session: Option<String>,
+        target: Option<RoomId>,
+        reason: Option<String>,
+    ) {
+        let target_room = target.unwrap_or_else(|| origin.clone());
+        let now = now_millis();
+        let source_text = source.to_string();
+        if !self.direct_wake_trusted(source) {
+            eprintln!(
+                "{}",
+                acb_i18n::t!("kernel.engine.direct_wake_untrusted", source = source_text)
+            );
+            self.record_wake_audit(
+                now,
+                &source_text,
+                target_room,
+                session,
+                reason,
+                WakeRequestOutcome::Untrusted,
+            );
+            return;
+        }
+        if self.direct_wake_rate_limited(source, now) {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.engine.direct_wake_rate_limited",
+                    source = source_text,
+                    limit = WAKE_REQUEST_LIMIT,
+                    window = WAKE_REQUEST_WINDOW_MS
+                )
+            );
+            self.record_wake_audit(
+                now,
+                &source_text,
+                target_room,
+                session,
+                reason,
+                WakeRequestOutcome::RateLimited,
+            );
+            return;
+        }
+
+        let subscribers: Vec<String> = self
+            .config
+            .subscribers_of(&target_room)
+            .into_iter()
+            .map(|subscriber| subscriber.id.clone())
+            .collect();
+        let targets = match session {
+            Some(session) => {
+                if !subscribers.iter().any(|known| known == &session) {
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "kernel.engine.direct_wake_not_subscribed",
+                            session = session,
+                            room = target_room
+                        )
+                    );
+                    self.record_wake_audit(
+                        now,
+                        &source_text,
+                        target_room,
+                        Some(session),
+                        reason,
+                        WakeRequestOutcome::NotSubscribed,
+                    );
+                    return;
+                }
+                vec![session]
+            }
+            None => subscribers,
+        };
+        if targets.is_empty() {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.engine.direct_wake_no_subscribers",
+                    room = target_room
+                )
+            );
+            self.record_wake_audit(
+                now,
+                &source_text,
+                target_room,
+                None,
+                reason,
+                WakeRequestOutcome::NoSubscribers,
+            );
+            return;
+        }
+
+        let detail = reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let wake_reason = match detail {
+            Some(detail) => acb_i18n::t!(
+                "kernel.engine.direct_wake_reason_detail",
+                source = source_text,
+                reason = detail
+            ),
+            None => acb_i18n::t!("kernel.engine.direct_wake_reason", source = source_text),
+        };
+        for session in &targets {
+            self.enqueue(
+                session.clone(),
+                target_room.clone(),
+                TurnReason::Wake,
+                Some(wake_reason.clone()),
+                None,
+                now,
+                0,
+            );
+            self.record_wake_audit(
+                now,
+                &source_text,
+                target_room.clone(),
+                Some(session.clone()),
+                reason.clone(),
+                WakeRequestOutcome::Accepted,
+            );
+        }
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "kernel.engine.direct_wake",
+                source = source_text,
+                room = target_room,
+                count = targets.len()
+            )
+        );
+    }
+
+    fn direct_wake_trusted(&self, source: &ProviderId) -> bool {
+        self.plugins.info(source).is_some_and(|info| {
+            matches!(
+                info.source,
+                PluginSource::Builtin | PluginSource::Trusted | PluginSource::Dynamic
+            ) && info.capabilities.contains(&Capability::WakeRequest)
+        })
+    }
+
+    fn direct_wake_rate_limited(&mut self, source: &ProviderId, now: i64) -> bool {
+        let window = self.wake_rates.entry(source.clone()).or_default();
+        while window
+            .front()
+            .is_some_and(|at| now.saturating_sub(*at) >= WAKE_REQUEST_WINDOW_MS)
+        {
+            window.pop_front();
+        }
+        if window.len() >= WAKE_REQUEST_LIMIT {
+            return true;
+        }
+        window.push_back(now);
+        false
+    }
+
+    fn record_wake_audit(
+        &mut self,
+        at: i64,
+        source: &str,
+        room: RoomId,
+        session: Option<String>,
+        reason: Option<String>,
+        outcome: WakeRequestOutcome,
+    ) {
+        if self.wake_audit.len() >= WAKE_AUDIT_KEEP {
+            self.wake_audit.pop_front();
+        }
+        self.wake_audit.push_back(WakeAuditEntry {
+            at,
+            source: source.to_owned(),
+            room,
+            session,
+            reason,
+            outcome,
+        });
+    }
+
+    /// 直接唤醒审计的只读 JSON 视图（控制台 / 测试用）。最新在前。
+    pub fn wake_audit(&self) -> Value {
+        let entries: Vec<Value> = self
+            .wake_audit
+            .iter()
+            .rev()
+            .map(|entry| {
+                json!({
+                    "at": entry.at,
+                    "source": entry.source,
+                    "room": entry.room.to_string(),
+                    "session": entry.session,
+                    "reason": entry.reason,
+                    "outcome": entry.outcome.as_str(),
+                })
+            })
+            .collect();
+        json!({
+            "limit_per_window": WAKE_REQUEST_LIMIT,
+            "window_ms": WAKE_REQUEST_WINDOW_MS,
+            "total": entries.len(),
+            "entries": entries,
+        })
     }
 
     /// 提前结束轮次。只清 `pending`，不动未读水位：被停掉的消息还在流水里，
