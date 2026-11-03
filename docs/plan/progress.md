@@ -233,7 +233,7 @@
   - `cargo test -p acb-kernel --test feedback_flow` → 3/3；
   - `cargo test --workspace` → 全通过（exit 0）；
   - dsh `npm test` 34/34；opencode `npm test` 42/42；`node --check harnesses/shared/tools.mjs` 通过。
-- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- commit：`59e30e0 feat(feedback): add reply lifecycle and wake-back loop`
 - 偏离说明：回复事件额外做了一次「强制唤醒原会话」，严格说绕过了 wake 策略；这是
   反馈闭环的必要语义（否则回复可能永远不被看见），代价是原会话会多开一轮空投递。
 - 未决问题：是否需要限制回复频率/回复长度可配置；反馈审计是否要单独持久化。
