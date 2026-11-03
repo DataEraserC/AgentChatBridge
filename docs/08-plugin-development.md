@@ -319,4 +319,7 @@ cargo test -p acb-adapter-wake-fixture --test policy
 - 平台适配器与事件映射：[05-adapters.md](05-adapters.md)
 - 插件宿主设计：[ADR-0026](adr/0026-plugin-host.md)
 - 适配器注册与生命周期：[ADR-0027](adr/0027-platform-adapter-registration.md)
+- 动态扩展与扩展工厂：[ADR-0029](adr/0029-dynamic-extensions.md)
+- unload-safe native 插件：[ADR-0030](adr/0030-unload-safe-native-plugin.md)
+- 动态扩展与反馈修复执行清单：[plan/dynamic-extensions-and-fixes.md](plan/dynamic-extensions-and-fixes.md)
 - 可运行示例：[examples](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/README.md)
