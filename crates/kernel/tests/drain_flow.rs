@@ -192,6 +192,48 @@ fn drain_waits_for_active_turn_in_snapshot() {
 }
 
 #[test]
+fn large_task_list_is_indexed_and_task_get_keeps_detail() {
+    let bridge = bridge();
+    lock(&bridge).ingest(message("/wake")).expect("入库");
+    let ticket = lock(&bridge)
+        .poll_turn()
+        .expect("能开轮")
+        .expect("直接唤醒开轮")
+        .ticket;
+
+    for index in 0..40 {
+        lock(&bridge)
+            .ingest(message(&format!("/task {index}")))
+            .expect("入库");
+    }
+    let listed = lock(&bridge)
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "task_list",
+            json!({"limit": 20}),
+        )
+        .expect("列任务");
+    assert_eq!(listed["indexed"], true, "超过阈值应自动索引：{listed}");
+    let tasks = listed["tasks"].as_array().expect("tasks");
+    assert_eq!(tasks.len(), 20);
+    assert!(tasks[0].get("result").is_none(), "索引化后不返回 result");
+    assert!(tasks[0].get("error").is_none());
+
+    let id = tasks[0]["id"].as_str().expect("id");
+    let got = lock(&bridge)
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "task_get",
+            json!({"id": id}),
+        )
+        .expect("详情仍给全文");
+    assert!(got.get("result").is_some());
+    assert!(got.get("error").is_some());
+}
+
+#[test]
 fn drain_leftovers_are_reportable() {
     let bridge = bridge();
     lock(&bridge).ingest(message("/task slow")).expect("入库");

@@ -91,6 +91,10 @@ const MAX_WAKE_DELAY_MS: u64 = 60_000;
 const DEFAULT_HISTORY: usize = 20;
 const MAX_HISTORY: usize = 200;
 
+/// 目录/列表超过这个字节数就自动降级成索引；详情按需再查。
+/// 4 KiB 是经验阈值：低于它的全文通常比多一次调用便宜（一次调用还要重付工具定义）。
+const LIST_INDEX_BYTES: usize = 4096;
+
 /// 轮次结束后票还留多久。留它是为了两件事：补确认（可能慢一步）、写反馈（随时想写）。
 const TURN_GRACE: Duration = Duration::from_secs(600);
 
@@ -980,14 +984,21 @@ impl<S: Store> Bridge<S> {
             .take(limit)
             .map(task_json)
             .collect();
-        Ok(json!({
+        let mut response = json!({
             "session": session,
             "total": total,
             "offset": offset,
             "returned": tasks.len(),
             "has_more": offset + tasks.len() < total,
             "tasks": tasks,
-        }))
+        });
+        maybe_index_list(
+            &mut response,
+            "tasks",
+            "indexed=true: result/error omitted. Call task_get with an id for full detail.",
+            task_index,
+        );
+        Ok(response)
     }
 
     /// 按 id 查一条任务记录；只允许查询本会话的任务。
@@ -4429,7 +4440,7 @@ impl<S: Store> Bridge<S> {
         self.mark_read(ticket, &room, page.iter().map(|record| record.id));
         let returned = page.len();
         let has_more = offset + returned < total;
-        Ok(json!({
+        let mut response = json!({
             "room": room,
             "total": total,
             "offset": offset,
@@ -4437,7 +4448,14 @@ impl<S: Store> Bridge<S> {
             "has_more": has_more,
             "next_offset": if has_more { json!(offset + returned) } else { Value::Null },
             "events": page,
-        }))
+        });
+        maybe_index_list(
+            &mut response,
+            "events",
+            "indexed=true: event payloads/elements omitted. Call fetch_records with ids for full records.",
+            event_index,
+        );
+        Ok(response)
     }
 
     /// 按 provider id 查目录；配置引用错误时给明确的 missing 标记。
@@ -4694,7 +4712,7 @@ impl<S: Store> Bridge<S> {
         // 没设条件：清单。不带参数表——那样就等于把整张表倒出来。
         if group.is_none() && tag.is_none() && query.is_none() {
             let list: Vec<Value> = methods.iter().map(describe_brief).collect();
-            return Ok(json!({
+            let mut response = json!({
                 "room": room_text,
                 "connection": connection,
                 "platform": platform,
@@ -4705,7 +4723,14 @@ impl<S: Store> Bridge<S> {
                 "hint": "名字里点号前那段是归属（跟平台 API 命名空间对齐）；tags 是用途，跨归属。\
                          要某个方法的参数表，再调一次并给 group / tag / query，三者可叠加。\
                          scope=connection 的方法跟房间无关（好友列表、账号资料这类），调它不用给 room。",
-            }));
+            });
+            maybe_index_list(
+                &mut response,
+                "methods",
+                "indexed=true: tags omitted and summaries shortened. Call platform_methods with group / tag / query for full details.",
+                method_index,
+            );
+            return Ok(response);
         }
 
         // 缩了范围：命中的方法连参数表一起给。
@@ -4841,14 +4866,21 @@ impl<S: Store> Bridge<S> {
             .take(limit)
             .map(feedback_view)
             .collect();
-        Ok(json!({
+        let mut response = json!({
             "session": session,
             "total": total,
             "offset": offset,
             "returned": items.len(),
             "has_more": offset + items.len() < total,
             "feedback": items,
-        }))
+        });
+        maybe_index_list(
+            &mut response,
+            "feedback",
+            "indexed=true: body/suggestion/replies omitted. Call feedback_get with an id for full detail.",
+            feedback_index,
+        );
+        Ok(response)
     }
 
     /// 按 id 查一条本会话的反馈。
@@ -5541,19 +5573,14 @@ fn column_set(given: Option<&[String]>) -> Result<Vec<&'static str>, ToolError> 
     Ok(columns)
 }
 
-/// 把一条记录按指定列序列化，并附带「每列取没取」的状态。
+/// 把一条记录按指定列序列化。
 ///
-/// 返回形如 `{ "id": 237, "columns": { "id": true, "platform_id": false } }`。
-/// 这样 agent 能一眼看出哪列是它要的、哪列没取，不会把「没取」误当「没有」。
-///
-/// 状态值是布尔，不是描述文字：「查了 / 没查」这种中文值只能给人看，机器要判断得再猜一遍。
+/// 「这次取了哪些列」只放在响应顶层的 `columns` 数组里，不再给每条记录附一份
+/// 11 键的布尔映射：同一个信息逐条重复纯属浪费上下文（20 条 ≈ 890 tokens）。
 fn record_columns(record: &Record, columns: &[&str]) -> Value {
-    let mut status = serde_json::Map::new();
     let mut out = serde_json::Map::new();
     for column in RECORD_COLUMNS {
-        let taken = columns.contains(column);
-        status.insert((*column).to_owned(), json!(taken));
-        if !taken {
+        if !columns.contains(column) {
             continue;
         }
         let value = match *column {
@@ -5587,7 +5614,6 @@ fn record_columns(record: &Record, columns: &[&str]) -> Value {
         };
         out.insert((*column).to_owned(), value);
     }
-    out.insert("columns".to_owned(), Value::Object(status));
     Value::Object(out)
 }
 
@@ -5642,6 +5668,79 @@ fn task_json(record: &TaskRecord) -> Value {
         "event_id": record.event_id,
         "event_woke": record.event_woke,
         "event_error": record.event_error,
+    })
+}
+
+/// 目录/列表超过阈值时，把每条降级成索引；顶层加 `indexed` 与详情入口。
+fn maybe_index_list(
+    response: &mut Value,
+    key: &str,
+    hint: &str,
+    compact: fn(&Value) -> Value,
+) {
+    let bytes = serde_json::to_vec(response).map(|bytes| bytes.len()).unwrap_or(0);
+    if bytes <= LIST_INDEX_BYTES {
+        return;
+    }
+    if let Some(items) = response.get_mut(key).and_then(Value::as_array_mut) {
+        let compacted: Vec<Value> = items.iter().map(compact).collect();
+        *items = compacted;
+    }
+    response["indexed"] = json!(true);
+    response["detail_hint"] = json!(hint);
+}
+
+fn method_index(item: &Value) -> Value {
+    let mut out = json!({
+        "name": item["name"],
+        "summary": truncate_chars(item["summary"].as_str().unwrap_or(""), 80),
+        "risk": item["risk"],
+    });
+    if let Some(scope) = item.get("scope") {
+        out["scope"] = scope.clone();
+    }
+    out
+}
+
+fn task_index(item: &Value) -> Value {
+    json!({
+        "id": item["id"],
+        "session": item["session"],
+        "room": item["room"],
+        "handler": item["handler"],
+        "wake_on": item["wake_on"],
+        "status": item["status"],
+        "created_at": item["created_at"],
+        "finished_at": item["finished_at"],
+    })
+}
+
+fn feedback_index(item: &Value) -> Value {
+    json!({
+        "id": item["id"],
+        "title": item["title"],
+        "kind": item["kind"],
+        "severity": item["severity"],
+        "status": item["status"],
+        "occurrences": item["occurrences"],
+        "repeats": item["repeats"],
+        "reply_count": item["replies"].as_array().map(Vec::len).unwrap_or(0),
+        "last_at": item["last_at"],
+    })
+}
+
+fn event_index(item: &Value) -> Value {
+    let kind = item.get("kind").cloned().unwrap_or(Value::Null);
+    json!({
+        "id": item["id"],
+        "at": item["at"],
+        "sender": item["sender"],
+        "event": {
+            "event": kind.get("event").cloned().unwrap_or(Value::Null),
+            "tags": kind.get("tags").cloned().unwrap_or_else(|| json!([])),
+            "summary": kind.get("summary").cloned().unwrap_or(Value::Null),
+        },
+        "labels": item["labels"],
     })
 }
 

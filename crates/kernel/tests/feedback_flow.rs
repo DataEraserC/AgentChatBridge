@@ -262,6 +262,59 @@ fn feedback_reply_is_recorded_and_wakes_the_original_session() {
 }
 
 #[test]
+fn large_feedback_list_is_indexed_and_get_keeps_full_body() {
+    let bridge = bridge();
+    let delivery = open_turn(&bridge, "main", "10001");
+    let ticket = delivery.ticket;
+
+    let long = "很长的正文".repeat(700);
+    let first = lock(&bridge)
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "report_feedback",
+            json!({"text": format!("第一条 {long}")}),
+        )
+        .expect("报第一条");
+    let second = lock(&bridge)
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "report_feedback",
+            json!({"text": format!("第二条 {long}")}),
+        )
+        .expect("报第二条");
+
+    let listed = lock(&bridge)
+        .tool_call(&ticket, &["main".to_owned()], "feedback_list", json!({}))
+        .expect("列反馈");
+    assert_eq!(listed["indexed"], true, "超过阈值应自动索引：{listed}");
+    assert_eq!(listed["returned"], 2);
+    assert!(listed["detail_hint"].as_str().is_some());
+    for item in listed["feedback"].as_array().expect("feedback") {
+        assert!(item.get("body").is_none(), "索引化后不返回正文：{item}");
+        assert!(item.get("suggestion").is_none());
+        assert!(item.get("replies").is_none());
+        assert!(item["reply_count"].as_u64().is_some());
+    }
+
+    let id = first["id"].as_i64().expect("id");
+    let got = lock(&bridge)
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "feedback_get",
+            json!({"id": id}),
+        )
+        .expect("详情仍给全文");
+    assert!(
+        got["body"].as_str().expect("body").contains("很长的正文"),
+        "详情必须保留完整正文"
+    );
+    let _ = second;
+}
+
+#[test]
 fn feedback_is_scoped_and_reply_requires_admin_cross_session() {
     let bridge = bridge();
     let main_turn = open_turn(&bridge, "main", "10001");

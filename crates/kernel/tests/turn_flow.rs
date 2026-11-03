@@ -1813,11 +1813,9 @@ fn tool_scope_is_the_turn_session_not_the_connection() {
     );
 }
 
-/// 记录里的 `columns` 状态表要用布尔，不能是「查了 / 没查」这种描述文字。
-///
-/// 那是给机器判断用的字段：布尔能直接当条件用，中文值只能让调用方再猜一遍。
+/// 列定义只在响应顶层给一次；每条记录不再重复 11 键的布尔映射。
 #[test]
-fn record_column_status_is_boolean_not_wording() {
+fn record_columns_are_declared_once_at_the_top_level() {
     let (mut bridge, _sends) = bridge();
     bridge
         .ingest(message("qq:group/123", "10001", "在吗", true))
@@ -1828,23 +1826,18 @@ fn record_column_status_is_boolean_not_wording() {
         .tool_call(&ticket, &sessions(), "get_history", json!({}))
         .expect("能查");
 
+    let columns = history["columns"].as_array().expect("顶层列定义");
+    assert!(columns.iter().any(|column| column == "id"));
+    assert!(columns.iter().any(|column| column == "elements"));
+    assert!(!columns.iter().any(|column| column == "kind"));
     let records = history["records"].as_array().expect("是数组");
     assert_eq!(records.len(), 1);
-    let status = records[0]["columns"].as_object().expect("每条记录带列状态");
+    assert!(
+        records[0].get("columns").is_none(),
+        "每条记录不再带 columns 映射：{records:?}"
+    );
 
-    // 默认列被取了 → true；没要的列 → false。全是布尔，没有一种是字符串。
-    assert_eq!(status.get("id"), Some(&json!(true)));
-    assert_eq!(status.get("elements"), Some(&json!(true)));
-    assert_eq!(status.get("kind"), Some(&json!(false)));
-    assert_eq!(status.get("platform_id"), Some(&json!(false)));
-    for (column, value) in status {
-        assert!(
-            value.is_boolean(),
-            "{column} 的状态该是布尔，实际是 {value}"
-        );
-    }
-
-    // 取了的列照旧在记录上；没取的列不出现（状态表说了没取）。
+    // 取了的列照旧在记录上；没取的列不出现（顶层 columns 已说明没取）。
     assert!(records[0].get("id").is_some());
     assert!(records[0].get("kind").is_none());
 }
@@ -3015,9 +3008,10 @@ fn history_can_return_quote_ref_as_a_column() {
     );
     assert_eq!(records[1]["quote_ref"]["platform_id"], "p-100");
     assert_eq!(records[1]["quote_ref"]["id"], 1);
-    // 状态表照样如实标：别的列这次没取。
-    assert_eq!(records[1]["columns"]["quote_ref"], true);
-    assert_eq!(records[1]["columns"]["elements"], false);
+    // 列定义只在顶层：调用方照样知道这次取了哪些列，但不再逐条重复。
+    assert_eq!(history["columns"], json!(["id", "quote_ref"]));
+    assert!(records[1].get("columns").is_none());
+    assert!(records[1].get("elements").is_none());
 }
 
 // ── 文件中继（ADR-0025）────────────────────────────────────────────────
