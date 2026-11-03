@@ -203,6 +203,7 @@ impl TryFrom<WireParamSpec> for ParamSpec {
             required: param.required,
             desc: Cow::Owned(param.desc),
             values: values.into(),
+            example: param.example,
         })
     }
 }
@@ -374,6 +375,7 @@ mod tests {
                 required: true,
                 desc: "正文".into(),
                 values: vec!["a".into(), "b".into()],
+                example: Some(serde_json::json!("hi")),
             }],
             targets: vec![WireTargetSpec {
                 param: "group_id".into(),
@@ -394,6 +396,7 @@ mod tests {
         assert_eq!(method.record, RecordMode::Message);
         assert_eq!(method.params.len(), 1);
         assert_eq!(method.params[0].values.len(), 2);
+        assert_eq!(method.params[0].sample(), serde_json::json!("hi"));
         assert_eq!(method.targets[0].role, TargetRole::Room);
         assert!(method.has_tag("send"));
     }

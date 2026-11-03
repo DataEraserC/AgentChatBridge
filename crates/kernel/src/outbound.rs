@@ -117,7 +117,7 @@ pub enum OutboundError {
 /// 内部用这个简化形状，**对外渲染成 JSON Schema** 给模型看（见 ADR-0020）：
 /// 适配器作者不用碰 schema 库，模型看到的还是它最熟的形式。
 /// 动态适配器也能构造目录，所以这些字段是 owned 的（静态声明用 `Cow::Borrowed`）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParamSpec {
     pub name: Cow<'static, str>,
     pub ty: ParamType,
@@ -125,6 +125,8 @@ pub struct ParamSpec {
     pub desc: Cow<'static, str>,
     /// 可选值的枚举。空表示不限。
     pub values: Cow<'static, [Cow<'static, str>]>,
+    /// 平台给的示例值。core 不再按参数名猜平台语义（群号/QQ 号/文件地址）。
+    pub example: Option<Value>,
 }
 
 const EMPTY_VALUES: &[Cow<'static, str>] = &[];
@@ -138,6 +140,7 @@ impl ParamSpec {
             required: true,
             desc: Cow::Borrowed(desc),
             values: Cow::Borrowed(EMPTY_VALUES),
+            example: None,
         }
     }
 
@@ -149,6 +152,7 @@ impl ParamSpec {
             required: false,
             desc: Cow::Borrowed(desc),
             values: Cow::Borrowed(EMPTY_VALUES),
+            example: None,
         }
     }
 
@@ -160,6 +164,7 @@ impl ParamSpec {
             required: true,
             desc: Cow::Borrowed(desc),
             values: Cow::Borrowed(EMPTY_VALUES),
+            example: None,
         }
     }
 
@@ -171,7 +176,14 @@ impl ParamSpec {
             required: false,
             desc: Cow::Borrowed(desc),
             values: Cow::Borrowed(EMPTY_VALUES),
+            example: None,
         }
+    }
+
+    /// 平台给的示例值；没有就留空，core 只给通用占位。
+    pub fn with_example(mut self, example: impl Into<Value>) -> Self {
+        self.example = Some(example.into());
+        self
     }
 
     /// 带枚举值。静态声明用 `Cow::Borrowed`，动态适配器用 `Cow::Owned`。
@@ -208,6 +220,10 @@ impl ParamSpec {
     /// 这个参数在样例里放什么。**填的是看得懂的假值**，不是 `<string>` 这种占位符——
     /// 占位符还得让人翻译一遍，填好的号改一改就能跑。
     pub fn sample(&self) -> Value {
+        // 平台给了示例就用它：示例是声明，不是 core 猜出来的平台语义。
+        if let Some(example) = &self.example {
+            return example.clone();
+        }
         // 有枚举就取第一个：那是这个参数唯一正确的取值范围。
         if let Some(first) = self.values.first() {
             return Value::String(first.as_ref().to_owned());
@@ -215,38 +231,11 @@ impl ParamSpec {
         match self.ty {
             ParamType::Integer => serde_json::json!(10),
             ParamType::Bool => serde_json::json!(false),
-            ParamType::StringList => serde_json::json!(["10000"]),
+            ParamType::StringList => serde_json::json!(["value"]),
             ParamType::Object => serde_json::json!({}),
-            // 形状不固定的那些：按名字猜最常见的样子。猜不准也没关系，
-            // 它是样例不是约束——参数表里写着真实形状。
-            ParamType::Any => match self.name.as_ref() {
-                "message" => serde_json::json!([{ "type": "text", "text": "你好" }]),
-                "messages" => serde_json::json!([{
-                    "type": "node",
-                    "data": {
-                        "name": "某人",
-                        "uin": "10000",
-                        "content": [{ "type": "text", "text": "你好" }],
-                    }
-                }]),
-                _ => serde_json::json!({}),
-            },
-            ParamType::String => Value::String(sample_string(self.name.as_ref()).to_owned()),
+            ParamType::Any => serde_json::json!({}),
+            ParamType::String => Value::String("示例值".to_owned()),
         }
-    }
-}
-
-/// 字符串参数的样例值。按名字给最像真的那个：群号、QQ 号、文件地址。
-fn sample_string(name: &str) -> &'static str {
-    match name {
-        "group_id" | "group" => "123456",
-        "user_id" | "uin" | "qq" | "target" | "user" => "10000",
-        "file" | "url" | "image" => "https://example.com/a.png",
-        "text" | "message" => "你好",
-        "name" | "card" | "nickname" => "新名字",
-        "keyword" | "query" | "word" => "关键词",
-        _ if name == "id" || name.ends_with("_id") => "123456",
-        _ => "值",
     }
 }
 
@@ -438,7 +427,7 @@ impl TargetSpec {
 /// 一个平台方法的声明。适配器自己给，core 只认这个形状。
 ///
 /// 字段都是 `Cow`：内置适配器用静态借用，动态/外置适配器可以构造自己的目录。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodSpec {
     /// 全名，强制 `resource.method`（`forward.get_content`）。
     pub name: Cow<'static, str>,

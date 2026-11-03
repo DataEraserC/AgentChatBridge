@@ -23,13 +23,27 @@ use acb_kernel::{
 // 一张表几百行，字段名全写出来会淹掉内容，所以统一用这几个短构造。
 
 /// 必填字符串。
-const fn req(name: &'static str, desc: &'static str) -> ParamSpec {
-    ParamSpec::required(name, desc)
+fn req(name: &'static str, desc: &'static str) -> ParamSpec {
+    ParamSpec::required(name, desc).with_example(example_for(name))
 }
 
 /// 可选字符串。
-const fn opt(name: &'static str, desc: &'static str) -> ParamSpec {
-    ParamSpec::optional(name, ParamType::String, desc)
+fn opt(name: &'static str, desc: &'static str) -> ParamSpec {
+    ParamSpec::optional(name, ParamType::String, desc).with_example(example_for(name))
+}
+
+/// OneBot 参数名的示例值。平台语义留在适配器，core 不再按名字猜。
+fn example_for(name: &str) -> &'static str {
+    match name {
+        "group_id" | "group" => "123456",
+        "user_id" | "uin" | "qq" | "target" | "user" => "10000",
+        "file" | "url" | "image" => "https://example.com/a.png",
+        "text" | "message" => "你好",
+        "name" | "card" | "nickname" => "新名字",
+        "keyword" | "query" | "word" => "关键词",
+        _ if name == "id" || name.ends_with("_id") => "123456",
+        _ => "示例值",
+    }
 }
 
 /// 可选数字。
@@ -43,8 +57,22 @@ const fn flag(name: &'static str, desc: &'static str) -> ParamSpec {
 }
 
 /// 必填但形状不固定（消息段：字符串或数组都合法）。
-const fn any(name: &'static str, desc: &'static str) -> ParamSpec {
-    ParamSpec::any(name, desc)
+fn any(name: &'static str, desc: &'static str) -> ParamSpec {
+    let param = ParamSpec::any(name, desc);
+    match name {
+        "message" => param.with_example(serde_json::json!([
+            { "type": "text", "text": "你好" }
+        ])),
+        "messages" => param.with_example(serde_json::json!([{
+            "type": "node",
+            "data": {
+                "name": "某人",
+                "uin": "10000",
+                "content": [{ "type": "text", "text": "你好" }],
+            }
+        }])),
+        _ => param,
+    }
 }
 
 fn m(
