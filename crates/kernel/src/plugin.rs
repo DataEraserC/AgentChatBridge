@@ -44,6 +44,35 @@ pub(crate) fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
     "non-string panic payload".to_owned()
 }
 
+/// 调 manager 的只读自述接口；panic 只当作这次调用失败，不穿过 core。
+fn call_manager<T>(
+    namespace: &str,
+    call: &'static str,
+    invoke: impl FnOnce() -> T,
+) -> Result<T, PluginError> {
+    catch_unwind(AssertUnwindSafe(invoke)).map_err(|payload| PluginError::Manager {
+        namespace: namespace.to_owned(),
+        detail: acb_i18n::t!(
+            "kernel.plugin.manager_call_panicked",
+            namespace = namespace,
+            call = call,
+            panic = panic_text(payload)
+        ),
+    })
+}
+
+/// 读 manager 健康状态；panic 视为 Unhealthy，不让控制台/健康检查线程崩掉。
+fn manager_health(namespace: &str, manager: &Arc<dyn ManagerPlugin>) -> Health {
+    match catch_unwind(AssertUnwindSafe(|| manager.health())) {
+        Ok(health) => health,
+        Err(payload) => Health::Unhealthy(acb_i18n::t!(
+            "kernel.plugin.manager_health_panicked",
+            namespace = namespace,
+            panic = panic_text(payload)
+        )),
+    }
+}
+
 /// 观察者只读旁路：单个 panic 只跳过它自己，不能挡住记录入库后的唤醒调度。
 fn observe_one(id: &ProviderId, observer: &Arc<dyn RecordObserver>, record: &Record) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| observer.observe(record))) {
@@ -1945,7 +1974,7 @@ impl PluginManager {
                     None => self
                         .managers
                         .get(descriptor.id.namespace())
-                        .map(|manager| manager.health())
+                        .map(|manager| manager_health(descriptor.id.namespace(), manager))
                         .unwrap_or(Health::Healthy),
                 };
                 let unloadable = self
@@ -2678,7 +2707,7 @@ impl PluginManager {
             });
         }
 
-        let mut descriptors = manager.descriptors();
+        let mut descriptors = call_manager(&namespace, "descriptors", || manager.descriptors())?;
         for descriptor in &mut descriptors {
             descriptor.metadata.merge_missing(&manifest.metadata);
         }
@@ -2843,7 +2872,7 @@ impl PluginManager {
             .filter_map(|namespace| {
                 self.managers.get(namespace).map(|manager| ManagerHealth {
                     namespace: namespace.clone(),
-                    health: manager.health(),
+                    health: manager_health(namespace, manager),
                 })
             })
             .collect()
@@ -4171,6 +4200,90 @@ mod tests {
 
         manager.shutdown_managers();
         assert_eq!(lifecycle.shutdowns.load(Ordering::SeqCst), 1);
+    }
+
+    struct PanicDescriptorsManager;
+
+    impl ManagerPlugin for PanicDescriptorsManager {
+        fn manifest(&self) -> ManagerManifest {
+            ManagerManifest::new("panicdesc", PLUGIN_API_VERSION, Vec::new())
+        }
+
+        fn descriptors(&self) -> Vec<ProviderDescriptor> {
+            panic!("descriptors exploded");
+        }
+
+        fn instantiate(
+            &self,
+            id: &ProviderId,
+            _options: ProviderOptions<'_>,
+        ) -> Result<ProviderInstance, PluginError> {
+            Err(PluginError::UnknownProvider(id.to_string()))
+        }
+    }
+
+    #[test]
+    fn panicking_descriptors_becomes_install_error() {
+        let mut manager = PluginManager::with_native_builtins();
+        let error = manager
+            .install_manager(Arc::new(PanicDescriptorsManager))
+            .expect_err("descriptors panic 要变成安装错误");
+        match error {
+            PluginError::Manager { namespace, detail } => {
+                assert_eq!(namespace, "panicdesc");
+                assert!(detail.contains("descriptors"), "{detail}");
+                assert!(detail.contains("descriptors exploded"), "{detail}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(
+            manager.manager_health().is_empty(),
+            "预检失败不能留下半棵 manager 子树"
+        );
+    }
+
+    struct PanicHealthManager;
+
+    impl ManagerPlugin for PanicHealthManager {
+        fn manifest(&self) -> ManagerManifest {
+            ManagerManifest::new("panichealth", PLUGIN_API_VERSION, Vec::new())
+        }
+
+        fn descriptors(&self) -> Vec<ProviderDescriptor> {
+            Vec::new()
+        }
+
+        fn instantiate(
+            &self,
+            id: &ProviderId,
+            _options: ProviderOptions<'_>,
+        ) -> Result<ProviderInstance, PluginError> {
+            Err(PluginError::UnknownProvider(id.to_string()))
+        }
+
+        fn health(&self) -> Health {
+            panic!("health exploded");
+        }
+    }
+
+    #[test]
+    fn panicking_health_is_reported_not_propagated() {
+        let mut manager = PluginManager::with_native_builtins();
+        manager
+            .install_manager(Arc::new(PanicHealthManager))
+            .expect("健康检查 panic 不影响安装");
+
+        let health = manager.manager_health();
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0].namespace, "panichealth");
+        assert!(
+            matches!(&health[0].health, Health::Unhealthy(detail) if detail.contains("health exploded")),
+            "panic 要变成 Unhealthy：{:?}",
+            health[0].health
+        );
+
+        // 第二次读取仍正常：panic 不能让结构或锁状态坏掉。
+        assert_eq!(manager.manager_health().len(), 1);
     }
 
     struct BadVersionLoader;
