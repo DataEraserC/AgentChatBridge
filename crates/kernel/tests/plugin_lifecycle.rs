@@ -223,6 +223,16 @@ fn config_with_wake(provider: &str) -> String {
     )
 }
 
+fn config_with_access(provider: &str) -> String {
+    config_with_wake("acb.wake.default").replacen(
+        "        [[sessions.subscriptions]]",
+        &format!(
+            "        [sessions.access]\n        provider = \"{provider}\"\n\n        [[sessions.subscriptions]]"
+        ),
+        1,
+    )
+}
+
 fn bridge(text: &str, loader: Arc<TestLoader>) -> Bridge<MemoryStore> {
     let mut plugins = PluginManager::with_native_builtins();
     plugins
@@ -386,6 +396,21 @@ fn referenced_plugin_rejects_unload() {
         reload.is_err(),
         "已加载且被引用时，重载包含卸载，也必须拒绝"
     );
+}
+
+#[test]
+fn access_reference_also_blocks_unload_and_reload() {
+    let loader = Arc::new(TestLoader::new());
+    let mut bridge = bridge(&config_with_access("testplg.wake"), loader);
+
+    let unload = bridge.queue_unload("testplg.wake");
+    let error = unload.err().expect("access 引用也必须拒绝");
+    assert!(
+        error.to_string().contains("session:main access"),
+        "错误要指出 access 引用：{error}"
+    );
+    assert!(bridge.queue_reload("testplg.wake").is_err());
+    assert_eq!(state(&bridge, "testplg.wake"), "unloadable");
 }
 
 #[test]

@@ -91,10 +91,80 @@ pub struct Config {
     pub turn_timeout_secs: u64,
 }
 
+/// 配置里对某个 provider 的一次引用：id + 稳定位置串。
+///
+/// 位置串只用于控制台/错误信息展示，不参与解析；新增 provider-bearing 字段时
+/// 必须同步更新 [`Config::provider_references`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderReference {
+    pub id: ProviderId,
+    pub location: String,
+}
+
 impl Config {
     /// 超时换算成毫秒给协议帧。0 = 关闭（帧里带 0，harness 收到就别自己兜底）。
     pub fn turn_timeout_ms(&self) -> u64 {
         self.turn_timeout_secs.saturating_mul(1000)
+    }
+
+    /// 当前配置引用的所有 provider。`queue_unload` / `queue_reload` 用它判断
+    /// “被引用就不能热卸载”，避免散落在 engine 里的手写扫描与新增字段遗漏。
+    pub fn provider_references(&self) -> Vec<ProviderReference> {
+        let mut refs = Vec::new();
+        for connection in &self.connections {
+            refs.push(ProviderReference {
+                id: connection.receive.provider.clone(),
+                location: format!("connection:{} receive", connection.id),
+            });
+            for route in &connection.routes {
+                refs.push(ProviderReference {
+                    id: route.provider.clone(),
+                    location: format!("connection:{} route", connection.id),
+                });
+            }
+        }
+        for session in &self.sessions {
+            refs.push(ProviderReference {
+                id: session.access.provider.clone(),
+                location: format!("session:{} access", session.id),
+            });
+            refs.push(ProviderReference {
+                id: session.delivery.provider.clone(),
+                location: format!("session:{} delivery", session.id),
+            });
+            for hook in session
+                .outbound
+                .before
+                .iter()
+                .chain(&session.outbound.after)
+            {
+                refs.push(ProviderReference {
+                    id: hook.clone(),
+                    location: format!("session:{} outbound", session.id),
+                });
+            }
+            refs.push(ProviderReference {
+                id: session.turn_error.provider.clone(),
+                location: format!("session:{} turn_error", session.id),
+            });
+            for subscription in &session.subscriptions {
+                refs.push(ProviderReference {
+                    id: subscription.wake.provider.clone(),
+                    location: format!("session:{} wake {}", session.id, subscription.room),
+                });
+                refs.push(ProviderReference {
+                    id: subscription.clock.provider.clone(),
+                    location: format!("session:{} clock {}", session.id, subscription.room),
+                });
+            }
+        }
+        refs.sort_by(|left, right| {
+            left.id
+                .cmp(&right.id)
+                .then_with(|| left.location.cmp(&right.location))
+        });
+        refs.dedup();
+        refs
     }
 }
 
@@ -2323,6 +2393,88 @@ mod tests {
         connection = "qq"
         room = "group/123"
     "#;
+
+    #[test]
+    fn provider_references_cover_all_current_fields() {
+        let text = r#"
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            url = "ws://127.0.0.1:3001"
+            account = "10001"
+
+            [connections.receive]
+            provider = "test.provider"
+
+            [[connections.routes]]
+            provider = "test.provider"
+
+            [[personas]]
+            id = "p"
+            name = "P"
+            text = "你是桥。"
+
+            [[harnesses]]
+            id = "dsh"
+            name = "DSH"
+
+            [[sessions]]
+            id = "main"
+            harness = "dsh"
+            persona = "p"
+            token = "t-main"
+
+            [sessions.access]
+            provider = "test.provider"
+
+            [sessions.delivery]
+            provider = "test.provider"
+
+            [sessions.outbound]
+            before = ["test.provider"]
+
+            [sessions.turn_error]
+            provider = "test.provider"
+
+            [[sessions.subscriptions]]
+            connection = "qq"
+            room = "group/123"
+
+            [sessions.subscriptions.wake]
+            provider = "test.provider"
+
+            [sessions.subscriptions.clock]
+            provider = "test.provider"
+        "#;
+        let config = Config::parse(text).expect("配置合法");
+        let refs = config.provider_references();
+        let locations: Vec<&str> = refs
+            .iter()
+            .filter(|reference| reference.id == ProviderId::parse("test.provider").expect("合法"))
+            .map(|reference| reference.location.as_str())
+            .collect();
+        assert_eq!(
+            locations,
+            vec![
+                "connection:qq receive",
+                "connection:qq route",
+                "session:main access",
+                "session:main clock qq:group/123",
+                "session:main delivery",
+                "session:main outbound",
+                "session:main turn_error",
+                "session:main wake qq:group/123",
+            ]
+        );
+        assert!(
+            config
+                .provider_references()
+                .iter()
+                .all(|reference| reference.id == ProviderId::parse("test.provider").expect("合法")),
+            "没有其它 provider 被误算进引用"
+        );
+    }
 
     #[test]
     fn minimal_config_uses_documented_defaults() {

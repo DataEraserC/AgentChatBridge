@@ -81,6 +81,31 @@
   `RouteContext` 与 `TurnReason`，设计 `kind=task` 合成事件与 `wake_on`。
 - 未决问题：`task` 记录是否需要在 SQLite 持久化；`wake_on` 默认值；直接唤醒 API 的限流策略。
 
+## 2026-11-04 01:38 CST — B 落地：provider 引用集中收集
+
+- 任务编号：B（代行决策后实施）
+- 代行决策：采纳 `Config::provider_references()` 最小方案。理由：不改配置/JSON/C ABI；
+  把手写扫描从 engine 收敛到 config 结构旁；增量风险可控。可回退：revert 本提交即可，
+  没有 schema/兼容性迁移。
+- 做了什么：
+  - `crates/kernel/src/config.rs`
+    - 新增 `ProviderReference { id, location }`；
+    - `Config::provider_references()` 集中收集 receive / route / access / delivery /
+      outbound / turn_error / wake / clock，按 id+location 排序去重。
+  - `crates/kernel/src/engine.rs`
+    - `plugin_references` 改为过滤 `config.provider_references()`，不再手写遍历。
+  - 测试：
+    - `config::tests::provider_references_cover_all_current_fields`：8 个位置全覆盖。
+    - `plugin_lifecycle::access_reference_also_blocks_unload_and_reload`：
+      access 引用会拒绝 unload/reload；未引用路径仍由既有测试覆盖。
+- 证据：
+  - 目标测试：config 1/1、plugin_lifecycle 9/9。
+  - `cargo test --workspace` → 42 suites 全通过，0 failed。
+- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- 偏离说明：没有引入 derive 宏；接受“新增 provider-bearing 字段仍需手工加一行”的残余风险，
+  换取零新依赖、零配置变更。可扩展性偏好部分满足。
+- 下一步入口：C 的注释/文档标注；之后 T7b。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
