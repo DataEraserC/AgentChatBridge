@@ -1088,6 +1088,11 @@ pub trait ManagerPlugin: Send + Sync {
     fn details(&self) -> Value {
         Value::Null
     }
+
+    /// 子树的可写根目录（authoring 工具做路径 jail 用）。默认没有。
+    fn root(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// 一种载体的加载器。`NativeLoader` 是内置实现；动态/进程/Lua 后续加。
@@ -2013,6 +2018,13 @@ impl PluginManager {
         self.managers
             .get(namespace)
             .map(|manager| manager.details())
+    }
+
+    /// 指定 manager 的根目录（authoring 工具做路径 jail 用）。
+    pub fn manager_root(&self, namespace: &str) -> Option<std::path::PathBuf> {
+        self.managers
+            .get(namespace)
+            .and_then(|manager| manager.root())
     }
 
     /// 汇总所有 manager 的自报健康状态（按安装顺序）。

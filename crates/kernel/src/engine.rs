@@ -13,6 +13,8 @@
 //! 当前会话订阅的所有房间；**跨会话发送被砍掉**——一个会话不能替别的人格发言。
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -49,7 +51,8 @@ use crate::storage::{
 };
 use crate::tools::{
     AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT, DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs,
-    DescribePluginsArgs, EventsArgs, FeedbackArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT,
+    DescribePluginsArgs, EventsArgs, ExtensionsListArgs, ExtensionsReadArgs, ExtensionsReloadArgs,
+    ExtensionsWriteArgs, FeedbackArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT,
     MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs, MemoryBlameArgs, MemoryCommitArgs,
     MemoryListArgs, MemoryLogArgs, MemorySearchArgs, MemoryWriteArgs, NotesArgs, PlatformCallArgs,
     PlatformMethodsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, WaitMessageArgs,
@@ -58,6 +61,16 @@ use crate::tools::{
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
 pub const MAX_DELIVERY: usize = 200;
+
+/// authoring 工具读/写单个扩展文件的硬上限。
+const MAX_EXTENSION_FILE_BYTES: u64 = 64 * 1024;
+
+fn extension_namespace(namespace: Option<&str>) -> &str {
+    namespace
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("dyn")
+}
 
 /// 唤醒延迟的上限。策略可以要求等待，但不能把轮次无限期挂起。
 const MAX_WAKE_DELAY_MS: u64 = 60_000;
@@ -142,6 +155,8 @@ struct Pending {
     room: RoomId,
     reason: TurnReason,
     wake_reason: Option<String>,
+    /// 触发这一轮的发送者。管理员身份按它判定；clock 等无来源的轮次是 None。
+    origin_sender: Option<String>,
     /// 最早什么时候允许开轮（Unix 毫秒）。等待期间的新消息照常入库，
     /// 到点 `open_turn` 会一起取走。
     not_before: i64,
@@ -161,6 +176,8 @@ struct ActiveTurn {
     /// 开轮时冻结的配置。轮次中途热重载只影响下一轮；这一轮所有工具查询
     /// 都用这份快照，否则「轮次边界生效」只是投递批次的边界，不是真的边界。
     config: Arc<Config>,
+    /// 触发这一轮的发送者；authoring 工具用它判定管理员。
+    origin_sender: Option<String>,
     /// 管理员按了 `/stop`：这一轮是被主动叫停的，收工时的错误不该再按
     /// `on_turn_error` 发失败通知（那会把「你让我停」报成「我出错了」）。
     stop_requested: bool,
@@ -174,6 +191,7 @@ struct EndedTurn {
     delivered: BTreeSet<u64>,
     read: BTreeSet<u64>,
     config: Arc<Config>,
+    origin_sender: Option<String>,
     at: Instant,
 }
 
@@ -185,6 +203,8 @@ struct TurnCtx {
     read: BTreeSet<u64>,
     /// 这一轮开轮时冻结的配置快照。工具期间不读 `self.config`。
     config: Arc<Config>,
+    /// 触发这一轮的发送者；没有来源（clock）时为 None。
+    origin_sender: Option<String>,
     /// 这一轮还在跑吗。写反馈时记进现场，方便区分「干到一半卡住」和「收工后才想起说」。
     live: bool,
 }
@@ -626,6 +646,296 @@ impl<S: Store> Bridge<S> {
             "lastError": error,
             "details": self.plugins.manager_details(namespace),
         })
+    }
+
+    fn require_extension_admin(
+        &self,
+        config: &Config,
+        room: &RoomId,
+        origin_sender: Option<&str>,
+    ) -> Result<(), ToolError> {
+        let admin = origin_sender
+            .map(|sender| config.is_admin(room, sender))
+            .unwrap_or(false);
+        if !admin {
+            return Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                acb_i18n::t!("extensions.tool.admin_only"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn extension_root(&self, namespace: &str) -> Result<PathBuf, ToolError> {
+        let root = self.plugins.manager_root(namespace).ok_or_else(|| {
+            ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!("extensions.manager_missing", namespace = namespace),
+            )
+        })?;
+        fs::canonicalize(&root).map_err(|error| {
+            ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!(
+                    "extensions.root.read_failed",
+                    path = root.display(),
+                    error = error
+                ),
+            )
+        })
+    }
+
+    fn read_extension(&self, namespace: &str, path: &str) -> Result<Value, ToolError> {
+        let target = self.extension_path(namespace, path, false)?;
+        let metadata = fs::metadata(&target).map_err(|error| {
+            ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!(
+                    "extensions.tool.read_failed",
+                    path = target.display(),
+                    error = error
+                ),
+            )
+        })?;
+        if metadata.len() > MAX_EXTENSION_FILE_BYTES {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!(
+                    "extensions.tool.too_large",
+                    path = target.display(),
+                    size = metadata.len(),
+                    max = MAX_EXTENSION_FILE_BYTES
+                ),
+            ));
+        }
+        let text = fs::read_to_string(&target).map_err(|error| {
+            ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!(
+                    "extensions.tool.read_failed",
+                    path = target.display(),
+                    error = error
+                ),
+            )
+        })?;
+        Ok(json!({
+            "namespace": namespace,
+            "path": path,
+            "size": metadata.len(),
+            "text": text,
+        }))
+    }
+
+    fn write_extension(&self, namespace: &str, path: &str, text: &str) -> Result<Value, ToolError> {
+        if text.len() as u64 > MAX_EXTENSION_FILE_BYTES {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!(
+                    "extensions.tool.too_large",
+                    path = path,
+                    size = text.len(),
+                    max = MAX_EXTENSION_FILE_BYTES
+                ),
+            ));
+        }
+        let target = self.extension_path(namespace, path, true)?;
+        let parent = target.parent().ok_or_else(|| {
+            ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!("extensions.tool.path_invalid", path = path),
+            )
+        })?;
+        let file_name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("manifest.toml");
+        let temp = parent.join(format!(
+            ".{file_name}.tmp-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        if let Err(error) = fs::write(&temp, text) {
+            let _ = fs::remove_file(&temp);
+            return Err(ToolError::new(
+                ErrorCode::Internal,
+                acb_i18n::t!(
+                    "extensions.tool.write_failed",
+                    path = target.display(),
+                    error = error
+                ),
+            ));
+        }
+        if let Err(error) = fs::rename(&temp, &target) {
+            let _ = fs::remove_file(&temp);
+            return Err(ToolError::new(
+                ErrorCode::Internal,
+                acb_i18n::t!(
+                    "extensions.tool.write_failed",
+                    path = target.display(),
+                    error = error
+                ),
+            ));
+        }
+        Ok(json!({
+            "namespace": namespace,
+            "path": path,
+            "bytes": text.len(),
+            "written": true,
+            "note": acb_i18n::t!("extensions.tool.write_note"),
+        }))
+    }
+
+    fn extension_path(
+        &self,
+        namespace: &str,
+        path: &str,
+        for_write: bool,
+    ) -> Result<PathBuf, ToolError> {
+        let path = path.trim();
+        if path.is_empty() || Path::new(path).is_absolute() {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!("extensions.tool.path_invalid", path = path),
+            ));
+        }
+        if !path.to_ascii_lowercase().ends_with(".toml") {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!("extensions.tool.not_toml", path = path),
+            ));
+        }
+        let components: Vec<Component<'_>> = Path::new(path).components().collect();
+        if components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                acb_i18n::t!("extensions.tool.path_invalid", path = path),
+            ));
+        }
+        let root = self.extension_root(namespace)?;
+        let target = root.join(path);
+        let mut current = root.clone();
+        for (index, component) in components.iter().enumerate() {
+            current.push(component.as_os_str());
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() {
+                        return Err(ToolError::new(
+                            ErrorCode::BadRequest,
+                            acb_i18n::t!("extensions.tool.symlink", path = current.display()),
+                        ));
+                    }
+                    if index + 1 < components.len() && !metadata.is_dir() {
+                        return Err(ToolError::new(
+                            ErrorCode::BadRequest,
+                            acb_i18n::t!("extensions.tool.not_file", path = current.display()),
+                        ));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        acb_i18n::t!(
+                            "extensions.tool.read_failed",
+                            path = current.display(),
+                            error = error
+                        ),
+                    ));
+                }
+            }
+        }
+        if for_write {
+            let parent = target.parent().ok_or_else(|| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("extensions.tool.path_invalid", path = path),
+                )
+            })?;
+            fs::create_dir_all(parent).map_err(|error| {
+                ToolError::new(
+                    ErrorCode::Internal,
+                    acb_i18n::t!(
+                        "extensions.tool.write_failed",
+                        path = parent.display(),
+                        error = error
+                    ),
+                )
+            })?;
+            let parent = fs::canonicalize(parent).map_err(|error| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!(
+                        "extensions.tool.read_failed",
+                        path = parent.display(),
+                        error = error
+                    ),
+                )
+            })?;
+            if !parent.starts_with(&root) {
+                return Err(ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("extensions.tool.path_escape", path = parent.display()),
+                ));
+            }
+            if let Ok(metadata) = fs::symlink_metadata(&target) {
+                if metadata.file_type().is_symlink() {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        acb_i18n::t!("extensions.tool.symlink", path = target.display()),
+                    ));
+                }
+                if !metadata.is_file() {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        acb_i18n::t!("extensions.tool.not_file", path = target.display()),
+                    ));
+                }
+            }
+            Ok(target)
+        } else {
+            let metadata = fs::symlink_metadata(&target).map_err(|error| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!(
+                        "extensions.tool.read_failed",
+                        path = target.display(),
+                        error = error
+                    ),
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("extensions.tool.symlink", path = target.display()),
+                ));
+            }
+            if !metadata.is_file() {
+                return Err(ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("extensions.tool.not_file", path = target.display()),
+                ));
+            }
+            let canonical = fs::canonicalize(&target).map_err(|error| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!(
+                        "extensions.tool.read_failed",
+                        path = target.display(),
+                        error = error
+                    ),
+                )
+            })?;
+            if !canonical.starts_with(&root) {
+                return Err(ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("extensions.tool.path_escape", path = canonical.display()),
+                ));
+            }
+            Ok(canonical)
+        }
     }
 
     fn apply_pending_plugin_actions(&mut self) {
@@ -1088,6 +1398,7 @@ impl<S: Store> Bridge<S> {
                     room.clone(),
                     TurnReason::Wake,
                     verdict.reason,
+                    Some(record.sender.id.clone()),
                     now,
                     verdict.delay_ms,
                 );
@@ -1367,6 +1678,7 @@ impl<S: Store> Bridge<S> {
                 delivered: turn.delivered.clone(),
                 read: turn.read.clone(),
                 config: turn.config.clone(),
+                origin_sender: turn.origin_sender.clone(),
                 at: Instant::now(),
             },
         );
@@ -1493,6 +1805,7 @@ impl<S: Store> Bridge<S> {
         let ctx = self.turn_ctx(ticket, tool)?;
         let turn_session = ctx.session.clone();
         let turn_config = ctx.config.clone();
+        let origin_sender = ctx.origin_sender.clone();
         // 下面的分支全用 `sessions` 当可见域——按会话圈，不是连接圈。
         let sessions: &[String] = std::slice::from_ref(&turn_session);
         let room = ctx.room.clone();
@@ -1573,6 +1886,40 @@ impl<S: Store> Bridge<S> {
             "describe_plugins" => {
                 let args: DescribePluginsArgs = parse(args)?;
                 self.describe_plugins(&turn_config, &turn_session, &room, args)
+            }
+            "extensions_list" => {
+                let args: ExtensionsListArgs = parse(args)?;
+                self.require_extension_admin(&turn_config, &room, origin_sender.as_deref())?;
+                let namespace = extension_namespace(args.namespace.as_deref());
+                Ok(self.extension_catalog(namespace))
+            }
+            "extensions_read" => {
+                let args: ExtensionsReadArgs = parse(args)?;
+                self.require_extension_admin(&turn_config, &room, origin_sender.as_deref())?;
+                let namespace = extension_namespace(args.namespace.as_deref());
+                self.read_extension(namespace, &args.path)
+            }
+            "extensions_write" => {
+                let args: ExtensionsWriteArgs = parse(args)?;
+                self.require_extension_admin(&turn_config, &room, origin_sender.as_deref())?;
+                let namespace = extension_namespace(args.namespace.as_deref());
+                self.write_extension(namespace, &args.path, &args.text)
+            }
+            "extensions_reload" => {
+                let args: ExtensionsReloadArgs = parse(args)?;
+                self.require_extension_admin(&turn_config, &room, origin_sender.as_deref())?;
+                let namespace = extension_namespace(args.namespace.as_deref());
+                self.queue_extension_reload(namespace)
+                    .map_err(|error| ToolError::new(ErrorCode::Internal, error.to_string()))?;
+                Ok(json!({
+                    "queued": true,
+                    "namespace": namespace,
+                    "state": "pending_reload",
+                    "note": acb_i18n::t!(
+                        "bridge.console.extension_reload_queued",
+                        namespace = namespace
+                    ),
+                }))
             }
             // 反馈：诚实报告「这里卡住了」。这是出口，不是抱怨箱（ADR-0021）。
             "report_feedback" => {
@@ -1979,6 +2326,7 @@ impl<S: Store> Bridge<S> {
                 delivered: turn.delivered.clone(),
                 read: turn.read.clone(),
                 config: turn.config.clone(),
+                origin_sender: turn.origin_sender.clone(),
                 live: true,
             });
         }
@@ -2040,6 +2388,7 @@ impl<S: Store> Bridge<S> {
             delivered: ended.delivered,
             read: ended.read,
             config: ended.config,
+            origin_sender: ended.origin_sender,
             live: false,
         })
     }
@@ -2356,6 +2705,7 @@ impl<S: Store> Bridge<S> {
                         room.clone(),
                         TurnReason::Clock,
                         None,
+                        None,
                         now,
                         0,
                     );
@@ -2388,6 +2738,7 @@ impl<S: Store> Bridge<S> {
         room: RoomId,
         reason: TurnReason,
         wake_reason: Option<String>,
+        origin_sender: Option<String>,
         at: i64,
         delay_ms: u64,
     ) {
@@ -2401,6 +2752,9 @@ impl<S: Store> Bridge<S> {
             .find(|pending| pending.session == session && pending.room == room)
         {
             existing.not_before = existing.not_before.min(not_before);
+            if origin_sender.is_some() {
+                existing.origin_sender = origin_sender;
+            }
             return;
         }
         self.pending.push_back(Pending {
@@ -2408,6 +2762,7 @@ impl<S: Store> Bridge<S> {
             room,
             reason,
             wake_reason,
+            origin_sender,
             not_before,
         });
     }
@@ -2513,6 +2868,7 @@ impl<S: Store> Bridge<S> {
                 delivered,
                 read: BTreeSet::new(),
                 config: turn_config.clone(),
+                origin_sender: pending.origin_sender.clone(),
                 stop_requested: false,
             },
         );

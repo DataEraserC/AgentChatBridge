@@ -112,9 +112,19 @@ provider = "dyn.routes"
 - `scope` 支持 `global` / `connection` / `session`；后两者必须给出
   `connections` / `sessions` 列表。
 
-重载由 `POST /api/extensions/reload`（默认 namespace `dyn`）或后续的
-`extensions_reload` 工具触发；它只入队，真正扫描与替换发生在下一个轮次边界。
+重载由 `POST /api/extensions/reload`（默认 namespace `dyn`）或 `extensions_reload`
+工具触发；它只入队，真正扫描与替换发生在下一个轮次边界。
 `GET /api/extensions` 返回模块级目录、health、最近错误、hash / mtime / calls。
+
+管理员会话（`admin_qqs` 命中）可以用 authoring 工具：
+
+- `extensions_list`：模块目录、health、最近错误、pending；
+- `extensions_read`：读相对路径（只允许 `.toml`）；
+- `extensions_write`：原子写相对路径（只允许 `.toml`，单文件 64 KiB）；
+- `extensions_reload`：排队重载。
+
+路径锁在 `ACB_DYNAMIC_DIR` 内，拒绝绝对路径、`..` 和符号链接；写完必须显式
+`extensions_reload`，不会自动生效。
 可抄的最小模块见 [`examples/extensions/echo`](https://github.com/DataEraserC/AgentChatBridge/tree/dev_20261025/examples/extensions/echo)。
 
 ## 嵌套 manager

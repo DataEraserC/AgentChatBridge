@@ -381,6 +381,64 @@ health 只表示 manager 子树的粗粒度状态。这是只读工具，不能�
     },
   },
   {
+    name: "extensions_list",
+    description: `列出 ACB_DYNAMIC_DIR 里的声明式扩展模块（仅管理员会话）。
+返回 namespace / installed / pendingReload / lastError / details（modules、errors、health）。
+namespace 默认 dyn。`,
+    schema: {
+      type: "object",
+      properties: {
+        namespace: { type: "string", description: "扩展目录 namespace，默认 dyn" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "extensions_read",
+    description: `读取扩展目录内的相对文件（仅管理员会话）。
+只允许 .toml，路径锁在 ACB_DYNAMIC_DIR 内；拒绝绝对路径、..、符号链接和超 64 KiB 的文件。
+path 例如 echo/manifest.toml。`,
+    schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "相对扩展目录的路径，例如 echo/manifest.toml" },
+        namespace: { type: "string", description: "扩展目录 namespace，默认 dyn" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "extensions_write",
+    description: `原子写入扩展目录内的相对文件（仅管理员会话）。
+只允许 .toml，路径锁在 ACB_DYNAMIC_DIR 内，单文件上限 64 KiB；会按需创建模块目录。
+写完不会自动生效：调用 extensions_reload，扫描与替换发生在下一个轮次边界；
+坏模块不会替换线上快照。`,
+    schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "相对扩展目录的路径，例如 echo/manifest.toml" },
+        text: { type: "string", description: "完整文件内容", maxLength: 65536 },
+        namespace: { type: "string", description: "扩展目录 namespace，默认 dyn" },
+      },
+      required: ["path", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "extensions_reload",
+    description: `排队重载动态扩展目录（仅管理员会话）。
+只入队，真正扫描与快照替换发生在下一个轮次边界；有在途轮次时保持 pending。
+任一模块校验失败时不替换线上快照，错误通过 extensions_list 的 lastError/errors 可见。`,
+    schema: {
+      type: "object",
+      properties: {
+        namespace: { type: "string", description: "扩展目录 namespace，默认 dyn" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "report_feedback",
     description: `把「你被什么卡住了」写回桥里——这是你唯一正式的抱怨出口。
 
