@@ -270,6 +270,57 @@
   4. 本机内存有限：`cargo test --workspace`、`nix build` 等重任务串行执行，不同时起
      多个；若进程被杀，先记录 `journalctl` 的 OOM 条目再继续。
 
+## 2026-11-04 03:05 CST — 设计提案：平台边界
+
+- 任务编号：设计议题（用户新增，只出文档）
+- 做了什么：新增 `docs/plan/platform-boundary-proposal.md`：
+  - 把「平台实现/策略进 core 禁止」与「平台无关能力抽象必须留在 core」拆成两条；
+  - 给出可执行判据：新增平台能否只写适配器 + 注册、不改 core 业务文件；
+  - 反例：通用插件 trait 里加 `platform()`；正例：`PlatformAdapter` + 能力 flags；
+  - 复核现有代码位置（`AdapterManifest.platform`、context 的 `platform` 数据、
+    `validate_wake_events`、`Element::Face{platform}`、`sample_string`、`WireManifest`），
+    逐条给出允许/可疑/禁止判断；
+  - 给出愿景/ADR-0027 的修订建议文本（不改原文）与能力 flags 建议。
+- 证据：对照 `docs/01-vision.md`、`docs/adr/0027-platform-adapter-registration.md`、
+  `crates/kernel/src/adapter.rs`、`crates/adapter-api/src/lib.rs`、`crates/kernel/src/outbound.rs`。
+- commit：`TBD`。
+- 未决问题：是否采纳 ADR 修订方向；能力 flags 首批范围；`sample_string` 是否移到
+  `MethodSpec.examples`。
+- 下一步入口：等用户确认后再改 ADR/代码。
+
+## 2026-11-04 03:05 CST — 设计文档：扩展点图谱与上下文成本
+
+- 任务编号：设计议题（用户新增，只出文档）
+- 做了什么：新增 `docs/plan/extension-point-catalog.md`：
+  - 现状清单：14 类扩展点/钩子的签名、触发时机、能否拦截、能否改写内容/目标；
+  - 今天插件能做的事与边界（含「工具扩展/任务 handler/跨轮状态」缺口）；
+  - 缺口 hook 建议（`RecordObserver` / `ToolProvider` / `TaskHandler` / `PluginState` /
+    `SendTargetHook` / `ToolOutputHook`）与优先级；
+  - 必须留在 core 的不变量（轮次边界、串行/票、ack/水位、引用判定、访问边界、
+    存储顺序、生命周期安全）；
+  - 判据：「改策略走插件，改不变量进 core；要新副作用/新数据形状，先加 hook」；
+  - context budget：逐工具典型/最坏返回体、线性增长项、现有上限、可选优化与代价、
+    测量口径。
+- 证据：对照 `crates/kernel/src/plugin.rs` 的 trait/上下文、`adapter.rs` 的 manifest、
+  `tools.rs` 的参数与上限、`engine.rs` 的 delivery/tool 实现。
+- commit：`TBD`。
+- 未决问题：`RecordObserver` / `ToolProvider` / `TaskHandler` 首批范围；`PluginState`
+  是否进 core；context budget 中哪些优化先测量。
+- 下一步入口：与「外部项目功能面清单」合并成差距矩阵。
+
+## 2026-11-04 03:05 CST — 评估口径更新（用户裁定）
+
+- 后续所有设计与评审统一只看四项：
+  1. 稳态运行成本（每轮固定开销、线性返回体、额外往返）；
+  2. 可观测性/可审计性（日志对账、错误定位、细节丢失）；
+  3. 接口面增长速度（插件自己长，还是 core 多入口/工具/字段）；
+  4. 可变更性（schema/协议是否锁死后续改法）。
+- **开发难度不作为否决理由**：多写代码、迁移调用点、一次性重构、学习成本不计入。
+- 已写入 `extension-point-catalog.md` 顶部与 §5，`platform-boundary-proposal.md` §5，
+  `native-reload-and-supervisor.md` §5。
+- 上下文预算定位：属于第 1/2 项的权衡，不是独立最高目标；短 id 用「可读前缀 + 短 id」
+  折中，不放弃唯一性/可对账性。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
