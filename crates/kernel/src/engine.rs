@@ -313,6 +313,33 @@ impl TaskStatus {
     }
 }
 
+/// 任务完成时是否发射合成事件。只控制“发不发事件”，不控制唤醒策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeOn {
+    Never,
+    Error,
+    Always,
+}
+
+impl WakeOn {
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text.trim() {
+            "never" => Self::Never,
+            "error" => Self::Error,
+            "always" => Self::Always,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Error => "error",
+            Self::Always => "always",
+        }
+    }
+}
+
 /// 一条后台任务记录。给 `task_list` / `task_get` 和任务完成事件用。
 #[derive(Debug, Clone)]
 pub struct TaskRecord {
@@ -321,6 +348,7 @@ pub struct TaskRecord {
     pub room: RoomId,
     pub handler: String,
     pub params_summary: String,
+    pub wake_on: String,
     pub status: TaskStatus,
     pub created_at: i64,
     pub started_at: Option<i64>,
@@ -328,6 +356,9 @@ pub struct TaskRecord {
     pub result: Option<Value>,
     pub error: Option<String>,
     pub delivery_error: Option<String>,
+    pub event_id: Option<u64>,
+    pub event_woke: Vec<String>,
+    pub event_error: Option<String>,
 }
 
 /// `begin_tool_call` 的两种结果：不需要平台 I/O 的已经做完了；需要平台的交给 endpoint
@@ -688,6 +719,11 @@ impl<S: Store> Bridge<S> {
             room: room.clone(),
             handler: handler.to_owned(),
             params_summary: summarize_params(params),
+            wake_on: params
+                .get("wake_on")
+                .and_then(Value::as_str)
+                .unwrap_or("always")
+                .to_owned(),
             status: TaskStatus::Queued,
             created_at: now_millis(),
             started_at: None,
@@ -695,6 +731,9 @@ impl<S: Store> Bridge<S> {
             result: None,
             error: None,
             delivery_error: None,
+            event_id: None,
+            event_woke: Vec::new(),
+            event_error: None,
         });
         while self.tasks.len() > TASK_KEEP {
             self.tasks.pop_front();
@@ -716,6 +755,7 @@ impl<S: Store> Bridge<S> {
         error: Option<String>,
         delivery_error: Option<String>,
     ) {
+        let mut finished = None;
         if let Some(record) = self.tasks.iter_mut().find(|record| record.id == task_id) {
             record.status = if error.is_some() || delivery_error.is_some() {
                 TaskStatus::Failed
@@ -726,6 +766,130 @@ impl<S: Store> Bridge<S> {
             record.result = result;
             record.error = error;
             record.delivery_error = delivery_error;
+            finished = Some((
+                record.id.clone(),
+                record.room.clone(),
+                record.status,
+                record.handler.clone(),
+                record.result.clone(),
+                record.error.clone(),
+                record.delivery_error.clone(),
+                record.wake_on.clone(),
+            ));
+        }
+
+        let Some((id, room, status, handler, result, error, delivery_error, wake_on_raw)) =
+            finished
+        else {
+            return;
+        };
+        let wake_on = WakeOn::parse(&wake_on_raw);
+        let should_emit = match wake_on {
+            Some(WakeOn::Never) => false,
+            Some(WakeOn::Error) => status == TaskStatus::Failed,
+            Some(WakeOn::Always) => true,
+            None => false,
+        };
+        if wake_on.is_none() {
+            self.set_task_event_error(
+                &id,
+                acb_i18n::t!(
+                    "kernel.engine.task_event_invalid_wake_on",
+                    wake_on = wake_on_raw
+                ),
+            );
+            return;
+        }
+        if !should_emit {
+            return;
+        }
+
+        let error_text = error
+            .as_ref()
+            .or(delivery_error.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        let summary = if status == TaskStatus::Failed {
+            acb_i18n::t!(
+                "kernel.engine.task_event_failed",
+                id = id,
+                handler = handler,
+                error = error_text
+            )
+        } else {
+            acb_i18n::t!(
+                "kernel.engine.task_event_succeeded",
+                id = id,
+                handler = handler
+            )
+        };
+        let payload = json!({
+            "task_id": id,
+            "status": status.as_str(),
+            "handler": handler,
+            "result": result,
+            "error": error,
+            "delivery_error": delivery_error,
+        });
+        let mut draft = RecordDraft::event(
+            room,
+            Sender {
+                id: "acb.task".into(),
+                name: "task".into(),
+                role: None,
+            },
+            now_millis(),
+            "task",
+            vec![Element::text(summary.clone())],
+            false,
+        );
+        if let RecordKind::Event {
+            tags,
+            payload: event_payload,
+            summary: event_summary,
+            ..
+        } = &mut draft.kind
+        {
+            tags.push("task".into());
+            tags.push(format!("task.{}", status.as_str()));
+            *event_payload = Some(payload);
+            *event_summary = Some(summary);
+        }
+
+        // 合成事件跳过 route/receive，只走 store + wake 策略；这样不会出现
+        // “任务失败 → 路由再触发任务 → 再失败”的循环。
+        match self.ingest_inner(draft, true) {
+            Ok(Ingest::Recorded { id: event_id, woke }) => {
+                if let Some(record) = self.tasks.iter_mut().find(|record| record.id == id) {
+                    record.event_id = Some(event_id);
+                    record.event_woke = woke;
+                    record.event_error = None;
+                }
+            }
+            Ok(Ingest::NotSubscribed { room }) => {
+                self.set_task_event_error(
+                    &id,
+                    acb_i18n::t!("kernel.engine.task_event_not_subscribed", room = room),
+                );
+            }
+            Ok(Ingest::Dropped { room }) => {
+                self.set_task_event_error(
+                    &id,
+                    acb_i18n::t!("kernel.engine.task_event_dropped", room = room),
+                );
+            }
+            Ok(Ingest::Handled { .. }) => {
+                self.set_task_event_error(&id, acb_i18n::t!("kernel.engine.task_event_handled"));
+            }
+            Err(error) => {
+                self.set_task_event_error(&id, error.to_string());
+            }
+        }
+    }
+
+    fn set_task_event_error(&mut self, task_id: &str, error: String) {
+        if let Some(record) = self.tasks.iter_mut().find(|record| record.id == task_id) {
+            record.event_error = Some(error);
         }
     }
 
@@ -1308,6 +1472,16 @@ impl<S: Store> Bridge<S> {
 
     /// 一条入站记录进来。
     pub fn ingest(&mut self, draft: RecordDraft) -> Result<Ingest, BridgeError> {
+        self.ingest_inner(draft, false)
+    }
+
+    /// `skip_route` 用于 core 自己生成的合成事件：仍然入库、仍然按 wake/clock 策略唤醒，
+    /// 但不再经过 route 插件，避免“任务失败 → route 再触发任务 → 再失败”的循环。
+    fn ingest_inner(
+        &mut self,
+        draft: RecordDraft,
+        skip_route: bool,
+    ) -> Result<Ingest, BridgeError> {
         // 收消息也是配置消费点（唤醒判定走订阅），暂存的配置在这里也要换上——
         // 否则刚保存的新订阅会漏掉紧接着来的第一条消息。开轮（poll）处同样应用：
         // 保证投递批次组装时用的配置和开轮后工具查询看到的一致。
@@ -1351,7 +1525,7 @@ impl<S: Store> Bridge<S> {
         let event_ref = event.as_deref();
         let tags_ref: Vec<&str> = tag_names.iter().map(String::as_str).collect();
 
-        let route_policies = if from_self {
+        let route_policies = if skip_route || from_self {
             Vec::new()
         } else {
             self.config
@@ -1437,7 +1611,7 @@ impl<S: Store> Bridge<S> {
                     suppressed = suppressed || !wake;
                 }
             }
-        } else {
+        } else if !skip_route {
             // 入站策略：先问这条连接的 provider 收不收。被丢掉的记录不写流水、不叫醒，
             // 就像它从没到过桥——水位也不会因为它出现空洞。
             let receive_policy = self
@@ -4839,6 +5013,7 @@ fn task_json(record: &TaskRecord) -> Value {
         "room": record.room.to_string(),
         "handler": record.handler,
         "params_summary": record.params_summary,
+        "wake_on": record.wake_on,
         "status": record.status.as_str(),
         "created_at": record.created_at,
         "started_at": record.started_at,
@@ -4846,6 +5021,9 @@ fn task_json(record: &TaskRecord) -> Value {
         "result": record.result,
         "error": record.error,
         "delivery_error": record.delivery_error,
+        "event_id": record.event_id,
+        "event_woke": record.event_woke,
+        "event_error": record.event_error,
     })
 }
 

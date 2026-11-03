@@ -441,8 +441,9 @@ path 例如 echo/manifest.toml。`,
   {
     name: "task_list",
     description: `列出本会话的后台任务记录（最新在前）。
-后台任务（route 的 task 动作）会记录任务 id、handler、状态、开始/结束时间、结果摘要和错误。
-任务可能在本轮结束后才完成；即使你没有收到唤醒，也可以回来用 task_list / task_get 查询。
+后台任务（route 的 task 动作）会记录任务 id、handler、状态、开始/结束时间、结果摘要、
+错误、wake_on 和合成事件信息。任务可能在本轮结束后才完成；即使你没有收到唤醒，
+也可以回来用 task_list / task_get 查询。
 status 可过滤 queued / running / succeeded / failed。`,
     schema: {
       type: "object",
@@ -461,7 +462,8 @@ status 可过滤 queued / running / succeeded / failed。`,
   {
     name: "task_get",
     description: `按任务 id 查一条本会话的后台任务记录。
-返回 handler、params_summary、状态、时间、result、error、delivery_error。
+返回 handler、params_summary、wake_on、状态、时间、result、error、delivery_error，
+以及合成事件 id / 唤醒会话 / 事件错误。
 只能查当前会话的任务；跨会话 id 会报 not found。`,
     schema: {
       type: "object",
