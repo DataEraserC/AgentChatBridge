@@ -38,15 +38,15 @@ pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 /// 适配器错误。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LinkError {
-    #[error("invalid URL: {0} (must be ws://host:port/path)")]
+    #[error("{}", acb_i18n::t!("adapter.onebot11.bad_url", url = .0))]
     BadUrl(String),
-    #[error("cannot connect to {address}: {detail}")]
+    #[error("{}", acb_i18n::t!("adapter.onebot11.connect_failed", address = address, detail = detail))]
     Connect { address: String, detail: String },
-    #[error("WebSocket handshake failed: {0}")]
+    #[error("{}", acb_i18n::t!("adapter.onebot11.handshake_failed", detail = .0))]
     Handshake(String),
-    #[error("connection error: {0}")]
+    #[error("{}", acb_i18n::t!("adapter.onebot11.transport_error", detail = .0))]
     Transport(String),
-    #[error("timed out waiting for the platform")]
+    #[error("{}", acb_i18n::t!("adapter.onebot11.platform_timeout"))]
     Timeout,
 }
 
@@ -137,10 +137,7 @@ fn build_request(
         if !token.is_empty() {
             let value = tungstenite::http::HeaderValue::from_str(&format!("Bearer {token}"))
                 .map_err(|_| {
-                    LinkError::BadUrl(
-                        "access token contains characters that cannot be used in a request header"
-                            .into(),
-                    )
+                    LinkError::BadUrl(acb_i18n::t!("adapter.onebot11.token_header_invalid"))
                 })?;
             request
                 .headers_mut()
@@ -194,7 +191,10 @@ pub fn pump(
                         waiting.insert(echo.to_owned(), action.reply);
                     }
                     if let Err(error) = ws.send(Message::text(action.body.to_string())) {
-                        fail_all(&mut waiting, "connection lost while sending");
+                        fail_all(
+                            &mut waiting,
+                            &acb_i18n::t!("adapter.onebot11.connection_lost_sending"),
+                        );
                         return Err(LinkError::Transport(error.to_string()));
                     }
                 }
@@ -225,13 +225,19 @@ pub fn pump(
             Err(WsError::Io(error)) if is_timeout(&error) => continue,
             Err(WsError::ConnectionClosed | WsError::AlreadyClosed) => return Ok(()),
             Err(error) => {
-                fail_all(&mut waiting, "connection lost while reading");
+                fail_all(
+                    &mut waiting,
+                    &acb_i18n::t!("adapter.onebot11.connection_lost_reading"),
+                );
                 return Err(LinkError::Transport(error.to_string()));
             }
         }
     }
 
-    fail_all(&mut waiting, "the bridge is shutting down");
+    fail_all(
+        &mut waiting,
+        &acb_i18n::t!("adapter.onebot11.bridge_shutdown"),
+    );
     Ok(())
 }
 
@@ -253,7 +259,10 @@ fn handle_text(
     waiting: &mut HashMap<String, Sender<Result<Value, LinkError>>>,
 ) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        eprintln!("adapter {connection}: received non-JSON content; dropping it");
+        eprintln!(
+            "{}",
+            acb_i18n::t!("adapter.onebot11.non_json_content", connection = connection)
+        );
         return;
     };
 
@@ -288,16 +297,36 @@ fn submit_event(events: &EventQueue, connection: &str, value: &Value, admin_qqs:
     match event::parse(connection, value, admin_qqs) {
         Ok(Parsed::Record(draft)) => {
             if !events.submit(draft) {
-                eprintln!("adapter {connection}: inbound queue is closed; dropping a record");
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "adapter.onebot11.inbound_queue_closed",
+                        connection = connection
+                    )
+                );
             }
         }
         Ok(Parsed::Ignored(reason)) => {
             // 心跳之类，不值得每次都打日志。
-            if reason.starts_with("unrecognized") {
-                eprintln!("adapter {connection}: {reason}");
+            if reason.starts_with(acb_i18n::tr("adapter.onebot11.unrecognized_prefix").as_str()) {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "adapter.onebot11.ignored_event",
+                        connection = connection,
+                        reason = reason
+                    )
+                );
             }
         }
-        Err(error) => eprintln!("adapter {connection}: cannot parse this event: {error}"),
+        Err(error) => eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.event_parse_failed",
+                connection = connection,
+                error = error
+            )
+        ),
     }
 }
 
@@ -338,7 +367,13 @@ fn spawn_poke_lookup(
                     }
                 }
                 Err(error) => eprintln!(
-                    "adapter {connection}: failed to resolve nickname for {user}; using the number: {error}"
+                    "{}",
+                    acb_i18n::t!(
+                        "adapter.onebot11.nickname_lookup_failed",
+                        connection = connection,
+                        user = user,
+                        error = error
+                    )
                 ),
             }
         }
@@ -378,7 +413,10 @@ pub fn supervise(
     while !shutdown.load(Ordering::Relaxed) {
         match connect(&url, token.as_deref(), READ_TICK) {
             Ok(ws) => {
-                eprintln!("adapter {id}: connected to {url}");
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("adapter.onebot11.connected", id = id, url = url)
+                );
                 let (sender, actions) = mpsc::channel();
                 slot.install(sender.clone());
 
@@ -399,16 +437,32 @@ pub fn supervise(
                 match outcome {
                     Ok(()) => {
                         eprintln!(
-                            "adapter {id}: connection closed; reconnecting in {RECONNECT_DELAY:?}"
+                            "{}",
+                            acb_i18n::t!(
+                                "adapter.onebot11.reconnect_closed",
+                                id = id,
+                                delay = format!("{RECONNECT_DELAY:?}")
+                            )
                         )
                     }
                     Err(error) => {
-                        eprintln!("adapter {id}: {error}; reconnecting in {RECONNECT_DELAY:?}")
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "adapter.onebot11.reconnect_error",
+                                id = id,
+                                error = error,
+                                delay = format!("{RECONNECT_DELAY:?}")
+                            )
+                        )
                     }
                 }
             }
             Err(error) => {
-                eprintln!("adapter {id}: {error}");
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("adapter.onebot11.adapter_error", id = id, error = error)
+                );
             }
         }
 
@@ -434,7 +488,11 @@ fn probe_login(sender: &Sender<Action>, configured: &str, connection: &str) {
 
     let Ok(Ok(value)) = reply_rx.recv_timeout(Duration::from_secs(5)) else {
         eprintln!(
-            "adapter {connection}: cannot determine the login account (send/receive unaffected)"
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.login_probe_timeout",
+                connection = connection
+            )
         );
         return;
     };
@@ -444,17 +502,33 @@ fn probe_login(sender: &Sender<Action>, configured: &str, connection: &str) {
         Some(Value::String(text)) => text.clone(),
         _ => {
             eprintln!(
-                "adapter {connection}: peer did not report the login account (send/receive unaffected)"
+                "{}",
+                acb_i18n::t!(
+                    "adapter.onebot11.login_probe_missing",
+                    connection = connection
+                )
             );
             return;
         }
     };
-    eprintln!("adapter {connection}: login account {self_id}");
+    eprintln!(
+        "{}",
+        acb_i18n::t!(
+            "adapter.onebot11.login_account",
+            connection = connection,
+            self_id = self_id
+        )
+    );
 
     if !configured.is_empty() && configured != self_id {
         eprintln!(
-            "warning: connection {connection} is logged in as {self_id}, but the config says {configured}. \
-             Messages sent by the bridge itself would be treated as someone else's; change account to {self_id}"
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.account_mismatch",
+                connection = connection,
+                self_id = self_id,
+                configured = configured
+            )
         );
     }
 }

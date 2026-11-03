@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "LuaManager / LuaLoader：用 Lua 脚本注册扩展点（ADR-0026 Phase 3b/4b）"
 
 [dependencies]
+acb-i18n = { workspace = true }
 acb-kernel = { path = "../../kernel" }
 acb-proto = { path = "../../proto" }
 serde_json = { workspace = true }

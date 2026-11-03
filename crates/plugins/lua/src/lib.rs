@@ -128,7 +128,9 @@ impl LuaCaller {
             HookTriggers::new().every_nth_instruction(TIMEOUT_HOOK_STEP),
             move |_, _| {
                 if Instant::now() >= deadline {
-                    Err(mlua::Error::runtime("Lua provider call timed out"))
+                    Err(mlua::Error::runtime(acb_i18n::t!(
+                        "plugin.lua.call_timed_out"
+                    )))
                 } else {
                     Ok(VmState::Continue)
                 }
@@ -143,7 +145,10 @@ impl LuaCaller {
 
     fn record_failure(&self, error: &mlua::Error) {
         self.failures.fetch_add(1, Ordering::Relaxed);
-        eprintln!("Lua provider {} call failed: {error}", self.label);
+        eprintln!(
+            "{}",
+            acb_i18n::t!("plugin.lua.call_failed", label = self.label, error = error)
+        );
     }
 }
 
@@ -255,8 +260,9 @@ impl SendHook for LuaSendHook {
         let replacement = match result {
             Ok(Value::Nil) => return Ok(()),
             Ok(Value::Table(table)) => elements_from_table(&table),
-            Ok(other) => Err(mlua::Error::runtime(format!(
-                "send.before must return an element array or nil; got {other:?}"
+            Ok(other) => Err(mlua::Error::runtime(acb_i18n::t!(
+                "plugin.lua.send_before_type",
+                value = format!("{other:?}")
             ))),
             Err(error) => Err(error),
         };
@@ -336,16 +342,20 @@ impl ClockProvider for LuaClockProvider {
                 "due" | "wake" => true,
                 "skip" | "stay" => false,
                 other => {
-                    self.caller.record_failure(&mlua::Error::runtime(format!(
-                        "clock.is_due returned an unrecognized string {other:?}"
-                    )));
+                    self.caller
+                        .record_failure(&mlua::Error::runtime(acb_i18n::t!(
+                            "plugin.lua.clock_unknown_string",
+                            value = format!("{other:?}")
+                        )));
                     false
                 }
             },
             Ok(other) => {
-                self.caller.record_failure(&mlua::Error::runtime(format!(
-                    "clock.is_due must return a boolean or due/skip; got {other:?}"
-                )));
+                self.caller
+                    .record_failure(&mlua::Error::runtime(acb_i18n::t!(
+                        "plugin.lua.clock_wrong_type",
+                        value = format!("{other:?}")
+                    )));
                 false
             }
             Err(error) => {
@@ -379,16 +389,20 @@ impl ReceiveProvider for LuaReceiveProvider {
                 "record" => ReceiveDecision::Record,
                 "drop" => ReceiveDecision::Drop,
                 other => {
-                    self.caller.record_failure(&mlua::Error::runtime(format!(
-                        "receive.decide returned an unrecognized string {other:?}"
-                    )));
+                    self.caller
+                        .record_failure(&mlua::Error::runtime(acb_i18n::t!(
+                            "plugin.lua.receive_unknown_string",
+                            value = format!("{other:?}")
+                        )));
                     ReceiveDecision::Record
                 }
             },
             Ok(other) => {
-                self.caller.record_failure(&mlua::Error::runtime(format!(
-                    "receive.decide must return record/drop or a boolean; got {other:?}"
-                )));
+                self.caller
+                    .record_failure(&mlua::Error::runtime(acb_i18n::t!(
+                        "plugin.lua.receive_wrong_type",
+                        value = format!("{other:?}")
+                    )));
                 ReceiveDecision::Record
             }
             Err(error) => {
@@ -550,7 +564,7 @@ impl ManagerPlugin for LuaManager {
         if !same_set {
             return Err(PluginError::Manager {
                 namespace: self.namespace.clone(),
-                detail: "scripts added or removed providers; changing the descriptor set requires a bridge restart".to_owned(),
+                detail: acb_i18n::t!("plugin.lua.provider_set_changed"),
             });
         }
         *self
@@ -565,7 +579,10 @@ impl ManagerPlugin for LuaManager {
         if failures == 0 {
             Health::Healthy
         } else {
-            Health::Degraded(format!("{failures} Lua call(s) failed"))
+            Health::Degraded(acb_i18n::t!(
+                "plugin.lua.degraded_failures",
+                failures = failures
+            ))
         }
     }
 }
@@ -619,17 +636,19 @@ fn load_scripts(
     failures: &Arc<AtomicU64>,
 ) -> Result<(Vec<ProviderDescriptor>, HashMap<ProviderId, LoadedProvider>), PluginError> {
     let entries = fs::read_dir(dir).map_err(|error| {
-        PluginError::Loader(format!(
-            "cannot read Lua plugin directory {}: {error}",
-            dir.display()
+        PluginError::Loader(acb_i18n::t!(
+            "plugin.lua.read_dir_failed",
+            dir = dir.display(),
+            error = error
         ))
     })?;
     let mut paths = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
-            PluginError::Loader(format!(
-                "failed to read Lua plugin directory {}: {error}",
-                dir.display()
+            PluginError::Loader(acb_i18n::t!(
+                "plugin.lua.read_dir_entry_failed",
+                dir = dir.display(),
+                error = error
             ))
         })?;
         let path = entry.path();
@@ -648,10 +667,10 @@ fn load_scripts(
     for path in paths {
         let loaded = load_script(&path, namespace, failures)?;
         if providers.contains_key(&loaded.id) {
-            return Err(PluginError::Loader(format!(
-                "duplicate provider id {} in {}",
-                path.display(),
-                loaded.id
+            return Err(PluginError::Loader(acb_i18n::t!(
+                "plugin.lua.duplicate_provider",
+                path = path.display(),
+                id = loaded.id
             )));
         }
         let capability = match loaded.extension {
@@ -693,20 +712,30 @@ fn load_script(
         .file_stem()
         .and_then(|stem| stem.to_str())
         .ok_or_else(|| {
-            PluginError::Loader(format!("{}: filename is not valid UTF-8", path.display()))
+            PluginError::Loader(acb_i18n::t!(
+                "plugin.lua.filename_not_utf8",
+                path = path.display()
+            ))
         })?;
     let id = ProviderId::parse(&format!("{namespace}.{stem}")).map_err(|error| {
-        PluginError::Loader(format!(
-            "{}: filename must be usable as a provider name (letters/digits/underscores/hyphens): {error}",
-            path.display()
+        PluginError::Loader(acb_i18n::t!(
+            "plugin.lua.filename_not_provider",
+            path = path.display(),
+            error = error
         ))
     })?;
-    let source = fs::read_to_string(path)
-        .map_err(|error| PluginError::Loader(format!("cannot read {}: {error}", path.display())))?;
+    let source = fs::read_to_string(path).map_err(|error| {
+        PluginError::Loader(acb_i18n::t!(
+            "plugin.lua.read_script_failed",
+            path = path.display(),
+            error = error
+        ))
+    })?;
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default()).map_err(|error| {
-        PluginError::Loader(format!(
-            "{}: failed to create Lua state: {error}",
-            path.display()
+        PluginError::Loader(acb_i18n::t!(
+            "plugin.lua.create_state_failed",
+            path = path.display(),
+            error = error
         ))
     })?;
     let table: Table = lua
@@ -714,16 +743,18 @@ fn load_script(
         .set_name(path.display().to_string())
         .eval()
         .map_err(|error| {
-            PluginError::Loader(format!(
-                "{}: script execution failed: {error}",
-                path.display()
+            PluginError::Loader(acb_i18n::t!(
+                "plugin.lua.script_failed",
+                path = path.display(),
+                error = error
             ))
         })?;
 
     let extension: String = table.get("extension").map_err(|error| {
-        PluginError::Loader(format!(
-            "{}: missing extension (wake / access / delivery / send): {error}",
-            path.display()
+        PluginError::Loader(acb_i18n::t!(
+            "plugin.lua.missing_extension",
+            path = path.display(),
+            error = error
         ))
     })?;
     let extension = match extension.as_str() {
@@ -736,9 +767,10 @@ fn load_script(
         "receive" => ExtensionPoint::Receive,
         "route" => ExtensionPoint::Route,
         other => {
-            return Err(PluginError::Loader(format!(
-                "{}: unsupported extension {other:?} (supported: wake / access / delivery / send / turn_error / clock / receive / route)",
-                path.display()
+            return Err(PluginError::Loader(acb_i18n::t!(
+                "plugin.lua.unsupported_extension",
+                path = path.display(),
+                extension = format!("{other:?}")
             )));
         }
     };
@@ -746,9 +778,10 @@ fn load_script(
         ExtensionPoint::Wake => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!(
-                    "{}: failed to save decide: {error}",
-                    path.display()
+                PluginError::Loader(acb_i18n::t!(
+                    "plugin.lua.save_decide_failed",
+                    path = path.display(),
+                    error = error
                 ))
             })?;
             LoadedInstance::Wake(Arc::new(LuaWakeProvider {
@@ -764,9 +797,10 @@ fn load_script(
         ExtensionPoint::Access => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!(
-                    "{}: failed to save decide: {error}",
-                    path.display()
+                PluginError::Loader(acb_i18n::t!(
+                    "plugin.lua.save_decide_failed",
+                    path = path.display(),
+                    error = error
                 ))
             })?;
             LoadedInstance::Access(Arc::new(LuaAccessProvider {
@@ -782,9 +816,10 @@ fn load_script(
         ExtensionPoint::Delivery => {
             let function = required_function(&table, "compose", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!(
-                    "{}: failed to save compose: {error}",
-                    path.display()
+                PluginError::Loader(acb_i18n::t!(
+                    "plugin.lua.save_compose_failed",
+                    path = path.display(),
+                    error = error
                 ))
             })?;
             LoadedInstance::Delivery(Arc::new(LuaDeliveryComposer {
@@ -801,27 +836,29 @@ fn load_script(
             let before = optional_function(&table, "before", path)?;
             let after = optional_function(&table, "after", path)?;
             if before.is_none() && after.is_none() {
-                return Err(PluginError::Loader(format!(
-                    "{}: send script requires at least one of before or after",
-                    path.display()
+                return Err(PluginError::Loader(acb_i18n::t!(
+                    "plugin.lua.send_needs_hook",
+                    path = path.display()
                 )));
             }
             let before_key = before
                 .map(|function| lua.create_registry_value(function))
                 .transpose()
                 .map_err(|error| {
-                    PluginError::Loader(format!(
-                        "{}: failed to save before: {error}",
-                        path.display()
+                    PluginError::Loader(acb_i18n::t!(
+                        "plugin.lua.save_before_failed",
+                        path = path.display(),
+                        error = error
                     ))
                 })?;
             let after_key = after
                 .map(|function| lua.create_registry_value(function))
                 .transpose()
                 .map_err(|error| {
-                    PluginError::Loader(format!(
-                        "{}: failed to save after: {error}",
-                        path.display()
+                    PluginError::Loader(acb_i18n::t!(
+                        "plugin.lua.save_after_failed",
+                        path = path.display(),
+                        error = error
                     ))
                 })?;
             let lua = Arc::new(Mutex::new(lua));
@@ -844,9 +881,10 @@ fn load_script(
         ExtensionPoint::TurnError => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!(
-                    "{}: failed to save decide: {error}",
-                    path.display()
+                PluginError::Loader(acb_i18n::t!(
+                    "plugin.lua.save_decide_failed",
+                    path = path.display(),
+                    error = error
                 ))
             })?;
             LoadedInstance::TurnError(Arc::new(LuaTurnErrorProvider {
@@ -862,9 +900,10 @@ fn load_script(
         ExtensionPoint::Clock => {
             let function = required_function(&table, "is_due", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!(
-                    "{}: failed to save is_due: {error}",
-                    path.display()
+                PluginError::Loader(acb_i18n::t!(
+                    "plugin.lua.save_is_due_failed",
+                    path = path.display(),
+                    error = error
                 ))
             })?;
             LoadedInstance::Clock(Arc::new(LuaClockProvider {
@@ -880,9 +919,10 @@ fn load_script(
         ExtensionPoint::Receive => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!(
-                    "{}: failed to save decide: {error}",
-                    path.display()
+                PluginError::Loader(acb_i18n::t!(
+                    "plugin.lua.save_decide_failed",
+                    path = path.display(),
+                    error = error
                 ))
             })?;
             LoadedInstance::Receive(Arc::new(LuaReceiveProvider {
@@ -898,9 +938,10 @@ fn load_script(
         ExtensionPoint::Route => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!(
-                    "{}: failed to save decide: {error}",
-                    path.display()
+                PluginError::Loader(acb_i18n::t!(
+                    "plugin.lua.save_decide_failed",
+                    path = path.display(),
+                    error = error
                 ))
             })?;
             LoadedInstance::Route(Arc::new(LuaRouteProvider {
@@ -924,9 +965,11 @@ fn load_script(
 
 fn required_function(table: &Table, name: &str, path: &Path) -> Result<Function, PluginError> {
     table.get::<Function>(name).map_err(|error| {
-        PluginError::Loader(format!(
-            "{}: missing {name} function: {error}",
-            path.display()
+        PluginError::Loader(acb_i18n::t!(
+            "plugin.lua.missing_function",
+            path = path.display(),
+            name = name,
+            error = error
         ))
     })
 }
@@ -937,9 +980,11 @@ fn optional_function(
     path: &Path,
 ) -> Result<Option<Function>, PluginError> {
     table.get::<Option<Function>>(name).map_err(|error| {
-        PluginError::Loader(format!(
-            "{}: {name} is not a function: {error}",
-            path.display()
+        PluginError::Loader(acb_i18n::t!(
+            "plugin.lua.not_a_function",
+            path = path.display(),
+            name = name,
+            error = error
         ))
     })
 }
@@ -1173,7 +1218,10 @@ fn element_to_table(lua: &Lua, element: &Element) -> mlua::Result<Table> {
             table.set(
                 "payload_json",
                 serde_json::to_string(payload).map_err(|error| {
-                    mlua::Error::runtime(format!("failed to serialize opaque payload: {error}"))
+                    mlua::Error::runtime(acb_i18n::t!(
+                        "plugin.lua.serialize_opaque_failed",
+                        error = error
+                    ))
                 })?,
             )?;
         }
@@ -1223,7 +1271,7 @@ fn element_from_table(table: &Table) -> mlua::Result<Element> {
         "opaque" => {
             let payload_json: String = table.get("payload_json")?;
             let payload = serde_json::from_str(&payload_json).map_err(|error| {
-                mlua::Error::runtime(format!("opaque payload is not valid JSON: {error}"))
+                mlua::Error::runtime(acb_i18n::t!("plugin.lua.opaque_not_json", error = error))
             })?;
             Element::Opaque {
                 platform: table.get::<String>("platform")?,
@@ -1231,8 +1279,9 @@ fn element_from_table(table: &Table) -> mlua::Result<Element> {
             }
         }
         other => {
-            return Err(mlua::Error::runtime(format!(
-                "unknown element type {other:?}; valid values: text/at/quote/image/audio/video/file/face/opaque"
+            return Err(mlua::Error::runtime(acb_i18n::t!(
+                "plugin.lua.unknown_element_type",
+                kind = format!("{other:?}")
             )));
         }
     })
@@ -1255,8 +1304,9 @@ fn sent_table(lua: &Lua, sent: &Sent) -> mlua::Result<Table> {
 
 fn interpret_delivery_plan(value: Value) -> mlua::Result<DeliveryPlan> {
     let Value::Table(table) = value else {
-        return Err(mlua::Error::runtime(format!(
-            "delivery composer must return a table or nil; got {value:?}"
+        return Err(mlua::Error::runtime(acb_i18n::t!(
+            "plugin.lua.delivery_wrong_type",
+            value = format!("{value:?}")
         )));
     };
     let keep = match table.get::<Option<Table>>("keep")? {
@@ -1324,8 +1374,9 @@ fn turn_error_action_table(lua: &Lua, action: &TurnErrorAction) -> mlua::Result<
 
 fn interpret_turn_error_actions(value: Value) -> mlua::Result<Vec<TurnErrorAction>> {
     let Value::Table(table) = value else {
-        return Err(mlua::Error::runtime(format!(
-            "turn_error provider must return an action array; got {value:?}"
+        return Err(mlua::Error::runtime(acb_i18n::t!(
+            "plugin.lua.turn_error_wrong_type",
+            value = format!("{value:?}")
         )));
     };
     let mut actions = Vec::new();
@@ -1337,13 +1388,18 @@ fn interpret_turn_error_actions(value: Value) -> mlua::Result<Vec<TurnErrorActio
             "send" => {
                 let room: String = action.get("room")?;
                 let room = RoomId::parse(&room).map_err(|error| {
-                    mlua::Error::runtime(format!("invalid turn error room: {room} ({error})"))
+                    mlua::Error::runtime(acb_i18n::t!(
+                        "plugin.lua.invalid_turn_error_room",
+                        room = room,
+                        error = error
+                    ))
                 })?;
                 actions.push(TurnErrorAction::Send { room });
             }
             other => {
-                return Err(mlua::Error::runtime(format!(
-                    "unknown turn error action {other:?} (only log / send are supported)"
+                return Err(mlua::Error::runtime(acb_i18n::t!(
+                    "plugin.lua.unknown_turn_error_action",
+                    action = format!("{other:?}")
                 )));
             }
         }
@@ -1456,8 +1512,9 @@ fn interpret_route_decision(value: &Value) -> mlua::Result<RouteDecision> {
         Value::String(text) => match text.to_string_lossy().as_str() {
             "pass" => Ok(RouteDecision::Pass),
             "drop" => Ok(RouteDecision::Drop { reason: None }),
-            other => Err(mlua::Error::runtime(format!(
-                "route.decide returned an unrecognized string {other:?} (expected pass / drop or an action table)"
+            other => Err(mlua::Error::runtime(acb_i18n::t!(
+                "plugin.lua.route_unknown_string",
+                value = format!("{other:?}")
             ))),
         },
         Value::Table(table) => {
@@ -1472,15 +1529,15 @@ fn interpret_route_decision(value: &Value) -> mlua::Result<RouteDecision> {
             }
             let actions: Option<Table> = table.get("actions")?;
             let Some(actions) = actions else {
-                return Err(mlua::Error::runtime(
-                    "route.decide table must contain action or actions",
-                ));
+                return Err(mlua::Error::runtime(acb_i18n::t!(
+                    "plugin.lua.route_needs_action"
+                )));
             };
             let mut parsed = Vec::new();
             for value in actions.sequence_values::<Table>() {
                 let action = value?;
                 let name: String = action.get("action").map_err(|_| {
-                    mlua::Error::runtime("every route action must have an action field")
+                    mlua::Error::runtime(acb_i18n::t!("plugin.lua.route_action_needs_field"))
                 })?;
                 parsed.push(route_action(&name, &action)?);
             }
@@ -1493,8 +1550,9 @@ fn interpret_route_decision(value: &Value) -> mlua::Result<RouteDecision> {
                 actions: parsed,
             })
         }
-        other => Err(mlua::Error::runtime(format!(
-            "route.decide must return pass / drop or an action table; got {other:?}"
+        other => Err(mlua::Error::runtime(acb_i18n::t!(
+            "plugin.lua.route_wrong_type",
+            value = format!("{other:?}")
         ))),
     }
 }
@@ -1511,38 +1569,42 @@ fn route_action(name: &str, table: &Table) -> mlua::Result<RouteAction> {
                 (Some(elements), None) => elements_from_table(&elements)?,
                 (None, Some(text)) => vec![Element::text(text)],
                 (Some(_), Some(_)) => {
-                    return Err(mlua::Error::runtime(
-                        "send action may provide only one of elements or text",
-                    ));
+                    return Err(mlua::Error::runtime(acb_i18n::t!(
+                        "plugin.lua.send_elements_or_text"
+                    )));
                 }
                 (None, None) => {
-                    return Err(mlua::Error::runtime(
-                        "send action must provide text or elements",
-                    ));
+                    return Err(mlua::Error::runtime(acb_i18n::t!(
+                        "plugin.lua.send_text_or_elements"
+                    )));
                 }
             };
             let room: Option<String> = table.get("room")?;
             let room = room
                 .map(|room| {
                     RoomId::parse(&room).map_err(|error| {
-                        mlua::Error::runtime(format!("invalid send room: {error}"))
+                        mlua::Error::runtime(acb_i18n::t!(
+                            "plugin.lua.invalid_send_room",
+                            error = error
+                        ))
                     })
                 })
                 .transpose()?;
             Ok(RouteAction::Send { room, elements })
         }
         "task" => {
-            let handler: String = table.get("handler").map_err(|_| {
-                mlua::Error::runtime("task action must specify handler (only exec is supported)")
-            })?;
+            let handler: String = table
+                .get("handler")
+                .map_err(|_| mlua::Error::runtime(acb_i18n::t!("plugin.lua.task_needs_handler")))?;
             let params = match table.get::<Option<Table>>("params")? {
                 Some(params) => lua_to_json(Value::Table(params))?,
                 None => serde_json::json!({}),
             };
             Ok(RouteAction::Task { handler, params })
         }
-        other => Err(mlua::Error::runtime(format!(
-            "unknown route action {other:?} (supported: interrupt / send / task)"
+        other => Err(mlua::Error::runtime(acb_i18n::t!(
+            "plugin.lua.unknown_route_action",
+            action = format!("{other:?}")
         ))),
     }
 }
@@ -1560,8 +1622,9 @@ fn interrupt_scope(table: &Table) -> mlua::Result<InterruptScope> {
     match table.get::<Option<String>>("scope")?.as_deref() {
         None | Some("room") => Ok(InterruptScope::Room),
         Some("connection") => Ok(InterruptScope::Connection),
-        Some(other) => Err(mlua::Error::runtime(format!(
-            "interrupt.scope only supports room / connection (or sessions = {{...}}); got {other:?}"
+        Some(other) => Err(mlua::Error::runtime(acb_i18n::t!(
+            "plugin.lua.interrupt_scope",
+            scope = format!("{other:?}")
         ))),
     }
 }
@@ -1574,7 +1637,7 @@ fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
         Value::Number(number) => serde_json::Number::from_f64(number)
             .map(serde_json::Value::Number)
             .ok_or_else(|| {
-                mlua::Error::runtime(format!("number {number} cannot be converted to JSON"))
+                mlua::Error::runtime(acb_i18n::t!("plugin.lua.number_not_json", number = number))
             }),
         Value::String(text) => Ok(serde_json::Value::String(
             text.to_string_lossy().to_string(),
@@ -1594,8 +1657,9 @@ fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
                 let key = match key {
                     Value::String(key) => key.to_string_lossy().to_string(),
                     other => {
-                        return Err(mlua::Error::runtime(format!(
-                            "JSON object keys must be strings; got {other:?}"
+                        return Err(mlua::Error::runtime(acb_i18n::t!(
+                            "plugin.lua.json_key_not_string",
+                            key = format!("{other:?}")
                         )));
                     }
                 };
@@ -1603,8 +1667,9 @@ fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
             }
             Ok(serde_json::Value::Object(map))
         }
-        other => Err(mlua::Error::runtime(format!(
-            "this Lua value cannot be converted to JSON: {other:?}"
+        other => Err(mlua::Error::runtime(acb_i18n::t!(
+            "plugin.lua.value_not_json",
+            value = format!("{other:?}")
         ))),
     }
 }
@@ -1624,8 +1689,9 @@ fn interpret_wake(value: Value) -> mlua::Result<WakeVerdict> {
                 delay_ms: 0,
             }),
             "stay" => Ok(WakeVerdict::stay()),
-            other => Err(mlua::Error::runtime(format!(
-                "wake provider must return \"wake\"/\"stay\"; got {other:?}"
+            other => Err(mlua::Error::runtime(acb_i18n::t!(
+                "plugin.lua.wake_result",
+                value = format!("{other:?}")
             ))),
         },
         Value::Table(table) => {
@@ -1639,13 +1705,15 @@ fn interpret_wake(value: Value) -> mlua::Result<WakeVerdict> {
                     delay_ms: delay_ms.unwrap_or(0),
                 }),
                 "stay" => Ok(WakeVerdict::stay()),
-                other => Err(mlua::Error::runtime(format!(
-                    "wake provider decision must be \"wake\"/\"stay\"; got {other:?}"
+                other => Err(mlua::Error::runtime(acb_i18n::t!(
+                    "plugin.lua.wake_decision",
+                    value = format!("{other:?}")
                 ))),
             }
         }
-        other => Err(mlua::Error::runtime(format!(
-            "wake provider must return \"wake\"/\"stay\", a boolean, or a {{decision, reason, delay_ms}} table; got {other:?}"
+        other => Err(mlua::Error::runtime(acb_i18n::t!(
+            "plugin.lua.wake_wrong_type",
+            value = format!("{other:?}")
         ))),
     }
 }
@@ -1660,12 +1728,14 @@ fn interpret_access(value: Value) -> mlua::Result<AccessDecision> {
         Value::String(text) => match text.to_string_lossy().as_str() {
             "allow" => Ok(AccessDecision::Allow),
             "deny" => Ok(AccessDecision::Deny),
-            other => Err(mlua::Error::runtime(format!(
-                "access provider must return \"allow\"/\"deny\"; got {other:?}"
+            other => Err(mlua::Error::runtime(acb_i18n::t!(
+                "plugin.lua.access_wrong_string",
+                value = format!("{other:?}")
             ))),
         },
-        other => Err(mlua::Error::runtime(format!(
-            "access provider must return \"allow\"/\"deny\" or a boolean; got {other:?}"
+        other => Err(mlua::Error::runtime(acb_i18n::t!(
+            "plugin.lua.access_wrong_type",
+            value = format!("{other:?}")
         ))),
     }
 }

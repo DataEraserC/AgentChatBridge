@@ -77,11 +77,9 @@ impl OneBotOutbound {
 
     /// 超时不是明确失败：请求可能还在上传/处理，也可能已经执行。
     fn timeout_detail(timeout: Duration) -> String {
-        format!(
-            "the request was handed to the adapter, but the platform did not reply within {} seconds; \
-             it may still be processing or may already have executed. Do not resend blindly; use \
-             get_history / fetch_records to confirm whether it was sent.",
-            timeout.as_secs()
+        acb_i18n::t!(
+            "adapter.onebot11.timeout_detail",
+            seconds = timeout.as_secs()
         )
     }
 }
@@ -89,17 +87,18 @@ impl OneBotOutbound {
 impl Outbound for OneBotOutbound {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         if room.connection != self.connection {
-            return Err(OutboundError::Unavailable(format!(
-                "this connection is {}, but received {}",
-                self.connection, room.connection
+            return Err(OutboundError::Unavailable(acb_i18n::t!(
+                "adapter.onebot11.connection_mismatch",
+                connection = self.connection,
+                room = room.connection
             )));
         }
 
         let (action, params) = action_of(room, elements)?;
         let Some(sender) = self.slot.current() else {
-            return Err(OutboundError::Unavailable(format!(
-                "{} is not connected yet",
-                self.connection
+            return Err(OutboundError::Unavailable(acb_i18n::t!(
+                "adapter.onebot11.not_connected",
+                connection = self.connection
             )));
         };
 
@@ -111,7 +110,9 @@ impl Outbound for OneBotOutbound {
                 body: json!({"action": action, "params": params, "echo": echo}),
                 reply: reply_tx,
             })
-            .map_err(|_| OutboundError::Unavailable("connection was just lost".into()))?;
+            .map_err(|_| {
+                OutboundError::Unavailable(acb_i18n::t!("adapter.onebot11.connection_lost"))
+            })?;
 
         let timeout = self.send_timeout(elements);
         let response = reply_rx
@@ -133,9 +134,10 @@ impl Outbound for OneBotOutbound {
         params: &Value,
     ) -> Result<CallOutcome, CallError> {
         if room.connection != self.connection {
-            return Err(CallError::Forbidden(format!(
-                "this connection is {}, but received a call for {}",
-                self.connection, room.connection
+            return Err(CallError::Forbidden(acb_i18n::t!(
+                "adapter.onebot11.call_connection_mismatch",
+                connection = self.connection,
+                room = room.connection
             )));
         }
 
@@ -175,10 +177,7 @@ impl OneBotOutbound {
             })
             .filter(|id| !id.is_empty())
             .ok_or_else(|| {
-                CallError::BadParams(
-                    "id is required: the data.id of the forward element (use it when the content looks like [merged forward])"
-                        .into(),
-                )
+                CallError::BadParams(acb_i18n::t!("adapter.onebot11.forward_id_required"))
             })?;
 
         let depth = params
@@ -208,9 +207,9 @@ impl OneBotOutbound {
         timeout: Duration,
     ) -> Result<Value, CallError> {
         let Some(sender) = self.slot.current() else {
-            return Err(CallError::Unavailable(format!(
-                "{} is not connected yet",
-                self.connection
+            return Err(CallError::Unavailable(acb_i18n::t!(
+                "adapter.onebot11.not_connected",
+                connection = self.connection
             )));
         };
 
@@ -222,7 +221,9 @@ impl OneBotOutbound {
                 body: json!({"action": action, "params": params, "echo": echo}),
                 reply: reply_tx,
             })
-            .map_err(|_| CallError::Unavailable("connection was just lost".into()))?;
+            .map_err(|_| {
+                CallError::Unavailable(acb_i18n::t!("adapter.onebot11.connection_lost"))
+            })?;
 
         reply_rx
             .recv_timeout(timeout)
@@ -241,10 +242,10 @@ fn action_of_route(route: &Route, room: &RoomId) -> Result<&'static str, CallErr
         Target::ByRoom { group, private } => match room.path.as_slice() {
             [kind, _] if kind == "group" => Ok(group),
             [kind, _] if kind == "private" => Ok(private),
-            _ => Err(CallError::BadParams(format!(
-                "{} requires a group or private room, but room {} is neither group/ nor private/",
-                route.method,
-                room.key()
+            _ => Err(CallError::BadParams(acb_i18n::t!(
+                "adapter.onebot11.room_needs_group_or_private",
+                method = route.method,
+                room = room.key()
             ))),
         },
     }
@@ -259,9 +260,9 @@ fn call_payload(route: &Route, room: &RoomId, params: &Value) -> Result<Value, C
         Value::Object(map) => map.clone(),
         Value::Null => serde_json::Map::new(),
         _ => {
-            return Err(CallError::BadParams(
-                "params must be an object (map)".into(),
-            ));
+            return Err(CallError::BadParams(acb_i18n::t!(
+                "adapter.onebot11.params_must_be_object"
+            )));
         }
     };
 
@@ -276,35 +277,35 @@ fn call_payload(route: &Route, room: &RoomId, params: &Value) -> Result<Value, C
                     // - poke.send 在群里：user_id 是“拍谁”，不是房间目标，必须保留；
                     // - 其它（如 message.send_forward）：user_id 指向另一个私聊房间，拒绝。
                     if route.method != "poke.send" && payload.contains_key(private_key) {
-                        return Err(CallError::BadParams(format!(
-                            "{} has {} pointing to another private chat; the current room is {}. \
-                             To send to a private chat, select that room with the room parameter; \
-                             do not retarget in params",
-                            route.method, private_key, room
+                        return Err(CallError::BadParams(acb_i18n::t!(
+                            "adapter.onebot11.private_target_other_room",
+                            method = route.method,
+                            key = private_key,
+                            room = room
                         )));
                     }
                     if route.method == "poke.send" && !payload.contains_key(private_key) {
-                        return Err(CallError::BadParams(
-                            "poke.send in a group requires user_id: pass who to poke".into(),
-                        ));
+                        return Err(CallError::BadParams(acb_i18n::t!(
+                            "adapter.onebot11.poke_needs_user_id"
+                        )));
                     }
                 }
                 [kind, id] if kind == "private" => {
                     fill_room_target(&mut payload, route.method, private_key, room, id)?;
                     if payload.contains_key(group_key) {
-                        return Err(CallError::BadParams(format!(
-                            "{} has {} pointing to another group; the current room is {}. \
-                             To send to a group, select that group with the room parameter; \
-                             do not retarget in params",
-                            route.method, group_key, room
+                        return Err(CallError::BadParams(acb_i18n::t!(
+                            "adapter.onebot11.group_target_other_room",
+                            method = route.method,
+                            key = group_key,
+                            room = room
                         )));
                     }
                 }
                 _ => {
-                    return Err(CallError::BadParams(format!(
-                        "{} requires a group or private room, but room {} is neither group/ nor private/",
-                        route.method,
-                        room.key()
+                    return Err(CallError::BadParams(acb_i18n::t!(
+                        "adapter.onebot11.room_needs_group_or_private",
+                        method = route.method,
+                        room = room.key()
                     )));
                 }
             }
@@ -327,21 +328,20 @@ fn fill_matching_group_target(
     let Some(id) = group_id_of(room) else {
         if let Some(value) = payload.get(key) {
             let target = value.as_str().unwrap_or_default();
-            return Err(CallError::BadParams(format!(
-                "{} has {} pointing to group {target}, but the current room is {}; \
-                 to operate on it, change platform_call's room to \"{}\" (and make sure this \
-                 session is subscribed to it); do not retarget in params",
-                method,
-                key,
-                room,
-                target_room_text(room, "group", target)
+            return Err(CallError::BadParams(acb_i18n::t!(
+                "adapter.onebot11.group_target_mismatch",
+                method = method,
+                key = key,
+                target = target,
+                room = room,
+                target_room = target_room_text(room, "group", target)
             )));
         }
-        return Err(CallError::BadParams(format!(
-            "{} requires {}, but room {} is not a group; provide it in params",
-            method,
-            key,
-            room.key()
+        return Err(CallError::BadParams(acb_i18n::t!(
+            "adapter.onebot11.group_target_missing",
+            method = method,
+            key = key,
+            room = room.key()
         )));
     };
     fill_room_target(payload, method, key, room, id)
@@ -357,21 +357,20 @@ fn fill_matching_private_target(
     let Some(id) = private_id_of(room) else {
         if let Some(value) = payload.get(key) {
             let target = value.as_str().unwrap_or_default();
-            return Err(CallError::BadParams(format!(
-                "{} has {} pointing to private chat {target}, but the current room is {}; \
-                 to operate on it, change platform_call's room to \"{}\" (and make sure this \
-                 session is subscribed to it); do not retarget in params",
-                method,
-                key,
-                room,
-                target_room_text(room, "private", target)
+            return Err(CallError::BadParams(acb_i18n::t!(
+                "adapter.onebot11.private_target_mismatch",
+                method = method,
+                key = key,
+                target = target,
+                room = room,
+                target_room = target_room_text(room, "private", target)
             )));
         }
-        return Err(CallError::BadParams(format!(
-            "{} requires {}, but room {} is not a private chat; provide it in params",
-            method,
-            key,
-            room.key()
+        return Err(CallError::BadParams(acb_i18n::t!(
+            "adapter.onebot11.private_target_missing",
+            method = method,
+            key = key,
+            room = room.key()
         )));
     };
     fill_room_target(payload, method, key, room, id)
@@ -394,13 +393,13 @@ fn fill_room_target(
                 } else {
                     "private"
                 };
-                return Err(CallError::BadParams(format!(
-                    "{} has {} = {given}, but the current room is {room}; \
-                     do not retarget in params. To operate on it, change platform_call's room to \"{}\" \
-                     (and make sure this session is subscribed to it)",
-                    method,
-                    key,
-                    target_room_text(room, kind, given)
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.target_mismatch",
+                    method = method,
+                    key = key,
+                    given = given,
+                    room = room,
+                    target_room = target_room_text(room, kind, given)
                 )));
             }
         }
@@ -503,12 +502,13 @@ fn parse_call_response(method: &str, value: Value) -> Result<Value, CallError> {
         return Ok(value.get("data").cloned().unwrap_or(Value::Null));
     }
 
+    let fallback_reason = acb_i18n::t!("adapter.onebot11.no_platform_reason");
     let detail = value
         .get("wording")
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .or_else(|| value.get("message").and_then(Value::as_str))
-        .unwrap_or("the platform gave no reason");
+        .unwrap_or(&fallback_reason);
     let reason = format!("{detail} (retcode {retcode})");
 
     Err(match retcode {
@@ -534,9 +534,9 @@ fn action_of(room: &RoomId, elements: &[Element]) -> Result<(&'static str, Value
                 "upload_private_file",
                 json!({"user_id": id, "file": url, "name": name}),
             )),
-            _ => Err(OutboundError::Unsupported(format!(
-                "unrecognized room format: {} (QQ rooms must be group/<group id> or private/<user id>)",
-                room.key()
+            _ => Err(OutboundError::Unsupported(acb_i18n::t!(
+                "adapter.onebot11.unrecognized_room",
+                room = room.key()
             ))),
         };
     }
@@ -553,9 +553,9 @@ fn action_of(room: &RoomId, elements: &[Element]) -> Result<(&'static str, Value
             "send_private_msg",
             json!({"user_id": id, "message": message}),
         )),
-        _ => Err(OutboundError::Unsupported(format!(
-            "unrecognized room format: {} (QQ rooms must be group/<group id> or private/<user id>)",
-            room.key()
+        _ => Err(OutboundError::Unsupported(acb_i18n::t!(
+            "adapter.onebot11.unrecognized_room",
+            room = room.key()
         ))),
     }
 }
@@ -565,12 +565,13 @@ fn parse_response(value: Value) -> Result<Sent, OutboundError> {
     let retcode = value.get("retcode").and_then(Value::as_i64).unwrap_or(-1);
     // 0 = 成功；1 = 已受理（异步发送的实现会这么回）。
     if retcode != 0 && retcode != 1 {
+        let fallback_reason = acb_i18n::t!("adapter.onebot11.no_platform_reason");
         let detail = value
             .get("wording")
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
             .or_else(|| value.get("message").and_then(Value::as_str))
-            .unwrap_or("the platform gave no reason");
+            .unwrap_or(&fallback_reason);
         return Err(OutboundError::Rejected(format!(
             "{detail} (retcode {retcode})"
         )));

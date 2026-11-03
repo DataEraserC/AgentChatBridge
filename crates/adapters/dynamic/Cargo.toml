@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "动态库平台适配器装载器：C ABI + 共用 JSON wire"
 
 [dependencies]
+acb-i18n = { workspace = true }
 acb-adapter-api = { path = "../../adapter-api" }
 acb-kernel = { path = "../../kernel" }
 acb-proto = { path = "../../proto" }

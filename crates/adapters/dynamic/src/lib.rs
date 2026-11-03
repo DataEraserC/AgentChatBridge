@@ -90,7 +90,11 @@ impl PluginLoader for DynamicLoader {
         for plugin in &self.plugins {
             let loaded =
                 LoadedPlugin::load(&plugin.path, plugin.kind.as_deref()).map_err(|detail| {
-                    PluginError::Loader(format!("failed to load {}: {detail}", plugin.path))
+                    PluginError::Loader(acb_i18n::t!(
+                        "adapter.dynamic.load_failed",
+                        path = plugin.path,
+                        detail = detail
+                    ))
                 })?;
             match loaded {
                 LoadedPlugin::Adapter(factory) => manager
@@ -117,23 +121,25 @@ enum LoadedPlugin {
 impl LoadedPlugin {
     fn load(path: &str, expected_kind: Option<&str>) -> Result<Self, String> {
         let library = unsafe { Library::new(path) }
-            .map_err(|error| format!("cannot open dynamic library: {error}"))?;
+            .map_err(|error| acb_i18n::t!("adapter.dynamic.open_library_failed", error = error))?;
         let entry: libloading::Symbol<'_, EntryFn> =
             unsafe { library.get(ENTRY_SYMBOL) }.map_err(|error| {
-                format!(
-                    "missing export {}: {error}",
-                    String::from_utf8_lossy(ENTRY_SYMBOL)
+                acb_i18n::t!(
+                    "adapter.dynamic.missing_export",
+                    symbol = String::from_utf8_lossy(ENTRY_SYMBOL),
+                    error = error
                 )
             })?;
         let table_ptr = unsafe { entry() };
         if table_ptr.is_null() {
-            return Err("acb_adapter_entry_v1 returned an empty table".into());
+            return Err(acb_i18n::t!("adapter.dynamic.empty_table"));
         }
         let table = unsafe { *table_ptr };
         if table.abi_version != ABI_VERSION {
-            return Err(format!(
-                "incompatible ABI version {} (requires {ABI_VERSION})",
-                table.abi_version
+            return Err(acb_i18n::t!(
+                "adapter.dynamic.abi_incompatible",
+                version = table.abi_version,
+                required = ABI_VERSION
             ));
         }
         if table.manifest.is_none()
@@ -142,22 +148,22 @@ impl LoadedPlugin {
             || table.destroy.is_none()
             || table.free_string.is_none()
         {
-            return Err(
-                "plugin function table is incomplete (manifest/create/invoke/destroy/free_string are all required)".into(),
-            );
+            return Err(acb_i18n::t!("adapter.dynamic.incomplete_table"));
         }
 
         let wire = read_manifest(&table)?;
         match wire.extension.as_str() {
             "platform_adapter" => {
-                let manifest = AdapterManifest::try_from(wire)
-                    .map_err(|detail| format!("invalid manifest: {detail}"))?;
+                let manifest = AdapterManifest::try_from(wire).map_err(|detail| {
+                    acb_i18n::t!("adapter.dynamic.invalid_manifest", detail = detail)
+                })?;
                 validate_manifest(&manifest).map_err(|error| error.to_string())?;
                 if let Some(expected) = expected_kind {
                     if manifest.kind.as_ref() != expected {
-                        return Err(format!(
-                            "manifest kind is {}, but the config says {expected}",
-                            manifest.kind
+                        return Err(acb_i18n::t!(
+                            "adapter.dynamic.manifest_kind_mismatch",
+                            kind = manifest.kind,
+                            expected = expected
                         ));
                     }
                 }
@@ -168,19 +174,26 @@ impl LoadedPlugin {
                 }))
             }
             "wake" => {
-                let provider = ProviderId::parse(&wire.id)
-                    .map_err(|error| format!("invalid wake provider id: {error}"))?;
+                let provider = ProviderId::parse(&wire.id).map_err(|error| {
+                    acb_i18n::t!(
+                        "adapter.dynamic.invalid_provider_id",
+                        extension = "wake",
+                        error = error
+                    )
+                })?;
                 if provider.namespace() == "acb" {
-                    return Err("out-of-tree plugins cannot use the acb namespace".into());
+                    return Err(acb_i18n::t!("adapter.dynamic.acb_namespace"));
                 }
                 if wire.api_version != PLUGIN_API_VERSION {
-                    return Err(format!(
-                        "incompatible plugin API version {} (requires {PLUGIN_API_VERSION})",
-                        wire.api_version
+                    return Err(acb_i18n::t!(
+                        "adapter.dynamic.api_incompatible",
+                        version = wire.api_version,
+                        required = PLUGIN_API_VERSION
                     ));
                 }
-                let metadata = PluginMetadata::try_from(wire.metadata)
-                    .map_err(|detail| format!("invalid metadata: {detail}"))?;
+                let metadata = PluginMetadata::try_from(wire.metadata).map_err(|detail| {
+                    acb_i18n::t!("adapter.dynamic.invalid_metadata", detail = detail)
+                })?;
                 if metadata
                     .summary
                     .as_deref()
@@ -188,13 +201,10 @@ impl LoadedPlugin {
                     .unwrap_or("")
                     .is_empty()
                 {
-                    return Err("wake plugins must declare metadata.summary".into());
+                    return Err(acb_i18n::t!("adapter.dynamic.wake_summary_required"));
                 }
                 if metadata.effects.is_empty() {
-                    return Err(
-                        "wake plugins must declare effects (at least may_wake / may_stay_silent)"
-                            .into(),
-                    );
+                    return Err(acb_i18n::t!("adapter.dynamic.wake_effects_required"));
                 }
                 Ok(Self::Wake(DylibWakeManager::new(
                     Arc::new(library),
@@ -206,19 +216,26 @@ impl LoadedPlugin {
                 )))
             }
             "access" | "delivery" | "send" | "turn_error" | "receive" | "clock" => {
-                let provider = ProviderId::parse(&wire.id)
-                    .map_err(|error| format!("invalid {} provider id: {error}", wire.extension))?;
+                let provider = ProviderId::parse(&wire.id).map_err(|error| {
+                    acb_i18n::t!(
+                        "adapter.dynamic.invalid_provider_id",
+                        extension = wire.extension,
+                        error = error
+                    )
+                })?;
                 if provider.namespace() == "acb" {
-                    return Err("out-of-tree plugins cannot use the acb namespace".into());
+                    return Err(acb_i18n::t!("adapter.dynamic.acb_namespace"));
                 }
                 if wire.api_version != PLUGIN_API_VERSION {
-                    return Err(format!(
-                        "incompatible plugin API version {} (requires {PLUGIN_API_VERSION})",
-                        wire.api_version
+                    return Err(acb_i18n::t!(
+                        "adapter.dynamic.api_incompatible",
+                        version = wire.api_version,
+                        required = PLUGIN_API_VERSION
                     ));
                 }
-                let metadata = PluginMetadata::try_from(wire.metadata)
-                    .map_err(|detail| format!("invalid metadata: {detail}"))?;
+                let metadata = PluginMetadata::try_from(wire.metadata).map_err(|detail| {
+                    acb_i18n::t!("adapter.dynamic.invalid_metadata", detail = detail)
+                })?;
                 if metadata
                     .summary
                     .as_deref()
@@ -226,9 +243,9 @@ impl LoadedPlugin {
                     .unwrap_or("")
                     .is_empty()
                 {
-                    return Err(format!(
-                        "{} plugins must declare metadata.summary",
-                        wire.extension
+                    return Err(acb_i18n::t!(
+                        "adapter.dynamic.provider_summary_required",
+                        extension = wire.extension
                     ));
                 }
                 let point = match wire.extension.as_str() {
@@ -249,7 +266,10 @@ impl LoadedPlugin {
                     metadata,
                 )))
             }
-            other => Err(format!("unknown plugin extension point: {other}")),
+            other => Err(acb_i18n::t!(
+                "adapter.dynamic.unknown_extension",
+                extension = other
+            )),
         }
     }
 }
@@ -262,10 +282,13 @@ struct DylibAdapterFactory {
 }
 
 fn read_manifest(table: &AdapterV1) -> Result<WireManifest, String> {
-    let manifest_fn = table.manifest.ok_or("missing manifest function")?;
+    let manifest_fn = table
+        .manifest
+        .ok_or(acb_i18n::t!("adapter.dynamic.missing_manifest_fn"))?;
     let pointer = unsafe { manifest_fn() };
     let json = take_owned_string(pointer, table)?;
-    serde_json::from_str(&json).map_err(|error| format!("manifest is not valid JSON: {error}"))
+    serde_json::from_str(&json)
+        .map_err(|error| acb_i18n::t!("adapter.dynamic.manifest_invalid_json", error = error))
 }
 
 impl AdapterFactory for DylibAdapterFactory {
@@ -305,16 +328,18 @@ impl DylibAdapterFactory {
         let config = WireInstanceConfig::Adapter {
             connection: WireConnection::from(connection),
         };
-        let config_json = CString::new(
-            encode_line(&config)
-                .map_err(|error| format!("failed to serialize connection config: {error}"))?,
-        )
-        .map_err(|_| "connection config contains NUL".to_owned())?;
+        let config_json = CString::new(encode_line(&config).map_err(|error| {
+            acb_i18n::t!("adapter.dynamic.serialize_connection_failed", error = error)
+        })?)
+        .map_err(|_| acb_i18n::t!("adapter.dynamic.connection_config_nul"))?;
 
-        let create = self.table.create.ok_or("missing create function")?;
+        let create = self
+            .table
+            .create
+            .ok_or(acb_i18n::t!("adapter.dynamic.missing_create_fn"))?;
         let handle_ptr = unsafe { create(config_json.as_ptr(), &host) };
         if handle_ptr.is_null() {
-            return Err("create returned an empty handle".into());
+            return Err(acb_i18n::t!("adapter.dynamic.empty_handle"));
         }
         let handle = Arc::new(Mutex::new(AdapterHandle {
             ptr: handle_ptr,
@@ -325,7 +350,10 @@ impl DylibAdapterFactory {
             Ok(catalog) => catalog,
             Err(detail) => {
                 destroy_handle(&self.table, &handle);
-                return Err(format!("failed to read platform method catalog: {detail}"));
+                return Err(acb_i18n::t!(
+                    "adapter.dynamic.read_catalog_failed",
+                    detail = detail
+                ));
             }
         };
 
@@ -364,12 +392,18 @@ fn describe(
             result: WireResult::Catalog { catalog },
             ..
         } => convert_catalog(catalog)
-            .map_err(|detail| format!("invalid platform method catalog: {detail}")),
+            .map_err(|detail| acb_i18n::t!("adapter.dynamic.catalog_invalid", detail = detail)),
         AdapterMessage::Reply {
             result: WireResult::Error { error },
             ..
-        } => Err(format!("plugin rejected describe: {error:?}")),
-        other => Err(format!("invalid describe reply: {other:?}")),
+        } => Err(acb_i18n::t!(
+            "adapter.dynamic.describe_rejected",
+            error = format!("{error:?}")
+        )),
+        other => Err(acb_i18n::t!(
+            "adapter.dynamic.bad_describe_reply",
+            reply = format!("{other:?}")
+        )),
     }
 }
 
@@ -439,7 +473,7 @@ impl ManagerPlugin for DylibWakeManager {
         let ProviderOptions::Wake(policy) = options else {
             return Err(PluginError::Provider {
                 id: id.to_string(),
-                detail: "wake provider requires WakePolicy".into(),
+                detail: acb_i18n::t!("adapter.dynamic.wake_policy_required"),
             });
         };
 
@@ -520,17 +554,20 @@ impl DylibWakeProvider {
             extension: "wake".into(),
             options: wake_options(policy),
         };
-        let config_json = CString::new(
-            encode_line(&config)
-                .map_err(|error| format!("failed to serialize wake config: {error}"))?,
-        )
-        .map_err(|_| "wake config contains NUL".to_owned())?;
+        let config_json = CString::new(encode_line(&config).map_err(|error| {
+            acb_i18n::t!("adapter.dynamic.serialize_wake_failed", error = error)
+        })?)
+        .map_err(|_| acb_i18n::t!("adapter.dynamic.wake_config_nul"))?;
 
-        let create = table.create.ok_or("missing create function")?;
+        let create = table
+            .create
+            .ok_or(acb_i18n::t!("adapter.dynamic.missing_create_fn"))?;
         let handle_ptr = unsafe { create(config_json.as_ptr(), &host) };
         if handle_ptr.is_null() {
-            return Err(format!(
-                "wake plugin {plugin_id} (platform {platform}) create returned an empty handle"
+            return Err(acb_i18n::t!(
+                "adapter.dynamic.wake_empty_handle",
+                plugin_id = plugin_id,
+                platform = platform
             ));
         }
 
@@ -550,7 +587,14 @@ impl DylibWakeProvider {
     fn note_failure(&self, detail: &str) {
         let count = self.failures.fetch_add(1, Ordering::Relaxed);
         if count < 5 || count % 100 == 0 {
-            eprintln!("wake plugin failed (attempt {}): {detail}", count + 1);
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "adapter.dynamic.wake_failed",
+                    attempt = count + 1,
+                    detail = detail
+                )
+            );
         }
     }
 
@@ -607,12 +651,18 @@ impl WakeProvider for DylibWakeProvider {
                 },
                 "stay" => WakeVerdict::stay(),
                 other => {
-                    self.note_failure(&format!("unknown wake decision: {other}"));
+                    self.note_failure(&acb_i18n::t!(
+                        "adapter.dynamic.unknown_wake_decision",
+                        decision = other
+                    ));
                     WakeVerdict::stay()
                 }
             },
             Ok(other) => {
-                self.note_failure(&format!("reply is not a wake decision: {other:?}"));
+                self.note_failure(&acb_i18n::t!(
+                    "adapter.dynamic.not_wake_reply",
+                    reply = format!("{other:?}")
+                ));
                 WakeVerdict::stay()
             }
             Err(detail) => {
@@ -770,7 +820,10 @@ impl ManagerPlugin for DylibDecisionManager {
             (point, _) => {
                 return Err(PluginError::Provider {
                     id: id.to_string(),
-                    detail: format!("{point:?} provider received options of the wrong type"),
+                    detail: acb_i18n::t!(
+                        "adapter.dynamic.provider_options_wrong_type",
+                        point = format!("{point:?}")
+                    ),
                 });
             }
         };
@@ -819,7 +872,7 @@ impl ManagerPlugin for DylibDecisionManager {
             other => {
                 return Err(PluginError::Provider {
                     id: id.to_string(),
-                    detail: format!("unknown decision extension point: {other}"),
+                    detail: acb_i18n::t!("adapter.dynamic.unknown_decision_point", point = other),
                 });
             }
         };
@@ -881,17 +934,24 @@ impl DecisionChannel {
             extension: extension.to_owned(),
             options,
         };
-        let config_json = CString::new(
-            encode_line(&config)
-                .map_err(|error| format!("failed to serialize {extension} config: {error}"))?,
-        )
-        .map_err(|_| format!("{extension} config contains NUL"))?;
+        let config_json = CString::new(encode_line(&config).map_err(|error| {
+            acb_i18n::t!(
+                "adapter.dynamic.serialize_config_failed",
+                extension = extension,
+                error = error
+            )
+        })?)
+        .map_err(|_| acb_i18n::t!("adapter.dynamic.config_nul", extension = extension))?;
 
-        let create = table.create.ok_or("missing create function")?;
+        let create = table
+            .create
+            .ok_or(acb_i18n::t!("adapter.dynamic.missing_create_fn"))?;
         let handle_ptr = unsafe { create(config_json.as_ptr(), &host) };
         if handle_ptr.is_null() {
-            return Err(format!(
-                "{extension} plugin {plugin_id} create returned an empty handle"
+            return Err(acb_i18n::t!(
+                "adapter.dynamic.empty_handle_extension",
+                extension = extension,
+                plugin_id = plugin_id
             ));
         }
 
@@ -921,9 +981,13 @@ impl DecisionChannel {
         let count = self.failures.fetch_add(1, Ordering::Relaxed);
         if count < 5 || count % 100 == 0 {
             eprintln!(
-                "{} plugin failed (attempt {}): {detail}",
-                self.label,
-                count + 1
+                "{}",
+                acb_i18n::t!(
+                    "adapter.dynamic.plugin_failed",
+                    label = self.label,
+                    attempt = count + 1,
+                    detail = detail
+                )
             );
         }
     }
@@ -941,7 +1005,10 @@ fn plugin_decision(channel: &DecisionChannel, message: CoreMessage) -> Option<St
             ..
         }) => Some(decision),
         Ok(other) => {
-            channel.note_failure(&format!("reply is not a decision: {other:?}"));
+            channel.note_failure(&acb_i18n::t!(
+                "adapter.dynamic.not_decision_reply",
+                reply = format!("{other:?}")
+            ));
             None
         }
         Err(detail) => {
@@ -979,8 +1046,10 @@ impl AccessProvider for DylibAccessProvider {
             Some("allow") => AccessDecision::Allow,
             Some("deny") => AccessDecision::Deny,
             Some(other) => {
-                self.channel
-                    .note_failure(&format!("unknown access decision: {other}"));
+                self.channel.note_failure(&acb_i18n::t!(
+                    "adapter.dynamic.unknown_access_decision",
+                    decision = other
+                ));
                 AccessDecision::Deny
             }
             None => AccessDecision::Deny,
@@ -1020,8 +1089,10 @@ impl DeliveryComposer for DylibDeliveryComposer {
                 ..
             }) => default_delivery_plan(request),
             Ok(other) => {
-                self.channel
-                    .note_failure(&format!("reply is not a delivery plan: {other:?}"));
+                self.channel.note_failure(&acb_i18n::t!(
+                    "adapter.dynamic.not_delivery_plan",
+                    reply = format!("{other:?}")
+                ));
                 default_delivery_plan(request)
             }
             Err(detail) => {
@@ -1068,8 +1139,10 @@ impl TurnErrorProvider for DylibTurnErrorProvider {
                 .filter_map(|action| parse_turn_error_action(&self.channel, action))
                 .collect(),
             Ok(other) => {
-                self.channel
-                    .note_failure(&format!("reply is not a turn error action: {other:?}"));
+                self.channel.note_failure(&acb_i18n::t!(
+                    "adapter.dynamic.not_turn_error_action",
+                    reply = format!("{other:?}")
+                ));
                 DefaultTurnErrorProvider.decide(policy, request)
             }
             Err(detail) => {
@@ -1098,7 +1171,11 @@ fn parse_turn_error_action(
         WireTurnErrorAction::Send { room } => match RoomId::parse(&room) {
             Ok(room) => Some(TurnErrorAction::Send { room }),
             Err(error) => {
-                channel.note_failure(&format!("invalid turn error room: {room} ({error})"));
+                channel.note_failure(&acb_i18n::t!(
+                    "adapter.dynamic.invalid_turn_error_room",
+                    room = room,
+                    error = error
+                ));
                 None
             }
         },
@@ -1158,19 +1235,25 @@ impl SendHook for DylibSendHook {
                 result: WireResult::Error { error },
                 ..
             }) => {
-                self.channel
-                    .note_failure(&format!("before-send hook error: {error:?}"));
+                let detail = acb_i18n::t!(
+                    "adapter.dynamic.before_send_hook_error",
+                    error = format!("{error:?}")
+                );
+                self.channel.note_failure(&detail);
                 Err(PluginError::Provider {
                     id: self.provider.clone(),
-                    detail: format!("before-send hook error: {error:?}"),
+                    detail,
                 })
             }
             Ok(other) => {
-                self.channel
-                    .note_failure(&format!("invalid before-send hook reply: {other:?}"));
+                let detail = acb_i18n::t!(
+                    "adapter.dynamic.bad_before_send_reply",
+                    reply = format!("{other:?}")
+                );
+                self.channel.note_failure(&detail);
                 Err(PluginError::Provider {
                     id: self.provider.clone(),
-                    detail: format!("invalid before-send hook reply: {other:?}"),
+                    detail,
                 })
             }
             Err(detail) => {
@@ -1231,8 +1314,10 @@ impl ReceiveProvider for DylibReceiveProvider {
             Some("record") => ReceiveDecision::Record,
             Some("drop") => ReceiveDecision::Drop,
             Some(other) => {
-                self.channel
-                    .note_failure(&format!("unknown receive decision: {other}"));
+                self.channel.note_failure(&acb_i18n::t!(
+                    "adapter.dynamic.unknown_receive_decision",
+                    decision = other
+                ));
                 ReceiveDecision::Record
             }
             // 出错按「接收」兜底：宁可多记一条，也不误丢消息。
@@ -1265,8 +1350,10 @@ impl ClockProvider for DylibClockProvider {
             Some("due") => true,
             Some("skip") => false,
             Some(other) => {
-                self.channel
-                    .note_failure(&format!("unknown clock decision: {other}"));
+                self.channel.note_failure(&acb_i18n::t!(
+                    "adapter.dynamic.unknown_clock_decision",
+                    decision = other
+                ));
                 false
             }
             // 出错按「不触发」兜底：时钟只是例行检查，不该因为插件坏了刷屏。
@@ -1340,9 +1427,10 @@ struct DylibOutbound {
 impl Outbound for DylibOutbound {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         if room.connection != self.connection {
-            return Err(OutboundError::Unavailable(format!(
-                "this connection is {}, but received {}",
-                self.connection, room.connection
+            return Err(OutboundError::Unavailable(acb_i18n::t!(
+                "adapter.dynamic.connection_mismatch",
+                connection = self.connection,
+                room = room.connection
             )));
         }
 
@@ -1368,8 +1456,9 @@ impl Outbound for DylibOutbound {
                 result: WireResult::Error { error },
                 ..
             } => Err(send_error(error)),
-            other => Err(OutboundError::Unavailable(format!(
-                "dynamic adapter reply is not a send result: {other:?}"
+            other => Err(OutboundError::Unavailable(acb_i18n::t!(
+                "adapter.dynamic.not_send_result",
+                reply = format!("{other:?}")
             ))),
         }
     }
@@ -1385,9 +1474,10 @@ impl Outbound for DylibOutbound {
         params: &serde_json::Value,
     ) -> Result<CallOutcome, CallError> {
         if room.connection != self.connection {
-            return Err(CallError::Forbidden(format!(
-                "this connection is {}, but received a call for {}",
-                self.connection, room.connection
+            return Err(CallError::Forbidden(acb_i18n::t!(
+                "adapter.dynamic.call_connection_mismatch",
+                connection = self.connection,
+                room = room.connection
             )));
         }
 
@@ -1420,8 +1510,9 @@ impl Outbound for DylibOutbound {
                 result: WireResult::Error { error },
                 ..
             } => Err(call_error(error)),
-            other => Err(CallError::Unavailable(format!(
-                "dynamic adapter reply is not a call result: {other:?}"
+            other => Err(CallError::Unavailable(acb_i18n::t!(
+                "adapter.dynamic.not_call_result",
+                reply = format!("{other:?}")
             ))),
         }
     }
@@ -1432,28 +1523,30 @@ fn invoke(
     handle: &Arc<Mutex<AdapterHandle>>,
     message: &CoreMessage,
 ) -> Result<AdapterMessage, String> {
-    let request = CString::new(
-        encode_line(message).map_err(|error| format!("failed to serialize request: {error}"))?,
-    )
-    .map_err(|_| "request contains NUL".to_owned())?;
+    let request = CString::new(encode_line(message).map_err(|error| {
+        acb_i18n::t!("adapter.dynamic.serialize_request_failed", error = error)
+    })?)
+    .map_err(|_| acb_i18n::t!("adapter.dynamic.request_nul"))?;
 
     let guard = handle
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !guard.alive {
-        return Err("adapter has already been destroyed".into());
+        return Err(acb_i18n::t!("adapter.dynamic.destroyed"));
     }
-    let invoke_fn = table.invoke.ok_or("missing invoke function")?;
+    let invoke_fn = table
+        .invoke
+        .ok_or(acb_i18n::t!("adapter.dynamic.missing_invoke_fn"))?;
     let pointer = unsafe { invoke_fn(guard.ptr, request.as_ptr()) };
     // 锁在调用期间不放：插件的 handle 不是线程安全的，destroy 必须排队。
     drop(guard);
 
     if pointer.is_null() {
-        return Err("adapter returned no result".into());
+        return Err(acb_i18n::t!("adapter.dynamic.no_result"));
     }
     let json = take_owned_string(pointer, table)?;
     decode_line::<AdapterMessage>(&json)
-        .map_err(|error| format!("reply is not valid JSON: {error}"))
+        .map_err(|error| acb_i18n::t!("adapter.dynamic.bad_reply_json", error = error))
 }
 
 fn invoke_with_timeout(
@@ -1472,19 +1565,19 @@ fn invoke_with_timeout(
     });
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "dynamic adapter call timed out ({} ms); the plugin may be stuck and the bridge needs a restart",
-            timeout.as_millis()
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(acb_i18n::t!(
+            "adapter.dynamic.call_timeout",
+            millis = timeout.as_millis()
         )),
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("dynamic adapter call thread is gone".into())
+            Err(acb_i18n::t!("adapter.dynamic.call_thread_gone"))
         }
     }
 }
 
 fn take_owned_string(pointer: *mut c_char, table: &AdapterV1) -> Result<String, String> {
     if pointer.is_null() {
-        return Err("adapter returned an empty string".into());
+        return Err(acb_i18n::t!("adapter.dynamic.empty_string"));
     }
     let text = unsafe { CStr::from_ptr(pointer).to_string_lossy().into_owned() };
     if let Some(free) = table.free_string {
@@ -1508,9 +1601,7 @@ fn destroy_handle(table: &AdapterV1, handle: &Arc<Mutex<AdapterHandle>>) {
             }
             Err(std::sync::TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
-                    eprintln!(
-                        "dynamic adapter has a stuck call; skipping destroy (wait for bridge restart)"
-                    );
+                    eprintln!("{}", acb_i18n::t!("adapter.dynamic.destroy_stuck"));
                     return;
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -1546,7 +1637,10 @@ fn monitor(
     // 先让插件自己收尾（Shutdown 可能返回空，忽略），再销毁 handle。
     let _ = invoke(&table, &handle, &CoreMessage::Shutdown);
     destroy_handle(&table, &handle);
-    eprintln!("adapter {connection} (dynamic): shut down");
+    eprintln!(
+        "{}",
+        acb_i18n::t!("adapter.dynamic.shutdown", connection = connection)
+    );
 }
 
 unsafe extern "C" fn submit_event(ctx: *mut c_void, message_json: *const c_char) {
@@ -1562,18 +1656,29 @@ unsafe extern "C" fn submit_event(ctx: *mut c_void, message_json: *const c_char)
             Ok(AdapterMessage::Event { record }) => {
                 if !context.events.submit(record.into()) {
                     eprintln!(
-                        "adapter {} (dynamic): inbound queue is closed; dropping a record",
-                        context.connection
+                        "{}",
+                        acb_i18n::t!(
+                            "adapter.dynamic.inbound_queue_closed",
+                            connection = context.connection
+                        )
                     );
                 }
             }
             Ok(other) => eprintln!(
-                "adapter {} (dynamic): submit_event only accepts event; got {:?}",
-                context.connection, other
+                "{}",
+                acb_i18n::t!(
+                    "adapter.dynamic.submit_event_wrong_message",
+                    connection = context.connection,
+                    message = format!("{other:?}")
+                )
             ),
             Err(error) => eprintln!(
-                "adapter {} (dynamic): submit_event received unparseable JSON: {error}",
-                context.connection
+                "{}",
+                acb_i18n::t!(
+                    "adapter.dynamic.submit_event_bad_json",
+                    connection = context.connection,
+                    error = error
+                )
             ),
         }
     }));
@@ -1608,6 +1713,14 @@ unsafe extern "C" fn log(ctx: *mut c_void, level: *const c_char, message: *const
                 .to_string_lossy()
                 .into_owned()
         };
-        eprintln!("adapter {connection} (dynamic {level}): {message}");
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.dynamic.log_line",
+                connection = connection,
+                level = level,
+                message = message
+            )
+        );
     }));
 }

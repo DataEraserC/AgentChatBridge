@@ -16,6 +16,7 @@ name = "acb-adapter-dynamic"
 version = "0.1.0"
 dependencies = [
  "acb-adapter-api",
+ "acb-i18n",
  "acb-kernel",
  "acb-proto",
  "libloading",
@@ -37,6 +38,7 @@ dependencies = [
 name = "acb-adapter-onebot11"
 version = "0.1.0"
 dependencies = [
+ "acb-i18n",
  "acb-kernel",
  "acb-proto",
  "serde_json",
@@ -49,6 +51,7 @@ name = "acb-adapter-process"
 version = "0.1.0"
 dependencies = [
  "acb-adapter-api",
+ "acb-i18n",
  "acb-kernel",
  "acb-proto",
  "serde_json",
@@ -72,6 +75,7 @@ dependencies = [
  "acb-adapter-dynamic",
  "acb-adapter-onebot11",
  "acb-adapter-process",
+ "acb-i18n",
  "acb-kernel",
  "acb-plugin-lua",
  "acb-plugin-trusted",
@@ -81,10 +85,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "acb-i18n"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "acb-kernel"
 version = "0.1.0"
 dependencies = [
  "acb-adapter-api",
+ "acb-i18n",
  "acb-proto",
  "git2",
  "rusqlite",
@@ -98,6 +110,7 @@ dependencies = [
 name = "acb-plugin-lua"
 version = "0.1.0"
 dependencies = [
+ "acb-i18n",
  "acb-kernel",
  "acb-proto",
  "mlua",
@@ -108,6 +121,7 @@ dependencies = [
 name = "acb-plugin-trusted"
 version = "0.1.0"
 dependencies = [
+ "acb-i18n",
  "acb-kernel",
 ]
 
@@ -115,6 +129,7 @@ dependencies = [
 name = "acb-proto"
 version = "0.1.0"
 dependencies = [
+ "acb-i18n",
  "serde",
  "serde_json",
  "thiserror",

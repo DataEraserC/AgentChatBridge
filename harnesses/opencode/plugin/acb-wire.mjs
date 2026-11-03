@@ -6,6 +6,7 @@
 // 用一个假的桥验它）。opencode 那一侧的粘合全在 `acb.mjs`。
 
 import net from "node:net"
+import { t } from "../../shared/i18n.mjs"
 
 /// 协议版本。和 `acb_proto::frame::PROTOCOL_VERSION` 必须一致。
 export const PROTOCOL_VERSION = 6
@@ -29,12 +30,12 @@ export class BridgeError extends Error {
 export function parseEndpoint(text) {
   const at = text.lastIndexOf(":")
   if (at < 0) {
-    throw new Error(`endpoint must be 127.0.0.1:7700; got ${text}`)
+    throw new Error(t("opencode.endpoint_format", { text }))
   }
   const host = text.slice(0, at).trim() || "127.0.0.1"
   const port = Number(text.slice(at + 1))
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error(`invalid port in endpoint: ${text}`)
+    throw new Error(t("opencode.endpoint_port", { text }))
   }
   return { host, port }
 }
@@ -49,10 +50,10 @@ export function parseEndpoint(text) {
 export class BridgeLink {
   constructor({ endpoint, token, harness, onTurn, onControl, log }) {
     if (!token) {
-      throw new Error("no access token: it must match the session token in config")
+      throw new Error(t("opencode.no_access_token"))
     }
     if (!harness) {
-      throw new Error("no harness name: it must match the session harness in config")
+      throw new Error(t("opencode.no_harness_name"))
     }
     parseEndpoint(endpoint) // 早报错，别等连的时候才炸
     this.endpoint = endpoint
@@ -95,7 +96,7 @@ export class BridgeLink {
 
       const timer = setTimeout(() => {
         socket.destroy()
-        this.#failHandshake(new BridgeError("timeout", "handshake timed out"))
+        this.#failHandshake(new BridgeError("timeout", t("opencode.handshake_timeout")))
       }, HANDSHAKE_TIMEOUT_MS)
 
       this.handshake = {
@@ -117,7 +118,7 @@ export class BridgeLink {
       socket.on("data", (chunk) => this.#onData(chunk))
       socket.on("error", (error) => {
         // 连接被拒之类：握手还没完就先告诉调用方，完事了就只当断线处理。
-        this.#failHandshake(new BridgeError("internal", `cannot connect to bridge: ${error.message}`))
+        this.#failHandshake(new BridgeError("internal", t("opencode.bridge_connect_failed", { error: error.message })))
       })
       socket.on("close", () => this.#onClose())
     })
@@ -135,7 +136,7 @@ export class BridgeLink {
     this.ticket = null
     this.queue = []
     this.#releaseTurn()
-    this.#rejectPending(new BridgeError("internal", "connection closed"))
+    this.#rejectPending(new BridgeError("internal", t("opencode.connection_closed")))
   }
 
   /**
@@ -145,17 +146,17 @@ export class BridgeLink {
    */
   async call(tool, args = {}, { timeout = CALL_TIMEOUT_MS } = {}) {
     if (!this.socket || this.closed) {
-      throw new BridgeError("internal", "the connection to the bridge is gone; cannot send this turn")
+      throw new BridgeError("internal", t("opencode.connection_gone"))
     }
     if (!this.ticket) {
-      throw new BridgeError("unauthorized", "no turn is in progress; tools cannot be called")
+      throw new BridgeError("unauthorized", t("opencode.no_active_turn"))
     }
     const id = `c-${++this.seq}`
     this.turnCalls += 1
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new BridgeError("timeout", `tool ${tool} returned no result`))
+        reject(new BridgeError("timeout", t("opencode.tool_timeout", { tool })))
       }, timeout)
       this.pending.set(id, { resolve, reject, timer })
     })
@@ -169,7 +170,10 @@ export class BridgeLink {
     this.#write({ frame: "turn_end", ticket, ...(error ? { error } : {}) })
     this.log(
       error ? "warn" : "info",
-      `turn_end ${ticket}${error ? `: ${error}` : ""}`,
+      t("opencode.turn_end_log", {
+        ticket,
+        error: error ? t("opencode.turn_end_error_suffix", { error }) : "",
+      }),
     )
     if (ticket === this.ticket) {
       this.ticket = null
@@ -208,14 +212,14 @@ export class BridgeLink {
     try {
       this.socket.write(text.endsWith("\n") ? text : `${text}\n`)
     } catch (error) {
-      this.#failHandshake(new BridgeError("internal", `cannot write: ${error.message}`))
+      this.#failHandshake(new BridgeError("internal", t("opencode.write_failed", { error: error.message })))
     }
   }
 
   #onData(chunk) {
     this.buffer += chunk
     if (this.buffer.length > MAX_FRAME_BYTES && !this.buffer.includes("\n")) {
-      this.log("error", "frame exceeded 1 MiB without a newline; disconnecting")
+      this.log("error", t("opencode.frame_too_large"))
       this.socket?.destroy()
       return
     }
@@ -229,7 +233,7 @@ export class BridgeLink {
       try {
         frame = JSON.parse(line)
       } catch {
-        this.log("error", `bridge sent non-JSON: ${line.slice(0, 200)}`)
+        this.log("error", t("opencode.non_json_frame", { line: line.slice(0, 200) }))
         this.socket?.destroy()
         return
       }
@@ -252,8 +256,12 @@ export class BridgeLink {
         this.queue.push(frame.delivery)
         this.log(
           "info",
-          `turn_start ${frame.delivery.ticket} session ${frame.delivery.session} ` +
-            `room ${roomText(frame.delivery.room)} (queue ${this.queue.length})`,
+          t("opencode.turn_start", {
+            ticket: frame.delivery.ticket,
+            session: frame.delivery.session,
+            room: roomText(frame.delivery.room),
+            queue: this.queue.length,
+          }),
         )
         this.#drainTurns()
         return
@@ -278,7 +286,7 @@ export class BridgeLink {
         Promise.resolve()
           .then(() => this.onControl(frame))
           .catch((error) => {
-            this.log("error", `failed to handle control command ${frame.command}: ${error?.message ?? error}`)
+            this.log("error", t("opencode.control_failed", { command: frame.command, error: error?.message ?? error }))
             try {
               this.controlResult({
                 id: frame.id,
@@ -287,7 +295,7 @@ export class BridgeLink {
                 error: String(error?.message ?? error),
               })
             } catch (reportError) {
-              this.log("error", `failed to report control command result: ${reportError?.message ?? reportError}`)
+              this.log("error", t("opencode.control_report_failed", { error: reportError?.message ?? reportError }))
             }
           })
         return
@@ -298,7 +306,7 @@ export class BridgeLink {
       case "pong":
         return
       default:
-        this.log("warn", `unknown frame: ${frame.frame}`)
+        this.log("warn", t("opencode.unknown_frame", { frame: frame.frame }))
     }
   }
 
@@ -324,7 +332,7 @@ export class BridgeLink {
             await this.onTurn(delivery)
           } catch (error) {
             const message = error?.message ?? String(error)
-            this.log("error", `turn failed: ${message}`)
+            this.log("error", t("opencode.turn_failed", { error: message }))
             this.endTurn(delivery.ticket, message)
           }
           await done
@@ -349,15 +357,15 @@ export class BridgeLink {
     this.queue = []
     this.buffer = ""
     this.#releaseTurn()
-    this.#rejectPending(new BridgeError("internal", "connection to the bridge lost"))
+    this.#rejectPending(new BridgeError("internal", t("opencode.connection_lost")))
     if (this.closed) return
-    this.#failHandshake(new BridgeError("internal", "connection closed during handshake"))
-    this.log("warn", `bridge disconnected; reconnecting in ${Math.round(this.backoff / 1000)} seconds`)
+    this.#failHandshake(new BridgeError("internal", t("opencode.handshake_closed")))
+    this.log("warn", t("opencode.reconnecting", { seconds: Math.round(this.backoff / 1000) }))
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       this.connect()
-        .then(() => this.log("info", `reconnected; rebound sessions ${this.sessions.join(", ")}`))
-        .catch((error) => this.log("error", `reconnect failed: ${error.message}`))
+        .then(() => this.log("info", t("opencode.reconnected", { sessions: this.sessions.join(", ") })))
+        .catch((error) => this.log("error", t("opencode.reconnect_failed", { error: error.message })))
     }, this.backoff)
     this.backoff = Math.min(this.backoff * 2, RECONNECT_MAX_MS)
   }

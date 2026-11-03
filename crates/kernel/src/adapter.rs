@@ -114,31 +114,27 @@ pub trait AdapterFactory: Send + Sync {
 /// 适配器注册/实例化错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AdapterError {
-    #[error("duplicate adapter kind registration: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.adapter.duplicate_kind", id = .0))]
     DuplicateKind(String),
-    #[error("duplicate adapter id: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.adapter.duplicate_id", id = .0))]
     DuplicateId(String),
-    #[error("unknown adapter kind: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.adapter.unknown_kind", id = .0))]
     UnknownKind(String),
-    #[error("adapter {adapter} does not support transport {transport}")]
+    #[error("{}", acb_i18n::t!("kernel.adapter.unsupported_transport", adapter = adapter, transport = transport))]
     UnsupportedTransport { adapter: String, transport: String },
-    #[error(
-        "adapter manifest kind is {manifest}, but connection {connection} is configured as {configured}"
-    )]
+    #[error("{}", acb_i18n::t!("kernel.adapter.kind_mismatch", manifest = manifest, connection = connection, configured = configured))]
     KindMismatch {
         connection: String,
         manifest: String,
         configured: String,
     },
-    #[error("adapter {0} API version {1} is incompatible (requires {ADAPTER_API_VERSION})")]
+    #[error("{}", acb_i18n::t!("kernel.adapter.api_version", adapter = .0, found = .1, required = ADAPTER_API_VERSION))]
     ApiVersion(String, u32),
-    #[error("invalid adapter id: {0} (must be namespace.name)")]
+    #[error("{}", acb_i18n::t!("kernel.adapter.bad_id", id = .0))]
     BadId(String),
-    #[error("failed to instantiate adapter {0}: {1}")]
+    #[error("{}", acb_i18n::t!("kernel.adapter.create_failed", adapter = .0, detail = .1))]
     Create(String, String),
-    #[error(
-        "third-party adapter {0} declares no metadata.summary (the agent needs to know what it does)"
-    )]
+    #[error("{}", acb_i18n::t!("kernel.adapter.missing_docs", adapter = .0))]
     MissingDocs(String),
 }
 

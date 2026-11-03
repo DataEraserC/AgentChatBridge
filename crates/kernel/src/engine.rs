@@ -81,7 +81,7 @@ pub enum BridgeError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Plugin(#[from] PluginError),
-    #[error("invalid ticket or this turn has ended: {0}")]
+    #[error("{}", acb_i18n::t!("kernel.engine.unknown_ticket", ticket = .0))]
     UnknownTicket(String),
 }
 
@@ -608,8 +608,12 @@ impl<S: Store> Bridge<S> {
                 Ok(provider) => provider,
                 Err(error) => {
                     eprintln!(
-                        "failed to resolve route provider {}: {error} (treating this message as pass)",
-                        policy.provider
+                        "{}",
+                        acb_i18n::t!(
+                            "kernel.engine.route_provider_resolve",
+                            provider = policy.provider,
+                            error = error
+                        )
                     );
                     continue;
                 }
@@ -646,7 +650,14 @@ impl<S: Store> Bridge<S> {
                 RouteDecision::Pass => unreachable!("pass must not be placed in handled"),
                 RouteDecision::Drop { reason } => {
                     if let Some(reason) = reason {
-                        eprintln!("route dropped a record in {room}: {reason}");
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "kernel.engine.route_dropped",
+                                room = room,
+                                reason = reason
+                            )
+                        );
                     }
                     return Ok(Ingest::Dropped { room });
                 }
@@ -814,7 +825,8 @@ impl<S: Store> Bridge<S> {
                     .map(|session| session.id.clone());
                 let Some(session) = session else {
                     eprintln!(
-                        "route send target {target} has no subscribers; skipping this action"
+                        "{}",
+                        acb_i18n::t!("kernel.engine.route_send_no_subscribers", target = target)
                     );
                     return Ok(());
                 };
@@ -823,13 +835,22 @@ impl<S: Store> Bridge<S> {
                     Ok(prepared) => self
                         .pending_route_actions
                         .push(PreparedRouteAction::Send(prepared)),
-                    Err(error) => eprintln!("failed to assemble route send: {error:?}"),
+                    Err(error) => eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "kernel.engine.route_send_assemble_failed",
+                            error = format!("{error:?}")
+                        )
+                    ),
                 }
                 Ok(())
             }
             RouteAction::Task { handler, params } => {
                 let Some(session) = sessions.first().cloned() else {
-                    eprintln!("route task has no available session; skipping: {handler}");
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("kernel.engine.route_task_no_session", handler = handler)
+                    );
                     return Ok(());
                 };
                 self.pending_route_actions
@@ -889,8 +910,13 @@ impl<S: Store> Bridge<S> {
             }
         }
         eprintln!(
-            "route interrupt ({scope:?}) in {room}: interrupted {} running turn(s)",
-            interrupted.len()
+            "{}",
+            acb_i18n::t!(
+                "kernel.engine.route_interrupt",
+                scope = format!("{scope:?}"),
+                room = room,
+                count = interrupted.len()
+            )
         );
         self.pending_interrupts.extend(interrupted);
     }
@@ -992,8 +1018,13 @@ impl<S: Store> Bridge<S> {
         if let Some(error) = error {
             if turn.stop_requested {
                 eprintln!(
-                    "turn for session {} in {} was stopped by /stop: {error} (no error notice sent)",
-                    turn.session, turn.room
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.engine.turn_stopped_by_stop",
+                        session = turn.session,
+                        room = turn.room,
+                        error = error
+                    )
                 );
             } else {
                 self.notify_turn_error(&turn.config, &turn.session, &turn.room, error);
@@ -1034,7 +1065,13 @@ impl<S: Store> Bridge<S> {
         for prepared in self.take_pending_notices() {
             let sent = prepared.execute();
             if let Err(error) = self.finish_send(prepared, sent) {
-                eprintln!("failed to send turn error notice: {error:?}");
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.engine.turn_error_notice_send_failed",
+                        error = format!("{error:?}")
+                    )
+                );
             }
         }
     }
@@ -1057,8 +1094,12 @@ impl<S: Store> Bridge<S> {
             Ok(provider) => provider,
             Err(resolve_error) => {
                 eprintln!(
-                    "failed to resolve turn error policy {}; falling back to built-in: {resolve_error}",
-                    policy.provider
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.engine.turn_error_policy_resolve",
+                        provider = policy.provider,
+                        error = resolve_error
+                    )
                 );
                 Arc::new(DefaultTurnErrorProvider)
             }
@@ -1093,7 +1134,13 @@ impl<S: Store> Bridge<S> {
                         vec![Element::text(text)],
                     ) {
                         Ok(prepared) => self.pending_notices.push(prepared),
-                        Err(err) => eprintln!("failed to assemble turn error notice: {err:?}"),
+                        Err(err) => eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "kernel.engine.turn_error_notice_assemble_failed",
+                                error = format!("{err:?}")
+                            )
+                        ),
                     }
                 }
             }
@@ -1116,7 +1163,7 @@ impl<S: Store> Bridge<S> {
         if !is_known(tool) {
             return Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
-                format!("unknown tool: {tool}"),
+                acb_i18n::t!("kernel.engine.unknown_tool", tool = tool),
             ));
         }
 
@@ -1261,7 +1308,7 @@ impl<S: Store> Bridge<S> {
             }
             other => Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
-                format!("unknown tool: {other}"),
+                acb_i18n::t!("kernel.engine.unknown_tool", tool = other),
             )),
         }?;
 
@@ -1398,12 +1445,22 @@ impl<S: Store> Bridge<S> {
                 .iter()
                 .find(|method| method.group() == group_of_name(&args.method))
             {
-                Some(near) => format!("did you mean {}?", near.name),
-                None => format!("this connection supports: {}", method_names(&methods)),
+                Some(near) => acb_i18n::t!(
+                    "kernel.engine.unknown_method_did_you_mean",
+                    name = near.name
+                ),
+                None => acb_i18n::t!(
+                    "kernel.engine.unknown_method_supports",
+                    methods = method_names(&methods)
+                ),
             };
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!("[unknown_method] unknown method: {}; {hint}", args.method),
+                acb_i18n::t!(
+                    "kernel.engine.unknown_method",
+                    method = args.method,
+                    hint = hint
+                ),
             ));
         };
 
@@ -1427,7 +1484,7 @@ impl<S: Store> Bridge<S> {
         if spec.record != RecordMode::None && config.account_of_room(&room).is_empty() {
             return Err(ToolError::new(
                 ErrorCode::Internal,
-                format!("connection for {room} has no configured account; cannot tell who this is"),
+                acb_i18n::t!("kernel.engine.no_account", room = room),
             ));
         }
 
@@ -1453,9 +1510,10 @@ impl<S: Store> Bridge<S> {
         let params = self.relay_params(args.params.clone())?;
 
         let outbound = self.outbound.handle_for(&room.connection).ok_or_else(|| {
-            call_error(CallError::Unavailable(format!(
-                "no connection named {}; cannot call {}",
-                room.connection, room
+            call_error(CallError::Unavailable(acb_i18n::t!(
+                "kernel.engine.no_connection_call",
+                connection = room.connection,
+                room = room
             )))
         })?;
 
@@ -1747,9 +1805,11 @@ impl<S: Store> Bridge<S> {
                 .map_err(|error| {
                     ToolError::new(
                         ErrorCode::Internal,
-                        format!(
-                            "[internal] access policy {} for session {id} is unavailable: {error}",
-                            session.access.provider
+                        acb_i18n::t!(
+                            "kernel.engine.access_policy_unavailable",
+                            provider = session.access.provider,
+                            session = id,
+                            error = error
                         ),
                     )
                 })?;
@@ -1773,20 +1833,24 @@ impl<S: Store> Bridge<S> {
         }
 
         let detail = match action {
-            AccessAction::Connection => format!(
-                "session {} has no accessible room on connection {connection}",
-                sessions.join(", ")
+            AccessAction::Connection => acb_i18n::t!(
+                "kernel.engine.access_no_rooms",
+                session = sessions.join(", "),
+                connection = connection
             ),
-            AccessAction::Read | AccessAction::Send => format!(
-                "session {} is not allowed to access {}",
-                sessions.join(", "),
-                room.map(ToString::to_string).unwrap_or_default()
+            AccessAction::Read | AccessAction::Send => acb_i18n::t!(
+                "kernel.engine.access_not_allowed",
+                session = sessions.join(", "),
+                room = room.map(ToString::to_string).unwrap_or_default()
             ),
         };
         let policy = if denied.is_empty() {
             String::new()
         } else {
-            format!("(access policy {})", denied.join("; "))
+            acb_i18n::t!(
+                "kernel.engine.access_policy_suffix",
+                denied = denied.join("; ")
+            )
         };
         Err(ToolError::new(
             ErrorCode::RoomNotSubscribed,
@@ -1901,8 +1965,14 @@ impl<S: Store> Bridge<S> {
                     Ok(provider) => provider,
                     Err(error) => {
                         eprintln!(
-                            "failed to resolve clock policy {}; skipping {session} ({room}): {error}",
-                            policy.provider
+                            "{}",
+                            acb_i18n::t!(
+                                "kernel.engine.clock_policy_resolve",
+                                provider = policy.provider,
+                                session = session,
+                                room = room,
+                                error = error
+                            )
                         );
                         continue;
                     }
@@ -1910,7 +1980,14 @@ impl<S: Store> Bridge<S> {
                 let last_record_at = match self.latest_record_at(&room) {
                     Ok(at) => at,
                     Err(error) => {
-                        eprintln!("failed to read the last record in {room}: {error}");
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "kernel.engine.last_record_read_failed",
+                                room = room,
+                                error = error
+                            )
+                        );
                         None
                     }
                 };
@@ -2018,8 +2095,12 @@ impl<S: Store> Bridge<S> {
             Ok(composer) => composer,
             Err(error) => {
                 eprintln!(
-                    "failed to resolve delivery policy {}; falling back to built-in composer: {error}",
-                    delivery_policy.provider
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.engine.delivery_policy_resolve",
+                        provider = delivery_policy.provider,
+                        error = error
+                    )
                 );
                 Arc::new(DefaultDeliveryComposer)
             }
@@ -2220,8 +2301,9 @@ impl<S: Store> Bridge<S> {
                     "[bad_params] your entire text consists of call markup (`</text>` etc.); nothing \
                      remains to send after stripping it. Write the message itself separately - put \
                      arguments in their own fields, not in the body."
+                        .to_owned()
                 } else {
-                    "nothing to send"
+                    acb_i18n::t!("kernel.engine.nothing_to_send")
                 },
             ));
         }
@@ -2238,7 +2320,7 @@ impl<S: Store> Bridge<S> {
             .map_err(|error| {
                 ToolError::new(
                     ErrorCode::Internal,
-                    format!("failed to resolve before-send hook: {error}"),
+                    acb_i18n::t!("kernel.engine.before_hook_resolve_failed", error = error),
                 )
             })?;
         let after_hooks = self
@@ -2247,7 +2329,7 @@ impl<S: Store> Bridge<S> {
             .map_err(|error| {
                 ToolError::new(
                     ErrorCode::Internal,
-                    format!("failed to resolve after-send hook: {error}"),
+                    acb_i18n::t!("kernel.engine.after_hook_resolve_failed", error = error),
                 )
             })?;
         let hook_context = SendContext {
@@ -2262,7 +2344,7 @@ impl<S: Store> Bridge<S> {
                 .map_err(|error| {
                     ToolError::new(
                         ErrorCode::Internal,
-                        format!("before-send hook failed: {error}"),
+                        acb_i18n::t!("kernel.engine.before_hook_failed", error = error),
                     )
                 })?;
             // 只报告真的改了正文的钩子；没改的也在回执里列出来只会变成噪音。
@@ -2273,7 +2355,7 @@ impl<S: Store> Bridge<S> {
         if elements.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                "before-send hook cleared the body; check the session's [sessions.outbound].before config",
+                acb_i18n::t!("kernel.engine.before_hook_cleared_body"),
             ));
         }
 
@@ -2285,16 +2367,17 @@ impl<S: Store> Bridge<S> {
         if account.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::Internal,
-                format!("connection for {room} has no configured account; cannot tell who this is"),
+                acb_i18n::t!("kernel.engine.no_account", room = room),
             ));
         }
 
         let outbound = self.outbound.handle_for(&room.connection).ok_or_else(|| {
             ToolError::new(
                 ErrorCode::Internal,
-                format!(
-                    "no connection named {}; cannot send to {room}",
-                    room.connection
+                acb_i18n::t!(
+                    "kernel.engine.no_connection_send",
+                    connection = room.connection,
+                    room = room
                 ),
             )
         })?;
@@ -2592,7 +2675,7 @@ impl<S: Store> Bridge<S> {
         if ids.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                "[bad_params] ids must not be empty; pass the #id shown before each delivered record",
+                acb_i18n::t!("kernel.engine.bad_params_ids_empty"),
             ));
         }
 
@@ -2734,7 +2817,7 @@ impl<S: Store> Bridge<S> {
         if args.ids.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                "[bad_params] ids must not be empty; pass the #id shown before each delivered record",
+                acb_i18n::t!("kernel.engine.bad_params_ids_empty"),
             ));
         }
         let columns = column_set(args.columns.as_deref())?;
@@ -2855,7 +2938,7 @@ impl<S: Store> Bridge<S> {
             Some(other) => {
                 return Err(ToolError::new(
                     ErrorCode::BadRequest,
-                    format!("status must be open or closed; got {other}"),
+                    acb_i18n::t!("kernel.engine.status_invalid", status = other),
                 ));
             }
             None => None,
@@ -2863,7 +2946,7 @@ impl<S: Store> Bridge<S> {
         if status.is_some() && kind != NoteKind::Topic {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                "status only applies to topics",
+                acb_i18n::t!("kernel.engine.status_topic_only"),
             ));
         }
 
@@ -2979,7 +3062,10 @@ impl<S: Store> Bridge<S> {
                 let session = config.session(session_id).ok_or_else(|| {
                     ToolError::new(
                         ErrorCode::Internal,
-                        format!("[internal] session {session_id} not found"),
+                        acb_i18n::t!(
+                            "kernel.engine.internal_session_not_found",
+                            session = session_id
+                        ),
                     )
                 })?;
                 let connection = config.connection(&room.connection);
@@ -3076,7 +3162,7 @@ impl<S: Store> Bridge<S> {
             }
             other => Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!("[bad_params] scope must be session or global; got {other}"),
+                acb_i18n::t!("kernel.engine.bad_scope", scope = other),
             )),
         }
     }
@@ -3133,8 +3219,9 @@ impl<S: Store> Bridge<S> {
                 {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
-                        format!(
-                            "[bad_params] no such connection: {connection}; call list_rooms to list them."
+                        acb_i18n::t!(
+                            "kernel.engine.bad_params_no_connection",
+                            connection = connection
                         ),
                     ));
                 }
@@ -3142,7 +3229,11 @@ impl<S: Store> Bridge<S> {
                     if room.connection != connection {
                         return Err(ToolError::new(
                             ErrorCode::BadRequest,
-                            format!("[bad_params] room {room} is not on connection {connection}."),
+                            acb_i18n::t!(
+                                "kernel.engine.bad_params_room_not_on_connection",
+                                room = room,
+                                connection = connection
+                            ),
                         ));
                     }
                 }
@@ -3335,9 +3426,10 @@ impl<S: Store> Bridge<S> {
                 if !FEEDBACK_KINDS.contains(&kind.as_str()) {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
-                        format!(
-                            "[bad_params] kind must be one of {}; got {kind} (defaults to friction).",
-                            FEEDBACK_KINDS.join(" / ")
+                        acb_i18n::t!(
+                            "kernel.engine.feedback_kind_invalid",
+                            kinds = FEEDBACK_KINDS.join(" / "),
+                            kind = kind
                         ),
                     ));
                 }
@@ -3357,9 +3449,10 @@ impl<S: Store> Bridge<S> {
                 if !FEEDBACK_SEVERITIES.contains(&severity.as_str()) {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
-                        format!(
-                            "[bad_params] severity must be one of {}; got {severity}.",
-                            FEEDBACK_SEVERITIES.join(" / ")
+                        acb_i18n::t!(
+                            "kernel.engine.feedback_severity_invalid",
+                            severities = FEEDBACK_SEVERITIES.join(" / "),
+                            severity = severity
                         ),
                     ));
                 }
@@ -3447,8 +3540,17 @@ impl<S: Store> Bridge<S> {
 
         // 也打进桥日志：一份被人看见的反馈，不该只躺在库里等人去查表。
         eprintln!(
-            "反馈 #{} [{} {}] {}：{}（自称 {} 次，第 {} 次报告）",
-            recorded.id, kind, severity, session, log_title, recorded.occurrences, recorded.repeats
+            "{}",
+            acb_i18n::t!(
+                "kernel.engine.feedback_log",
+                id = recorded.id,
+                kind = kind,
+                severity = severity,
+                session = session,
+                title = log_title,
+                occurrences = recorded.occurrences,
+                repeats = recorded.repeats
+            )
         );
 
         let mut truncated = serde_json::Map::new();
@@ -3531,7 +3633,7 @@ impl<S: Store> Bridge<S> {
         let Some(session_cfg) = config.session(session) else {
             return Err(ToolError::new(
                 ErrorCode::Internal,
-                format!("session {session} does not exist"),
+                acb_i18n::t!("kernel.engine.session_not_found", session = session),
             ));
         };
         self.memory
@@ -3711,8 +3813,13 @@ impl<S: Store> Bridge<S> {
 fn delivery_range(delivered: &BTreeSet<u64>) -> String {
     match (delivered.iter().next(), delivered.iter().next_back()) {
         (Some(first), Some(last)) if first == last => format!("#{first}"),
-        (Some(first), Some(last)) => format!("#{first}–#{last}（共 {} 条）", delivered.len()),
-        _ => "（这一轮没有投任何记录）".to_owned(),
+        (Some(first), Some(last)) => acb_i18n::t!(
+            "kernel.engine.delivery_range",
+            first = first,
+            last = last,
+            count = delivered.len()
+        ),
+        _ => acb_i18n::t!("kernel.engine.delivery_range_empty"),
     }
 }
 
@@ -3735,9 +3842,7 @@ fn resolve_room(text: &str) -> Result<RoomId, ToolError> {
     RoomId::parse(text).map_err(|error| {
         ToolError::new(
             ErrorCode::BadRequest,
-            format!(
-                "room must be connection:segment/segment (e.g. qq:group/123); got {text} ({error})"
-            ),
+            acb_i18n::t!("kernel.engine.resolve_room", room = text, error = error),
         )
     })
 }
@@ -3762,9 +3867,10 @@ fn column_set(given: Option<&[String]>) -> Result<Vec<&'static str>, ToolError> 
             None => {
                 return Err(ToolError::new(
                     ErrorCode::BadRequest,
-                    format!(
-                        "unknown column: {name}. Available columns: {}",
-                        RECORD_COLUMNS.join(", ")
+                    acb_i18n::t!(
+                        "kernel.engine.unknown_column",
+                        column = name,
+                        columns = RECORD_COLUMNS.join(", ")
                     ),
                 ));
             }
@@ -3830,7 +3936,7 @@ fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, ToolError> {
     serde_json::from_value(args).map_err(|error| {
         ToolError::new(
             ErrorCode::BadRequest,
-            format!("invalid parameters: {error}"),
+            acb_i18n::t!("kernel.engine.invalid_params", error = error),
         )
     })
 }
@@ -3839,7 +3945,7 @@ fn parse_note_kind(text: &str) -> Result<NoteKind, ToolError> {
     NoteKind::parse(text).ok_or_else(|| {
         ToolError::new(
             ErrorCode::BadRequest,
-            format!("note kind must be term / member / topic; got {text}"),
+            acb_i18n::t!("kernel.engine.note_kind_invalid", kind = text),
         )
     })
 }
@@ -3981,8 +4087,9 @@ fn feedback_fingerprint(title: &str) -> String {
 fn no_catalog(connection: &str) -> ToolError {
     ToolError::new(
         ErrorCode::ToolNotAllowed,
-        format!(
-            "[unsupported_platform] connection {connection} declares no platform-specific methods"
+        acb_i18n::t!(
+            "kernel.engine.unsupported_platform",
+            connection = connection
         ),
     )
 }
@@ -4072,18 +4179,25 @@ fn no_match(
         given.push(format!("query={query}"));
     }
 
-    let mut hint = format!(
-        "this connection has these groups: {}",
-        groups_of(methods).join(" / ")
+    let mut hint = acb_i18n::t!(
+        "kernel.engine.no_match_groups",
+        groups = groups_of(methods).join(" / ")
     );
     let known_tags = tag_names(methods);
     if !known_tags.is_empty() {
-        hint.push_str(&format!("; tags: {}", known_tags.join(" / ")));
+        hint.push_str(&acb_i18n::t!(
+            "kernel.engine.no_match_tags",
+            tags = known_tags.join(" / ")
+        ));
     }
 
     ToolError::new(
         ErrorCode::BadRequest,
-        format!("[no_match] no methods match {}; {hint}", given.join(" + ")),
+        acb_i18n::t!(
+            "kernel.engine.no_match",
+            filters = given.join(" + "),
+            hint = hint
+        ),
     )
 }
 
@@ -4122,7 +4236,7 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
         _ => {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!("[bad_params] {} params must be an object (map)", spec.name),
+                acb_i18n::t!("kernel.engine.params_not_object", method = spec.name),
             ));
         }
     };
@@ -4133,9 +4247,11 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
                 if param.required {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
-                        format!(
-                            "[bad_params] {} is missing required parameter {} ({})",
-                            spec.name, param.name, param.desc
+                        acb_i18n::t!(
+                            "kernel.engine.params_missing_required",
+                            method = spec.name,
+                            parameter = param.name,
+                            desc = param.desc
                         ),
                     ));
                 }
@@ -4144,11 +4260,12 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
                 if !param.ty.matches(value) {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
-                        format!(
-                            "[bad_params] {} parameter {} must be {}; got {value}",
-                            spec.name,
-                            param.name,
-                            param.ty.json_type()
+                        acb_i18n::t!(
+                            "kernel.engine.params_type_mismatch",
+                            method = spec.name,
+                            parameter = param.name,
+                            expected = param.ty.json_type(),
+                            value = value
                         ),
                     ));
                 }
@@ -4168,9 +4285,12 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
                             .join(" / ");
                         return Err(ToolError::new(
                             ErrorCode::BadRequest,
-                            format!(
-                                "[bad_params] {} parameter {} must be one of {choices}; got {value}",
-                                spec.name, param.name
+                            acb_i18n::t!(
+                                "kernel.engine.params_choice_mismatch",
+                                method = spec.name,
+                                parameter = param.name,
+                                choices = choices,
+                                value = value
                             ),
                         ));
                     }
@@ -4186,11 +4306,12 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
             .any(|param| param.name.as_ref() == key.as_str())
         {
             let known = if spec.params.is_empty() {
-                "this method takes no parameters".to_owned()
+                acb_i18n::t!("kernel.engine.no_params")
             } else {
-                format!(
-                    "available parameters: {}",
-                    spec.params
+                acb_i18n::t!(
+                    "kernel.engine.available_params",
+                    params = spec
+                        .params
                         .iter()
                         .map(|param| param.name.as_ref())
                         .collect::<Vec<_>>()
@@ -4199,9 +4320,11 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
             };
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!(
-                    "[bad_params] {} does not recognize parameter {key}; {known}",
-                    spec.name
+                acb_i18n::t!(
+                    "kernel.engine.unknown_param",
+                    method = spec.name,
+                    parameter = key,
+                    known = known
                 ),
             ));
         }

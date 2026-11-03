@@ -81,7 +81,7 @@ impl AdapterFactory for OneBotAdapterFactory {
         if connection.url.is_none() {
             return Err(AdapterError::Create(
                 connection.id.clone(),
-                "onebot11 requires a url (ws://host:port/path)".into(),
+                acb_i18n::t!("adapter.onebot11.url_required"),
             ));
         }
         let slot = LinkSlot::new();

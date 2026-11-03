@@ -36,17 +36,16 @@ fn one_to_onebot(element: &Element) -> Result<Value, SegmentError> {
         Element::Video { url } => json!({"type": "video", "data": {"file": url}}),
         Element::Face { id, .. } => json!({"type": "face", "data": {"id": id}}),
         Element::File { .. } => {
-            return Err(SegmentError::Unsupported(
-                "OneBot 11 没有标准的 file 消息段；单个文件走上传动作，\
-                 文件和文字/图片不能混在同一条消息里"
-                    .into(),
-            ));
+            return Err(SegmentError::Unsupported(acb_i18n::t!(
+                "adapter.onebot11.file_unsupported"
+            )));
         }
         // QQ 自己的段，原样送回去。
         Element::Opaque { platform, payload } if platform == PLATFORM => payload.clone(),
         Element::Opaque { platform, .. } => {
-            return Err(SegmentError::Unsupported(format!(
-                "this is {platform}-specific content; QQ cannot send it"
+            return Err(SegmentError::Unsupported(acb_i18n::t!(
+                "adapter.onebot11.foreign_platform_content",
+                platform = platform
             )));
         }
     })

@@ -128,16 +128,16 @@ fn parse_options(connection: &Connection) -> Result<ProcessConfig, String> {
     let options = connection
         .options
         .as_object()
-        .ok_or("connections.options must be an object (map)")?;
+        .ok_or(acb_i18n::t!("adapter.process.options_not_object"))?;
 
     let command = options
         .get("command")
-        .ok_or("options.command must be the launch command (a string or [program, args...])")?;
+        .ok_or(acb_i18n::t!("adapter.process.command_required"))?;
     let (program, mut args) = match command {
         serde_json::Value::String(program) => {
             let program = program.trim();
             if program.is_empty() {
-                return Err("options.command must not be empty".into());
+                return Err(acb_i18n::t!("adapter.process.command_empty"));
             }
             (program.to_owned(), Vec::new())
         }
@@ -145,29 +145,29 @@ fn parse_options(connection: &Connection) -> Result<ProcessConfig, String> {
             let mut parts = items.iter().map(|item| {
                 item.as_str()
                     .map(str::to_owned)
-                    .ok_or_else(|| "options.command array may only contain strings".to_owned())
+                    .ok_or_else(|| acb_i18n::t!("adapter.process.command_array_element"))
             });
             let program = parts
                 .next()
                 .transpose()?
-                .ok_or("options.command array must not be empty")?;
+                .ok_or(acb_i18n::t!("adapter.process.command_array_empty"))?;
             let rest = parts.collect::<Result<Vec<_>, _>>()?;
             if program.trim().is_empty() {
-                return Err("the first element of options.command must not be empty".into());
+                return Err(acb_i18n::t!("adapter.process.command_first_empty"));
             }
             (program, rest)
         }
-        _ => return Err("options.command must be a string or an array of strings".into()),
+        _ => return Err(acb_i18n::t!("adapter.process.command_wrong_type")),
     };
 
     if let Some(extra) = options.get("args") {
         let items = extra
             .as_array()
-            .ok_or("options.args must be an array of strings")?;
+            .ok_or(acb_i18n::t!("adapter.process.args_not_array"))?;
         for item in items {
             args.push(
                 item.as_str()
-                    .ok_or("options.args may only contain strings")?
+                    .ok_or(acb_i18n::t!("adapter.process.args_element"))?
                     .to_owned(),
             );
         }
@@ -177,13 +177,13 @@ fn parse_options(connection: &Connection) -> Result<ProcessConfig, String> {
     if let Some(table) = options.get("env") {
         let table = table
             .as_object()
-            .ok_or("options.env must be an object (map)")?;
+            .ok_or(acb_i18n::t!("adapter.process.env_not_object"))?;
         for (key, value) in table {
             env.push((
                 key.clone(),
                 value
                     .as_str()
-                    .ok_or_else(|| format!("options.env.{key} must be a string"))?
+                    .ok_or_else(|| acb_i18n::t!("adapter.process.env_value_not_string", key = key))?
                     .to_owned(),
             ));
         }
@@ -193,7 +193,7 @@ fn parse_options(connection: &Connection) -> Result<ProcessConfig, String> {
         Some(value) => Some(
             value
                 .as_str()
-                .ok_or("options.cwd must be a string")?
+                .ok_or(acb_i18n::t!("adapter.process.cwd_not_string"))?
                 .to_owned(),
         ),
         None => None,
@@ -340,21 +340,25 @@ fn start_child(
         command.current_dir(cwd);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("failed to start {}: {error}", config.program))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or("child process has no stdin (wrong launch mode)")?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("child process has no stdout (wrong launch mode)")?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or("child process has no stderr (wrong launch mode)")?;
+    let mut child = command.spawn().map_err(|error| {
+        acb_i18n::t!(
+            "adapter.process.start_failed",
+            program = config.program,
+            error = error
+        )
+    })?;
+    let stdin = child.stdin.take().ok_or(acb_i18n::t!(
+        "adapter.process.child_no_stdio",
+        stream = "stdin"
+    ))?;
+    let stdout = child.stdout.take().ok_or(acb_i18n::t!(
+        "adapter.process.child_no_stdio",
+        stream = "stdout"
+    ))?;
+    let stderr = child.stderr.take().ok_or(acb_i18n::t!(
+        "adapter.process.child_no_stdio",
+        stream = "stderr"
+    ))?;
 
     spawn_stderr(connection.to_owned(), stderr);
     let (hello_tx, hello_rx) = mpsc::channel();
@@ -375,32 +379,37 @@ fn start_child(
         }
         Err(RecvTimeoutError::Timeout) => {
             stop_child(&mut child);
-            return Err(format!(
-                "timed out waiting for the child process to say hello ({} seconds)",
-                config.startup_timeout.as_secs()
+            return Err(acb_i18n::t!(
+                "adapter.process.hello_timeout",
+                seconds = config.startup_timeout.as_secs()
             ));
         }
         Err(RecvTimeoutError::Disconnected) => {
             stop_child(&mut child);
-            return Err("child process exited without saying hello".into());
+            return Err(acb_i18n::t!("adapter.process.hello_missing"));
         }
     };
     // hello 刚说完就退出的进程不能算启动成功，否则第一次请求会写进死管道。
     if let Ok(Some(status)) = child.try_wait() {
         stop_child(&mut child);
-        return Err(format!(
-            "child process exited right after saying hello ({status})"
+        return Err(acb_i18n::t!(
+            "adapter.process.hello_then_exit",
+            status = status
         ));
     }
     eprintln!(
-        "adapter {connection} (process): {} started ({} platform method(s))",
-        hello.name,
-        hello.catalog.len()
+        "{}",
+        acb_i18n::t!(
+            "adapter.process.started",
+            connection = connection,
+            name = hello.name,
+            count = hello.catalog.len()
+        )
     );
 
     let catalog = convert_catalog(hello.catalog).map_err(|detail| {
         stop_child(&mut child);
-        format!("invalid platform method catalog from adapter: {detail}")
+        acb_i18n::t!("adapter.process.catalog_invalid", detail = detail)
     })?;
 
     Ok((child, stdin, catalog, hello.info))
@@ -430,7 +439,7 @@ fn supervise(
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
         for (_, reply) in waiting {
-            let _ = reply.send(Err("adapter process exited".into()));
+            let _ = reply.send(Err(acb_i18n::t!("adapter.process.exited")));
         }
         if shutdown {
             return;
@@ -438,8 +447,12 @@ fn supervise(
         let _ = child.wait();
 
         eprintln!(
-            "adapter {connection} (process): child process exited; restarting in {} ms",
-            delay.as_millis()
+            "{}",
+            acb_i18n::t!(
+                "adapter.process.restarting",
+                connection = connection,
+                millis = delay.as_millis()
+            )
         );
         let wake = Instant::now() + delay;
         while Instant::now() < wake {
@@ -474,7 +487,14 @@ fn supervise(
                 delay = RESTART_DELAY;
             }
             Err(detail) => {
-                eprintln!("adapter {connection} (process): restart failed: {detail}");
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "adapter.process.restart_failed",
+                        connection = connection,
+                        detail = detail
+                    )
+                );
                 delay = (delay * 2).min(MAX_RESTART_DELAY);
             }
         }
@@ -487,7 +507,14 @@ fn spawn_stderr(connection: String, stderr: std::process::ChildStderr) {
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().map_while(Result::ok) {
-            eprintln!("adapter {connection} (process stderr): {line}");
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "adapter.process.stderr_line",
+                    connection = connection,
+                    line = line
+                )
+            );
         }
     });
 }
@@ -509,7 +536,14 @@ fn spawn_reader(
             let line = match line {
                 Ok(line) => line,
                 Err(error) => {
-                    eprintln!("adapter {connection}: failed to read child process output: {error}");
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "adapter.process.read_output_failed",
+                            connection = connection,
+                            error = error
+                        )
+                    );
                     break;
                 }
             };
@@ -521,7 +555,12 @@ fn spawn_reader(
                 Ok(message) => message,
                 Err(error) => {
                     eprintln!(
-                        "adapter {connection}: received an unparseable wire message: {error}"
+                        "{}",
+                        acb_i18n::t!(
+                            "adapter.process.bad_wire_message",
+                            connection = connection,
+                            error = error
+                        )
                     );
                     continue;
                 }
@@ -545,9 +584,8 @@ fn spawn_reader(
                     }
                     _ => {
                         if let Some(sender) = hello_tx.take() {
-                            let _ = sender.send(Err(
-                                "the child process's first line must be hello".to_owned(),
-                            ));
+                            let _ =
+                                sender.send(Err(acb_i18n::t!("adapter.process.first_line_hello")));
                         }
                         return;
                     }
@@ -557,12 +595,19 @@ fn spawn_reader(
 
             match message {
                 AdapterMessage::Hello { .. } => {
-                    eprintln!("adapter {connection}: duplicate hello; ignoring");
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("adapter.process.duplicate_hello", connection = connection)
+                    );
                 }
                 AdapterMessage::Event { record } => {
                     if !events.submit(record.into()) {
                         eprintln!(
-                            "adapter {connection}: inbound queue is closed; dropping a record"
+                            "{}",
+                            acb_i18n::t!(
+                                "adapter.process.inbound_queue_closed",
+                                connection = connection
+                            )
                         );
                     }
                 }
@@ -576,7 +621,15 @@ fn spawn_reader(
                     }
                 }
                 AdapterMessage::Log { level, message } => {
-                    eprintln!("adapter {connection} ({level}): {message}");
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "adapter.process.log_line",
+                            connection = connection,
+                            level = level,
+                            message = message
+                        )
+                    );
                 }
             }
         }
@@ -589,11 +642,11 @@ fn spawn_reader(
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
         for (_, reply) in waiting {
-            let _ = reply.send(Err("adapter process exited".into()));
+            let _ = reply.send(Err(acb_i18n::t!("adapter.process.exited")));
         }
         if !hello_seen {
             if let Some(sender) = hello_tx.take() {
-                let _ = sender.send(Err("child process exited without saying hello".into()));
+                let _ = sender.send(Err(acb_i18n::t!("adapter.process.hello_missing")));
             }
         }
     });
@@ -623,7 +676,11 @@ fn wait_for_exit(
                     }
                     Ok(None) | Err(_) => {
                         eprintln!(
-                            "adapter {connection} (process): shutdown timed out; forcing termination"
+                            "{}",
+                            acb_i18n::t!(
+                                "adapter.process.shutdown_timeout",
+                                connection = connection
+                            )
                         );
                         let _ = child.kill();
                         let _ = child.wait();
@@ -648,11 +705,11 @@ fn write_line(stdin: &Mutex<Option<ChildStdin>>, message: &CoreMessage) -> Resul
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let stdin = stdin
         .as_mut()
-        .ok_or_else(|| "adapter process is not running".to_owned())?;
+        .ok_or_else(|| acb_i18n::t!("adapter.process.not_running"))?;
     stdin
         .write_all(format!("{line}\n").as_bytes())
         .and_then(|_| stdin.flush())
-        .map_err(|error| format!("cannot write to adapter process: {error}"))
+        .map_err(|error| acb_i18n::t!("adapter.process.write_failed", error = error))
 }
 
 struct ProcessOutbound {
@@ -665,7 +722,7 @@ struct ProcessOutbound {
 impl ProcessOutbound {
     fn request(&mut self, message: CoreMessage, id: u64) -> Result<WireResult, String> {
         if !self.shared.alive.load(Ordering::Relaxed) {
-            return Err("adapter process is not running".into());
+            return Err(acb_i18n::t!("adapter.process.not_running"));
         }
 
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -693,9 +750,9 @@ impl ProcessOutbound {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&id);
-                Err("timed out waiting for the adapter".into())
+                Err(acb_i18n::t!("adapter.process.call_timeout"))
             }
-            Err(RecvTimeoutError::Disconnected) => Err("adapter process exited".into()),
+            Err(RecvTimeoutError::Disconnected) => Err(acb_i18n::t!("adapter.process.exited")),
         }
     }
 }
@@ -703,9 +760,10 @@ impl ProcessOutbound {
 impl Outbound for ProcessOutbound {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         if room.connection != self.connection {
-            return Err(OutboundError::Unavailable(format!(
-                "this connection is {}, but received {}",
-                self.connection, room.connection
+            return Err(OutboundError::Unavailable(acb_i18n::t!(
+                "adapter.process.connection_mismatch",
+                connection = self.connection,
+                room = room.connection
             )));
         }
 
@@ -725,9 +783,9 @@ impl Outbound for ProcessOutbound {
         match result {
             WireResult::Sent { platform_id, at } => Ok(Sent { platform_id, at }),
             WireResult::Error { error } => Err(send_error(error)),
-            _ => Err(OutboundError::Unavailable(
-                "adapter reply is not a send result".into(),
-            )),
+            _ => Err(OutboundError::Unavailable(acb_i18n::t!(
+                "adapter.process.not_send_result"
+            ))),
         }
     }
 
@@ -748,9 +806,10 @@ impl Outbound for ProcessOutbound {
         params: &serde_json::Value,
     ) -> Result<CallOutcome, CallError> {
         if room.connection != self.connection {
-            return Err(CallError::Forbidden(format!(
-                "this connection is {}, but received a call for {}",
-                self.connection, room.connection
+            return Err(CallError::Forbidden(acb_i18n::t!(
+                "adapter.process.call_connection_mismatch",
+                connection = self.connection,
+                room = room.connection
             )));
         }
 
@@ -777,9 +836,9 @@ impl Outbound for ProcessOutbound {
                 Ok(CallOutcome { value, record })
             }
             WireResult::Error { error } => Err(call_error(error)),
-            _ => Err(CallError::Unavailable(
-                "adapter reply is not a call result".into(),
-            )),
+            _ => Err(CallError::Unavailable(acb_i18n::t!(
+                "adapter.process.not_call_result"
+            ))),
         }
     }
 }

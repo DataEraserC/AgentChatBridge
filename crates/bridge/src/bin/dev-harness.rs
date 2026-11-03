@@ -19,10 +19,14 @@ use acb_proto::frame::{PROTOCOL_VERSION, decode, encode};
 use acb_proto::{Frame, Ticket};
 
 fn main() -> ExitCode {
+    acb_i18n::init();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("dev-harness: {error}");
+            eprintln!(
+                "{}",
+                acb_i18n::t!("bridge.dev_harness.error", error = error)
+            );
             ExitCode::FAILURE
         }
     }
@@ -46,8 +50,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     match read(&mut reader)? {
-        Frame::Ready { sessions, .. } => println!("bound to sessions: {}", sessions.join(", ")),
-        other => return Err(format!("handshake failed: got {}", other.kind()).into()),
+        Frame::Ready { sessions, .. } => println!(
+            "{}",
+            acb_i18n::t!(
+                "bridge.dev_harness.bound_sessions",
+                sessions = sessions.join(", ")
+            )
+        ),
+        other => {
+            return Err(
+                acb_i18n::t!("bridge.dev_harness.handshake_failed", kind = other.kind()).into(),
+            );
+        }
     }
 
     loop {
@@ -61,20 +75,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match frame {
             Frame::TurnStart { delivery } => {
                 println!(
-                    "\n--- turn start: {} ({} records) ---",
-                    delivery.room,
-                    delivery.records.len()
+                    "{}",
+                    acb_i18n::t!(
+                        "bridge.dev_harness.turn_start",
+                        room = delivery.room,
+                        count = delivery.records.len()
+                    )
                 );
                 for record in &delivery.records {
                     println!(
-                        "  #{} {}: {}",
-                        record.id,
-                        record.sender.name,
-                        flatten_text(&record.elements)
+                        "{}",
+                        acb_i18n::t!(
+                            "bridge.dev_harness.record_line",
+                            id = record.id,
+                            sender = record.sender.name,
+                            text = flatten_text(&record.elements)
+                        )
                     );
                     // 桥附的旁白（重投说明之类）另起一行，别和人家说的话混在一起。
                     if let Some(note) = &record.note {
-                        println!("    ※ {note}");
+                        println!(
+                            "{}",
+                            acb_i18n::t!("bridge.dev_harness.note_line", note = note)
+                        );
                     }
                 }
 
@@ -102,7 +125,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Frame::Ping => send(&mut writer, &Frame::Pong)?,
             Frame::Pong | Frame::Log { .. } => {}
-            other => println!("received {}", other.kind()),
+            other => println!(
+                "{}",
+                acb_i18n::t!("bridge.dev_harness.received", kind = other.kind())
+            ),
         }
     }
 }
@@ -129,19 +155,33 @@ fn reply(
     match read(reader)? {
         Frame::ToolResult { id, result, error } => {
             if let Some(error) = error {
-                eprintln!("send failed: {} ({:?})", error.message, error.code);
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "bridge.dev_harness.send_failed",
+                        message = error.message,
+                        code = format!("{:?}", error.code)
+                    )
+                );
             } else {
                 let sent = result.unwrap_or_default();
                 println!(
-                    "  sent, platform message id {}",
-                    sent.get("platform_id")
-                        .and_then(|id| id.as_str())
-                        .unwrap_or("-")
+                    "{}",
+                    acb_i18n::t!(
+                        "bridge.dev_harness.sent",
+                        platform_id = sent
+                            .get("platform_id")
+                            .and_then(|id| id.as_str())
+                            .unwrap_or("-")
+                    )
                 );
             }
             assert_eq!(id, "dev-reply");
         }
-        other => eprintln!("waiting for tool result, got {}", other.kind()),
+        other => eprintln!(
+            "{}",
+            acb_i18n::t!("bridge.dev_harness.wait_tool_result", kind = other.kind())
+        ),
     }
     Ok(())
 }
@@ -167,16 +207,29 @@ fn ack(
     match read(reader)? {
         Frame::ToolResult { result, error, .. } => {
             if let Some(error) = error {
-                eprintln!("acknowledge failed: {} ({:?})", error.message, error.code);
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "bridge.dev_harness.ack_failed",
+                        message = error.message,
+                        code = format!("{:?}", error.code)
+                    )
+                );
             } else if let Some(watermark) = result
                 .unwrap_or_default()
                 .get("watermark")
                 .and_then(|value| value.as_u64())
             {
-                println!("  watermark advanced to #{watermark}");
+                println!(
+                    "{}",
+                    acb_i18n::t!("bridge.dev_harness.watermark", watermark = watermark)
+                );
             }
         }
-        other => eprintln!("waiting for acknowledgement result, got {}", other.kind()),
+        other => eprintln!(
+            "{}",
+            acb_i18n::t!("bridge.dev_harness.wait_ack_result", kind = other.kind())
+        ),
     }
     Ok(())
 }
@@ -218,29 +271,42 @@ impl Options {
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--endpoint" => endpoint = args.next().ok_or("--endpoint requires an address")?,
-                "--harness" => harness = args.next().ok_or("--harness requires a harness name")?,
-                "--token" => token = args.next().ok_or("--token requires a token")?,
-                "--reply" => reply = args.next().ok_or("--reply requires content")?,
+                "--endpoint" => {
+                    endpoint = args
+                        .next()
+                        .ok_or(acb_i18n::t!("bridge.dev_harness.endpoint_required"))?
+                }
+                "--harness" => {
+                    harness = args
+                        .next()
+                        .ok_or(acb_i18n::t!("bridge.dev_harness.harness_flag_required"))?
+                }
+                "--token" => {
+                    token = args
+                        .next()
+                        .ok_or(acb_i18n::t!("bridge.dev_harness.token_flag_required"))?
+                }
+                "--reply" => {
+                    reply = args
+                        .next()
+                        .ok_or(acb_i18n::t!("bridge.dev_harness.reply_required"))?
+                }
                 "--once" => once = true,
                 "--help" | "-h" => {
-                    println!(
-                        "用法：dev-harness --harness 名 --token 令牌 \
-                         [--endpoint 127.0.0.1:7700] [--reply 回复内容] [--once]"
-                    );
+                    println!("{}", acb_i18n::t!("bridge.dev_harness.usage"));
                     std::process::exit(0);
                 }
-                other => return Err(format!("unknown argument: {other}").into()),
+                other => {
+                    return Err(acb_i18n::t!("bridge.dev_harness.unknown_arg", arg = other).into());
+                }
             }
         }
 
         if harness.trim().is_empty() {
-            return Err(
-                "--harness is required; it must match a session's harness name in config".into(),
-            );
+            return Err(acb_i18n::t!("bridge.dev_harness.harness_required").into());
         }
         if token.trim().is_empty() {
-            return Err("--token is required; it must match a session's token in config".into());
+            return Err(acb_i18n::t!("bridge.dev_harness.token_required").into());
         }
 
         Ok(Self {

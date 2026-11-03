@@ -6,10 +6,11 @@
 // 换成了「打印出来 + 回一句固定的话」。所以能看到这一段的，插件也一定能看到。
 
 import { BridgeLink, renderTurn } from "./plugin/acb-wire.mjs"
+import { t } from "../shared/i18n.mjs"
 
 const options = parseArgs(process.argv.slice(2))
 if (!options.token) {
-  console.error("usage: node probe.mjs --token <device token> [--endpoint 127.0.0.1:7700] [--reply <text>] [--once]")
+  console.error(t("opencode.probe_usage"))
   process.exit(2)
 }
 
@@ -31,15 +32,15 @@ const link = new BridgeLink({
         const sent = await link.call("send_message", {
           elements: [{ type: "text", text: options.reply }],
         })
-        console.log(`  sent, platform message id ${sent?.platform_id ?? "-"}`)
+        console.log(t("opencode.probe_sent", { id: sent?.platform_id ?? "-" }))
         const acked = await link.call("ack_messages", {
           ids: delivery.records.map((record) => record.id),
         })
-        console.log(`  watermark advanced to #${acked?.watermark ?? "?"}`)
+        console.log(t("opencode.probe_watermark", { watermark: acked?.watermark ?? "?" }))
       }
     } catch (error) {
       failure = error.message
-      console.error(`  turn failed: ${error.message} (${error.code})`)
+      console.error(t("opencode.probe_turn_failed", { error: error.message, code: error.code }))
     } finally {
       link.endTurn(delivery.ticket, failure)
     }
@@ -54,11 +55,11 @@ const link = new BridgeLink({
 try {
   await link.connect()
 } catch (error) {
-  console.error(`cannot connect to bridge: ${error.message}`)
+  console.error(t("opencode.probe_connect_failed", { error: error.message }))
   process.exit(1)
 }
 
-console.log(`bound to sessions ${link.sessions.join(", ")}; waiting for turns (Ctrl-C to exit)`)
+console.log(t("opencode.probe_bound", { sessions: link.sessions.join(", ") }))
 
 process.on("SIGINT", () => {
   link.close()
@@ -92,11 +93,11 @@ function parseArgs(argv) {
         break
       case "--help":
       case "-h":
-        console.log("usage: node probe.mjs --token <device token> [--endpoint 127.0.0.1:7700] [--reply <text>] [--once]")
+        console.log(t("opencode.probe_usage"))
         process.exit(0)
         break
       default:
-        console.error(`unknown argument: ${arg}`)
+        console.error(t("opencode.probe_unknown_arg", { arg }))
         process.exit(2)
     }
   }
