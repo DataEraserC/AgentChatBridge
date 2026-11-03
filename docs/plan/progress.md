@@ -831,6 +831,42 @@
 - commit：`4d80848 docs(plan): add manager panic status and morning decision brief`
 - 可回退：纯文档。
 
+## 2026-11-04 04:31 CST — core 代码质量审计（clippy + 风险清单 + manager 只读接口兜底）
+
+- 任务编号：core 代码质量审计（用户指定三项）
+- 做了什么：
+  1. `cargo clippy --workspace --all-targets -- -D warnings` 清零：
+     - 真实问题：needless borrow/closure、redundant deref、`map().flatten()`、
+       `sort_by` → `sort_by_key(Reverse)`、`.err().expect()` → `expect_err`、
+       未用 import、doc 续行缩进、`not_unsafe_ptr_arg_deref`（`UnloadSafeLibrary::invoke/
+       destroy` 改为 `unsafe fn` + `# Safety`）；
+     - 刻意保留的 lint 用局部 `#[allow]` + 一行理由：`large_enum_variant`（`Frame`、
+       `ToolCallStart`、onebot11 `Parsed`）、`too_many_arguments`（`enqueue`、测试夹具）、
+       中文测试名含 URL（`relay.rs` / `platform_flow.rs` / `turn_flow.rs`）。
+  2. 新增 `docs/plan/core-risk-inventory.md`：unsafe 清单、生产/测试 unwrap/expect 分布、
+     锁中毒与持锁 I/O、无界集合、已知未做项；每条给行号、影响、动作、P0/P1/P2。
+     结论：无 P0，P1 共 6 项（入站队列、路由队列、动态库调用线程、relay 持锁复制、
+     process stdin 写入、relay 磁盘清理）。
+  3. `descriptors()` / `health()` panic 兜底：
+     - `plugin.rs` 新增 `call_manager` / `manager_health`（`catch_unwind`）；
+     - `collect_manager` 的 descriptors panic → `PluginError::Manager`，不留半棵子树；
+     - `catalog` / `manager_health()` 的 health panic → `Health::Unhealthy`；
+     - 新增测试 `panicking_descriptors_becomes_install_error`、
+       `panicking_health_is_reported_not_propagated`。
+- 证据：
+  - `cargo clippy --workspace --all-targets -- -D warnings` → exit 0；
+  - `cargo test --workspace` → 54 个 suite 全部 `ok`（0 failed）；
+  - 新增两个 panic 测试单独跑 2/2。
+- commit：`f0e5aee chore(clippy): clear workspace lints under -D warnings`、
+  `e1850d4 fix(plugin): contain manager descriptors and health panics`
+- 偏离/未做：
+  - P1 只评估不批量修：队列上限、锁外 relay、process 写入超时都涉及行为/配置决策，
+    按「只修能明确证明的问题」留给后续逐项提交。
+  - `manifest()` / `children()` / `details()` / `root()` 仍未 catch，列入清单 P2。
+  - `unsafe impl Send for AdapterHandle` 与动态库 ABI 逐条契约未补注释，列入清单 P2。
+- 可回退：clippy 提交可逐文件回退；panic 兜底移除 helper、i18n 两条键与测试即可；
+  `core-risk-inventory.md` 为纯新增文档。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
