@@ -37,7 +37,7 @@
 | 13 | 任务 handler | `TaskHandler::handle(&task_id, &payload) -> TaskOutcome`；内置 `exec` 兜底 | 路由 `Task` 动作之后，route worker 执行 | 无插件扩展点 | 由 handler 自己 | 否 |
 | 14 | 插件生命周期 | `PluginInfo{source,health,lifecycle,capabilities,...}`；控制台 `POST /api/plugins/*` | 目录展示 / 轮次边界执行 | 控制卸载/重载 | 否 | 否 |
 | 15 | `RecordObserver` | `observe(&Record)` | 记录 append 之后 | 只读旁路 | 否 | 否 |
-| 16 | `ToolProvider` | `tools() -> Vec<ToolSpec>`；`call(&ToolCallContext, tool, args) -> Value` | `plugin_tools` / `plugin_tool_call` 调用时 | 只读旁路（插件自己的 I/O 由插件负责） | 由工具自己 | 否 |
+| 16 | `ToolProvider` | `tools() -> Vec<ToolSpec>`；`call(&ToolCallContext, tool, args) -> Value` | `plugin_tools` / `plugin_tool_call` 调用时；`ToolLoader` 注册后可随轮次边界卸载/重载 | 只读旁路（插件自己的 I/O 由插件负责） | 由工具自己 | 否 |
 | 17 | `ToolAccessProvider` | `check(&ToolAccessContext) -> Allow \| Deny{reason}`；错误按失败关闭处理 | core 已知工具/轮次判定之后、任何副作用之前 | **只能否决**，不能覆盖 core 判定 | 否 | 否 |
 
 补充：`describe_plugins`、`extensions_list/read/write/reload`、`task_list/get`、

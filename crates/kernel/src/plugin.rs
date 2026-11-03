@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use acb_proto::{Element, Omitted, Record, RecordKind, RoomId, Sender, ToolError, TurnReason};
 use serde_json::Value;
@@ -448,6 +448,8 @@ pub enum PluginError {
     ManagerDepth { namespace: String, max: usize },
     #[error("{}", acb_i18n::t!("kernel.plugin.manager_cycle", chain = .0))]
     ManagerCycle(String),
+    #[error("{}", acb_i18n::t!("kernel.plugin.tool_name_taken", name = name, id = id))]
+    ToolNameConflict { name: String, id: String },
     #[error("{}", acb_i18n::t!("kernel.plugin.load_failed", detail = .0))]
     Loader(String),
 }
@@ -1324,6 +1326,108 @@ fn native_meta(
     }
 }
 
+/// 进程内 ToolProvider 的 loader。
+///
+/// 工具代码仍要跟宿主一起编译，但注册/卸载走现有 loader 与轮次边界状态机：
+/// `queue_unload` / `queue_reload` 生效后，`plugin_tools` 索引随之出现/消失。
+pub struct ToolLoader {
+    entries: Vec<(ProviderDescriptor, Arc<dyn ToolProvider>)>,
+    /// 已卸载但保留的目录快照，与 DynamicLoader 的 `unloaded` 语义一致。
+    unloaded: Mutex<HashMap<ProviderId, PluginInfo>>,
+}
+
+impl ToolLoader {
+    pub fn new(entries: Vec<(ProviderDescriptor, Arc<dyn ToolProvider>)>) -> Self {
+        Self {
+            entries,
+            unloaded: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn entry(&self, id: &ProviderId) -> Option<(&ProviderDescriptor, &Arc<dyn ToolProvider>)> {
+        self.entries
+            .iter()
+            .find(|(descriptor, _)| &descriptor.id == id)
+            .map(|(descriptor, provider)| (descriptor, provider))
+    }
+}
+
+impl PluginLoader for ToolLoader {
+    fn manifest(&self) -> LoaderManifest {
+        LoaderManifest::new(
+            LoaderKind::Native,
+            PLUGIN_API_VERSION,
+            vec![ExtensionPoint::Tool],
+        )
+    }
+
+    fn install(&self, manager: &mut PluginManager) -> Result<(), PluginError> {
+        let mut installed: Vec<ProviderId> = Vec::new();
+        for (descriptor, provider) in &self.entries {
+            match manager.register_tools(descriptor.clone(), provider.clone()) {
+                Ok(()) => installed.push(descriptor.id.clone()),
+                Err(error) => {
+                    // 安装是批量的：一个重名不能让前面几个留下半套注册。
+                    for id in installed {
+                        let _ = manager.remove_tool(&id);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn unload(&self, manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
+        let Some(mut info) = manager.info(id) else {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        };
+        manager.remove_tool(id)?;
+        info.lifecycle = PluginLifecycle::Unloaded;
+        self.unloaded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.clone(), info);
+        Ok(())
+    }
+
+    fn can_unload(&self, id: &ProviderId) -> bool {
+        self.entry(id).is_some()
+    }
+
+    fn inactive(&self) -> Vec<PluginInfo> {
+        self.unloaded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn reload(&self, manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
+        if !self
+            .unloaded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(id)
+        {
+            return Err(PluginError::Loader(acb_i18n::t!(
+                "kernel.plugin.tool_loader_not_unloaded",
+                id = id
+            )));
+        }
+        let Some((descriptor, provider)) = self.entry(id) else {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        };
+        manager.register_tools(descriptor.clone(), provider.clone())?;
+        self.unloaded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
+        Ok(())
+    }
+}
+
 /// 内置 loader。它不读文件，只把编译进来的 provider 注册到 Root。
 #[derive(Debug, Default)]
 pub struct NativeLoader;
@@ -2030,15 +2134,44 @@ impl PluginManager {
                     .iter()
                     .any(|name| name == &spec.name)
             {
-                return Err(PluginError::DuplicateProvider(spec.name));
+                return Err(PluginError::ToolNameConflict {
+                    name: spec.name,
+                    id: descriptor.id.to_string(),
+                });
             }
             if !names.insert(spec.name.clone()) {
-                return Err(PluginError::DuplicateProvider(spec.name));
+                return Err(PluginError::ToolNameConflict {
+                    name: spec.name,
+                    id: descriptor.id.to_string(),
+                });
             }
         }
         self.descriptors
             .insert(descriptor.id.clone(), descriptor.clone());
         self.tool_providers.insert(descriptor.id, provider);
+        Ok(())
+    }
+
+    /// 移除一个直接注册的 ToolProvider（loader 卸载时用）。manager 提供的工具
+    /// 不能单个摘掉，必须走 manager 卸载，避免留下半套子树。
+    pub fn remove_tool(&mut self, id: &ProviderId) -> Result<(), PluginError> {
+        let Some(descriptor) = self.descriptors.get(id) else {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        };
+        if descriptor.extension_point != ExtensionPoint::Tool {
+            return Err(PluginError::WrongProviderKind {
+                id: id.to_string(),
+                expected: ExtensionPoint::Tool,
+                found: descriptor.extension_point,
+            });
+        }
+        if self.tool_providers.remove(id).is_none() {
+            return Err(PluginError::Provider {
+                id: id.to_string(),
+                detail: acb_i18n::t!("kernel.plugin.tool_manager_owned", id = id),
+            });
+        }
+        self.descriptors.remove(id);
         Ok(())
     }
 
