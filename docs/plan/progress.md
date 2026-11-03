@@ -118,7 +118,7 @@
     “回滚”在当前同路径 reload 下不成立，并指向决策文档。
   - `docs/plan/native-reload-rollback-options.md` 增加“代行决策记录”与建议调整。
 - 证据：`cargo test --workspace` 在 B 落地后已全通过；本步只改注释/文档，未改行为。
-- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- commit：`6700fce docs(dynamic): mark native reload rollback as unimplemented`
 - 逐条对照：没有假装满足回滚；已知不满足的引用位置是 ADR-0030 D3 与
   `adapters/dynamic/src/lib.rs` 的 `reload` 注释。
 - 下一步入口：T7b；读 `task_flow.rs`、`route_worker.rs`、`engine.rs` 的 route/wake 路径。
