@@ -28,6 +28,11 @@ pub const TOOL_NAMES: &[&str] = &[
     "platform_call",
     // 插件目录：本会话实际用了哪些 wake/access/delivery 策略，它们声称做什么。
     "describe_plugins",
+    // 动态扩展目录 authoring（仅管理员会话；T6b）。
+    "extensions_list",
+    "extensions_read",
+    "extensions_write",
+    "extensions_reload",
     // 反馈：把「哪里卡住了」写回桥里（ADR-0021）。活干不下去时用它，不要直接摸平台端口。
     "report_feedback",
     // 记忆：文件层
@@ -250,6 +255,37 @@ pub struct DescribePluginsArgs {
     /// `receive` / `platform_adapter`）。只对 `scope=global` 生效。
     #[serde(default)]
     pub extension: Option<String>,
+}
+
+/// 动态扩展目录：列模块。`namespace` 默认 `dyn`。
+#[derive(Debug, Default, Deserialize)]
+pub struct ExtensionsListArgs {
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+/// 动态扩展目录：读一个相对路径（只允许模块目录下的 `.toml`）。
+#[derive(Debug, Deserialize)]
+pub struct ExtensionsReadArgs {
+    pub path: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+/// 动态扩展目录：写一个相对路径（只允许模块目录下的 `.toml`，原子写入）。
+#[derive(Debug, Deserialize)]
+pub struct ExtensionsWriteArgs {
+    pub path: String,
+    pub text: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+/// 动态扩展目录：排队重载。
+#[derive(Debug, Default, Deserialize)]
+pub struct ExtensionsReloadArgs {
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 /// 调一个平台方法。`params` 是任意 map，core 不认识里面任何字段，原样转给适配器。

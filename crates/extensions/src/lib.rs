@@ -373,6 +373,10 @@ impl ManagerPlugin for DynamicRouteManager {
             .clone()
     }
 
+    fn root(&self) -> Option<PathBuf> {
+        Some(self.root.clone())
+    }
+
     fn details(&self) -> Value {
         let snapshot = self
             .shared

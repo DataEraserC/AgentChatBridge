@@ -140,15 +140,17 @@ agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例
       增删模块在边界生效。
 - 实测：`cargo test -p acb-extensions` 10/10；`cargo test --workspace` 全通过。
 
-#### T6b：authoring 工具（待办）
+#### T6b：authoring 工具（已完成）
 
-- [ ] `extensions_list` / `extensions_read` / `extensions_write` / `extensions_reload`。
-- [ ] 仅管理员会话；路径 jail、大小上限、原子写入。
-- [ ] 写完显式 reload，下一轮边界生效。
+- [x] `extensions_list` / `extensions_read` / `extensions_write` / `extensions_reload`。
+- [x] 仅管理员会话；路径 jail、64 KiB 上限、原子写入、拒绝符号链接与 `..`。
+- [x] 轮次来源发送者进入 `TurnCtx`，管理员按当前房间连接的 `admin_qqs` 判定。
+- [x] 写完显式 reload，下一轮边界生效。
 - 依据：ADR-0029 P1、D3、D4、D7、D8、D9。
 - 验收：AI 写一个 route 模块 → reload → 下一轮真实生效，全程不重启桥。
+- 实测：`cargo test -p acb-extensions` 12/12（9 单元 + 2 authoring + 1 boundary）。
 - 拆分理由：T6a 先固定目录/manifest/分派器/安全与边界语义，T6b 只加工具面；
-  工具面依赖“轮次来源发送者”进入 TurnCtx 的管理员判定，单独提交更容易验证。
+  工具面依赖“轮次来源发送者”进入 `TurnCtx` 的管理员判定，单独提交更容易验证。
 
 ### T7. 任务结果与反馈回复的唤醒闭环
 
