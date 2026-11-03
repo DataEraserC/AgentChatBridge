@@ -68,7 +68,7 @@
 |---|---|---|---|
 | ~~观察**每一条**入站记录~~（已落地） | — | `RecordObserver`：`observe(&Record)`，append 之后同步只读；测试见 `observer_flow.rs` | 已完成 |
 | ~~插件提供工具~~（已落地） | — | `ToolProvider`：`tools() -> Vec<ToolSpec>` + `call(&ToolCallContext, tool, args)`；通过 `plugin_tools` 索引发现，`plugin_tool_call` 调用 | 已完成 |
-| 任务 handler 可扩展 | `task::run` 只认 `exec`（ADR-0029 D5 未落地，随 T8 做） | `TaskHandler`：`fn run(&self, ctx: &TaskContext, params: &Value) -> Result<TaskOutcome, TaskError>` | 高 |
+| ~~任务 handler 可扩展~~（已落地） | `task::run` 曾只认 `exec`（ADR-0029 D5） | `TaskHandler`：`handle(&self, task_id: &str, payload: &Value) -> Result<TaskOutcome, String>`；只给任务 id + payload，不暴露 Store/票/水位；任务记录仍是内存 200 条上限，不落库 | 已完成 |
 | 跨轮次/跨重启状态 | 插件只能自己找地方存 | `PluginState`：`get/set/delete(namespace, key, ttl)`，由 core 提供作用域和上限 | 中 |
 | 发送目标改写 | `before_send` 只给元素，room 已定；随便改会绕过 access | `SendTargetHook`：`fn rewrite_target(&self, ctx) -> Option<RoomId>`，core 收到后**重新跑 access** | 中 |
 | 按会话速率限制（发送/入站） | 可用 send/receive hook 做，但没有统一状态 | 先用 `PluginState` + 现有 hook；暂不加新 hook | 低 |
