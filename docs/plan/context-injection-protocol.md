@@ -1,6 +1,6 @@
-# 上下文注入片段协议设计（只出文档，不实施）
+# 上下文注入片段协议
 
-状态：设计草案（2026-11-04）。**等待用户确认后再动代码、协议或 harness。**
+状态：已批准并实施（2026-11-04）。本稿是实现的合同；改动需同步代码与测试。
 
 目标：给插件一个受预算约束的、声明式的「往本轮模型上下文里加一段文字」的能力。
 它不是让插件改写对话历史，也不是让插件改投递记录。
@@ -64,15 +64,15 @@ fn is_false(value: &bool) -> bool {
 - 不提供 `enabled` 字段：开关是「配置里有没有引用这个 provider」，不是片段自述。
 - 不加 `PromptAudit` 大对象：审计走日志（见 §6），避免每轮投递再长一截。
 
-## 3. 扩展点形状（实现时再加）
+## 3. 扩展点形状（已实现）
 
 ```rust
-pub struct PromptContext<'a> {
-    pub session: &'a str,
-    pub room: &'a RoomId,
-    pub platform: &'a str,
+pub struct PromptContext {
+    pub session: String,
+    pub room: RoomId,
+    pub platform: String,
     pub reason: TurnReason,
-    pub wake_reason: Option<&'a str>,
+    pub wake_reason: Option<String>,
     /// 本轮开始时间（毫秒），供插件判断时效；不是当前时间。
     pub now: i64,
 }
@@ -83,12 +83,13 @@ pub struct PromptDraft {
 }
 
 pub trait PromptProvider: Send + Sync {
-    fn prompts(&self, ctx: &PromptContext<'_>) -> Result<Vec<PromptDraft>, String>;
+    fn prompts(&self, ctx: &PromptContext) -> Result<Vec<PromptDraft>, String>;
 }
 ```
 
-- `PromptContext` 只给会话/房间/平台/开轮原因，不给记录列表、Store、票或水位。
-  插件要基于历史做判断，自己用 `RecordObserver` 维护状态，不要求 core 把历史递进来。
+- provider 只拿会话/房间/平台/开轮原因，不拿记录、Store、票或水位。
+- 调用在独立线程里做，单个 provider 超时 **50 ms**；超时/panic 都只跳过该来源并记日志，
+  不阻塞本轮投递。超时线程可能继续跑，但它不持有任何 core 状态。
 - 扩展点：`ExtensionPoint::Prompt`；能力：`Capability::PromptContribute`；
   实例化：`ProviderOptions::Prompt` / `ProviderInstance::Prompt`。
 - provider 名注册方式与 Observer 相同（安装即注册）；调用点在投递组装时，一轮一次，

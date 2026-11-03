@@ -421,8 +421,28 @@ export function renderPersona(persona) {
   return `[人格：${label}]\n${text}\n[以上是这个会话的人格设定，按它说话。]`
 }
 
+/**
+ * 插件贡献的上下文片段。core 已经裁剪、排序；这里只做展示：
+ * 独立块、带来源标签，不拼进记录行，也不冒充用户消息。
+ * 旧桥没有 `prompts` 字段时返回空串，行为与升级前完全一致。
+ */
+export function renderPrompts(prompts) {
+  if (!Array.isArray(prompts) || prompts.length === 0) return ""
+  const lines = ["[插件上下文]"]
+  for (const fragment of prompts) {
+    const text = String(fragment?.text ?? "").trim()
+    if (!text) continue
+    const source = String(fragment?.source ?? "").trim() || "unknown"
+    lines.push(`[来源: ${source}]`)
+    lines.push(text)
+  }
+  return lines.length > 1 ? lines.join("\n") : ""
+}
+
 export function renderTurn(delivery, { now = Date.now() } = {}) {
   const lines = []
+  const prompts = renderPrompts(delivery.prompts)
+  if (prompts) lines.push(prompts)
   const room = roomText(delivery.room)
   const count = delivery.records.length
   const why = delivery.reason === "clock" ? "定时例行检查" : "有新消息"

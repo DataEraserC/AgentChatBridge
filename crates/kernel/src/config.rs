@@ -147,6 +147,12 @@ impl Config {
                 id: session.turn_error.provider.clone(),
                 location: format!("session:{} turn_error", session.id),
             });
+            for id in &session.prompts {
+                refs.push(ProviderReference {
+                    id: id.clone(),
+                    location: format!("session:{} prompts", session.id),
+                });
+            }
             for subscription in &session.subscriptions {
                 refs.push(ProviderReference {
                     id: subscription.wake.provider.clone(),
@@ -436,6 +442,8 @@ pub struct Session {
     pub outbound: OutboundPolicy,
     /// 失败通知策略（ADR-0026）：默认按 `on_turn_error` / 全局默认选动作。
     pub turn_error: TurnErrorPolicy,
+    /// 上下文注入 provider 列表（按配置顺序）。空 = 不注入。
+    pub prompts: Vec<ProviderId>,
     /// 这个会话一轮失败时按顺序执行的「通知动作」列表。空 = 只记日志。
     /// 见 [`TurnErrorAction`]。
     pub on_turn_error: TurnErrorActions,
@@ -889,6 +897,12 @@ pub enum ConfigError {
     },
     #[error("{}", acb_i18n::t!("kernel.config.bad_turn_error_provider", session = session, provider = provider, detail = detail))]
     BadTurnErrorProvider {
+        session: String,
+        provider: String,
+        detail: String,
+    },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_prompt_provider", session = session, provider = provider, detail = detail))]
+    BadPromptProvider {
         session: String,
         provider: String,
         detail: String,
@@ -1407,6 +1421,7 @@ impl Config {
             let delivery = build_delivery(&id, raw_session.delivery)?;
             let outbound = build_outbound(&id, raw_session.outbound)?;
             let turn_error = build_turn_error(&id, raw_session.turn_error)?;
+            let prompts = build_prompts(&id, raw_session.prompts)?;
 
             sessions.push(Session {
                 id,
@@ -1422,6 +1437,7 @@ impl Config {
                 outbound,
                 turn_error,
                 on_turn_error,
+                prompts,
             });
         }
 
@@ -1894,6 +1910,30 @@ fn build_turn_error(session: &str, raw: RawTurnError) -> Result<TurnErrorPolicy,
     })
 }
 
+/// 会话级上下文注入 provider 列表。空串/非法 id 在启动时拒绝；重复 id 去重。
+fn build_prompts(session: &str, raw: Vec<String>) -> Result<Vec<ProviderId>, ConfigError> {
+    let mut prompts: Vec<ProviderId> = Vec::new();
+    for item in raw {
+        let text = item.trim();
+        if text.is_empty() {
+            return Err(ConfigError::BadPromptProvider {
+                session: session.to_owned(),
+                provider: item.clone(),
+                detail: "empty provider id".to_owned(),
+            });
+        }
+        let id = ProviderId::parse(text).map_err(|error| ConfigError::BadPromptProvider {
+            session: session.to_owned(),
+            provider: text.to_owned(),
+            detail: error.to_string(),
+        })?;
+        if !prompts.contains(&id) {
+            prompts.push(id);
+        }
+    }
+    Ok(prompts)
+}
+
 fn build_wake(session: &str, room: &RoomId, raw: RawWake) -> Result<WakePolicy, ConfigError> {
     let default = WakePolicy::default();
 
@@ -2106,6 +2146,9 @@ struct RawSession {
     /// 一轮失败时的通知动作列表（默认空 = 只记日志）。
     #[serde(default)]
     on_turn_error: Vec<String>,
+    /// 上下文注入 provider 列表（默认空 = 不注入）。
+    #[serde(default)]
+    prompts: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2424,6 +2467,7 @@ mod tests {
             harness = "dsh"
             persona = "p"
             token = "t-main"
+            prompts = ["test.provider"]
 
             [sessions.access]
             provider = "test.provider"
@@ -2463,6 +2507,7 @@ mod tests {
                 "session:main clock qq:group/123",
                 "session:main delivery",
                 "session:main outbound",
+                "session:main prompts",
                 "session:main turn_error",
                 "session:main wake qq:group/123",
             ]
@@ -2481,6 +2526,7 @@ mod tests {
         let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("应当能解析");
         let subscription = &config.sessions[0].subscriptions[0];
 
+        assert!(config.sessions[0].prompts.is_empty(), "默认不注入上下文");
         assert_eq!(subscription.room.to_string(), "qq:group/123");
         assert!(subscription.wake.at_mention);
         assert!(subscription.wake.reply);
