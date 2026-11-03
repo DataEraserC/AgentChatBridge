@@ -22,6 +22,9 @@ use crate::plugin_meta::PluginMetadata;
 pub const ADAPTER_API_VERSION: u32 = 1;
 
 /// 适配器声明的能力。core 用它判断这条连接能做什么。
+///
+/// 这里只放**真实适配器已经在用**的能力，不预先铺满；新增能力必须有适配器实现，
+/// 否则就是一张空头支票。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AdapterCapability {
     /// 能把平台事件翻译成记录。
@@ -30,6 +33,25 @@ pub enum AdapterCapability {
     Send,
     /// 能声明平台方法目录并调用。
     Catalog,
+    /// 能撤回/删除已发消息（方法目录里的 `message.recall`）。
+    Recall,
+    /// 能 @ 指定成员（内容元素 `At`）。
+    Mention,
+    /// 能承载图片/语音/视频/文件等富媒体元素。
+    RichMedia,
+}
+
+impl AdapterCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReceiveEvents => "receive_events",
+            Self::Send => "send",
+            Self::Catalog => "catalog",
+            Self::Recall => "recall",
+            Self::Mention => "mention",
+            Self::RichMedia => "rich_media",
+        }
+    }
 }
 
 /// 一条适配器的静态声明。

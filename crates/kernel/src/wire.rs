@@ -35,6 +35,9 @@ impl TryFrom<WireManifest> for AdapterManifest {
                 "receive_events" => AdapterCapability::ReceiveEvents,
                 "send" => AdapterCapability::Send,
                 "catalog" => AdapterCapability::Catalog,
+                "recall" => AdapterCapability::Recall,
+                "mention" => AdapterCapability::Mention,
+                "rich_media" => AdapterCapability::RichMedia,
                 other => {
                     return Err(acb_i18n::t!(
                         "kernel.wire.unknown_adapter_capability",
@@ -464,6 +467,39 @@ mod tests {
             send_error(WireError::Unavailable { detail: "x".into() }),
             OutboundError::Unavailable(_)
         ));
+    }
+
+    #[test]
+    fn manifest_capabilities_cover_recall_mention_and_rich_media() {
+        let wire = WireManifest {
+            id: "demo.adapter".into(),
+            platform: "demo".into(),
+            kind: "demo".into(),
+            transports: vec!["process".into()],
+            api_version: 1,
+            capabilities: vec![
+                "receive_events".into(),
+                "send".into(),
+                "catalog".into(),
+                "recall".into(),
+                "mention".into(),
+                "rich_media".into(),
+            ],
+            events: Vec::new(),
+            event_tags: Vec::new(),
+            supports_at: true,
+            supports_reply: true,
+            extension: "platform_adapter".into(),
+            metadata: WirePluginMetadata::default(),
+        };
+        let manifest = AdapterManifest::try_from(wire).expect("capabilities 可转换");
+        for capability in [
+            AdapterCapability::Recall,
+            AdapterCapability::Mention,
+            AdapterCapability::RichMedia,
+        ] {
+            assert!(manifest.capabilities.contains(&capability));
+        }
     }
 
     #[test]

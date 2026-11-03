@@ -18,6 +18,11 @@ static CAPABILITIES: &[AdapterCapability] = &[
     AdapterCapability::ReceiveEvents,
     AdapterCapability::Send,
     AdapterCapability::Catalog,
+    // 真实实现：message.recall（delete_msg）、At 元素、image/record/video/file 段。
+    // 编辑消息当前协议不支持，不声明。
+    AdapterCapability::Recall,
+    AdapterCapability::Mention,
+    AdapterCapability::RichMedia,
 ];
 /// 已知会进流水的事件名（事件里的 `event` 字段）。OneBot 的 notice_type 是开放的，
 /// 没列出来的也会原样记，所以这是「常见事件」清单，不是白名单。
