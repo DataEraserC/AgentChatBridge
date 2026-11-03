@@ -108,6 +108,14 @@ impl PromptProvider for SlowPrompt {
     }
 }
 
+struct PanicPrompt;
+
+impl PromptProvider for PanicPrompt {
+    fn prompts(&self, _context: &PromptContext) -> Result<Vec<PromptDraft>, String> {
+        panic!("provider panic");
+    }
+}
+
 fn bridge_with(entries: &[(&str, Arc<dyn PromptProvider>)]) -> Arc<Mutex<Bridge<MemoryStore>>> {
     let ids: Vec<&str> = entries.iter().map(|(id, _)| *id).collect();
     let mut plugins = PluginManager::with_native_builtins();
@@ -269,5 +277,15 @@ fn slow_provider_times_out_and_is_skipped() {
         started.elapsed() < Duration::from_millis(180),
         "超时后应当继续投递，而不是等 provider 跑完：{:?}",
         started.elapsed()
+    );
+}
+
+#[test]
+fn panicking_provider_is_isolated_and_skipped() {
+    let bridge = bridge_with(&[("test.panic", Arc::new(PanicPrompt))]);
+    let delivery = open(&bridge);
+    assert!(
+        delivery.prompts.is_empty(),
+        "provider panic 只跳过该来源，不能带崩投递"
     );
 }

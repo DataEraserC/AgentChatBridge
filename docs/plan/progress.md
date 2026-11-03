@@ -684,6 +684,28 @@
 - 证据：示例运行成功；`cargo check --workspace --all-targets` 不受影响（示例独立 workspace）。
 - 可回退：删除示例与文档小节即可。
 
+## 2026-11-04 07:00 CST — 失败恢复验证（SQLite 损坏 / provider panic）
+
+- 任务编号：剩余项 3（存储与插件失败恢复）
+- 做了什么/验证了什么：
+  1. `crates/kernel/tests/sqlite_store.rs` 新增损坏库用例：写入非 SQLite 字节后
+     `SqliteStore::open` 返回 `StorageError::Backend`，不 panic；原文件字节保持不变，
+     没有被悄悄清空/替换成新库。好库重开可读由既有 `restart_*` 用例覆盖（24/24）。
+  2. `crates/kernel/tests/prompt_flow.rs` 新增 provider panic 用例：provider 在投递线程里
+     panic，core 通过 channel 断开识别并跳过该来源，整轮投递不受影响（5/5）。
+  3. 盘点结论：
+     - PromptProvider 的 panic 已被隔离（独立线程 + channel）。
+     - RecordObserver / RouteProvider / ToolProvider 的 panic **没有** catch_unwind；
+       它们在调用线程里 unwind，最坏会结束进程，由外部 supervisor 拉起。本轮不改，
+       因为把 panic 当成正常错误会掩盖插件 bug，且需要单独的安全点/审计设计。
+     - kill -9 的恢复语义已由 supervisor MVP（退出码 75/78 + systemd Restart）覆盖；
+       本轮没有在临时实例上重复 live kill -9。
+- 证据：
+  - `cargo test -p acb-kernel --test sqlite_store` → 24/24；
+  - `cargo test -p acb-kernel --test prompt_flow` → 5/5；
+  - `cargo test --workspace` 全绿。
+- 可回退：两个测试用例独立，删除即可；不改生产代码。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
