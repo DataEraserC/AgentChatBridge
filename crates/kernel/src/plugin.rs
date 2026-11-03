@@ -13,7 +13,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use acb_proto::{Element, Omitted, Record, RecordKind, RoomId, Sender};
+use acb_proto::{Element, Omitted, Record, RecordKind, RoomId, Sender, ToolError};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -195,6 +195,10 @@ pub enum ExtensionPoint {
     Clock,
     Delivery,
     TurnError,
+    /// 只读观察每条入库记录（统计、审计、索引）。
+    Observer,
+    /// 插件提供的工具。
+    Tool,
     PlatformAdapter,
     Manager,
     Loader,
@@ -211,6 +215,8 @@ impl ExtensionPoint {
             Self::Clock => "clock",
             Self::Delivery => "delivery",
             Self::TurnError => "turn_error",
+            Self::Observer => "observer",
+            Self::Tool => "tool",
             Self::PlatformAdapter => "platform_adapter",
             Self::Manager => "manager",
             Self::Loader => "loader",
@@ -235,6 +241,10 @@ pub enum Capability {
     RouteDecision,
     /// 允许在路由动作里直接请求唤醒（绕过 wake 策略）。只给高信任载体。
     WakeRequest,
+    /// 只读观察入库记录。
+    ObservedRecord,
+    /// 提供插件工具。
+    ToolCall,
 }
 
 impl Capability {
@@ -253,6 +263,8 @@ impl Capability {
             Self::ReceiveDecision => "receive_decision",
             Self::RouteDecision => "route_decision",
             Self::WakeRequest => "wake_request",
+            Self::ObservedRecord => "observed_record",
+            Self::ToolCall => "tool_call",
         }
     }
 }
@@ -460,6 +472,45 @@ pub trait WakeProvider: Send + Sync {
             delay_ms: 0,
         }
     }
+}
+
+/// 记录观察者。append 之后同步调用，只读；不能改记录、不能开轮、不能写水位。
+pub trait RecordObserver: Send + Sync {
+    fn observe(&self, record: &Record);
+}
+
+/// 插件提供的一个工具。schema 是 JSON Schema；发现时先给 name + summary，
+/// 只有明确按 name 查询时才返回完整 schema。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolSpec {
+    /// 工具名。不能和 core 内置工具重名。
+    pub name: String,
+    /// 一句话说明，给索引列表用。
+    pub summary: String,
+    /// JSON Schema（object），给 `plugin_tools({name})` 详情用。
+    pub schema: Value,
+}
+
+/// 插件工具调用时的上下文。只给会话/房间/来源/是否在轮内，不交 Store、票和水位。
+#[derive(Debug, Clone, Copy)]
+pub struct ToolCallContext<'a> {
+    pub session: &'a str,
+    pub room: &'a RoomId,
+    pub origin_sender: Option<&'a str>,
+    pub live: bool,
+}
+
+/// 工具提供者。一个 provider 可以带多个工具。
+pub trait ToolProvider: Send + Sync {
+    fn tools(&self) -> Vec<ToolSpec>;
+
+    /// 调用其中一个工具。`tool` 必须是 `tools()` 里声明过的名字。
+    fn call(
+        &self,
+        context: &ToolCallContext<'_>,
+        tool: &str,
+        args: Value,
+    ) -> Result<Value, ToolError>;
 }
 
 /// 内置唤醒策略：等价于原来的 `WakePolicy::decide`。
@@ -1028,6 +1079,10 @@ pub enum ProviderOptions<'a> {
     Clock(&'a ClockPolicy),
     Receive(&'a ReceivePolicy),
     Route(&'a RoutePolicy),
+    /// 观察者不需要策略配置。
+    Observer,
+    /// 工具提供者不需要策略配置。
+    Tool,
     /// 平台适配器：按这条连接的配置实例化。
     PlatformAdapter(&'a Connection),
     /// 不需要 options 的扩展点（发送钩子）。
@@ -1044,6 +1099,8 @@ pub enum ProviderInstance {
     Clock(Arc<dyn ClockProvider>),
     Receive(Arc<dyn ReceiveProvider>),
     Route(Arc<dyn RouteProvider>),
+    Observer(Arc<dyn RecordObserver>),
+    Tool(Arc<dyn ToolProvider>),
     PlatformAdapter(Arc<dyn AdapterFactory>),
 }
 
@@ -1059,6 +1116,8 @@ impl ProviderInstance {
             Self::Clock(_) => ExtensionPoint::Clock,
             Self::Receive(_) => ExtensionPoint::Receive,
             Self::Route(_) => ExtensionPoint::Route,
+            Self::Observer(_) => ExtensionPoint::Observer,
+            Self::Tool(_) => ExtensionPoint::Tool,
             Self::PlatformAdapter(_) => ExtensionPoint::PlatformAdapter,
         }
     }
@@ -1351,6 +1410,8 @@ pub struct PluginManager {
     clocks: HashMap<ProviderId, Arc<dyn ClockProvider>>,
     receives: HashMap<ProviderId, Arc<dyn ReceiveProvider>>,
     routes: HashMap<ProviderId, Arc<dyn RouteProvider>>,
+    observers: HashMap<ProviderId, Arc<dyn RecordObserver>>,
+    tool_providers: HashMap<ProviderId, Arc<dyn ToolProvider>>,
     /// 直接注册的平台适配器工厂，键是连接配置里的 `kind`。
     adapters: HashMap<String, Arc<dyn AdapterFactory>>,
     /// manager 子树声明的适配器：`kind` → provider id。
@@ -1428,6 +1489,8 @@ impl PluginManager {
                     | ExtensionPoint::Clock
                     | ExtensionPoint::Receive
                     | ExtensionPoint::Route
+                    | ExtensionPoint::Observer
+                    | ExtensionPoint::Tool
                     | ExtensionPoint::PlatformAdapter
             ) {
                 return Err(PluginError::UnsupportedExtensionPoint {
@@ -1516,6 +1579,9 @@ impl PluginManager {
             self.clocks.retain(|id, _| id.namespace() != namespace);
             self.receives.retain(|id, _| id.namespace() != namespace);
             self.routes.retain(|id, _| id.namespace() != namespace);
+            self.observers.retain(|id, _| id.namespace() != namespace);
+            self.tool_providers
+                .retain(|id, _| id.namespace() != namespace);
             self.adapter_providers
                 .retain(|_, id| id.namespace() != namespace);
         }
@@ -1847,6 +1913,183 @@ impl PluginManager {
         Ok(())
     }
 
+    /// 注册插件工具提供者。工具名不能和内置工具或已注册插件工具重名。
+    pub fn register_tools(
+        &mut self,
+        descriptor: ProviderDescriptor,
+        provider: Arc<dyn ToolProvider>,
+    ) -> Result<(), PluginError> {
+        self.check_descriptor(&descriptor, ExtensionPoint::Tool, Capability::ToolCall)?;
+        if self.descriptors.contains_key(&descriptor.id) {
+            return Err(PluginError::DuplicateProvider(descriptor.id.to_string()));
+        }
+        let mut names = HashSet::new();
+        for spec in provider.tools() {
+            if crate::tools::TOOL_NAMES.contains(&spec.name.as_str())
+                || self
+                    .declared_tool_names()
+                    .iter()
+                    .any(|name| name == &spec.name)
+            {
+                return Err(PluginError::DuplicateProvider(spec.name));
+            }
+            if !names.insert(spec.name.clone()) {
+                return Err(PluginError::DuplicateProvider(spec.name));
+            }
+        }
+        self.descriptors
+            .insert(descriptor.id.clone(), descriptor.clone());
+        self.tool_providers.insert(descriptor.id, provider);
+        Ok(())
+    }
+
+    /// 所有插件工具的目录（name + summary + provider）。目录不全量给 schema。
+    pub fn plugin_tool_index(&self) -> Vec<(ProviderId, ToolSpec)> {
+        let mut out = Vec::new();
+        for descriptor in self
+            .descriptors
+            .values()
+            .filter(|descriptor| descriptor.extension_point == ExtensionPoint::Tool)
+        {
+            let Some(provider) = self.tool_provider(&descriptor.id) else {
+                continue;
+            };
+            for spec in provider.tools() {
+                if crate::tools::TOOL_NAMES.contains(&spec.name.as_str()) {
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "kernel.plugin.tool_name_conflict",
+                            name = spec.name,
+                            id = descriptor.id
+                        )
+                    );
+                    continue;
+                }
+                out.push((descriptor.id.clone(), spec));
+            }
+        }
+        out.sort_by(|left, right| left.1.name.cmp(&right.1.name));
+        out
+    }
+
+    /// 按工具名找到提供者；重名时返回错误（注册时已经拒绝，这里是防御）。
+    pub fn tool_provider_for(&self, name: &str) -> Option<(ProviderId, Arc<dyn ToolProvider>)> {
+        self.plugin_tool_index()
+            .into_iter()
+            .find(|(_, spec)| spec.name == name)
+            .and_then(|(id, _)| self.tool_provider(&id).map(|provider| (id, provider)))
+    }
+
+    fn tool_provider(&self, id: &ProviderId) -> Option<Arc<dyn ToolProvider>> {
+        if let Some(provider) = self.tool_providers.get(id) {
+            return Some(provider.clone());
+        }
+        let manager = self.managers.get(id.namespace())?;
+        match manager.instantiate(id, ProviderOptions::Tool) {
+            Ok(ProviderInstance::Tool(provider)) => Some(provider),
+            Ok(other) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.plugin.tool_wrong_kind",
+                        id = id,
+                        found = format!("{:?}", other.extension_point())
+                    )
+                );
+                None
+            }
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("kernel.plugin.tool_failed", id = id, error = error)
+                );
+                None
+            }
+        }
+    }
+
+    fn declared_tool_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for provider in self.tool_providers.values() {
+            for spec in provider.tools() {
+                names.push(spec.name);
+            }
+        }
+        for descriptor in self
+            .descriptors
+            .values()
+            .filter(|descriptor| descriptor.extension_point == ExtensionPoint::Tool)
+        {
+            if self.tool_providers.contains_key(&descriptor.id) {
+                continue;
+            }
+            if let Some(provider) = self.tool_provider(&descriptor.id) {
+                for spec in provider.tools() {
+                    names.push(spec.name);
+                }
+            }
+        }
+        names
+    }
+
+    /// 注册记录观察者。只读，不参与调度。
+    pub fn register_observer(
+        &mut self,
+        descriptor: ProviderDescriptor,
+        observer: Arc<dyn RecordObserver>,
+    ) -> Result<(), PluginError> {
+        self.check_descriptor(
+            &descriptor,
+            ExtensionPoint::Observer,
+            Capability::ObservedRecord,
+        )?;
+        if self.descriptors.contains_key(&descriptor.id) {
+            return Err(PluginError::DuplicateProvider(descriptor.id.to_string()));
+        }
+        self.descriptors
+            .insert(descriptor.id.clone(), descriptor.clone());
+        self.observers.insert(descriptor.id, observer);
+        Ok(())
+    }
+
+    /// 把一条刚入库的记录交给所有观察者。顺序按 provider id 排序，保证可复现。
+    ///
+    /// 观察者异常不影响主流程；这里没有返回值，错误由 manager 自己记录健康状态。
+    pub fn observe(&self, record: &Record) {
+        let mut ids: Vec<&ProviderId> = self
+            .descriptors
+            .values()
+            .filter(|descriptor| descriptor.extension_point == ExtensionPoint::Observer)
+            .map(|descriptor| &descriptor.id)
+            .collect();
+        ids.sort();
+        for id in ids {
+            if let Some(observer) = self.observers.get(id) {
+                observer.observe(record);
+                continue;
+            }
+            let Some(manager) = self.managers.get(id.namespace()) else {
+                continue;
+            };
+            match manager.instantiate(id, ProviderOptions::Observer) {
+                Ok(ProviderInstance::Observer(observer)) => observer.observe(record),
+                Ok(other) => eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.plugin.observer_wrong_kind",
+                        id = id,
+                        found = format!("{:?}", other.extension_point())
+                    )
+                ),
+                Err(error) => eprintln!(
+                    "{}",
+                    acb_i18n::t!("kernel.plugin.observer_failed", id = id, error = error)
+                ),
+            }
+        }
+    }
+
     /// 安装一棵树外 manager 子树。它拥有自己的 namespace 和子树注册表；Root 只做
     /// namespace / 版本 / 能力 / id 审计，之后把它子树里的 id 委托给它。
     ///
@@ -1963,6 +2206,8 @@ impl PluginManager {
                 ExtensionPoint::Clock => Capability::ClockDecision,
                 ExtensionPoint::Receive => Capability::ReceiveDecision,
                 ExtensionPoint::Route => Capability::RouteDecision,
+                ExtensionPoint::Observer => Capability::ObservedRecord,
+                ExtensionPoint::Tool => Capability::ToolCall,
                 ExtensionPoint::PlatformAdapter => Capability::PlatformCatalog,
                 point => {
                     return Err(PluginError::UnsupportedExtensionPoint {

@@ -6,14 +6,16 @@ use std::sync::{Arc, Mutex};
 
 use acb_kernel::{
     Bridge, Capability, Config, DefaultWakeProvider, Element, ExtensionPoint, MemoryStore,
-    Outbound, OutboundError, PLUGIN_API_VERSION, PluginManager, PluginMetadata,
-    ProviderDescriptor, ProviderId, RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision,
-    RoutePolicy, RouteProvider, Sender, Sent,
+    Outbound, OutboundError, PLUGIN_API_VERSION, PluginManager, PluginMetadata, ProviderDescriptor,
+    ProviderId, RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision, RoutePolicy,
+    RouteProvider, Sender, Sent,
 };
 use serde_json::{Value, json};
 
 fn bytes(value: &Value) -> usize {
-    serde_json::to_vec(value).map(|bytes| bytes.len()).unwrap_or(0)
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
 }
 
 #[test]
@@ -24,7 +26,9 @@ fn measure_plugin_catalog() {
         let metadata = PluginMetadata {
             title: Some(format!("测试插件 {index}").into()),
             summary: Some("用于测量插件目录随生态规模增长的成本".into()),
-            description: Some("描述由插件作者声明，长度随作者写法变化；这里给一段中等长度文本。".into()),
+            description: Some(
+                "描述由插件作者声明，长度随作者写法变化；这里给一段中等长度文本。".into(),
+            ),
             tags: vec!["measure".into()].into(),
             effects: Vec::new().into(),
             docs_url: None,

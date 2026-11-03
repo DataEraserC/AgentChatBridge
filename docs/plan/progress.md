@@ -396,6 +396,39 @@
   是否需要按模型窗口调整。
 - 下一步入口：RecordObserver 与 ToolProvider。
 
+## 2026-11-04 04:35 CST — 扩展点：RecordObserver 与 ToolProvider
+
+- 任务编号：扩展点首批（用户代行决策）
+- 代行决策：
+  - 只做 `RecordObserver` 与 `ToolProvider`；`TaskHandler` 随 T8，`PluginState` 不进 core；
+  - 观察者 append 后同步只读调用，不能改记录/开轮/水位；
+  - 插件工具用 `plugin_tools` 索引 + `plugin_tool_call` 通用入口，schema 按 name 按需查，
+    不给每个插件工具单独注册成 core 工具；
+  - 工具名不能和内置工具重名；工具上下文只给会话/房间/来源/是否在轮内。
+  - 可否回退：删除两个扩展点与两个工具即可；不影响现有配置/协议。
+- 做了什么：
+  - `crates/kernel/src/plugin.rs`：`RecordObserver`、`ToolSpec`、`ToolCallContext`、
+    `ToolProvider`；`ExtensionPoint::Observer/Tool`、`Capability::ObservedRecord/ToolCall`；
+    `register_observer` / `observe`、`register_tools` / `plugin_tool_index` /
+    `tool_provider_for`；manager instantiate 支持 Observer/Tool；卸载清理。
+  - `crates/kernel/src/engine.rs`：append 后调用观察者；`plugin_tools` /
+    `plugin_tool_call` 工具分发。
+  - `crates/kernel/src/tools.rs` / `harnesses/shared/tools.mjs`：两个新工具。
+  - `crates/kernel/tests/observer_flow.rs`（新）：每条入库记录观察一次、不改变调度；
+  - `crates/kernel/tests/plugin_tools_flow.rs`（新）：发现/schema/调用/上下文/未知工具/
+    内置重名拒绝。
+- 证据：
+  - `cargo test -p acb-kernel --test observer_flow` → 2/2；
+  - `cargo test -p acb-kernel --test plugin_tools_flow` → 2/2；
+  - `cargo check --workspace` 通过。
+- commit：`TBD`。
+- 偏离说明：插件工具采用「索引 + 通用调用」两步发现，新增 2 个常驻工具定义；
+  这比给每个插件工具单独注册省接口面，但 agent 需要先查索引。下一步可用测量数据
+  评估是否值得把频繁使用的插件工具提升为常驻（暂不做）。
+- 未决问题：ToolProvider 的权限是否只给 high-trust 载体；插件工具是否需要单独的
+  调用审计/限流；`plugin_tools` 索引是否需要阈值索引（当前 limit 50）。
+- 下一步入口：TaskHandler（T8 一起）。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，

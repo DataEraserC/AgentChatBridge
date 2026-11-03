@@ -213,7 +213,9 @@ fn measure_extension_catalog_sizes() {
         let listed = call(&mut bridge, &ticket, "extensions_list", json!({})).expect("list");
         println!(
             "MEASURE extensions_catalog modules={count} bytes={}",
-            serde_json::to_vec(&listed).map(|bytes| bytes.len()).unwrap_or(0)
+            serde_json::to_vec(&listed)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0)
         );
         let _ = fs::remove_dir_all(&root);
     }

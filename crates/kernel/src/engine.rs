@@ -55,8 +55,9 @@ use crate::tools::{
     ExtensionsWriteArgs, FeedbackArgs, FeedbackGetArgs, FeedbackListArgs, FeedbackReplyArgs,
     FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs,
     MemoryBlameArgs, MemoryCommitArgs, MemoryListArgs, MemoryLogArgs, MemorySearchArgs,
-    MemoryWriteArgs, NotesArgs, PlatformCallArgs, PlatformMethodsArgs, RECORD_COLUMNS, SendArgs,
-    SendToArgs, SetNoteArgs, TaskGetArgs, TaskListArgs, WaitMessageArgs, is_known,
+    MemoryWriteArgs, NotesArgs, PlatformCallArgs, PlatformMethodsArgs, PluginToolCallArgs,
+    PluginToolsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, TaskGetArgs, TaskListArgs,
+    WaitMessageArgs, is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -1729,6 +1730,8 @@ impl<S: Store> Bridge<S> {
                 self.store.add_labels(&room, &target, &target_labels)?;
             }
         }
+        // 观察者只看已落库的记录；不能改内容、不能开轮、不能动水位。
+        self.plugins.observe(&record);
 
         let mut woke = Vec::new();
         let now = now_millis();
@@ -2644,6 +2647,68 @@ impl<S: Store> Bridge<S> {
                     ));
                 }
                 self.reply_feedback(args.id, &turn_session, "tool", &args.text)
+            }
+            // 插件工具：先查索引，需要 schema 时按 name 查；调用走通用入口。
+            "plugin_tools" => {
+                let args: PluginToolsArgs = parse(args)?;
+                if let Some(name) = clean(args.name.as_deref()) {
+                    let index = self.plugins.plugin_tool_index();
+                    let Some((provider, spec)) =
+                        index.into_iter().find(|(_, spec)| spec.name == name)
+                    else {
+                        return Err(ToolError::new(
+                            ErrorCode::BadRequest,
+                            acb_i18n::t!("kernel.engine.unknown_tool", tool = name),
+                        ));
+                    };
+                    Ok(json!({
+                        "name": spec.name,
+                        "summary": spec.summary,
+                        "provider": provider.to_string(),
+                        "schema": spec.schema,
+                    }))
+                } else {
+                    let limit = args.limit.unwrap_or(50).clamp(1, 100);
+                    let offset = args.offset.unwrap_or(0);
+                    let index = self.plugins.plugin_tool_index();
+                    let total = index.len();
+                    let tools: Vec<Value> = index
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .map(|(provider, spec)| {
+                            json!({
+                                "name": spec.name,
+                                "summary": spec.summary,
+                                "provider": provider.to_string(),
+                            })
+                        })
+                        .collect();
+                    Ok(json!({
+                        "total": total,
+                        "offset": offset,
+                        "returned": tools.len(),
+                        "has_more": offset + tools.len() < total,
+                        "tools": tools,
+                        "hint": "给 name 查 schema；用 plugin_tool_call({tool, arguments}) 调用。",
+                    }))
+                }
+            }
+            "plugin_tool_call" => {
+                let args: PluginToolCallArgs = parse(args)?;
+                let Some((_, provider)) = self.plugins.tool_provider_for(&args.tool) else {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        acb_i18n::t!("kernel.engine.unknown_tool", tool = args.tool),
+                    ));
+                };
+                let context = crate::plugin::ToolCallContext {
+                    session: &turn_session,
+                    room: &room,
+                    origin_sender: origin_sender.as_deref(),
+                    live,
+                };
+                provider.call(&context, &args.tool, args.arguments)
             }
             // 记忆：文件层。
             "memory_read" => {
@@ -5672,13 +5737,10 @@ fn task_json(record: &TaskRecord) -> Value {
 }
 
 /// 目录/列表超过阈值时，把每条降级成索引；顶层加 `indexed` 与详情入口。
-fn maybe_index_list(
-    response: &mut Value,
-    key: &str,
-    hint: &str,
-    compact: fn(&Value) -> Value,
-) {
-    let bytes = serde_json::to_vec(response).map(|bytes| bytes.len()).unwrap_or(0);
+fn maybe_index_list(response: &mut Value, key: &str, hint: &str, compact: fn(&Value) -> Value) {
+    let bytes = serde_json::to_vec(response)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
     if bytes <= LIST_INDEX_BYTES {
         return;
     }

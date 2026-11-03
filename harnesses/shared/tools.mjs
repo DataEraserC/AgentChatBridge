@@ -570,6 +570,34 @@ status 可过滤 queued / running / succeeded / failed。`,
     },
   },
   {
+    name: "plugin_tools",
+    description: `列出插件提供的工具（只有 name + 一句话说明）。给 name 时返回该工具的完整
+JSON Schema。插件工具不在默认工具表里，先用它发现，再用 plugin_tool_call 调用。`,
+    schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "要看完整 schema 的插件工具名" },
+        limit: { type: "integer", description: "索引最多返回几条，默认 50，上限 100" },
+        offset: { type: "integer", description: "索引翻页起点" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "plugin_tool_call",
+    description: `调用一个插件工具。tool 必须是 plugin_tools 列出的名字；arguments 原样
+交给插件。插件工具只能拿到当前会话/房间/来源/是否在轮内，不能碰 Store 或水位。`,
+    schema: {
+      type: "object",
+      properties: {
+        tool: { type: "string", description: "plugin_tools 返回的工具名" },
+        arguments: { type: "object", description: "工具参数，形状看该工具的 schema" },
+      },
+      required: ["tool"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "memory_read",
     description: `读记忆仓库里的一个文件。memory 是记忆 id（投递里的 memories 字段列了
 本会话能碰哪些），path 是 worktree 内的相对路径。`,
