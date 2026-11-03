@@ -19,6 +19,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 STATE_DIR=${ACB_OPENCODE_DIR:-$REPO/state/opencode-1093015329}
 PORT=${ACB_OPENCODE_PORT:-4097}
+# 监听地址：默认只回环；要暴露到 ZeroTier/Tailscale 等网卡时由部署方设为 0.0.0.0。
+HOST=${ACB_OPENCODE_HOST:-127.0.0.1}
 PASSWORD=${ACB_OPENCODE_PASSWORD:-acb-opencode-local}
 OC=${ACB_OPENCODE_BIN:-/etc/profiles/per-user/nixos/bin/opencode2}
 
@@ -32,7 +34,7 @@ cd "$STATE_DIR"
 . ./env
 export OPENCODE_PASSWORD="$PASSWORD"
 
-"$OC" serve --hostname 127.0.0.1 --port "$PORT" --log-level info --print-logs &
+"$OC" serve --hostname "$HOST" --port "$PORT" --log-level info --print-logs &
 serve_pid=$!
 trap 'kill "$serve_pid" 2>/dev/null || true' INT TERM
 

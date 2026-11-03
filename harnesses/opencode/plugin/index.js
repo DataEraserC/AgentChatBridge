@@ -44,6 +44,20 @@ function parseModelRef(text) {
   return { providerID: value.slice(0, slash), modelID: value.slice(slash + 1) }
 }
 
+/**
+ * opencode 报的错是不是「这个会话记录的工作目录已经不存在」。
+ *
+ * `session.get` 只返回记录，不校验目录；真正投话时 opencode 才报
+ * `Directory not found: /path`。这类会话不能继续用，必须换一条新的；
+ * 但模型 400、桥错误不能触发重建，否则每轮失败都会丢上下文。
+ */
+export function isMissingDirectoryError(error) {
+  const message = String(error?.message ?? error)
+  return /directory[^,;]*?(?:not[ -]?found|does[ -]?not[ -]?exist|no[ -]?such|missing)|not[ -]?found[^,;]*?directory/i.test(
+    message,
+  )
+}
+
 export default {
   id: SERVICE,
 
@@ -258,7 +272,7 @@ class TurnDriver {
     let failure = null
     const started = Date.now()
     try {
-      const sessionID = await this.#session(delivery.session)
+      let sessionID = await this.#session(delivery.session)
       // 映射（新建或接上的）报给桥，控制台才看得到 harness 侧映射。
       this.#reportMap(delivery.session, sessionID, link)
       let text = renderTurn(delivery) + CODE_MODE_HINT
@@ -292,14 +306,35 @@ class TurnDriver {
       )
       // prompt 把话排进会话；wait 等这一轮助手真正说完。
       // 会话配了 model 就随本轮带上，opencode 会自己校验 provider/model 是否已配置。
-      await this.ctx.session.prompt({
-        sessionID,
-        text,
-        ...(modelRef ? { model: modelRef } : {}),
-      })
+      const sendPrompt = () =>
+        this.ctx.session.prompt({
+          sessionID,
+          text,
+          ...(modelRef ? { model: modelRef } : {}),
+        })
+      try {
+        await sendPrompt()
+      } catch (error) {
+        if (!isMissingDirectoryError(error)) throw error
+        // 旧会话记录指向的目录已被删掉：`session.get` 不校验目录，只有 prompt 才会报。
+        // 丢掉旧映射，新建一条会话重试一次；仍失败就走正常的轮次失败上报。
+        this.log(
+          "warn",
+          t("opencode.session_directory_missing", {
+            session: delivery.session,
+            sessionId: sessionID,
+            error: error?.message ?? error,
+          }),
+        )
+        this.#forget(delivery.session)
+        sessionID = await this.#session(delivery.session)
+        this.#reportMap(delivery.session, sessionID, link)
+        await sendPrompt()
+      }
       this.log("info", t("opencode.prompt_sent", { ticket: delivery.ticket }))
       if (typeof this.ctx.session.wait === "function") {
         await this.ctx.session.wait({ sessionID })
+        await this.#assertTurnSucceeded(sessionID)
       }
       this.log(
         "info",
@@ -393,6 +428,24 @@ class TurnDriver {
     } catch {
       return false
     }
+  }
+
+  /**
+   * `session.wait` 只表示「这一轮结束了」，模型/网关失败（429 额度、鉴权、模型不可用等）
+   * 也会正常 resolve。这里再查一次会话状态，把失败按轮次失败报给桥，避免桥把
+   * 「没有回复」当成成功（之前的 429 就是这样被吞掉的）。
+   */
+  async #assertTurnSucceeded(sessionID) {
+    let session
+    try {
+      session = await this.ctx.session.get({ sessionID })
+    } catch {
+      // 状态查不到不改判，保持原来的成功语义，别把正常轮次误判成失败。
+      return
+    }
+    const outcome = session?.outcome ?? session?.data?.outcome
+    if (outcome === undefined || outcome === "succeeded") return
+    throw new Error(t("opencode.turn_outcome_failed", { sessionId: sessionID, outcome }))
   }
 
   async #storageGet(key) {
