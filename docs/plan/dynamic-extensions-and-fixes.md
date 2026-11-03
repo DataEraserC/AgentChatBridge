@@ -185,11 +185,18 @@ agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例
       任务记录继续内存 + 200 条上限，暂不上 SQLite；直接唤醒上限与审计保留条数先用
       固定常量，等有真实调优需求再进配置。
 
-#### T7c：反馈回复（待办）
+#### T7c：反馈回复（已完成）
 
-- [ ] `feedback_list` / `feedback_get` / `feedback_reply`；回复复用 T7b 事件唤醒原会话。
-- [ ] 控制台反馈回复与状态流转。
+- [x] `feedback_list` / `feedback_get` / `feedback_reply`；回复复用 T7b 事件唤醒原会话。
+      - `feedback_list` / `feedback_get` 只读当前会话写过的反馈；`feedback_reply` 允许
+        原会话或管理员（按轮次来源发送者判定）跨会话回复。
+      - 回复写进 `feedback.replies`（SQLite schema 10 → 11），open 状态推进到 acked。
+      - 回复发 `kind=feedback` 合成事件（tags `feedback.reply`），事件走 store + wake；
+        无论 wake 策略是否命中，都直接把原会话排进唤醒队列。
+- [x] 控制台反馈回复与状态流转：`POST /api/feedback/:id/reply` + 反馈页回复按钮。
 - 依据：ADR-0021、ADR-0029 D5；feedback 4。
+- 实测：`cargo test -p acb-kernel --test feedback_flow` 3/3；`cargo test --workspace` 全通过；
+      dsh 34/34、opencode 42/42 harness 测试通过。
 
 - 验收：任务失败/成功可按策略唤醒；AI 未唤醒也能用 `task_get` 查到结果；无自触发循环。
 

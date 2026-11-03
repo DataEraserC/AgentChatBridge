@@ -212,6 +212,9 @@ impl<S: Store + Send + 'static> Console<S> {
             // 控制台前端 i18n：当前 locale + 完整 message map。
             ("GET", "/api/i18n") => (200, acb_i18n::catalog_json()),
             ("GET", "/api/feedback") => self.feedback(query),
+            ("POST", p) if p.starts_with("/api/feedback/") && p.ends_with("/reply") => {
+                self.feedback_reply(p, body)
+            }
             ("POST", p) if p.starts_with("/api/feedback/") => self.set_feedback(p, body),
             ("POST", p) if p.starts_with("/api/session/") => self.reset(p),
             // 配置只读视图（方案 A 第一步）。敏感字段在桥这侧就遮掉，完整原文
@@ -736,6 +739,37 @@ impl<S: Store + Send + 'static> Console<S> {
         }
     }
 
+    /// 回复一条反馈（T7c）。回复会作为合成事件通知原会话。
+    /// `POST /api/feedback/:id/reply`，body `{"text":"..."}`。
+    fn feedback_reply(&self, path: &str, body: &str) -> (u16, String) {
+        let rest = path
+            .trim_start_matches("/api/feedback/")
+            .trim_end_matches("/reply");
+        let Ok(id) = rest.parse::<i64>() else {
+            return (
+                400,
+                json!({"error": acb_i18n::t!("bridge.console.feedback_path")}).to_string(),
+            );
+        };
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+        let text = parsed
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            return (
+                400,
+                json!({"error": acb_i18n::t!("bridge.console.feedback_reply_empty")}).to_string(),
+            );
+        }
+        let mut bridge = lock(&self.bridge);
+        match bridge.reply_feedback(id, "console", "console", text) {
+            Ok(result) => (200, result.to_string()),
+            Err(error) => (400, json!({"error": error.message}).to_string()),
+        }
+    }
+
     fn reset(&self, path: &str) -> (u16, String) {
         // path 形如 /api/session/:id/reset 或 /api/session/:id/interrupt。
         // 两者同一套转发逻辑，只是指令名不同：reset 重置映射，interrupt 打断当前轮。
@@ -821,6 +855,7 @@ fn feedback_json(item: &acb_kernel::Feedback) -> serde_json::Value {
         "context": item.context,
         "status": item.status,
         "note": item.note,
+        "replies": item.replies,
         "first_at": item.first_at,
         "last_at": item.last_at,
     })

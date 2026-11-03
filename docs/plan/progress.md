@@ -200,6 +200,43 @@
     插件回滚边界。只出设计。
   - `docs/plan/platform-boundary-proposal.md`：平台实现禁止进 core、平台无关能力
     抽象必须留在 core；附 ADR 措辞建议与复核位置。只出文档，等待用户确认。
+  - `docs/plan/extension-point-catalog.md`：现有扩展点/钩子清单、今天能做的插件能力、
+    缺口 hook、必须留在 core 的不变量与判断规则。只出文档。
+
+## 2026-11-04 02:32 CST — T7c：反馈查询、回复与通知闭环
+
+- 任务编号：D / T7c
+- 代行决策：
+  - `feedback_list` / `feedback_get` 只读当前会话写过的反馈；跨会话回复需要管理员身份
+    （按轮次来源发送者命中 `admin_qqs`），普通会话只能回复自己的反馈；
+  - 回复把 open 推进到 acked；其余状态仍由控制台显式流转；
+  - 回复发 `kind=feedback` 合成事件（tags `feedback.reply`），并直接唤醒原会话，
+    不依赖 wake 策略是否命中——「有人回了你」不能被普通策略静默吞掉；
+  - 回复存进 `feedback.replies`（SQLite schema 10 → 11，新增 JSON 列）。
+  - 理由：反馈通道原来只进不出；不给查询和回复，agent 只能反复重报。跨会话权限沿用
+    现有的管理员判定，不新增 ACL 概念。
+  - 可否回退：回退到 schema 10 需要删 `replies` 列/迁移并移除三个工具；现有反馈数据
+    在旧程序里仍可读（`replies` 列不被旧程序查询）。
+- 做了什么：
+  - `crates/kernel/src/storage.rs`：`FeedbackReply`、`Feedback.replies`、
+    `feedback_by_id` / `reply_feedback`；MemoryStore 实现。
+  - `crates/kernel/src/storage/sqlite.rs`：schema 11、`replies` 列与迁移、
+    SQLite 实现；`docs/07-storage.md` 同步。
+  - `crates/kernel/src/engine.rs`：`feedback_list` / `feedback_get` / `feedback_reply`；
+    回复事件 + 原会话强制唤醒；权限与会话隔离。
+  - `crates/kernel/src/tools.rs` / `harnesses/shared/tools.mjs`：三个工具与参数。
+  - `crates/bridge/src/console.rs` / `console.html`：`POST /api/feedback/:id/reply`、
+    反馈页回复按钮与回复展示。
+  - `crates/kernel/tests/feedback_flow.rs`（新）：回复入库/事件/唤醒、会话隔离、
+    非管理员跨会话拒绝、管理员跨会话回复。
+- 证据：
+  - `cargo test -p acb-kernel --test feedback_flow` → 3/3；
+  - `cargo test --workspace` → 全通过（exit 0）；
+  - dsh `npm test` 34/34；opencode `npm test` 42/42；`node --check harnesses/shared/tools.mjs` 通过。
+- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- 偏离说明：回复事件额外做了一次「强制唤醒原会话」，严格说绕过了 wake 策略；这是
+  反馈闭环的必要语义（否则回复可能永远不被看见），代价是原会话会多开一轮空投递。
+- 未决问题：是否需要限制回复频率/回复长度可配置；反馈审计是否要单独持久化。
 
 ## 环境状态
 

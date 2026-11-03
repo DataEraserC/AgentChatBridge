@@ -525,6 +525,51 @@ status 可过滤 queued / running / succeeded / failed。`,
     },
   },
   {
+    name: "feedback_list",
+    description: `列出你（当前会话）写过的反馈，最新在前，带状态和回复。
+回复只会出现在这里和被唤醒的那一轮里；不查就不知道维护方回了什么。`,
+    schema: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: ["open", "acked", "resolved", "wontfix"],
+          description: "只看某个状态",
+        },
+        limit: { type: "integer", description: "最多返回几条，默认 20，上限 100" },
+        offset: { type: "integer", description: "从第几条开始（翻页）" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "feedback_get",
+    description: `按 id 查一条你写过的反馈，含完整正文、备注和回复记录。
+只能查当前会话写过的反馈。`,
+    schema: {
+      type: "object",
+      properties: {
+        id: { type: "integer", description: "feedback_list 返回的反馈编号" },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "feedback_reply",
+    description: `回复一条反馈。原会话或管理员可以写。
+回复会入库，并作为合成事件通知反馈的原会话；回复一条 open 状态的反馈会把它推进到 acked。`,
+    schema: {
+      type: "object",
+      properties: {
+        id: { type: "integer", description: "要回复的反馈编号" },
+        text: { type: "string", description: "回复正文（上限 2000 字）" },
+      },
+      required: ["id", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "memory_read",
     description: `读记忆仓库里的一个文件。memory 是记忆 id（投递里的 memories 字段列了
 本会话能碰哪些），path 是 worktree 内的相对路径。`,

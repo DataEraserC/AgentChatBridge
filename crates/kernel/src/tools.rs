@@ -38,6 +38,10 @@ pub const TOOL_NAMES: &[&str] = &[
     "task_get",
     // 反馈：把「哪里卡住了」写回桥里（ADR-0021）。活干不下去时用它，不要直接摸平台端口。
     "report_feedback",
+    // 反馈查询与回复（T7c）。回复会作为合成事件通知原会话。
+    "feedback_list",
+    "feedback_get",
+    "feedback_reply",
     // 记忆：文件层
     "memory_read",
     "memory_write",
@@ -361,6 +365,30 @@ pub struct FeedbackArgs {
     /// 出事时在调哪个桥工具（如 `platform_call`）。缺省取当前正在执行的工具。
     #[serde(default)]
     pub tool: Option<String>,
+}
+
+/// 列反馈：只看本会话写过的。`status` 过滤生命周期。
+#[derive(Debug, Default, Deserialize)]
+pub struct FeedbackListArgs {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+}
+
+/// 查一条反馈：id + 回复。
+#[derive(Debug, Deserialize)]
+pub struct FeedbackGetArgs {
+    pub id: i64,
+}
+
+/// 回复一条反馈。维护方会话或该反馈的原会话可以写。
+#[derive(Debug, Deserialize)]
+pub struct FeedbackReplyArgs {
+    pub id: i64,
+    pub text: String,
 }
 
 /// 记忆工具公共参数：操作哪个记忆 + worktree 内的相对路径。
