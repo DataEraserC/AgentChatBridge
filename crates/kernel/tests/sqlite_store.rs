@@ -1014,3 +1014,27 @@ fn merging_fills_empty_fields_in_sqlite_too() {
     assert_eq!(items[0].tool.as_deref(), Some("platform_methods"));
     assert_eq!(items[0].repeats, 2);
 }
+
+#[test]
+fn corrupted_database_fails_loudly_and_is_not_replaced() {
+    let db = TempDb::new("corrupted");
+    std::fs::create_dir_all(db.path().parent().expect("有父目录")).expect("建目录");
+    let garbage = b"this is definitely not a sqlite database";
+    std::fs::write(db.path(), garbage).expect("写坏文件");
+
+    let error = acb_kernel::SqliteStore::open(db.path())
+        .err()
+        .expect("损坏的库必须明确报错，不能静默当成空库");
+    assert!(
+        matches!(error, StorageError::Backend(_)),
+        "应当是后端错误而不是 panic：{error:?}"
+    );
+    assert!(
+        !error.to_string().is_empty(),
+        "错误信息要能定位问题，不能是空串"
+    );
+
+    // 原文件不能被悄悄清空或替换成新库。
+    let after = std::fs::read(db.path()).expect("文件还在");
+    assert_eq!(after, garbage, "损坏的原始文件应当保持原样");
+}
