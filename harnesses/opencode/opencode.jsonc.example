@@ -15,11 +15,11 @@
   // （请求体无限增长）；而 @ai-sdk/openai 默认走 Responses API（/v1/responses），该端点
   // 格式干净规范，能稳定跑通。baseURL 直连 http://127.0.0.1:1100/v1 即可，无需 tls_proxy。
   "model": {
-    "providerID": "arc",
-    "model": "1Agent2Api/glm-5.3-flash"
+    "providerID": "new-api-y9000p2025-openai-responses",
+    "model": "1AgentRouter/gpt-5.6-sol"
   },
   "provider": {
-    "arc": {
+    "new-api-y9000p2025-openai-responses": {
       "npm": "@ai-sdk/openai",
       "name": "New API (OpenAI Responses)",
       "options": {
@@ -31,6 +31,13 @@
           "name": "glm-5.3-flash",
           "limit": {
             "context": 200000,
+            "output": 4096
+          }
+        },
+        "1AgentRouter/gpt-5.6-sol": {
+          "name": "gpt-5.6-sol",
+          "limit": {
+            "context": 262144,
             "output": 4096
           }
         }

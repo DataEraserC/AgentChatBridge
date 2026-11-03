@@ -24,6 +24,8 @@ class FakeHost {
     this.tools = new Map()
     this.created = []
     this.sessions = new Map()
+    this.directories = new Map()
+    this.promptFailures = new Map()
     this.prompts = []
     this.waits = []
     this.storage = new Map()
@@ -72,9 +74,19 @@ class FakeHost {
         async get({ sessionID }) {
           const found = self.sessions.get(sessionID)
           if (!found) throw new Error(`没有这个会话：${sessionID}`)
-          return found
+          return {
+            ...found,
+            ...(self.directories.has(sessionID)
+              ? { directory: self.directories.get(sessionID) }
+              : {}),
+          }
         },
         async prompt({ sessionID, text }) {
+          const failure = self.promptFailures.get(sessionID)
+          if (failure) {
+            self.promptFailures.delete(sessionID)
+            throw failure
+          }
           self.prompts.push({ sessionID, text })
         },
         async wait({ sessionID }) {
@@ -214,6 +226,60 @@ test("会话没了就重建，不往死会话里灌", async (t) => {
   await bridge.next()
 
   assert.equal(host.created.length, 2, "旧会话没了就该新建一个")
+})
+
+test("旧会话的目录失效：首次 prompt 失败后自动新建并重试，本轮成功", async (t) => {
+  const { bridge, host } = await boot(t)
+
+  await openTurn(bridge, host)
+  host.finishTurn()
+  await bridge.next()
+
+  // 会话还查得到、记录里也没标目录不存在，但真投话时 opencode 报目录已删。
+  host.promptFailures.set(
+    host.created[0].id,
+    new Error("Directory not found: /gone/away"),
+  )
+
+  await openTurn(bridge, host, delivery({ ticket: "main-2" }))
+  host.finishTurn()
+
+  assert.deepEqual(await bridge.next(), { frame: "turn_end", ticket: "main-2" })
+  assert.equal(host.created.length, 2, "目录失效的旧会话应被丢弃并新建")
+  assert.equal(host.prompts.length, 2, "只有重试那一次真正投进去了")
+  assert.equal(host.prompts.at(-1).sessionID, host.created[1].id, "重试要用新会话")
+})
+
+test("会话记录的目录不存在就直接新建，不浪费一次失败", async (t) => {
+  const { bridge, host } = await boot(t)
+
+  await openTurn(bridge, host)
+  host.finishTurn()
+  await bridge.next()
+
+  host.directories.set(host.created[0].id, "/definitely/does/not/exist")
+
+  await openTurn(bridge, host, delivery({ ticket: "main-2" }))
+  host.finishTurn()
+
+  assert.deepEqual(await bridge.next(), { frame: "turn_end", ticket: "main-2" })
+  assert.equal(host.created.length, 2, "目录不存在就该直接换会话")
+  assert.equal(host.prompts.at(-1).sessionID, host.created[1].id)
+})
+
+test("模型/网关失败（如 429）要作为轮次失败上报，不能当成功", async (t) => {
+  const { bridge, host } = await boot(t)
+
+  await openTurn(bridge, host)
+  // opencode 的 wait 在 429/额度/鉴权失败时也会正常 resolve；这里模拟失败 outcome。
+  host.sessions.get(host.created[0].id).outcome = "failed"
+  host.finishTurn()
+
+  const frame = await bridge.next()
+  assert.equal(frame.frame, "turn_end")
+  assert.equal(frame.ticket, TICKET)
+  assert.ok(frame.error, "失败必须带 error，桥才能走失败通知")
+  assert.match(frame.error, /failed|429|quota|outcome/i)
 })
 
 test("工具调用转发给桥，结果原样交回模型", async (t) => {
