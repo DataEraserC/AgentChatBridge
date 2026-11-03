@@ -116,6 +116,7 @@ impl<S: Store + Send + 'static> Console<S> {
             return write_response(&mut stream, 400, "application/json", &body, &[]);
         };
         let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+        let peer = stream.peer_addr().ok().map(|addr| addr.ip());
         let (method, path, auth) = parse_request_line(&header_text);
         let cookie = header_text
             .lines()
@@ -173,7 +174,7 @@ impl<S: Store + Send + 'static> Console<S> {
             );
         }
 
-        let (status, body) = self.route(&method, path, &body);
+        let (status, body) = self.route(&method, path, &body, peer);
         write_response(&mut stream, status, "application/json", &body, &[])
     }
 
@@ -182,10 +183,28 @@ impl<S: Store + Send + 'static> Console<S> {
         constant_time_eq(auth, &format!("Bearer {}", self.token))
     }
 
-    fn route(&self, method: &str, path: &str, body: &str) -> (u16, String) {
+    fn route(
+        &self,
+        method: &str,
+        path: &str,
+        body: &str,
+        peer: Option<std::net::IpAddr>,
+    ) -> (u16, String) {
         // 路径可能带查询串（/api/feedback?status=open&limit=20）。
         let (path, query) = split_query(path);
         match (method, path) {
+            // 健康/排空探针：只给本机。仍走控制台 token 鉴权（在 handle 里）。
+            ("GET", "/healthz") => {
+                if !peer.is_some_and(|ip| ip.is_loopback()) {
+                    return (
+                        403,
+                        json!({"error": acb_i18n::t!("bridge.console.health_loopback_only")})
+                            .to_string(),
+                    );
+                }
+                let bridge = lock(&self.bridge);
+                (200, bridge.drain_snapshot().to_string())
+            }
             ("GET", "/api/status") => (200, self.status()),
             ("GET", "/api/sessions") => (200, self.sessions()),
             // 插件目录：只读，描述由插件作者声明；不暴露实际 options / 路径 / token。

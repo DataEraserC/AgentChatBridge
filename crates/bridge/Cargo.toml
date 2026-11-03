@@ -19,6 +19,8 @@ acb-adapter-dynamic = { path = "../adapters/dynamic" }
 acb-extensions = { path = "../extensions" }
 acb-proto = { path = "../proto" }
 serde_json = { workspace = true }
+# SIGTERM / SIGHUP 处理。只做信号到原子量的转发，handler 里不碰任何非信号安全函数。
+libc = "0.2"
 # 配置补丁用：在原 TOML 文档上外科手术式改键，注释排版不丢（ADR-0009）。
 # 版本跟 kernel 的 toml 0.8 同族（toml 0.8 内部就是它）。
 toml_edit = "0.22"

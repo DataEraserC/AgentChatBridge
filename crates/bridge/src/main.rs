@@ -9,10 +9,11 @@
 //! 6. 起一个清理线程，定时削旧流水（只削读过的）；
 //! 7. 起接入点，等 harness 连进来。
 
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acb_adapter_dynamic::DynamicLoader;
 use acb_adapter_onebot11::OneBotAdapterFactory;
@@ -32,21 +33,52 @@ use console::Console;
 /// 真需要更勤/更懒再做成配置项。
 const PRUNE_EVERY: Duration = Duration::from_secs(300);
 
+/// 排空预算：到点还在跑就强制退出（内存任务记录会丢，消息不丢）。
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// 排空期间的轮询间隔。
+const DRAIN_POLL: Duration = Duration::from_millis(250);
+
+/// 退出码合同（systemd 依赖它决定是否拉起）：
+/// 0 = 运维停止；75 = core 请求重启；78 = 配置/启动失败，不应自动重启。
+const EXIT_RESTART: u8 = 75;
+const EXIT_CONFIG: u8 = 78;
+
+/// 信号处理只做一件事：把信号编号写进原子量。handler 内不碰锁、不分配。
+static PENDING_SIGNAL: AtomicUsize = AtomicUsize::new(0);
+
+extern "C" fn record_signal(signal: libc::c_int) {
+    PENDING_SIGNAL.store(signal as usize, Ordering::SeqCst);
+}
+
+fn install_signal_handlers() {
+    // SAFETY: `signal` 是标准 C 接口；handler 只做原子写，满足 async-signal-safe。
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            record_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGHUP,
+            record_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
+
 fn main() -> ExitCode {
     acb_i18n::init();
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!(
                 "{}",
                 acb_i18n::t!("bridge.main.start_failed", error = error)
             );
-            ExitCode::FAILURE
+            ExitCode::from(EXIT_CONFIG)
         }
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let options = Options::parse(std::env::args().skip(1))?;
 
     let text = std::fs::read_to_string(&options.config)?;
@@ -69,7 +101,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if options.check_only {
         println!("{}", acb_i18n::t!("bridge.main.check_ok"));
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    install_signal_handlers();
+    if let Some(console) = &config.console {
+        write_health_token(&console.token);
     }
 
     // 先开库：库打不开就别往下走。宁可起不来，也别用内存悄悄跑起来——
@@ -279,10 +316,132 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("{}", acb_i18n::t!("bridge.main.running"));
-    while !shutdown.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_secs(3600));
+    let exit_code = wait_for_stop(&bridge, &route_worker, &shutdown);
+    shutdown.store(true, Ordering::SeqCst);
+    Ok(exit_code)
+}
+
+/// 主循环：等退出信号。SIGTERM = 排空后正常退出；SIGHUP = 排空后请求重启（75）。
+fn wait_for_stop<S: acb_kernel::Store + Send + 'static>(
+    bridge: &Arc<Mutex<Bridge<S>>>,
+    worker: &RouteWorker,
+    shutdown: &AtomicBool,
+) -> ExitCode {
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return ExitCode::SUCCESS;
+        }
+        let signal = PENDING_SIGNAL.swap(0, Ordering::SeqCst);
+        if signal == 0 {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
+        let restarting = signal == libc::SIGHUP as usize;
+        let snapshot = {
+            let mut bridge = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            bridge.begin_drain()
+        };
+        println!(
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.drain_start",
+                signal = signal,
+                active = snapshot["active_turns"],
+                queued = snapshot["queued_turns"],
+                tasks = snapshot["running_tasks"]
+            )
+        );
+
+        let deadline = Instant::now() + DRAIN_TIMEOUT;
+        let mut drained = false;
+        let mut last = snapshot;
+        while Instant::now() < deadline {
+            last = {
+                let bridge = bridge
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                bridge.drain_snapshot()
+            };
+            if last["active_turns"].as_u64() == Some(0)
+                && last["running_tasks"].as_u64() == Some(0)
+                && worker.busy() == 0
+            {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(DRAIN_POLL);
+        }
+
+        if !drained {
+            let leftovers = {
+                let bridge = bridge
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                bridge.drain_leftovers()
+            };
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "bridge.main.drain_timeout",
+                    timeout = DRAIN_TIMEOUT.as_secs(),
+                    leftover = leftovers
+                )
+            );
+        }
+        println!(
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.drain_done",
+                state = last["state"],
+                active = last["active_turns"],
+                queued = last["queued_turns"]
+            )
+        );
+        return if restarting {
+            ExitCode::from(EXIT_RESTART)
+        } else {
+            ExitCode::SUCCESS
+        };
     }
-    Ok(())
+}
+
+/// 把控制台 token 写进运行时目录，供本机健康探针读取（0600）。
+///
+/// 探针脚本只需要文件路径，不必把 token 抄进单元文件；token 本身仍只来自配置。
+fn write_health_token(token: &str) {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join("acb-health.token");
+    if let Err(error) = std::fs::write(&path, token) {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.health_token_failed",
+                path = path.display(),
+                error = error
+            )
+        );
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "bridge.main.health_token_failed",
+                    path = path.display(),
+                    error = error
+                )
+            );
+        }
+    }
 }
 
 /// 扫一次旧流水。删了什么就打一行，没删就不吭声——安静的日志才好读。

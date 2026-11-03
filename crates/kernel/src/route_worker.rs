@@ -3,7 +3,7 @@
 //! 路由插件在入库时只做「决定」和「准备」，真正的平台 I/O、下载/转码都在这里。
 //! 这个线程不持有 core 的全局锁；只在准备发送和结算回执时短暂回锁。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,6 +17,8 @@ use crate::task;
 #[derive(Clone)]
 pub struct RouteWorker {
     tx: Sender<PreparedRouteAction>,
+    /// 已排进队列 + 正在执行的动作数。排空时据此等待后台发送/任务收尾。
+    busy: Arc<AtomicUsize>,
 }
 
 impl RouteWorker {
@@ -25,17 +27,26 @@ impl RouteWorker {
         shutdown: Arc<AtomicBool>,
     ) -> Self {
         let (tx, rx) = channel();
-        std::thread::spawn(move || run_loop(bridge, rx, shutdown));
-        Self { tx }
+        let busy = Arc::new(AtomicUsize::new(0));
+        let worker_busy = Arc::clone(&busy);
+        std::thread::spawn(move || run_loop(bridge, rx, shutdown, worker_busy));
+        Self { tx, busy }
     }
 
     pub(crate) fn enqueue(&self, actions: Vec<PreparedRouteAction>) {
         for action in actions {
+            self.busy.fetch_add(1, Ordering::SeqCst);
             if self.tx.send(action).is_err() {
+                self.busy.fetch_sub(1, Ordering::SeqCst);
                 eprintln!("{}", acb_i18n::t!("kernel.route_worker.stopped"));
                 break;
             }
         }
+    }
+
+    /// 队列里 + 正在执行的动作数。排空判定用。
+    pub fn busy(&self) -> usize {
+        self.busy.load(Ordering::SeqCst)
     }
 }
 
@@ -43,10 +54,14 @@ fn run_loop<S: Store + Send + 'static>(
     bridge: Arc<Mutex<Bridge<S>>>,
     rx: Receiver<PreparedRouteAction>,
     shutdown: Arc<AtomicBool>,
+    busy: Arc<AtomicUsize>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(action) => run_action(&bridge, action),
+            Ok(action) => {
+                run_action(&bridge, action);
+                busy.fetch_sub(1, Ordering::SeqCst);
+            }
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         }

@@ -1,6 +1,9 @@
 [Unit]
 Description=ACB bridge
 After=network.target
+# 防坏配置/坏插件打成无限重启；连续失败后停在 failed，等人处理。
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -9,8 +12,16 @@ Environment=PATH=/run/current-system/sw/bin:/etc/profiles/per-user/nixos/bin:/ru
 # 当前测试环境：用 flake 的 acb-bridge-test 包装器（ACB_LUA_DIR 已指向仓库 examples/lua）。
 # 实际部署不沿用这个本地路径，另行决定运行用户、权限和配置来源。
 ExecStart=/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/result-lua/bin/acb-bridge-test --config config.toml
-Restart=always
+# 只有异常退出才拉起；SIGTERM/SIGHUP 排空后退出 0/75，systemd 不把 75 当失败而丢失重启意图。
+Restart=on-failure
+RestartForceExitStatus=75
+RestartPreventExitStatus=78
 RestartSec=5
+# core 默认排空 30s；给 systemd 留出余量，避免排空未完成就 SIGKILL。
+TimeoutStopSec=45
+ExecReload=/bin/kill -HUP $MAINPID
+# 健康探针只做 curl；token 由 core 写到运行时目录（0600），不写进单元文件。
+ExecStartPost=/bin/sh -c 'sleep 5; curl -fsS --max-time 5 -H "Authorization: Bearer $(cat ${XDG_RUNTIME_DIR}/acb-health.token)" http://127.0.0.1:3100/healthz >/dev/null'
 StandardOutput=append:/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/state/logs/bridge.log
 StandardError=append:/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/state/logs/bridge.log
 
