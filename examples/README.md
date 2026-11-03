@@ -7,6 +7,8 @@
 |------|------|------|
 | `lua/` | Lua 脚本 | 写策略 provider 最快；需要 `ACB_LUA_DIR` |
 | `process/` | 外置进程 | 任意语言写平台适配器；通过连接配置启动 |
+| `dynamic/wake-provider/` | 动态库 | 可独立构建的 wake 策略 `.so` 示例 |
+| `dynamic/nested-manager/` | 进程内 native | `ManagerPlugin::children()` 嵌套子树示例 |
 | 动态库 | `.so` / `.dylib` | 参考 `crates/adapters/dynamic-fixture`（适配器）和 `crates/plugins/wake-fixture`（策略） |
 
 ## Lua 策略
@@ -132,6 +134,19 @@ decide = function(request, options) ... options.extra.ops_room ... end
 -- receive
 decide = function(request, options) ... options.extra.blocked ... end
 ```
+
+## 嵌套 manager
+
+`dynamic/nested-manager/` 演示 `ManagerPlugin::children()`：父 manager `parent` 只做容器，
+子 manager `child` 提供 `child.always`。它是进程内 native 扩展示例，需要编译进桥或由
+自定义 `PluginLoader` 安装：
+
+```bash
+cargo test --manifest-path examples/dynamic/nested-manager/Cargo.toml
+```
+
+配置引用 `child.always`（manager 树不编码进 provider id，namespace 只有第一段）。
+细节见 [`dynamic/nested-manager/README.md`](dynamic/nested-manager/README.md)。
 
 ## 外置进程适配器
 

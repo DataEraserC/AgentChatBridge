@@ -111,14 +111,18 @@ agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例
 
 ### T5. 增加 PluginManager 嵌套样例
 
-- [ ] 新增可构建样例（建议 `examples/dynamic/nested-manager/` 或独立 fixture crate），
-      父 manager 通过 `children()` 返回子 manager。
-- [ ] 子 manager 注册一个可解析的 provider（如 `child.always`），父 manager 不直接提供。
-- [ ] 演示 health 顺序、深度限制、环路拒绝中的至少一项。
-- [ ] 在 `docs/08-plugin-development.md` 增加“嵌套 manager”小节，指向样例。
+- [x] 新增可构建样例 `examples/dynamic/nested-manager/`，父 manager 通过 `children()`
+      返回子 manager。
+- [x] 子 manager 注册 `child.always`，父 manager 不直接提供。
+- [x] 演示 health 顺序（`manager_health()` 先父后子）与父 manager 不提供 provider。
+- [x] 在 `docs/08-plugin-development.md` 增加「嵌套 manager」小节，指向样例；
+      `examples/README.md` 同步登记。
 - 依据：当前只有 [plugin.rs](../../crates/kernel/src/plugin.rs) 的单元测试
   `nested_manager_subtree_is_installed_and_resolved`，没有面向用户的样例。
-- 验收：样例可独立构建；配置引用 `parent.child.<name>` 能解析；文档可从零照抄。
+- 验收：样例可独立构建；配置引用 `child.always` 能解析；文档可从零照抄。
+- 说明：`ProviderId` 的 namespace 只有第一段（`child.always` 的 namespace 是 `child`），
+  manager 树不编码进 provider id；原清单里的 `parent.child.<name>` 不是当前契约。
+- 实测：`cargo test --manifest-path examples/dynamic/nested-manager/Cargo.toml` 4/4 通过。
 
 ### T6. ADR-0029 P1：动态扩展闭环
 

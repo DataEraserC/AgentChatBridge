@@ -1,0 +1,13 @@
+[package]
+name = "acb-example-nested-manager"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+description = "可独立构建的 PluginManager 嵌套 manager 示例"
+
+[dependencies]
+acb-kernel = { path = "../../../crates/kernel" }
+
+# 故意不加入根 workspace：示例可以单独构建，不拖慢主仓库。
+[workspace]
