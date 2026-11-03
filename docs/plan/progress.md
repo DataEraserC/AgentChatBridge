@@ -106,6 +106,23 @@
   换取零新依赖、零配置变更。可扩展性偏好部分满足。
 - 下一步入口：C 的注释/文档标注；之后 T7b。
 
+## 2026-11-04 01:39 CST — C 代行决策：native reload 按方案 B 运行
+
+- 任务编号：C（代行决策）
+- 代行决策：暂不改 ADR-0030 原文；同路径 native reload 按方案 B 的现实语义运行：
+  失败保持 `unloaded` + `lastError`，不声称回滚到上一份实现。理由：用户明确要求暂不改
+  ADR；方案 B 与 T4c 现状一致，零代码/零兼容性风险。可否回退：只涉及注释/文档，
+  删除注释即可回退；ADR 未动。
+- 做了什么：
+  - `crates/adapters/dynamic/src/lib.rs` `reload` 上方加注释，标明 ADR-0030 D3 的
+    “回滚”在当前同路径 reload 下不成立，并指向决策文档。
+  - `docs/plan/native-reload-rollback-options.md` 增加“代行决策记录”与建议调整。
+- 证据：`cargo test --workspace` 在 B 落地后已全通过；本步只改注释/文档，未改行为。
+- commit：`TBD`（本条随提交写入；hash 由下一次 docs 提交补）。
+- 逐条对照：没有假装满足回滚；已知不满足的引用位置是 ADR-0030 D3 与
+  `adapters/dynamic/src/lib.rs` 的 `reload` 注释。
+- 下一步入口：T7b；读 `task_flow.rs`、`route_worker.rs`、`engine.rs` 的 route/wake 路径。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，

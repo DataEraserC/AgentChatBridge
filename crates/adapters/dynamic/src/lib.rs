@@ -344,6 +344,10 @@ impl PluginLoader for DynamicLoader {
             .collect()
     }
 
+    /// 注意：ADR-0030 D3 的“回滚到上一份已加载实现”在当前同路径 reload 下不成立。
+    /// 调用方在 reload 前已经 unload，旧库已经 `dlclose`；这里只重新加载路径，
+    /// 失败时插件保持 `unloaded` 并留下 `lastError`，不会恢复旧版本。
+    /// 候选预加载/回滚方案见 `docs/plan/native-reload-rollback-options.md`。
     fn reload(&self, manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
         let path = self
             .known
