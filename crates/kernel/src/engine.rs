@@ -541,48 +541,14 @@ impl<S: Store> Bridge<S> {
     }
 
     /// 一个 provider 被当前生效配置引用的位置。引用中的插件不能卸载，
-    /// 否则下一轮解析配置会失败。返回形如 `session:main wake qq:group/123` 的稳定标识。
+    /// 否则下一轮解析配置会失败。位置串形如 `session:main wake qq:group/123`。
     fn plugin_references(&self, id: &ProviderId) -> Vec<String> {
-        let mut refs = Vec::new();
-        for connection in &self.config.connections {
-            if &connection.receive.provider == id {
-                refs.push(format!("connection:{} receive", connection.id));
-            }
-            for route in &connection.routes {
-                if &route.provider == id {
-                    refs.push(format!("connection:{} route", connection.id));
-                }
-            }
-        }
-        for session in &self.config.sessions {
-            if &session.access.provider == id {
-                refs.push(format!("session:{} access", session.id));
-            }
-            if &session.delivery.provider == id {
-                refs.push(format!("session:{} delivery", session.id));
-            }
-            if session.outbound.before.iter().any(|hook| hook == id)
-                || session.outbound.after.iter().any(|hook| hook == id)
-            {
-                refs.push(format!("session:{} outbound", session.id));
-            }
-            if &session.turn_error.provider == id {
-                refs.push(format!("session:{} turn_error", session.id));
-            }
-            for subscription in &session.subscriptions {
-                if &subscription.wake.provider == id {
-                    refs.push(format!("session:{} wake {}", session.id, subscription.room));
-                }
-                if &subscription.clock.provider == id {
-                    refs.push(format!(
-                        "session:{} clock {}",
-                        session.id, subscription.room
-                    ));
-                }
-            }
-        }
-        refs.sort();
-        refs
+        self.config
+            .provider_references()
+            .into_iter()
+            .filter(|reference| &reference.id == id)
+            .map(|reference| reference.location)
+            .collect()
     }
 
     fn plugin_lifecycle(&self, id: &ProviderId) -> Result<PluginLifecycle, BridgeError> {
