@@ -186,7 +186,64 @@
 **明确不建议默认做的**：给所有返回体加极简模式、把工具名/参数压成短码、默认裁剪
 内容。它们会牺牲可调试性和表达力，除非测量显示成本确实是瓶颈。
 
-### 6.4 稳定短 id 与错误信息
+### 6.5 外部成本报告基线（2026-11-04）
+
+外部评审（`acb-context-cost-critique.md`）给出的实测基线，作为后续优化的对照：
+
+| 项 | 基线 | 说明 |
+|---|---|---|
+| 工具数量 | 36 | `tools.rs::TOOL_NAMES` / `tools.mjs` |
+| 工具定义序列化 | 30,855 bytes | `{name, description, schema}` 求和 |
+| 工具定义估算 | **9,058 tokens/请求** | 描述 4,352 + schema 4,198；CJK 按 1 token/字近似 |
+| 4 个请求的轮次 | ~36k tokens | 工具定义随每次请求重付 |
+| 单工具平均 | 252 tokens | 长尾：`platform_call` 1,273、`platform_methods` 748、`report_feedback` 649 |
+| 每条记录 `columns` 映射 | 20 条约 890 tokens | 与消息长度无关的固定浪费，已删除 |
+| `platform_methods` 全目录 | 52 方法 ≈ 7.3 KB ≈ 2.9k tokens | 默认一次全给 |
+| 共享说明复制 | `ROOM_SCHEMA`/`COLUMNS_DOC`/`ELEMENTS_DOC` 合计 ≈ 1,548 tokens | 同一段文字抄进多个 schema |
+
+Pack 拆分（用于分层设计，不默认启用）：
+
+| Pack | 工具数 | tokens |
+|---|---:|---:|
+| core（消息/读取/平台/反馈） | 11 | 5,541 |
+| notes | 3 | 548 |
+| memory | 12 | 1,206 |
+| extensions | 4 | 608 |
+| feedback 查询/回复 | 3 | 389 |
+| task | 2 | 361 |
+| describe_plugins | 1 | 405 |
+| 全部 | 36 | 9,058 |
+
+### 6.6 已实施与实验设计
+
+**已实施（纯冗余/阈值触发，无语义变化）**
+
+1. **删除每条记录的 `columns` 映射**：列定义只保留响应顶层 `columns` 数组。20 条记录
+   固定省约 890 tokens；`get_history` / `fetch_records` 调用方仍能从顶层知道取了哪些列。
+2. **目录/列表阈值索引**：`LIST_INDEX_BYTES = 4096`。超过阈值时自动降级：
+   - `platform_methods` 默认清单 → name + 短 summary + risk（tags 省略、summary 截到 80 字）；
+   - `feedback_list` → 去掉 body/suggestion/replies，保留标题、状态、回复数；
+   - `task_list` → 去掉 result/error，保留 id/status/handler；
+   - `get_platform_events` → 去掉 payload/elements，保留 id/at/sender/event/tags/summary。
+   响应顶层加 `indexed: true` 与 `detail_hint`，详情走 `feedback_get` / `task_get` /
+   `fetch_records` 或带 `group/tag/query` 的 `platform_methods`。阈值以下保持全文，
+   不默认拆成两步。阈值取值依据：一次额外调用的成本（~9k 工具定义 + 历史）通常高于
+   4 KiB 全文，只有超过 4 KiB 才值得换一次调用。
+
+**待实验（先设计 + 基准，不默认启用）**
+
+- **分层工具包**：按会话能力注册 core / notes / memory / extensions / feedback / task /
+  describe_plugins 等 pack。基线 9,058 tokens；最小 core pack 约 5,541 tokens，
+  不含 memory 的会话可省约 1,206，普通成员可省 extensions 约 608 + feedback 约 389。
+  实现必须是**可开关的实验路径**，默认行为不变。
+- **描述瘦身 / 共享 schema**：`ROOM_SCHEMA` / `COLUMNS_DOC` / `ELEMENTS_DOC` 合计
+  ~1,548 tokens。需要先给测量口径（每请求工具描述字节、每轮调用次数、漏用率），
+  再决定是否合并；未测量前不改默认工具集。
+- **可发现性代价**：按需工具包会让 agent 不知道未注册能力存在。缓解方式是保留一个
+  `capabilities`/`help` 入口或错误里给「该能力属于哪个 pack」；这会增加一次调用，
+  必须先测量再上。
+
+### 6.7 稳定短 id 与错误信息
 
 - 反馈 id 是数字，稳定且短；任务 id 形如 `task-<票前缀>-<序号>`，前缀用于跨重启不撞号，
   比纯序号长但可读、可审计。按四项口径属于**可观测性**：可读前缀 + 短 id 的折中即可，

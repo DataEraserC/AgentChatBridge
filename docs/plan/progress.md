@@ -360,6 +360,42 @@
 - 未决问题：自动回滚/插件 LKG 提升逻辑是否要做；drain 参数是否配置化。
 - 下一步入口：平台能力 flags（仅现有适配器真实能力）。
 
+## 2026-11-04 04:10 CST — 上下文成本：删冗余 columns + 阈值索引 + 三个输出测量
+
+- 任务编号：context budget（用户代行决策）
+- 代行决策：
+  - 立即删除每条记录的 `columns` 布尔映射，列定义只留响应顶层；
+  - 目录/列表超过 4 KiB 才索引化，不默认拆成两步；阈值以下保持全文；
+  - 分层工具包先设计+测量，不默认启用；未测量前不改默认工具集；
+  - 不改错误信息可行动性，不引入新的两级查询默认路径。
+- 做了什么：
+  - `crates/kernel/src/engine.rs`：`record_columns` 去掉每记录 `columns`；新增
+    `LIST_INDEX_BYTES = 4096` 与 `maybe_index_list`；
+    `platform_methods` / `feedback_list` / `task_list` / `get_platform_events`
+    超阈值时返回索引 + `detail_hint`；
+  - `crates/kernel/tests/turn_flow.rs`：列定义只顶层出现，记录不再带 `columns`；
+  - `crates/kernel/tests/feedback_flow.rs` / `drain_flow.rs`：大列表自动索引、
+    详情接口仍返回全文；
+  - `crates/kernel/tests/context_budget.rs`（新）：可重复测量插件目录/task_list；
+  - `crates/extensions/tests/authoring.rs`：可重复测量扩展目录；
+  - `docs/plan/extension-point-catalog.md`：并入外部成本报告基线、pack 拆分、
+    已实施/待实验与阈值依据。
+- 证据/前后数据（JSON 字节；前两项为本轮 `--nocapture` 实测，columns 来自外部报告）：
+  - 每记录 `columns`：外部报告实测 20 条短消息 1,686 B → 796 B（省 890 B，≈890 tokens）；
+  - `plugin_catalog`：10 个内置 3,709 B（典型）；60 个插件 26,089 B（最坏，线性增长）；
+  - `task_list`：5 条 1,739 B（全文，1 次调用）；20 条触发索引 3,781 B（1 次调用，
+    详情需再 1 次 `task_get`）；
+  - `extensions_catalog`：1 个模块 550 B；50 个模块 14,742 B（线性增长，1 次调用，无分页）；
+  - `cargo test -p acb-kernel --test context_budget` 2/2；
+    `cargo test -p acb-extensions --test authoring measure_extension_catalog_sizes` 1/1。
+- commit：`TBD`。
+- 偏离说明：阈值索引会让超过 4 KiB 的列表少给细节并多一次详情调用；这是用一次
+  额外调用换体积，依据是外部报告「一次调用 ≈ 9k 工具定义 + 历史」。未对
+  `describe_plugins(global)` 做索引（不在本次四个接口清单里），只记录测量值。
+- 未决问题：分层工具包是否做实验开关；描述瘦身/共享 schema 是否值得；阈值 4 KiB
+  是否需要按模型窗口调整。
+- 下一步入口：RecordObserver 与 ToolProvider。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
