@@ -8,8 +8,8 @@ use acb_kernel::{
     AccessAction, AccessRequest, ClockContext, ClockPolicy, Config, DeliveryPolicy,
     DeliveryRequest, Element, InterruptScope, Omitted, PluginManager, ProviderId, ReceiveDecision,
     ReceivePolicy, ReceiveRequest, Record, RecordKind, ReloadScope, RoomId, RouteAction,
-    RouteContext, RouteDecision, RoutePolicy, SendContext, SendOrigin, Sender, Sent, TurnErrorAction,
-    TurnErrorPolicy, TurnErrorRequest, WakeContext, WakeDecision, WakePolicy,
+    RouteContext, RouteDecision, RoutePolicy, SendContext, SendOrigin, Sender, Sent,
+    TurnErrorAction, TurnErrorPolicy, TurnErrorRequest, WakeContext, WakeDecision, WakePolicy,
 };
 
 use super::*;
@@ -368,7 +368,7 @@ return {
     );
     let failures = plugins.reload_managers(&ReloadScope::All);
     assert_eq!(failures.len(), 1, "descriptor 集合变化应当报错");
-    assert!(failures[0].1.to_string().contains("重启"));
+    assert!(failures[0].1.to_string().contains("restart"));
 }
 
 #[test]
@@ -1377,7 +1377,11 @@ return {
     };
 
     assert_eq!(decide("闲聊", false), RouteDecision::Pass);
-    assert_eq!(decide("/stop", false), RouteDecision::Pass, "非管理员不处理");
+    assert_eq!(
+        decide("/stop", false),
+        RouteDecision::Pass,
+        "非管理员不处理"
+    );
     assert_eq!(
         decide("/stop", true),
         RouteDecision::Handle {

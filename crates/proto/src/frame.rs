@@ -308,7 +308,7 @@ pub fn decode(line: &str) -> Result<Frame, DecodeError> {
         .get("frame")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| DecodeError::MissingField {
-            detail: "缺少 frame 字段".into(),
+            detail: "missing `frame` field".into(),
         })?;
 
     match tag {

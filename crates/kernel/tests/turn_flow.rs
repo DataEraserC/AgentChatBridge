@@ -12,14 +12,13 @@ use acb_kernel::{
     AccessAction, AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Bridge, Capability,
     ControlRegistry, Cursor, DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest,
     Element, ErrorCode, EventQueue, ExtensionPoint, Feedbacks, Ingest, ManagerManifest,
-    ManagerPlugin, MemoryStore, NoteKey,
-    NoteKind, Notes, Omitted, Outbound, OutboundError, PLUGIN_API_VERSION, PluginError,
-    PluginManager, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions,
-    ReceiveDecision, ReceiveProvider, ReceiveRequest, RecordDraft, RoomId, RouteAction,
-    RouteContext, RouteDecision, RoutePolicy, RouteProvider, RouteWorker, SendContext, SendHook,
-    Sender, Sent, Transcript, TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest,
-    TurnReason, WakeContext, WakeDecision, WakePolicy, WakeProvider, WakeVerdict, Watermarks,
-    drain_events, unread,
+    ManagerPlugin, MemoryStore, NoteKey, NoteKind, Notes, Omitted, Outbound, OutboundError,
+    PLUGIN_API_VERSION, PluginError, PluginManager, ProviderDescriptor, ProviderId,
+    ProviderInstance, ProviderOptions, ReceiveDecision, ReceiveProvider, ReceiveRequest,
+    RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision, RoutePolicy, RouteProvider,
+    RouteWorker, SendContext, SendHook, Sender, Sent, Transcript, TurnErrorAction, TurnErrorPolicy,
+    TurnErrorProvider, TurnErrorRequest, TurnReason, WakeContext, WakeDecision, WakePolicy,
+    WakeProvider, WakeVerdict, Watermarks, drain_events, unread,
 };
 use serde_json::{Value, json};
 
@@ -962,22 +961,13 @@ fn admin_stop_interrupts_the_active_turn_and_drops_pending() {
         .ingest(message("qq:group/123", "10001", "/stop@bot 别说了", false))
         .expect("能处理命令");
     assert!(
-        matches!(
-            &stopped,
-            Ingest::Handled {
-                stored: None,
-                ..
-            }
-        ),
+        matches!(&stopped, Ingest::Handled { stored: None, .. }),
         "应当由路由插件处理且不写流水，实际 {stopped:?}"
     );
 
     // 控制命令不写流水：流水里最后一条仍是第二条消息。
     assert_eq!(
-        bridge
-            .store()
-            .latest(&room("qq:group/123"))
-            .expect("能读"),
+        bridge.store().latest(&room("qq:group/123")).expect("能读"),
         Some(2),
         "/stop 不该写进流水"
     );
@@ -1010,10 +1000,7 @@ fn stop_from_non_admin_is_a_normal_message() {
         "非管理员发的 /stop 只是普通消息"
     );
     assert_eq!(
-        bridge
-            .store()
-            .latest(&room("qq:group/123"))
-            .expect("能读"),
+        bridge.store().latest(&room("qq:group/123")).expect("能读"),
         Some(1)
     );
 }
@@ -1100,13 +1087,7 @@ fn route_send_goes_through_the_action_worker() {
         let bridge = Arc::clone(&bridge);
         let shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
-            drain_events(
-                bridge,
-                receiver,
-                shutdown,
-                ControlRegistry::new(),
-                worker,
-            )
+            drain_events(bridge, receiver, shutdown, ControlRegistry::new(), worker)
         })
     };
 
@@ -1143,7 +1124,13 @@ fn route_store_without_wake_is_archived_but_not_unread() {
         .ingest(message("qq:group/123", "20002", "/store", false))
         .expect("能处理");
     assert!(
-        matches!(stored, Ingest::Handled { stored: Some(1), .. }),
+        matches!(
+            stored,
+            Ingest::Handled {
+                stored: Some(1),
+                ..
+            }
+        ),
         "命令要存进流水，实际 {stored:?}"
     );
 
@@ -1156,10 +1143,7 @@ fn route_store_without_wake_is_archived_but_not_unread() {
         1,
         "只存不叫醒的命令不该混进下一轮的未读"
     );
-    assert_eq!(
-        delivery.records[0].elements,
-        vec![Element::text("在吗")]
-    );
+    assert_eq!(delivery.records[0].elements, vec![Element::text("在吗")]);
 }
 
 struct TaskRoute {
@@ -1205,13 +1189,7 @@ fn route_task_runs_exec_and_sends_the_file() {
         let bridge = Arc::clone(&bridge);
         let shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
-            drain_events(
-                bridge,
-                receiver,
-                shutdown,
-                ControlRegistry::new(),
-                worker,
-            )
+            drain_events(bridge, receiver, shutdown, ControlRegistry::new(), worker)
         })
     };
 
@@ -1237,7 +1215,10 @@ struct VideoRejectingOutbound {
 
 impl Outbound for VideoRejectingOutbound {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
-        if elements.iter().any(|element| matches!(element, Element::Video { .. })) {
+        if elements
+            .iter()
+            .any(|element| matches!(element, Element::Video { .. }))
+        {
             return Err(OutboundError::Unsupported("这个平台不发视频".into()));
         }
         let mut sends = self.sends.lock().expect("没被毒死");
@@ -1298,13 +1279,7 @@ fn task_send_candidates_fall_back_only_on_unsupported() {
         let bridge = Arc::clone(&bridge);
         let shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
-            drain_events(
-                bridge,
-                receiver,
-                shutdown,
-                ControlRegistry::new(),
-                worker,
-            )
+            drain_events(bridge, receiver, shutdown, ControlRegistry::new(), worker)
         })
     };
 
@@ -2317,7 +2292,10 @@ fn turn_failure_falls_back_to_default_when_session_has_no_override() {
         Element::Text { text } => text,
         other => panic!("失败通知应是文本，收到 {other:?}"),
     };
-    assert!(text.contains("一轮失败"), "要带「一轮失败」字样：{text}");
+    assert!(
+        text.contains("turn failed"),
+        "要带「turn failed」字样：{text}"
+    );
     assert!(text.contains("content-blocked"), "要带原始错误：{text}");
 }
 
@@ -2448,7 +2426,7 @@ fn tools_after_the_turn_say_the_round_is_over() {
         error.message
     );
     assert!(
-        error.message.contains("请结束本轮"),
+        error.message.contains("end the turn"),
         "要让 agent 收手：{}",
         error.message
     );
@@ -3393,7 +3371,7 @@ fn custom_turn_error_provider_decides_notifications() {
         Element::Text { text } => text,
         other => panic!("失败通知应是文本，收到 {other:?}"),
     };
-    assert!(text.contains("[一轮失败]"));
+    assert!(text.contains("[turn failed]"));
     assert!(text.contains("boom"));
 }
 

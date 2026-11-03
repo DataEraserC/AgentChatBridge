@@ -23,7 +23,7 @@ pub const NAMESPACE: &str = "trusted";
 pub const ACCUMULATE_ONLY_PROVIDER: &str = "trusted.accumulate_only";
 
 fn accumulate_only_id() -> ProviderId {
-    ProviderId::parse(ACCUMULATE_ONLY_PROVIDER).expect("provider id 必须合法")
+    ProviderId::parse(ACCUMULATE_ONLY_PROVIDER).expect("provider id must be valid")
 }
 
 /// `trusted.accumulate_only` 的实现：不读 `@`/昵称/拍/引用，只看未读数。

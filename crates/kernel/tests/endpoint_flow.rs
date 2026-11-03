@@ -206,7 +206,7 @@ fn handshake_rejects_bad_token_version_and_wrong_first_frame() {
         },
     )
     .expect_err("令牌不对");
-    assert!(error.to_string().contains("令牌"));
+    assert!(error.to_string().contains("token"));
 
     let error = handshake(
         &bridge,
@@ -217,7 +217,7 @@ fn handshake_rejects_bad_token_version_and_wrong_first_frame() {
         },
     )
     .expect_err("版本不对");
-    assert!(error.to_string().contains("版本"));
+    assert!(error.to_string().contains("version"));
 
     let error = handshake(&bridge, Frame::Ping).expect_err("第一帧不是 hello");
     assert!(error.to_string().contains("hello"));
@@ -231,7 +231,7 @@ fn handshake_rejects_bad_token_version_and_wrong_first_frame() {
         },
     )
     .expect_err("没带令牌");
-    assert!(error.to_string().contains("令牌"));
+    assert!(error.to_string().contains("token"));
 }
 
 // ---------------------------------------------------------------------------

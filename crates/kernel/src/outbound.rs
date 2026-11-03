@@ -98,17 +98,17 @@ pub struct Sent {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum OutboundError {
     /// 平台明确拒收（被踢了、没权限、内容违规）。
-    #[error("平台拒收：{0}")]
+    #[error("platform rejected: {0}")]
     Rejected(String),
     /// 适配器编不出来（比如平台不支持这种元素，也降级不了）。
-    #[error("平台不支持这种内容：{0}")]
+    #[error("platform does not support this content: {0}")]
     Unsupported(String),
     /// 通道本身没通（连接断了、账号掉线）。
-    #[error("发送通道不可用：{0}")]
+    #[error("send channel unavailable: {0}")]
     Unavailable(String),
     /// 等平台回话超时。请求已经交给适配器，但平台没在时限内回话——
     /// **结果可能已经成功，也可能还在处理**；不能当成明确失败让 agent 重发。
-    #[error("等平台回话超时：{0}")]
+    #[error("timed out waiting for the platform: {0}")]
     Timeout(String),
 }
 
@@ -463,7 +463,11 @@ impl MethodSpec {
     /// 归属：名字里点号前面那段。跟平台 API 的命名空间对齐，模型看到 `{"type":"forward"}`
     /// 就能联想到 `forward.*`。
     pub fn group(&self) -> &str {
-        self.name.as_ref().split('.').next().unwrap_or(self.name.as_ref())
+        self.name
+            .as_ref()
+            .split('.')
+            .next()
+            .unwrap_or(self.name.as_ref())
     }
 
     /// 带不带这个标签。大小写不敏感——模型未必记得住声明时是大写还是小写。
@@ -568,29 +572,29 @@ impl Risk {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CallError {
     /// 方法名不存在。`suggestion` 是最近似的名字，让模型一轮就能改对。
-    #[error("没有这个方法：{method}")]
+    #[error("no such method: {method}")]
     UnknownMethod {
         method: String,
         suggestion: Option<String>,
     },
     /// 这个平台本身没这能力（Satori 里对应 404）。
-    #[error("平台不支持：{0}")]
+    #[error("unsupported by platform: {0}")]
     UnsupportedPlatform(String),
     /// 平台有，我们的适配器还没写（Satori 里对应 501）。
-    #[error("适配器还没实现：{0}")]
+    #[error("adapter does not implement it yet: {0}")]
     NotImplemented(String),
     /// 有这能力，但这个号没权限，或者按配置没开给模型。
-    #[error("不允许：{0}")]
+    #[error("not allowed: {0}")]
     Forbidden(String),
     /// 参数不对。
-    #[error("参数不对：{0}")]
+    #[error("invalid parameters: {0}")]
     BadParams(String),
     /// 通道不通：连接断了、账号掉线。
-    #[error("通道不可用：{0}")]
+    #[error("channel unavailable: {0}")]
     Unavailable(String),
     /// 等平台回话超时。请求已经交给适配器，平台没在时限内回话；
     /// **可能已经执行**（大文件上传尤其常见），不要直接重发。
-    #[error("等平台回话超时：{0}")]
+    #[error("timed out waiting for the platform: {0}")]
     Timeout(String),
 }
 
@@ -624,7 +628,7 @@ pub trait Outbound: Send {
     ) -> Result<CallOutcome, CallError> {
         let _ = (room, params);
         Err(CallError::UnsupportedPlatform(format!(
-            "这条连接（{}）没有声明平台方法，调不了 {method}",
+            "this connection ({}) declares no platform methods; cannot call {method}",
             room.connection
         )))
     }
@@ -701,7 +705,7 @@ impl Outbound for Outbounds {
         match self.handle_for(&room.connection) {
             Some(outbound) => outbound.send(room, elements),
             None => Err(OutboundError::Unavailable(format!(
-                "没有名为 {} 的连接，发不到 {}",
+                "no connection named {}; cannot send to {}",
                 room.connection, room
             ))),
         }
@@ -724,7 +728,7 @@ impl Outbound for Outbounds {
         match self.handle_for(&room.connection) {
             Some(outbound) => outbound.call(room, method, params),
             None => Err(CallError::Unavailable(format!(
-                "没有名为 {} 的连接，调不到 {}",
+                "no connection named {}; cannot call {}",
                 room.connection, room
             ))),
         }
@@ -768,7 +772,9 @@ impl OutboundHandle {
 
 impl std::fmt::Debug for OutboundHandle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("OutboundHandle").finish_non_exhaustive()
+        formatter
+            .debug_struct("OutboundHandle")
+            .finish_non_exhaustive()
     }
 }
 
@@ -821,9 +827,7 @@ mod tests {
         let outbounds = Outbounds::new().with("qq", Box::new(Recorder::default()));
         let handle = outbounds.handle_for("qq").expect("这条连接有句柄");
         let room = RoomId::new("qq", "group/1").expect("合法");
-        handle
-            .send(&room, &[Element::text("x")])
-            .expect("句柄能发");
+        handle.send(&room, &[Element::text("x")]).expect("句柄能发");
     }
 
     /// 单连接/测试走兜底：没有按连接注册时，所有房间都交给同一个实现。
@@ -855,7 +859,11 @@ mod tests {
 
         let room = RoomId::new("qq", "group/1").expect("合法");
         let error = outbounds
-            .call(&room, "forward.get_content", &serde_json::json!({"id": "x"}))
+            .call(
+                &room,
+                "forward.get_content",
+                &serde_json::json!({"id": "x"}),
+            )
             .expect_err("没声明就调不动");
         assert!(matches!(error, CallError::UnsupportedPlatform(_)));
     }
@@ -913,13 +921,20 @@ mod tests {
 
         // 只有声明过的那条连接看得见方法。
         assert_eq!(outbounds.catalog("qq").len(), 1);
-        assert_eq!(outbounds.catalog("qq").first().map(MethodSpec::group), Some("forward"));
+        assert_eq!(
+            outbounds.catalog("qq").first().map(MethodSpec::group),
+            Some("forward")
+        );
         assert!(outbounds.catalog("qq2").is_empty());
         assert!(outbounds.catalog("没这个连接").is_empty());
 
         let room = RoomId::new("qq", "group/1").expect("合法");
         let result = outbounds
-            .call(&room, "forward.get_content", &serde_json::json!({"id": "x7"}))
+            .call(
+                &room,
+                "forward.get_content",
+                &serde_json::json!({"id": "x7"}),
+            )
             .expect("声明过就能调");
         assert_eq!(result.value["called"], "forward.get_content");
         assert_eq!(result.value["params"]["id"], "x7");

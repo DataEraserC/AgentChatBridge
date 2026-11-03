@@ -29,12 +29,12 @@ export class BridgeError extends Error {
 export function parseEndpoint(text) {
   const at = text.lastIndexOf(":")
   if (at < 0) {
-    throw new Error(`endpoint 要形如 127.0.0.1:7700，收到的是 ${text}`)
+    throw new Error(`endpoint must be 127.0.0.1:7700; got ${text}`)
   }
   const host = text.slice(0, at).trim() || "127.0.0.1"
   const port = Number(text.slice(at + 1))
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error(`endpoint 里的端口不对：${text}`)
+    throw new Error(`invalid port in endpoint: ${text}`)
   }
   return { host, port }
 }
@@ -49,10 +49,10 @@ export function parseEndpoint(text) {
 export class BridgeLink {
   constructor({ endpoint, token, harness, onTurn, onControl, log }) {
     if (!token) {
-      throw new Error("没有接入令牌：要和配置里会话的 token 一致")
+      throw new Error("no access token: it must match the session token in config")
     }
     if (!harness) {
-      throw new Error("没有 harness 名：要和配置里会话的 harness 一致")
+      throw new Error("no harness name: it must match the session harness in config")
     }
     parseEndpoint(endpoint) // 早报错，别等连的时候才炸
     this.endpoint = endpoint
@@ -95,7 +95,7 @@ export class BridgeLink {
 
       const timer = setTimeout(() => {
         socket.destroy()
-        this.#failHandshake(new BridgeError("timeout", "握手超时"))
+        this.#failHandshake(new BridgeError("timeout", "handshake timed out"))
       }, HANDSHAKE_TIMEOUT_MS)
 
       this.handshake = {
@@ -117,7 +117,7 @@ export class BridgeLink {
       socket.on("data", (chunk) => this.#onData(chunk))
       socket.on("error", (error) => {
         // 连接被拒之类：握手还没完就先告诉调用方，完事了就只当断线处理。
-        this.#failHandshake(new BridgeError("internal", `连不上桥：${error.message}`))
+        this.#failHandshake(new BridgeError("internal", `cannot connect to bridge: ${error.message}`))
       })
       socket.on("close", () => this.#onClose())
     })
@@ -135,7 +135,7 @@ export class BridgeLink {
     this.ticket = null
     this.queue = []
     this.#releaseTurn()
-    this.#rejectPending(new BridgeError("internal", "连接已关闭"))
+    this.#rejectPending(new BridgeError("internal", "connection closed"))
   }
 
   /**
@@ -145,17 +145,17 @@ export class BridgeLink {
    */
   async call(tool, args = {}, { timeout = CALL_TIMEOUT_MS } = {}) {
     if (!this.socket || this.closed) {
-      throw new BridgeError("internal", "和桥的连接不在了，这轮发不出去")
+      throw new BridgeError("internal", "the connection to the bridge is gone; cannot send this turn")
     }
     if (!this.ticket) {
-      throw new BridgeError("unauthorized", "现在没有进行中的轮次，工具调不动")
+      throw new BridgeError("unauthorized", "no turn is in progress; tools cannot be called")
     }
     const id = `c-${++this.seq}`
     this.turnCalls += 1
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new BridgeError("timeout", `工具 ${tool} 等不到结果`))
+        reject(new BridgeError("timeout", `tool ${tool} returned no result`))
       }, timeout)
       this.pending.set(id, { resolve, reject, timer })
     })
@@ -169,7 +169,7 @@ export class BridgeLink {
     this.#write({ frame: "turn_end", ticket, ...(error ? { error } : {}) })
     this.log(
       error ? "warn" : "info",
-      `turn_end ${ticket}${error ? `：${error}` : ""}`,
+      `turn_end ${ticket}${error ? `: ${error}` : ""}`,
     )
     if (ticket === this.ticket) {
       this.ticket = null
@@ -208,14 +208,14 @@ export class BridgeLink {
     try {
       this.socket.write(text.endsWith("\n") ? text : `${text}\n`)
     } catch (error) {
-      this.#failHandshake(new BridgeError("internal", `写不出去：${error.message}`))
+      this.#failHandshake(new BridgeError("internal", `cannot write: ${error.message}`))
     }
   }
 
   #onData(chunk) {
     this.buffer += chunk
     if (this.buffer.length > MAX_FRAME_BYTES && !this.buffer.includes("\n")) {
-      this.log("error", "收到的帧超过 1 MiB 还没有换行，断开")
+      this.log("error", "frame exceeded 1 MiB without a newline; disconnecting")
       this.socket?.destroy()
       return
     }
@@ -229,7 +229,7 @@ export class BridgeLink {
       try {
         frame = JSON.parse(line)
       } catch {
-        this.log("error", `桥发来的不是 JSON：${line.slice(0, 200)}`)
+        this.log("error", `bridge sent non-JSON: ${line.slice(0, 200)}`)
         this.socket?.destroy()
         return
       }
@@ -252,8 +252,8 @@ export class BridgeLink {
         this.queue.push(frame.delivery)
         this.log(
           "info",
-          `turn_start ${frame.delivery.ticket} 会话 ${frame.delivery.session} ` +
-            `房间 ${roomText(frame.delivery.room)}（队列 ${this.queue.length}）`,
+          `turn_start ${frame.delivery.ticket} session ${frame.delivery.session} ` +
+            `room ${roomText(frame.delivery.room)} (queue ${this.queue.length})`,
         )
         this.#drainTurns()
         return
@@ -278,7 +278,7 @@ export class BridgeLink {
         Promise.resolve()
           .then(() => this.onControl(frame))
           .catch((error) => {
-            this.log("error", `控制指令 ${frame.command} 处理失败：${error?.message ?? error}`)
+            this.log("error", `failed to handle control command ${frame.command}: ${error?.message ?? error}`)
             try {
               this.controlResult({
                 id: frame.id,
@@ -287,7 +287,7 @@ export class BridgeLink {
                 error: String(error?.message ?? error),
               })
             } catch (reportError) {
-              this.log("error", `回报控制指令结果失败：${reportError?.message ?? reportError}`)
+              this.log("error", `failed to report control command result: ${reportError?.message ?? reportError}`)
             }
           })
         return
@@ -298,7 +298,7 @@ export class BridgeLink {
       case "pong":
         return
       default:
-        this.log("warn", `不认识的帧：${frame.frame}`)
+        this.log("warn", `unknown frame: ${frame.frame}`)
     }
   }
 
@@ -324,7 +324,7 @@ export class BridgeLink {
             await this.onTurn(delivery)
           } catch (error) {
             const message = error?.message ?? String(error)
-            this.log("error", `这一轮跑挂了：${message}`)
+            this.log("error", `turn failed: ${message}`)
             this.endTurn(delivery.ticket, message)
           }
           await done
@@ -349,15 +349,15 @@ export class BridgeLink {
     this.queue = []
     this.buffer = ""
     this.#releaseTurn()
-    this.#rejectPending(new BridgeError("internal", "和桥的连接断了"))
+    this.#rejectPending(new BridgeError("internal", "connection to the bridge lost"))
     if (this.closed) return
-    this.#failHandshake(new BridgeError("internal", "连接在握手阶段就断了"))
-    this.log("warn", `桥断了，${Math.round(this.backoff / 1000)} 秒后重连`)
+    this.#failHandshake(new BridgeError("internal", "connection closed during handshake"))
+    this.log("warn", `bridge disconnected; reconnecting in ${Math.round(this.backoff / 1000)} seconds`)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       this.connect()
-        .then(() => this.log("info", `重连成功，重新绑定会话组 ${this.sessions.join("、")}`))
-        .catch((error) => this.log("error", `重连失败：${error.message}`))
+        .then(() => this.log("info", `reconnected; rebound sessions ${this.sessions.join(", ")}`))
+        .catch((error) => this.log("error", `reconnect failed: ${error.message}`))
     }, this.backoff)
     this.backoff = Math.min(this.backoff * 2, RECONNECT_MAX_MS)
   }
@@ -661,7 +661,7 @@ export function normalizeToolArgs(tool, args = {}) {
       if (!given.to || typeof given.to !== "string") {
         throw new BridgeError(
           "bad_request",
-          "send_message_to 要写 to，形如 qq:group/12345；只能是当前会话订阅过的房间",
+          "send_message_to requires to, e.g. qq:group/12345; it must be a room this session is subscribed to",
         )
       }
       // 跨会话发送已砍：to 只落在当前会话订阅的房间，没有 device 身份一说。
@@ -670,11 +670,11 @@ export function normalizeToolArgs(tool, args = {}) {
     case "ack_messages": {
       const ids = Array.isArray(given.ids) ? given.ids : []
       if (ids.length === 0) {
-        throw new BridgeError("bad_request", "ack_messages 要带 ids，就是投递记录里的编号")
+        throw new BridgeError("bad_request", "ack_messages requires ids: the #ids of the delivered records")
       }
       const bad = ids.find((id) => !Number.isInteger(id))
       if (bad !== undefined) {
-        throw new BridgeError("bad_request", `ids 只能是整数，收到 ${JSON.stringify(bad)}`)
+        throw new BridgeError("bad_request", `ids must be integers; got ${JSON.stringify(bad)}`)
       }
       return { ids }
     }
@@ -687,12 +687,12 @@ function elementsOf(args) {
   if (Array.isArray(args.elements) && args.elements.length > 0) {
     for (const element of args.elements) {
       if (!element || typeof element !== "object") {
-        throw new BridgeError("bad_request", "elements 里每一项都得是对象")
+        throw new BridgeError("bad_request", "every item in elements must be an object")
       }
       if (!ELEMENT_TYPES.includes(element.type)) {
         throw new BridgeError(
           "bad_request",
-          `不认识的元素类型 ${JSON.stringify(element.type)}；能用的有：${ELEMENT_TYPES.join("、")}`,
+          `unknown element type ${JSON.stringify(element.type)}; available: ${ELEMENT_TYPES.join(", ")}`,
         )
       }
     }
@@ -701,7 +701,7 @@ function elementsOf(args) {
   if (typeof args.text === "string" && args.text.length > 0) {
     return [{ type: "text", text: args.text }]
   }
-  throw new BridgeError("bad_request", "发消息至少要有 text，或者 elements 里的一段内容")
+  throw new BridgeError("bad_request", "a message requires text, or at least one element in elements")
 }
 
 function stripUndefined(object) {

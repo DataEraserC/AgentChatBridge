@@ -80,7 +80,8 @@ mod tests {
 
     #[test]
     fn cut_at_closing_text_tag() {
-        let raw = "正文到这儿就完了。</text>\n<refs>[\"#700\"]</refs>\n</mcp__acb__report_feedback>";
+        let raw =
+            "正文到这儿就完了。</text>\n<refs>[\"#700\"]</refs>\n</mcp__acb__report_feedback>";
         let (text, cut) = trim_call_markup(raw);
         assert_eq!(text, "正文到这儿就完了。");
         assert!(cut);

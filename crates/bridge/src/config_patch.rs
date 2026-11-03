@@ -7,18 +7,21 @@
 //! 补丁原子性：任何一条 op 失败就整体报错，一个字节都不落盘（落盘前的校验、
 //! 备份由 console 的保存流程统一管，这里只负责「改文本」）。
 
-use toml_edit::{value, DocumentMut, Item, Table};
+use toml_edit::{DocumentMut, Item, Table, value};
 
 /// 应用一组补丁操作，返回（改完的 TOML 全文，人话改动清单）。
 pub fn apply_patch(text: &str, ops: &[serde_json::Value]) -> Result<(String, Vec<String>), String> {
-    let mut doc: DocumentMut = text
-        .parse()
-        .map_err(|error| format!("现有配置解析不开（先在 TOML 编辑器里修好）：{error}"))?;
+    let mut doc: DocumentMut = text.parse().map_err(|error| {
+        format!("existing config does not parse (fix it in a TOML editor first): {error}")
+    })?;
     let mut changes = Vec::new();
 
     for (index, op) in ops.iter().enumerate() {
-        let kind = op.get("op").and_then(serde_json::Value::as_str).unwrap_or("");
-        let where_ = format!("第 {} 条补丁（{kind}）", index + 1);
+        let kind = op
+            .get("op")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let where_ = format!("op {} ({kind})", index + 1);
         match kind {
             "session" => session_op(&mut doc, op, &mut changes),
             "subscription" => subscription_op(&mut doc, op, &mut changes),
@@ -28,9 +31,9 @@ pub fn apply_patch(text: &str, ops: &[serde_json::Value]) -> Result<(String, Vec
             "connection" => connection_op(&mut doc, op, &mut changes),
             "global" => global_op(&mut doc, op, &mut changes),
             "delete" => delete_op(&mut doc, op, &mut changes),
-            other => Err(format!("不认识的 op 类型「{other}」（能用的：session / subscription / persona / memory / harness / connection / global / delete）")),
+            other => Err(format!("unknown op type \"{other}\" (supported: session / subscription / persona / memory / harness / connection / global / delete)")),
         }
-        .map_err(|error| format!("{where_}：{error}"))?;
+        .map_err(|error| format!("{where_}: {error}"))?;
     }
 
     Ok((doc.to_string(), changes))
@@ -56,30 +59,34 @@ fn session_op(
         let create = op
             .get("create")
             .and_then(serde_json::Value::as_object)
-            .ok_or(format!("没有会话 {id}；要新建请在同一条 op 里带 create（至少 harness 和 token）"))?;
+            .ok_or(format!("no such session {id}; to create one, include create in the same op (at least harness and token)"))?;
         let harness = create
             .get("harness")
             .and_then(serde_json::Value::as_str)
-            .ok_or("新建会话要带 harness（id）")?;
+            .ok_or("creating a session requires harness (id)")?;
         if harness_table(doc, harness).is_none() {
-            return Err(format!("新建会话引用的 harness「{harness}」不存在，先新增它"));
+            return Err(format!(
+                "new session references unknown harness \"{harness}\"; add it first"
+            ));
         }
         let token = create
             .get("token")
             .and_then(serde_json::Value::as_str)
             .filter(|t| !t.is_empty())
-            .ok_or("新建会话要带 token（接入令牌，给 harness 连桥用）")?;
+            .ok_or(
+                "creating a session requires token (the access token the harness uses to connect)",
+            )?;
         let persona = create
             .get("persona")
             .and_then(serde_json::Value::as_str)
             .filter(|p| !p.is_empty())
-            .ok_or("新建会话要带 persona（配置里 persona 是必填的，先建个人格）")?;
+            .ok_or("creating a session requires persona (persona is mandatory in config; create one first)")?;
         let persona_id = persona.to_owned();
 
         let sessions = doc
             .get_mut("sessions")
             .and_then(Item::as_array_of_tables_mut)
-            .ok_or("配置里没有 [[sessions]] 段，先用 TOML 编辑器建一个会话")?;
+            .ok_or("config has no [[sessions]] section; create a session in a TOML editor first")?;
         let mut table = Table::new();
         table.insert("id", value(id.clone()));
         table.insert("harness", value(harness.to_owned()));
@@ -93,47 +100,55 @@ fn session_op(
             }
         }
         if let Some(list) = create.get("memories") {
-            let memories = str_list(list).map_err(|_| "memories 要是字符串数组".to_owned())?;
+            let memories =
+                str_list(list).map_err(|_| "memories must be an array of strings".to_owned())?;
             if !memories.is_empty() {
                 table.insert("memories", str_array(&memories));
             }
         }
         sessions.push(table);
-        changes.push(format!("会话 {id}：新增（harness {harness}）"));
+        changes.push(format!("session {id}: created (harness {harness})"));
     }
 
     let patch = match op.get("patch").map(serde_json::Value::as_object) {
         Some(Some(patch)) => patch,
         // create-only 的 op（只建不改）没有 patch，直接完事。
-        Some(None) => return Err("patch 要是对象".into()),
+        Some(None) => return Err("patch must be an object".into()),
         None => return Ok(()),
     };
-    let table = session_table_mut(doc, &id).ok_or(format!("没有会话 {id}"))?;
+    let table = session_table_mut(doc, &id).ok_or(format!("no such session {id}"))?;
 
     for (key, val) in patch {
         match key.as_str() {
             "name" | "persona" => {
-                let text = val.as_str().ok_or(format!("{key} 要是字符串"))?;
+                let text = val.as_str().ok_or(format!("{key} must be a string"))?;
                 table.insert(key.as_str(), value(text.to_owned()));
-                changes.push(format!("会话 {id}：{key} → {text}"));
+                changes.push(format!("session {id}: {key} -> {text}"));
             }
             "model" => match val {
                 serde_json::Value::Null => {
                     table.remove("model");
-                    changes.push(format!("会话 {id}：模型清掉（harness 侧自定）"));
+                    changes.push(format!(
+                        "session {id}: model cleared (decided by the harness)"
+                    ));
                 }
                 serde_json::Value::String(text) => {
                     table.insert("model", value(text.clone()));
-                    changes.push(format!("会话 {id}：模型 → {text}"));
+                    changes.push(format!("session {id}: model -> {text}"));
                 }
-                _ => return Err("model 要是字符串或 null".into()),
+                _ => return Err("model must be a string or null".into()),
             },
             "memories" => {
-                let list = str_list(val).map_err(|_| "memories 要是字符串数组".to_owned())?;
+                let list =
+                    str_list(val).map_err(|_| "memories must be an array of strings".to_owned())?;
                 table.insert("memories", str_array(&list));
-                changes.push(format!("会话 {id}：记忆 → [{}]", list.join(", ")));
+                changes.push(format!("session {id}: memories -> [{}]", list.join(", ")));
             }
-            other => return Err(format!("会话 patch 不认识字段 {other}（能改：name / persona / model / memories）")),
+            other => {
+                return Err(format!(
+                    "session patch does not recognize field {other} (editable: name / persona / model / memories)"
+                ));
+            }
         }
     }
     Ok(())
@@ -150,21 +165,30 @@ fn subscription_op(
     changes: &mut Vec<String>,
 ) -> Result<(), String> {
     let session_id = string_field(op, "session")?;
-    let session = session_table_mut(doc, &session_id).ok_or(format!("没有会话 {session_id}"))?;
+    let session =
+        session_table_mut(doc, &session_id).ok_or(format!("no such session {session_id}"))?;
 
-    if op.get("remove").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+    if op
+        .get("remove")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
         let room = string_field(op, "room")?;
         let (connection, path) = split_room(&room, op)?;
         let subs = session
             .get_mut("subscriptions")
             .and_then(Item::as_array_of_tables_mut)
-            .ok_or(format!("会话 {session_id} 没有任何订阅"))?;
+            .ok_or(format!("session {session_id} has no subscriptions"))?;
         let index = subs
             .iter()
             .position(|t| room_matches(t, &connection, &path))
-            .ok_or(format!("会话 {session_id} 没有 {connection}:{path} 的订阅"))?;
+            .ok_or(format!(
+                "session {session_id} has no subscription for {connection}:{path}"
+            ))?;
         subs.remove(index);
-        changes.push(format!("会话 {session_id}：删掉订阅 {connection}:{path}"));
+        changes.push(format!(
+            "session {session_id}: subscription {connection}:{path} removed"
+        ));
         return Ok(());
     }
 
@@ -172,13 +196,23 @@ fn subscription_op(
     let subs = session
         .get_mut("subscriptions")
         .and_then(Item::as_array_of_tables_mut)
-        .ok_or(format!("会话 {session_id} 没有 [[sessions.subscriptions]] 段，先用 TOML 编辑器建一条"))?;
+        .ok_or(format!("session {session_id} has no [[sessions.subscriptions]] section; add one in a TOML editor first"))?;
 
-    if let Some(existing) = subs.iter_mut().find(|t| room_matches(t, &connection, &path)) {
+    if let Some(existing) = subs
+        .iter_mut()
+        .find(|t| room_matches(t, &connection, &path))
+    {
         if let Some(wake) = op.get("wake").and_then(serde_json::Value::as_object) {
-            set_wake(existing, wake, &format!("{session_id}/{connection}:{path}"), changes)?;
+            set_wake(
+                existing,
+                wake,
+                &format!("{session_id}/{connection}:{path}"),
+                changes,
+            )?;
         } else {
-            changes.push(format!("会话 {session_id}：订阅 {connection}:{path} 无改动"));
+            changes.push(format!(
+                "session {session_id}: subscription {connection}:{path} unchanged"
+            ));
         }
         return Ok(());
     }
@@ -193,7 +227,9 @@ fn subscription_op(
         sub.insert("wake", Item::Table(wake_table));
     }
     subs.push(sub);
-    changes.push(format!("会话 {session_id}：新增订阅 {connection}:{path}"));
+    changes.push(format!(
+        "session {session_id}: subscription {connection}:{path} added"
+    ));
     Ok(())
 }
 
@@ -245,36 +281,39 @@ fn connection_op(
     let exists = doc
         .get("connections")
         .and_then(Item::as_array_of_tables)
-        .map(|arr| arr.iter().any(|t| t.get("id").and_then(Item::as_str) == Some(id.as_str())))
+        .map(|arr| {
+            arr.iter()
+                .any(|t| t.get("id").and_then(Item::as_str) == Some(id.as_str()))
+        })
         .unwrap_or(false);
 
     if !exists {
         let create = op
             .get("create")
             .and_then(serde_json::Value::as_object)
-            .ok_or(format!("没有连接 {id}；要新建请在同一条 op 里带 create（至少 platform / kind / url / account）"))?;
+            .ok_or(format!("no such connection {id}; to create one, include create in the same op (at least platform / kind / url / account)"))?;
         let platform = create
             .get("platform")
             .and_then(serde_json::Value::as_str)
-            .ok_or("新建连接要带 platform")?;
+            .ok_or("creating a connection requires platform")?;
         let kind = create
             .get("kind")
             .and_then(serde_json::Value::as_str)
-            .ok_or("新建连接要带 kind")?;
+            .ok_or("creating a connection requires kind")?;
         let url = create
             .get("url")
             .and_then(serde_json::Value::as_str)
             .filter(|u| !u.is_empty())
-            .ok_or("新建连接要带 url")?;
+            .ok_or("creating a connection requires url")?;
         let account = create
             .get("account")
             .and_then(serde_json::Value::as_str)
-            .ok_or("新建连接要带 account")?;
+            .ok_or("creating a connection requires account")?;
 
         let connections = doc
             .get_mut("connections")
             .and_then(Item::as_array_of_tables_mut)
-            .ok_or("配置里没有 [[connections]] 段，先用 TOML 编辑器建一个")?;
+            .ok_or("config has no [[connections]] section; create one in a TOML editor first")?;
         let mut table = Table::new();
         table.insert("id", value(id.clone()));
         table.insert("platform", value(platform.to_owned()));
@@ -287,13 +326,11 @@ fn connection_op(
             }
         }
         connections.push(table);
-        changes.push(format!("连接 {id}：新增（要重启）"));
+        changes.push(format!("connection {id}: created (restart required)"));
     }
 
     let patch = match op.get("patch") {
-        Some(patch) => patch
-            .as_object()
-            .ok_or("patch 要是对象")?,
+        Some(patch) => patch.as_object().ok_or("patch must be an object")?,
         // create-only 的 op（只建不改）没有 patch，直接完事。
         None => return Ok(()),
     };
@@ -304,27 +341,31 @@ fn connection_op(
             arr.iter_mut()
                 .find(|t| t.get("id").and_then(Item::as_str) == Some(id.as_str()))
         })
-        .ok_or(format!("没有连接 {id}"))?;
+        .ok_or(format!("no such connection {id}"))?;
 
     for (key, val) in patch {
         match key.as_str() {
             "url" | "account" => {
-                let text = val.as_str().ok_or(format!("{key} 要是字符串"))?;
+                let text = val.as_str().ok_or(format!("{key} must be a string"))?;
                 table.insert(key.as_str(), value(text.to_owned()));
-                changes.push(format!("连接 {id}：{key} 更新（要重启）"));
+                changes.push(format!("connection {id}: {key} updated (restart required)"));
             }
             "token" => match val {
                 serde_json::Value::Null => {
                     table.remove("token");
-                    changes.push(format!("连接 {id}：令牌清掉（要重启）"));
+                    changes.push(format!("connection {id}: token cleared (restart required)"));
                 }
                 serde_json::Value::String(text) => {
                     table.insert("token", value(text.clone()));
-                    changes.push(format!("连接 {id}：令牌更新（要重启）"));
+                    changes.push(format!("connection {id}: token updated (restart required)"));
                 }
-                _ => return Err("token 要是字符串或 null".into()),
+                _ => return Err("token must be a string or null".into()),
             },
-            other => return Err(format!("连接 patch 不认识字段 {other}（能改：url / token / account）")),
+            other => {
+                return Err(format!(
+                    "connection patch does not recognize field {other} (editable: url / token / account)"
+                ));
+            }
         }
     }
     Ok(())
@@ -340,15 +381,27 @@ fn global_op(
     let patch = op
         .get("patch")
         .and_then(serde_json::Value::as_object)
-        .ok_or("要带 patch 对象")?;
+        .ok_or("patch object is required")?;
 
     for (key, val) in patch {
         match key.as_str() {
             "delivery_limit" => {
-                set_or_remove_int(doc, "delivery_limit", val, "单轮投递上限", changes)?;
+                set_or_remove_int(
+                    doc,
+                    "delivery_limit",
+                    val,
+                    "per-turn delivery limit",
+                    changes,
+                )?;
             }
             "turn_timeout_secs" => {
-                set_or_remove_int(doc, "turn_timeout_secs", val, "单轮自动超时（秒，0=关）", changes)?;
+                set_or_remove_int(
+                    doc,
+                    "turn_timeout_secs",
+                    val,
+                    "per-turn timeout (seconds, 0=off)",
+                    changes,
+                )?;
             }
             "max_records_per_room" | "max_age_days" => {
                 if doc.get("retention").is_none() {
@@ -357,29 +410,40 @@ fn global_op(
                 let table = doc
                     .get_mut("retention")
                     .and_then(Item::as_table_mut)
-                    .ok_or("[retention] 不是表，先用 TOML 编辑器修")?;
+                    .ok_or("[retention] is not a table; fix it in a TOML editor first")?;
                 match val {
                     serde_json::Value::Null => {
                         table.remove(key.as_str());
-                        changes.push(format!("{key}：删掉（回默认）"));
+                        changes.push(format!("{key}: removed (back to default)"));
                     }
                     serde_json::Value::Number(number) => {
-                        let n = number.as_u64().ok_or(format!("{key} 要是非负整数"))?;
+                        let n = number
+                            .as_u64()
+                            .ok_or(format!("{key} must be a non-negative integer"))?;
                         table.insert(key.as_str(), value(n as i64));
                         changes.push(format!("{key} → {n}"));
                     }
-                    _ => return Err(format!("{key} 要是数字或 null")),
+                    _ => return Err(format!("{key} must be a number or null")),
                 }
             }
             "default_on_turn_error" => {
                 let list = match val {
                     serde_json::Value::Null => Vec::new(),
-                    other => str_list(other).map_err(|_| "default_on_turn_error 要是字符串数组".to_owned())?,
+                    other => str_list(other).map_err(|_| {
+                        "default_on_turn_error must be an array of strings".to_owned()
+                    })?,
                 };
                 doc.insert("default_on_turn_error", str_array(&list));
-                changes.push(format!("默认失败通知 → [{}]", list.join(", ")));
+                changes.push(format!(
+                    "default turn error action -> [{}]",
+                    list.join(", ")
+                ));
             }
-            other => return Err(format!("global patch 不认识字段 {other}（能改：delivery_limit / turn_timeout_secs / max_records_per_room / max_age_days / default_on_turn_error）")),
+            other => {
+                return Err(format!(
+                    "global patch does not recognize field {other} (editable: delivery_limit / turn_timeout_secs / max_records_per_room / max_age_days / default_on_turn_error)"
+                ));
+            }
         }
     }
     Ok(())
@@ -404,7 +468,7 @@ fn split_room(room: &str, op: &serde_json::Value) -> Result<(String, String), St
         return Ok((connection.to_owned(), path.to_owned()));
     }
     let connection = string_field(op, "connection")
-        .map_err(|_| format!("room 写的是裸路径 {room}，要么带上连接前缀（{room} 前面加 连接名:），要么另给 connection 字段"))?;
+        .map_err(|_| format!("room is a bare path {room}; either prefix it with a connection name ({room} with connection:) or provide a separate connection field"))?;
     Ok((connection, room.to_owned()))
 }
 
@@ -427,9 +491,9 @@ fn set_wake(
     let wake_table = sub
         .get_mut("wake")
         .and_then(Item::as_table_mut)
-        .ok_or("wake 不是表")?;
+        .ok_or("wake is not a table")?;
     fill_wake(wake_table, wake)?;
-    changes.push(format!("订阅 {label}：唤醒策略更新"));
+    changes.push(format!("subscription {label}: wake policy updated"));
     Ok(())
 }
 
@@ -449,10 +513,12 @@ fn fill_wake(
                     acb_kernel::ProviderId::parse(text).map_err(|error| error.to_string())?;
                     wake_table.insert("provider", value(text));
                 }
-                _ => return Err("wake.provider 要是字符串或 null".into()),
+                _ => return Err("wake.provider must be a string or null".into()),
             },
             "at_mention" | "reply" | "name_mention" | "poke" => {
-                let flag = val.as_bool().ok_or(format!("wake.{key} 要是布尔"))?;
+                let flag = val
+                    .as_bool()
+                    .ok_or(format!("wake.{key} must be a boolean"))?;
                 wake_table.insert(key.as_str(), value(flag));
             }
             "accumulate" => match val {
@@ -460,10 +526,12 @@ fn fill_wake(
                     wake_table.remove("accumulate");
                 }
                 serde_json::Value::Number(number) => {
-                    let n = number.as_u64().ok_or("wake.accumulate 要是非负整数")?;
+                    let n = number
+                        .as_u64()
+                        .ok_or("wake.accumulate must be a non-negative integer")?;
                     wake_table.insert("accumulate", value(n as i64));
                 }
-                _ => return Err("wake.accumulate 要是数字或 null".into()),
+                _ => return Err("wake.accumulate must be a number or null".into()),
             },
             "names" | "events" | "event_tags" | "ignore_event_tags" | "keywords"
             | "ignore_speakers" => match val {
@@ -471,11 +539,12 @@ fn fill_wake(
                     wake_table.remove(key.as_str());
                 }
                 other => {
-                    let list = str_list(other).map_err(|_| format!("wake.{key} 要是字符串数组或 null"))?;
+                    let list = str_list(other)
+                        .map_err(|_| format!("wake.{key} must be an array of strings or null"))?;
                     wake_table.insert(key.as_str(), str_array(&list));
                 }
             },
-            other => return Err(format!("wake 不认识字段 {other}")),
+            other => return Err(format!("wake does not recognize field {other}")),
         }
     }
     Ok(())
@@ -493,7 +562,7 @@ fn upsert_named_table(
     let array = doc
         .get_mut(array_key)
         .and_then(Item::as_array_of_tables_mut)
-        .ok_or(format!("配置里没有 [[{array_key}]] 段"))?;
+        .ok_or(format!("config has no [[{array_key}]] section"))?;
 
     let existing = array
         .iter_mut()
@@ -503,7 +572,7 @@ fn upsert_named_table(
         for field in fields {
             if let Some(text) = op.get(*field).and_then(serde_json::Value::as_str) {
                 table.insert(*field, value(text.to_owned()));
-                changes.push(format!("{label}：{field} 更新"));
+                changes.push(format!("{label}: {field} updated"));
             }
         }
         return Ok(());
@@ -515,11 +584,11 @@ fn upsert_named_table(
         let text = op
             .get(*field)
             .and_then(serde_json::Value::as_str)
-            .ok_or(format!("新建 {label} 缺字段 {field}"))?;
+            .ok_or(format!("new {label} is missing field {field}"))?;
         table.insert(*field, value(text.to_owned()));
     }
     array.push(table);
-    changes.push(format!("{label}：新增"));
+    changes.push(format!("{label}: created"));
     Ok(())
 }
 
@@ -540,18 +609,20 @@ fn delete_op(
         "memory" => "memories",
         "harness" => "harnesses",
         "session" => "sessions",
-        other => return Err(format!("不认识的 section「{other}」")),
+        other => return Err(format!("unknown section \"{other}\"")),
     };
     let array = doc
         .get_mut(array_key)
         .and_then(Item::as_array_of_tables_mut)
-        .ok_or(format!("配置里没有 [[{array_key}]] 段，删不了"))?;
+        .ok_or(format!(
+            "config has no [[{array_key}]] section; cannot delete"
+        ))?;
     let position = array
         .iter()
         .position(|t| t.get("id").and_then(Item::as_str) == Some(id.as_str()))
-        .ok_or(format!("{array_key} 里没有 id 为「{id}」的条目"))?;
+        .ok_or_else(|| format!("{array_key} has no entry with id \"{id}\""))?;
     array.remove(position);
-    changes.push(format!("{array_key}/{id}：删除"));
+    changes.push(format!("{array_key}/{id}: deleted"));
     Ok(())
 }
 
@@ -559,7 +630,7 @@ fn string_field(op: &serde_json::Value, key: &str) -> Result<String, String> {
     op.get(key)
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-        .ok_or(format!("缺字段 {key}（要是字符串）"))
+        .ok_or(format!("missing field {key} (must be a string)"))
 }
 
 fn str_list(val: &serde_json::Value) -> Result<Vec<String>, ()> {
@@ -592,18 +663,18 @@ fn set_or_remove_int(
     match val {
         serde_json::Value::Null => {
             doc.remove(key);
-            changes.push(format!("{label}：删掉（回默认）"));
+            changes.push(format!("{label}: removed (back to default)"));
             Ok(())
         }
         serde_json::Value::Number(number) => {
             let n = number
                 .as_u64()
-                .ok_or(format!("{label} 要是非负整数"))?;
+                .ok_or(format!("{label} must be a non-negative integer"))?;
             doc.insert(key, value(n as i64));
             changes.push(format!("{label} → {n}"));
             Ok(())
         }
-        _ => Err(format!("{label} 要是数字或 null")),
+        _ => Err(format!("{label} must be a number or null")),
     }
 }
 
@@ -676,7 +747,8 @@ keywords = ["喂"]
     }
 
     #[test]
-    fn wake_patch_keeps_comments_and_only_touched_keys() {        let text = base();
+    fn wake_patch_keeps_comments_and_only_touched_keys() {
+        let text = base();
         let ops = parse_ops(serde_json::json!([
             {"op": "subscription", "session": "main", "room": "qq:group/123",
              "wake": {"keywords": ["喂", "在吗"], "accumulate": 10}}
@@ -709,7 +781,7 @@ keywords = ["喂"]
             {"op": "subscription", "session": "main", "room": "qq:group/123", "remove": true}
         ]));
         let (new_text, changes) = super::apply_patch(&new_text, &ops).expect("能删");
-        assert!(changes[0].contains("删掉订阅"));
+        assert!(changes[0].contains("removed"));
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         let subs = &config.session("main").expect("在").subscriptions;
         assert_eq!(subs.len(), 1);
@@ -736,7 +808,7 @@ keywords = ["喂"]
             {"op": "persona", "id": "p2", "name": "二号", "text": "你是二号桥。"}
         ]));
         let (new_text, changes) = super::apply_patch(&text, &ops).expect("能加");
-        assert!(changes[0].contains("新增"));
+        assert!(changes[0].contains("created"));
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         assert_eq!(config.personas.len(), 2);
         assert_eq!(config.personas[1].name, "二号");
@@ -764,7 +836,7 @@ keywords = ["喂"]
             {"op": "nonsense"}
         ]));
         let error = super::apply_patch(&text, &ops).expect_err("该报错");
-        assert!(error.contains("第 2 条"), "错误要指明第几条：{error}");
+        assert!(error.contains("op 2"), "错误要指明第几条：{error}");
 
         // 不存在的会话报错。
         let ops = parse_ops(serde_json::json!([
@@ -783,7 +855,7 @@ keywords = ["喂"]
         let (new_text, changes) = super::apply_patch(&text, &ops).expect("能打");
         assert!(new_text.contains("ws://127.0.0.1:3002"));
         assert!(!new_text.contains("conn-secret"), "token 键被删");
-        assert!(changes.iter().all(|c| c.contains("要重启")));
+        assert!(changes.iter().all(|c| c.contains("restart required")));
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         assert_eq!(config.connections[0].token, None);
     }
@@ -794,10 +866,15 @@ keywords = ["喂"]
         // 缺 create → 还是报「没有会话」。
         let error = super::apply_patch(
             &text,
-            &parse_ops(serde_json::json!([{"op": "session", "id": "new1", "patch": {"name": "x"}}])),
+            &parse_ops(
+                serde_json::json!([{"op": "session", "id": "new1", "patch": {"name": "x"}}]),
+            ),
         )
         .expect_err("该报错");
-        assert!(error.contains("new1") && error.contains("create"), "{error}");
+        assert!(
+            error.contains("new1") && error.contains("create"),
+            "{error}"
+        );
         // create 里 harness 不存在 → 报错指名。
         let error = super::apply_patch(
             &text,
@@ -816,7 +893,7 @@ keywords = ["喂"]
             ])),
         )
         .expect("能建");
-        assert!(changes[0].contains("新增"));
+        assert!(changes[0].contains("created"));
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         let session = config.session("new1").expect("新会话在");
         assert_eq!(session.harness, "dsh");
@@ -839,7 +916,7 @@ keywords = ["喂"]
             ])),
         )
         .expect("能建");
-        assert!(changes[0].contains("新增") && changes[1].contains("新增"));
+        assert!(changes[0].contains("created") && changes[1].contains("created"));
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         assert_eq!(config.connections.len(), 2);
         assert_eq!(config.connections[1].account, "10002");

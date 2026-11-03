@@ -42,10 +42,10 @@ use acb_adapter_api::{
 };
 use acb_kernel::wire::{call_error, convert_catalog, send_error};
 use acb_kernel::{
-    AdapterCapability, AdapterError, AdapterFactory, AdapterHost, AdapterInstance,
-    AdapterManifest, CallError, CallOutcome, Connection, Element, EventQueue, MethodSpec,
-    Outbound, OutboundError, OutgoingRecord, PluginEffect, PluginMetadata, RoomId, Sent,
-    ADAPTER_API_VERSION,
+    ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
+    AdapterInstance, AdapterManifest, CallError, CallOutcome, Connection, Element, EventQueue,
+    MethodSpec, Outbound, OutboundError, OutgoingRecord, PluginEffect, PluginMetadata, RoomId,
+    Sent,
 };
 
 /// 等子进程回一条动作结果的上限。
@@ -81,13 +81,12 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
     supports_reply: true,
     metadata: PluginMetadata {
         title: Some(Cow::Borrowed("外置进程适配器")),
-        summary: Some(Cow::Borrowed("按连接的 options 启动子进程，stdio JSON 行协议")),
+        summary: Some(Cow::Borrowed(
+            "按连接的 options 启动子进程，stdio JSON 行协议",
+        )),
         description: None,
         tags: Cow::Borrowed(&[]),
-        effects: Cow::Borrowed(&[
-            PluginEffect::ExternalCall,
-            PluginEffect::Nondeterministic,
-        ]),
+        effects: Cow::Borrowed(&[PluginEffect::ExternalCall, PluginEffect::Nondeterministic]),
         docs_url: None,
         options_schema: None,
     },
@@ -129,16 +128,16 @@ fn parse_options(connection: &Connection) -> Result<ProcessConfig, String> {
     let options = connection
         .options
         .as_object()
-        .ok_or("connections.options 要给一个对象（map）")?;
+        .ok_or("connections.options must be an object (map)")?;
 
     let command = options
         .get("command")
-        .ok_or("options.command 要给启动命令（字符串或 [程序, 参数...]）")?;
+        .ok_or("options.command must be the launch command (a string or [program, args...])")?;
     let (program, mut args) = match command {
         serde_json::Value::String(program) => {
             let program = program.trim();
             if program.is_empty() {
-                return Err("options.command 不能为空".into());
+                return Err("options.command must not be empty".into());
             }
             (program.to_owned(), Vec::new())
         }
@@ -146,29 +145,29 @@ fn parse_options(connection: &Connection) -> Result<ProcessConfig, String> {
             let mut parts = items.iter().map(|item| {
                 item.as_str()
                     .map(str::to_owned)
-                    .ok_or_else(|| "options.command 数组里只能放字符串".to_owned())
+                    .ok_or_else(|| "options.command array may only contain strings".to_owned())
             });
             let program = parts
                 .next()
                 .transpose()?
-                .ok_or("options.command 数组不能为空")?;
+                .ok_or("options.command array must not be empty")?;
             let rest = parts.collect::<Result<Vec<_>, _>>()?;
             if program.trim().is_empty() {
-                return Err("options.command 的第一个元素不能为空".into());
+                return Err("the first element of options.command must not be empty".into());
             }
             (program, rest)
         }
-        _ => return Err("options.command 要给字符串或字符串数组".into()),
+        _ => return Err("options.command must be a string or an array of strings".into()),
     };
 
     if let Some(extra) = options.get("args") {
         let items = extra
             .as_array()
-            .ok_or("options.args 要给字符串数组")?;
+            .ok_or("options.args must be an array of strings")?;
         for item in items {
             args.push(
                 item.as_str()
-                    .ok_or("options.args 里只能放字符串")?
+                    .ok_or("options.args may only contain strings")?
                     .to_owned(),
             );
         }
@@ -176,13 +175,15 @@ fn parse_options(connection: &Connection) -> Result<ProcessConfig, String> {
 
     let mut env = Vec::new();
     if let Some(table) = options.get("env") {
-        let table = table.as_object().ok_or("options.env 要给对象（map）")?;
+        let table = table
+            .as_object()
+            .ok_or("options.env must be an object (map)")?;
         for (key, value) in table {
             env.push((
                 key.clone(),
                 value
                     .as_str()
-                    .ok_or_else(|| format!("options.env.{key} 要是字符串"))?
+                    .ok_or_else(|| format!("options.env.{key} must be a string"))?
                     .to_owned(),
             ));
         }
@@ -192,7 +193,7 @@ fn parse_options(connection: &Connection) -> Result<ProcessConfig, String> {
         Some(value) => Some(
             value
                 .as_str()
-                .ok_or("options.cwd 要给字符串")?
+                .ok_or("options.cwd must be a string")?
                 .to_owned(),
         ),
         None => None,
@@ -307,8 +308,7 @@ fn runtime_manifest(platform: &str, shared: &SharedProcess) -> AdapterManifest {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
     let events: Vec<Cow<'static, str>> = info.events.into_iter().map(Cow::Owned).collect();
-    let event_tags: Vec<Cow<'static, str>> =
-        info.event_tags.into_iter().map(Cow::Owned).collect();
+    let event_tags: Vec<Cow<'static, str>> = info.event_tags.into_iter().map(Cow::Owned).collect();
     AdapterManifest {
         platform: Cow::Owned(platform.to_owned()),
         events: events.into(),
@@ -342,19 +342,19 @@ fn start_child(
 
     let mut child = command
         .spawn()
-        .map_err(|error| format!("启动 {} 失败：{error}", config.program))?;
+        .map_err(|error| format!("failed to start {}: {error}", config.program))?;
     let stdin = child
         .stdin
         .take()
-        .ok_or("子进程没有 stdin（启动方式不对）")?;
+        .ok_or("child process has no stdin (wrong launch mode)")?;
     let stdout = child
         .stdout
         .take()
-        .ok_or("子进程没有 stdout（启动方式不对）")?;
+        .ok_or("child process has no stdout (wrong launch mode)")?;
     let stderr = child
         .stderr
         .take()
-        .ok_or("子进程没有 stderr（启动方式不对）")?;
+        .ok_or("child process has no stderr (wrong launch mode)")?;
 
     spawn_stderr(connection.to_owned(), stderr);
     let (hello_tx, hello_rx) = mpsc::channel();
@@ -376,29 +376,31 @@ fn start_child(
         Err(RecvTimeoutError::Timeout) => {
             stop_child(&mut child);
             return Err(format!(
-                "等子进程说 hello 超时（{} 秒）",
+                "timed out waiting for the child process to say hello ({} seconds)",
                 config.startup_timeout.as_secs()
             ));
         }
         Err(RecvTimeoutError::Disconnected) => {
             stop_child(&mut child);
-            return Err("子进程没说 hello 就退出了".into());
+            return Err("child process exited without saying hello".into());
         }
     };
     // hello 刚说完就退出的进程不能算启动成功，否则第一次请求会写进死管道。
     if let Ok(Some(status)) = child.try_wait() {
         stop_child(&mut child);
-        return Err(format!("子进程说完 hello 就退出了（{status}）"));
+        return Err(format!(
+            "child process exited right after saying hello ({status})"
+        ));
     }
     eprintln!(
-        "适配器 {connection}（process）：{} 已启动（{} 个平台方法）",
+        "adapter {connection} (process): {} started ({} platform method(s))",
         hello.name,
         hello.catalog.len()
     );
 
     let catalog = convert_catalog(hello.catalog).map_err(|detail| {
         stop_child(&mut child);
-        format!("适配器的平台方法目录不合法：{detail}")
+        format!("invalid platform method catalog from adapter: {detail}")
     })?;
 
     Ok((child, stdin, catalog, hello.info))
@@ -428,7 +430,7 @@ fn supervise(
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
         for (_, reply) in waiting {
-            let _ = reply.send(Err("适配器进程退出了".into()));
+            let _ = reply.send(Err("adapter process exited".into()));
         }
         if shutdown {
             return;
@@ -436,7 +438,7 @@ fn supervise(
         let _ = child.wait();
 
         eprintln!(
-            "适配器 {connection}（process）：子进程退出，{} 毫秒后重启",
+            "adapter {connection} (process): child process exited; restarting in {} ms",
             delay.as_millis()
         );
         let wake = Instant::now() + delay;
@@ -472,7 +474,7 @@ fn supervise(
                 delay = RESTART_DELAY;
             }
             Err(detail) => {
-                eprintln!("适配器 {connection}（process）：重启失败：{detail}");
+                eprintln!("adapter {connection} (process): restart failed: {detail}");
                 delay = (delay * 2).min(MAX_RESTART_DELAY);
             }
         }
@@ -485,7 +487,7 @@ fn spawn_stderr(connection: String, stderr: std::process::ChildStderr) {
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().map_while(Result::ok) {
-            eprintln!("适配器 {connection}（process stderr）：{line}");
+            eprintln!("adapter {connection} (process stderr): {line}");
         }
     });
 }
@@ -507,7 +509,7 @@ fn spawn_reader(
             let line = match line {
                 Ok(line) => line,
                 Err(error) => {
-                    eprintln!("适配器 {connection}：读子进程输出失败：{error}");
+                    eprintln!("adapter {connection}: failed to read child process output: {error}");
                     break;
                 }
             };
@@ -518,7 +520,9 @@ fn spawn_reader(
             let message = match decode_line::<AdapterMessage>(&line) {
                 Ok(message) => message,
                 Err(error) => {
-                    eprintln!("适配器 {connection}：收到读不懂的 wire 消息：{error}");
+                    eprintln!(
+                        "adapter {connection}: received an unparseable wire message: {error}"
+                    );
                     continue;
                 }
             };
@@ -542,7 +546,7 @@ fn spawn_reader(
                     _ => {
                         if let Some(sender) = hello_tx.take() {
                             let _ = sender.send(Err(
-                                "子进程的第一行必须是 hello".to_owned(),
+                                "the child process's first line must be hello".to_owned(),
                             ));
                         }
                         return;
@@ -553,11 +557,13 @@ fn spawn_reader(
 
             match message {
                 AdapterMessage::Hello { .. } => {
-                    eprintln!("适配器 {connection}：重复的 hello，忽略");
+                    eprintln!("adapter {connection}: duplicate hello; ignoring");
                 }
                 AdapterMessage::Event { record } => {
                     if !events.submit(record.into()) {
-                        eprintln!("适配器 {connection}：入站队列已关闭，丢掉一条记录");
+                        eprintln!(
+                            "adapter {connection}: inbound queue is closed; dropping a record"
+                        );
                     }
                 }
                 AdapterMessage::Reply { id, result } => {
@@ -570,7 +576,7 @@ fn spawn_reader(
                     }
                 }
                 AdapterMessage::Log { level, message } => {
-                    eprintln!("适配器 {connection}（{level}）：{message}");
+                    eprintln!("adapter {connection} ({level}): {message}");
                 }
             }
         }
@@ -583,11 +589,11 @@ fn spawn_reader(
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
         for (_, reply) in waiting {
-            let _ = reply.send(Err("适配器进程退出了".into()));
+            let _ = reply.send(Err("adapter process exited".into()));
         }
         if !hello_seen {
             if let Some(sender) = hello_tx.take() {
-                let _ = sender.send(Err("子进程没说 hello 就退出了".into()));
+                let _ = sender.send(Err("child process exited without saying hello".into()));
             }
         }
     });
@@ -616,7 +622,9 @@ fn wait_for_exit(
                         thread::sleep(Duration::from_millis(50));
                     }
                     Ok(None) | Err(_) => {
-                        eprintln!("适配器 {connection}（process）：收尾超时，强制结束");
+                        eprintln!(
+                            "adapter {connection} (process): shutdown timed out; forcing termination"
+                        );
                         let _ = child.kill();
                         let _ = child.wait();
                         return true;
@@ -640,11 +648,11 @@ fn write_line(stdin: &Mutex<Option<ChildStdin>>, message: &CoreMessage) -> Resul
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let stdin = stdin
         .as_mut()
-        .ok_or_else(|| "适配器进程没在跑".to_owned())?;
+        .ok_or_else(|| "adapter process is not running".to_owned())?;
     stdin
         .write_all(format!("{line}\n").as_bytes())
         .and_then(|_| stdin.flush())
-        .map_err(|error| format!("写不进适配器进程：{error}"))
+        .map_err(|error| format!("cannot write to adapter process: {error}"))
 }
 
 struct ProcessOutbound {
@@ -657,7 +665,7 @@ struct ProcessOutbound {
 impl ProcessOutbound {
     fn request(&mut self, message: CoreMessage, id: u64) -> Result<WireResult, String> {
         if !self.shared.alive.load(Ordering::Relaxed) {
-            return Err("适配器进程没在跑".into());
+            return Err("adapter process is not running".into());
         }
 
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -685,9 +693,9 @@ impl ProcessOutbound {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&id);
-                Err("等适配器回话超时".into())
+                Err("timed out waiting for the adapter".into())
             }
-            Err(RecvTimeoutError::Disconnected) => Err("适配器进程退出了".into()),
+            Err(RecvTimeoutError::Disconnected) => Err("adapter process exited".into()),
         }
     }
 }
@@ -696,7 +704,7 @@ impl Outbound for ProcessOutbound {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         if room.connection != self.connection {
             return Err(OutboundError::Unavailable(format!(
-                "这条连接叫 {}，收到 {}",
+                "this connection is {}, but received {}",
                 self.connection, room.connection
             )));
         }
@@ -718,7 +726,7 @@ impl Outbound for ProcessOutbound {
             WireResult::Sent { platform_id, at } => Ok(Sent { platform_id, at }),
             WireResult::Error { error } => Err(send_error(error)),
             _ => Err(OutboundError::Unavailable(
-                "适配器回执不是发送结果".into(),
+                "adapter reply is not a send result".into(),
             )),
         }
     }
@@ -741,7 +749,7 @@ impl Outbound for ProcessOutbound {
     ) -> Result<CallOutcome, CallError> {
         if room.connection != self.connection {
             return Err(CallError::Forbidden(format!(
-                "这条连接叫 {}，收到 {} 的调用",
+                "this connection is {}, but received a call for {}",
                 self.connection, room.connection
             )));
         }
@@ -770,7 +778,7 @@ impl Outbound for ProcessOutbound {
             }
             WireResult::Error { error } => Err(call_error(error)),
             _ => Err(CallError::Unavailable(
-                "适配器回执不是调用结果".into(),
+                "adapter reply is not a call result".into(),
             )),
         }
     }

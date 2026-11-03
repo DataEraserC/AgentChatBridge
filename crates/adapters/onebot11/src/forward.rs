@@ -323,7 +323,12 @@ mod tests {
         assert_eq!(nodes[2]["path"], "1.0", "内层的路径挂在外层下面");
         assert_eq!(nodes[2]["depth"], 1);
         assert_eq!(nodes[2]["text"], "对的对的");
-        assert!(tree["leaf_text"].as_str().expect("有一句话").contains("对的对的"));
+        assert!(
+            tree["leaf_text"]
+                .as_str()
+                .expect("有一句话")
+                .contains("对的对的")
+        );
     }
 
     /// `depth: 1` 就只看一层：内层留个 `forward_id`，让模型自己决定要不要再展开。
@@ -435,6 +440,11 @@ mod tests {
         assert_eq!(tree["nodes"][0]["text"], "[图片]");
         assert_eq!(tree["nodes"][0]["at"], 1_793_376_467_000i64, "秒要换成毫秒");
         assert_eq!(tree["nodes"][1]["text"], "零点发这个，是想再养一个？");
-        assert!(tree["leaf_text"].as_str().unwrap_or("").contains("零点发这个"));
+        assert!(
+            tree["leaf_text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("零点发这个")
+        );
     }
 }

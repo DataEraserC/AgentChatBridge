@@ -112,52 +112,52 @@ impl ProviderId {
 
     /// 内置 wake provider。
     pub fn builtin_wake() -> Self {
-        Self::parse(DEFAULT_WAKE_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(DEFAULT_WAKE_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置 access provider（默认按订阅）。
     pub fn builtin_access() -> Self {
-        Self::parse(DEFAULT_ACCESS_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(DEFAULT_ACCESS_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置 access provider：所有房间。
     pub fn builtin_all_rooms_access() -> Self {
-        Self::parse(ALL_ROOMS_ACCESS_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(ALL_ROOMS_ACCESS_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置 access provider：指定房间提权。
     pub fn builtin_elevated_access() -> Self {
-        Self::parse(ELEVATED_ACCESS_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(ELEVATED_ACCESS_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置 access provider：指定来源房间提权。
     pub fn builtin_privileged_origins_access() -> Self {
-        Self::parse(PRIVILEGED_ORIGINS_ACCESS_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(PRIVILEGED_ORIGINS_ACCESS_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置投递 composer。
     pub fn builtin_delivery() -> Self {
-        Self::parse(DEFAULT_DELIVERY_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(DEFAULT_DELIVERY_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置失败通知 provider。
     pub fn builtin_turn_error() -> Self {
-        Self::parse(DEFAULT_TURN_ERROR_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(DEFAULT_TURN_ERROR_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置「不启用时钟」provider。
     pub fn builtin_clock_off() -> Self {
-        Self::parse(DEFAULT_CLOCK_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(DEFAULT_CLOCK_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置「固定间隔 / 房间空闲」时钟 provider。
     pub fn builtin_clock_interval_idle() -> Self {
-        Self::parse(CLOCK_INTERVAL_IDLE_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(CLOCK_INTERVAL_IDLE_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置入站策略：全部接收。
     pub fn builtin_receive_all() -> Self {
-        Self::parse(DEFAULT_RECEIVE_PROVIDER).expect("内置 provider id 必须合法")
+        Self::parse(DEFAULT_RECEIVE_PROVIDER).expect("built-in provider id must be valid")
     }
 
     pub fn namespace(&self) -> &str {
@@ -381,41 +381,41 @@ pub struct ManagerHealth {
 /// 插件系统错误。工具调用不在这里——那是 `acb_proto::ToolError`。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PluginError {
-    #[error("provider id 不合法：{0}（要写成 namespace.name）")]
+    #[error("invalid provider id: {0} (must be namespace.name)")]
     InvalidProviderId(String),
-    #[error("没有这个 provider：{0}")]
+    #[error("unknown provider: {0}")]
     UnknownProvider(String),
-    #[error("provider 重复注册：{0}")]
+    #[error("duplicate provider registration: {0}")]
     DuplicateProvider(String),
-    #[error("provider {id} 的扩展点不支持：{point:?}")]
+    #[error("provider {id} does not support extension point: {point:?}")]
     UnsupportedExtensionPoint { id: String, point: ExtensionPoint },
-    #[error("provider {id} 返回的实例是 {found:?}，但这里要 {expected:?}")]
+    #[error("provider {id} returned {found:?}, but {expected:?} was required")]
     WrongProviderKind {
         id: String,
         expected: ExtensionPoint,
         found: ExtensionPoint,
     },
-    #[error("provider {id} 的 API 版本 {found} 不兼容（需要 {required}）")]
+    #[error("provider {id} API version {found} is incompatible (requires {required})")]
     ApiVersion {
         id: String,
         found: u32,
         required: u32,
     },
-    #[error("provider {id} 缺少能力：{capability:?}")]
+    #[error("provider {id} is missing capability: {capability:?}")]
     MissingCapability { id: String, capability: Capability },
-    #[error("namespace 重复：{0}")]
+    #[error("duplicate namespace: {0}")]
     DuplicateNamespace(String),
-    #[error("namespace {0} 是内置保留名，树外 manager 不能占用")]
+    #[error("namespace {0} is a built-in reserved name; out-of-tree managers cannot use it")]
     ReservedNamespace(String),
-    #[error("子树管理器 {namespace} 出错：{detail}")]
+    #[error("subtree manager {namespace} error: {detail}")]
     Manager { namespace: String, detail: String },
-    #[error("provider {id} 出错：{detail}")]
+    #[error("provider {id} error: {detail}")]
     Provider { id: String, detail: String },
-    #[error("manager 子树太深：{namespace}（上限 {max} 层）")]
+    #[error("manager subtree too deep: {namespace} (limit {max} levels)")]
     ManagerDepth { namespace: String, max: usize },
-    #[error("manager 环路：{0}")]
+    #[error("manager cycle: {0}")]
     ManagerCycle(String),
-    #[error("插件加载失败：{0}")]
+    #[error("plugin load failed: {0}")]
     Loader(String),
 }
 
@@ -1113,7 +1113,9 @@ pub trait PluginLoader: Send + Sync {
 
     /// 卸载这个 loader 安装的 provider。默认不支持——动态 loader 再覆盖。
     fn unload(&self, _manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
-        Err(PluginError::Loader(format!("这个 loader 不支持卸载 {id}")))
+        Err(PluginError::Loader(format!(
+            "this loader does not support unloading {id}"
+        )))
     }
 }
 
@@ -1328,7 +1330,7 @@ impl PluginManager {
         let mut manager = Self::default();
         manager
             .install_loader(&NativeLoader)
-            .expect("内置 provider 必须能注册");
+            .expect("built-in providers must register successfully");
         manager
     }
 
@@ -1346,7 +1348,7 @@ impl PluginManager {
         }
         if manifest.extensions.is_empty() {
             return Err(PluginError::Loader(format!(
-                "{} loader 没声明任何扩展点",
+                "{} loader declares no extension points",
                 manifest.kind.as_str()
             )));
         }
@@ -1484,7 +1486,7 @@ impl PluginManager {
         let Some(manager) = self.managers.get(id.namespace()) else {
             return Err(AdapterError::Create(
                 connection.id.clone(),
-                format!("manager {} 没装", id.namespace()),
+                format!("manager {} is not installed", id.namespace()),
             ));
         };
 
@@ -1495,7 +1497,7 @@ impl PluginManager {
             Ok(other) => Err(AdapterError::Create(
                 connection.id.clone(),
                 format!(
-                    "{} 返回的是 {:?}，不是平台适配器",
+                    "{} returned {:?}, not a platform adapter",
                     id,
                     other.extension_point()
                 ),
@@ -1712,7 +1714,7 @@ impl PluginManager {
         if namespace.is_empty() {
             return Err(PluginError::Manager {
                 namespace: String::new(),
-                detail: "namespace 不能为空".to_owned(),
+                detail: "namespace must not be empty".to_owned(),
             });
         }
         if namespace == BUILTIN_NAMESPACE {
@@ -1735,7 +1737,8 @@ impl PluginManager {
         if !namespace_ok {
             return Err(PluginError::Manager {
                 namespace,
-                detail: "namespace 只能包含字母、数字、下划线和短横线".to_owned(),
+                detail: "namespace may only contain letters, digits, underscores, and hyphens"
+                    .to_owned(),
             });
         }
         if self.managers.contains_key(&namespace)
@@ -1768,7 +1771,7 @@ impl PluginManager {
                 return Err(PluginError::Manager {
                     namespace: namespace.clone(),
                     detail: format!(
-                        "provider {} 没有声明 summary（agent 需要知道它是干什么的）",
+                        "provider {} declares no summary (the agent needs to know what it does)",
                         descriptor.id
                     ),
                 });
@@ -1777,7 +1780,7 @@ impl PluginManager {
                 return Err(PluginError::Manager {
                     namespace: namespace.clone(),
                     detail: format!(
-                        "descriptor {} 的 namespace 和 manager 的 {} 不一致",
+                        "descriptor {} namespace does not match manager namespace {}",
                         descriptor.id, namespace
                     ),
                 });
@@ -1804,7 +1807,7 @@ impl PluginManager {
                 if kind.is_empty() {
                     return Err(PluginError::Manager {
                         namespace: namespace.clone(),
-                        detail: format!("适配器 descriptor {} 没声明 kind", descriptor.id),
+                        detail: format!("adapter descriptor {} declares no kind", descriptor.id),
                     });
                 }
                 let duplicate = self.adapters.contains_key(kind)
@@ -1823,7 +1826,10 @@ impl PluginManager {
             } else if descriptor.kind.is_some() {
                 return Err(PluginError::Manager {
                     namespace: namespace.clone(),
-                    detail: format!("只有平台适配器能声明 kind，{} 声明了", descriptor.id),
+                    detail: format!(
+                        "only platform adapters may declare kind; {} declared one",
+                        descriptor.id
+                    ),
                 });
             }
             if !manifest.capabilities.contains(&required) {
@@ -1851,7 +1857,7 @@ impl PluginManager {
             descriptors,
         });
         ancestry.push(namespace);
-        for child in collected.last().expect("刚刚推入").manager.children() {
+        for child in collected.last().expect("just pushed").manager.children() {
             self.collect_manager(child, ancestry, collected)?;
         }
         ancestry.pop();

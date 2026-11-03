@@ -17,8 +17,8 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// 单个收下文件的大小上限。fs::copy 不占桥的内存，这个上限主要防磁盘被塞满。
@@ -29,17 +29,17 @@ const KEEP_FOR: Duration = Duration::from_secs(24 * 3600);
 /// 收文件失败的几种原因。每种都能让模型一轮就知道该改什么。
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
-    #[error("文件不存在：{}", .0.display())]
+    #[error("file not found: {}", .0.display())]
     NotFound(PathBuf),
-    #[error("不是普通文件：{}", .0.display())]
+    #[error("not a regular file: {}", .0.display())]
     NotAFile(PathBuf),
-    #[error("文件太大：{} 有 {size} 字节，上限 {limit} 字节", .path.display())]
+    #[error("file too large: {} is {size} bytes (limit {limit} bytes)", .path.display())]
     TooBig {
         path: PathBuf,
         size: u64,
         limit: u64,
     },
-    #[error("收不下（{}）：{error}", .path.display())]
+    #[error("cannot accept file ({}): {error}", .path.display())]
     Io {
         path: PathBuf,
         #[source]
@@ -81,7 +81,7 @@ impl FileRelay {
                 return Err(RelayError::Io {
                     path: source.to_owned(),
                     error,
-                })
+                });
             }
         };
         if !meta.is_file() {
@@ -168,7 +168,7 @@ impl FileRelay {
                     let relay = Arc::clone(&relay);
                     std::thread::spawn(move || {
                         if let Err(error) = handle_connection(stream, &relay) {
-                            eprintln!("文件中继：请求没处理完：{error}");
+                            eprintln!("file relay: request was not fully handled: {error}");
                         }
                     });
                 }
@@ -282,9 +282,7 @@ fn content_type_of(path: &Path) -> &'static str {
 }
 
 fn handle_connection(mut stream: TcpStream, relay: &FileRelay) -> io::Result<()> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     // 只需要请求行：读到头结束（空行）或 8 KiB 就停，别等一个可能不来的 body。
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -357,7 +355,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("时间正常")
                 .as_nanos();
-            let dir = std::env::temp_dir().join(format!("acb-relay-{}-{name}-{nanos}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("acb-relay-{}-{name}-{nanos}", std::process::id()));
             fs::create_dir_all(&dir).expect("能建临时目录");
             Self(dir)
         }
@@ -381,7 +380,9 @@ mod tests {
         assert!(url.starts_with("http://10.89.0.1:3131/f/"), "{url}");
         assert!(url.ends_with("/____.png"), "中文和空格要换掉：{url}");
 
-        let rest = url.strip_prefix("http://10.89.0.1:3131/f/").expect("前缀对");
+        let rest = url
+            .strip_prefix("http://10.89.0.1:3131/f/")
+            .expect("前缀对");
         let mut segments = rest.splitn(2, '/');
         let token = segments.next().expect("有 token");
         let name = segments.next().expect("有文件名");
@@ -426,15 +427,27 @@ mod tests {
             size: limit_check,
             limit: 1,
         };
-        assert!(too_big.to_string().contains("文件太大"));
+        assert!(too_big.to_string().contains("file too large"));
     }
 
     #[test]
     fn 只有绝对路径才算本机文件() {
-        assert_eq!(local_path("/home/a/b.png"), Some(PathBuf::from("/home/a/b.png")));
-        assert_eq!(local_path("file:///home/a/b.png"), Some(PathBuf::from("/home/a/b.png")));
-        assert_eq!(local_path("C:\\Users\\a.png"), Some(PathBuf::from("C:\\Users\\a.png")));
-        assert_eq!(local_path("C:/Users/a.png"), Some(PathBuf::from("C:/Users/a.png")));
+        assert_eq!(
+            local_path("/home/a/b.png"),
+            Some(PathBuf::from("/home/a/b.png"))
+        );
+        assert_eq!(
+            local_path("file:///home/a/b.png"),
+            Some(PathBuf::from("/home/a/b.png"))
+        );
+        assert_eq!(
+            local_path("C:\\Users\\a.png"),
+            Some(PathBuf::from("C:\\Users\\a.png"))
+        );
+        assert_eq!(
+            local_path("C:/Users/a.png"),
+            Some(PathBuf::from("C:/Users/a.png"))
+        );
         // 这些都不是本机路径，原样放行。
         assert_eq!(local_path("http://e.com/a.png"), None);
         assert_eq!(local_path("https://e.com/a.png"), None);

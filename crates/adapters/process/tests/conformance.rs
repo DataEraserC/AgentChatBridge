@@ -3,8 +3,8 @@
 //! 真启动一个子进程，只用 wire 协议通信：hello、入站事件、发送回执、调用回执、
 //! 错误分类、按 shutdown 退出。core 这边只经过正常的 `AdapterFactory` 入口。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -45,9 +45,7 @@ fn process_adapter_speaks_the_wire_protocol() {
 
     let instance = plugins
         .create_adapter(
-            &connection(Some(env!(
-                "CARGO_BIN_EXE_acb-adapter-process-fixture"
-            ))),
+            &connection(Some(env!("CARGO_BIN_EXE_acb-adapter-process-fixture"))),
             events.clone(),
         )
         .expect("能启动子进程并读到 hello");
@@ -60,7 +58,10 @@ fn process_adapter_speaks_the_wire_protocol() {
 
     // hello 里声明的入站能力要进 manifest，describe_plugins 才看得见。
     assert!(
-        manifest.events.iter().any(|event| event.as_ref() == "knock"),
+        manifest
+            .events
+            .iter()
+            .any(|event| event.as_ref() == "knock"),
         "{:?}",
         manifest.events
     );
@@ -144,9 +145,7 @@ fn process_adapter_restarts_after_child_exits() {
 
     let instance = plugins
         .create_adapter(
-            &connection(Some(env!(
-                "CARGO_BIN_EXE_acb-adapter-process-fixture"
-            ))),
+            &connection(Some(env!("CARGO_BIN_EXE_acb-adapter-process-fixture"))),
             events.clone(),
         )
         .expect("能启动子进程");

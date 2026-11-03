@@ -51,7 +51,7 @@ impl MemoryRepo {
             return Err(ToolError::new(
                 ErrorCode::Internal,
                 format!(
-                    "记忆仓库路径 {} 已存在但不是 git 仓库，桥不会覆盖它",
+                    "memory repository path {} already exists but is not a git repository; the bridge will not overwrite it",
                     repo_path.display()
                 ),
             ));
@@ -59,7 +59,10 @@ impl MemoryRepo {
         git2::Repository::init_bare(&repo_path).map_err(|error| {
             ToolError::new(
                 ErrorCode::Internal,
-                format!("初始化裸仓库 {} 失败：{error}", repo_path.display()),
+                format!(
+                    "failed to initialize bare repository {}: {error}",
+                    repo_path.display()
+                ),
             )
         })?;
         Ok(repo_path)
@@ -83,7 +86,7 @@ impl MemoryRepo {
                     return Err(ToolError::new(
                         ErrorCode::Internal,
                         format!(
-                            "worktree {} 已存在但不是有效工作副本，桥不会覆盖或删除它",
+                            "worktree {} already exists but is not a valid working copy; the bridge will not overwrite or delete it",
                             worktree.display()
                         ),
                     ));
@@ -95,7 +98,7 @@ impl MemoryRepo {
         let repo = git2::Repository::open(&bare).map_err(|error| {
             ToolError::new(
                 ErrorCode::Internal,
-                format!("打开裸仓库 {} 失败：{error}", bare.display()),
+                format!("failed to open bare repository {}: {error}", bare.display()),
             )
         })?;
 
@@ -107,7 +110,7 @@ impl MemoryRepo {
                 ToolError::new(
                     ErrorCode::Internal,
                     format!(
-                        "初始化空仓库的 worktree {} 失败：{error}",
+                        "failed to initialize worktree {} for an empty repository: {error}",
                         worktree.display()
                     ),
                 )
@@ -120,7 +123,7 @@ impl MemoryRepo {
             ToolError::new(
                 ErrorCode::Internal,
                 format!(
-                    "为会话 {session} checkout worktree 失败：{error}（裸仓库 {}）",
+                    "failed to check out worktree for session {session}: {error} (bare repository {})",
                     bare.display()
                 ),
             )
@@ -142,7 +145,7 @@ impl MemoryRepo {
         if !canonical.starts_with(&base) {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!("路径 {rel} 越出了记忆仓库的范围，不允许"),
+                format!("path {rel} is outside the memory repository; not allowed"),
             ));
         }
         Ok(canonical)
@@ -162,17 +165,20 @@ impl MemoryRepo {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
                 format!(
-                    "会话没有引用记忆 {memory}；能碰的记忆是：{}",
+                    "session does not reference memory {memory}; accessible memories: {}",
                     if session_memories.is_empty() {
-                        "（一个都没有）".to_owned()
+                        "(none)".to_owned()
                     } else {
-                        session_memories.join("、")
+                        session_memories.join(", ")
                     }
                 ),
             ));
         }
         let location = location_of(memory).ok_or_else(|| {
-            ToolError::new(ErrorCode::Internal, format!("记忆 {memory} 找不到仓库路径"))
+            ToolError::new(
+                ErrorCode::Internal,
+                format!("no repository path found for memory {memory}"),
+            )
         })?;
         self.ensure_worktree(&location, memory, session)
     }
@@ -203,7 +209,7 @@ pub fn read_file(worktree: &Path, rel: &str) -> Result<String, ToolError> {
     std::fs::read_to_string(&path).map_err(|error| {
         ToolError::new(
             ErrorCode::BadRequest,
-            format!("读文件 {} 失败：{error}", path.display()),
+            format!("failed to read file {}: {error}", path.display()),
         )
     })
 }
@@ -215,14 +221,14 @@ pub fn write_file(worktree: &Path, rel: &str, content: &str) -> Result<(), ToolE
         std::fs::create_dir_all(parent).map_err(|error| {
             ToolError::new(
                 ErrorCode::Internal,
-                format!("建目录 {} 失败：{error}", parent.display()),
+                format!("failed to create directory {}: {error}", parent.display()),
             )
         })?;
     }
     std::fs::write(&path, content).map_err(|error| {
         ToolError::new(
             ErrorCode::Internal,
-            format!("写文件 {} 失败：{error}", path.display()),
+            format!("failed to write file {}: {error}", path.display()),
         )
     })?;
     Ok(())
@@ -235,11 +241,14 @@ pub fn list_dir(worktree: &Path, rel: &str) -> Result<Vec<String>, ToolError> {
     for entry in std::fs::read_dir(&path).map_err(|error| {
         ToolError::new(
             ErrorCode::BadRequest,
-            format!("列目录 {} 失败：{error}", path.display()),
+            format!("failed to list directory {}: {error}", path.display()),
         )
     })? {
         let entry = entry.map_err(|error| {
-            ToolError::new(ErrorCode::Internal, format!("读目录项失败：{error}"))
+            ToolError::new(
+                ErrorCode::Internal,
+                format!("failed to read directory entry: {error}"),
+            )
         })?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -302,11 +311,14 @@ fn walk(dir: &Path, visit: &mut dyn FnMut(&Path)) -> Result<(), ToolError> {
 /// `git status`：返回简明的变更概览（每个条目一行，前缀是状态码）。
 pub fn git_status(worktree: &Path) -> Result<String, ToolError> {
     let repo = git2::Repository::open(worktree).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("打开 worktree 失败：{error}"))
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to open worktree: {error}"),
+        )
     })?;
     let mut out = String::new();
     let statuses = repo.statuses(None).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("git status 失败：{error}"))
+        ToolError::new(ErrorCode::Internal, format!("git status failed: {error}"))
     })?;
     for entry in statuses.iter() {
         let code = status_code(entry.status());
@@ -322,14 +334,17 @@ pub fn git_status(worktree: &Path) -> Result<String, ToolError> {
 /// `git log`：最近 `n` 条提交，一行一条（短 hash + 提交信息）。
 pub fn git_log(worktree: &Path, n: usize) -> Result<String, ToolError> {
     let repo = git2::Repository::open(worktree).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("打开 worktree 失败：{error}"))
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to open worktree: {error}"),
+        )
     })?;
     let mut revwalk = repo
         .revwalk()
-        .map_err(|error| ToolError::new(ErrorCode::Internal, format!("git log 失败：{error}")))?;
+        .map_err(|error| ToolError::new(ErrorCode::Internal, format!("git log failed: {error}")))?;
     revwalk
         .push_head()
-        .map_err(|error| ToolError::new(ErrorCode::Internal, format!("git log 失败：{error}")))?;
+        .map_err(|error| ToolError::new(ErrorCode::Internal, format!("git log failed: {error}")))?;
     let mut out = String::new();
     for oid in revwalk.flatten().take(n) {
         let commit = match repo.find_commit(oid) {
@@ -346,11 +361,14 @@ pub fn git_log(worktree: &Path, n: usize) -> Result<String, ToolError> {
 /// `git diff`：工作区相对最近提交的改动。
 pub fn git_diff(worktree: &Path) -> Result<String, ToolError> {
     let repo = git2::Repository::open(worktree).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("打开 worktree 失败：{error}"))
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to open worktree: {error}"),
+        )
     })?;
-    let diff = repo
-        .diff_index_to_workdir(None, None)
-        .map_err(|error| ToolError::new(ErrorCode::Internal, format!("git diff 失败：{error}")))?;
+    let diff = repo.diff_index_to_workdir(None, None).map_err(|error| {
+        ToolError::new(ErrorCode::Internal, format!("git diff failed: {error}"))
+    })?;
     let mut out = String::new();
     let opts = git2::DiffFormat::Patch;
     diff.print(opts, |_delta, _hunk, line| {
@@ -358,34 +376,45 @@ pub fn git_diff(worktree: &Path) -> Result<String, ToolError> {
         let _ = out.push_str(content);
         true
     })
-    .map_err(|error| ToolError::new(ErrorCode::Internal, format!("渲染 diff 失败：{error}")))?;
+    .map_err(|error| {
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to render diff: {error}"),
+        )
+    })?;
     Ok(out)
 }
 
 /// `git add`：暂存指定路径（相对 worktree；空串暂存全部）。
 pub fn git_add(worktree: &Path, rel: &str) -> Result<(), ToolError> {
     let repo = git2::Repository::open(worktree).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("打开 worktree 失败：{error}"))
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to open worktree: {error}"),
+        )
     })?;
     let mut index = repo
         .index()
-        .map_err(|error| ToolError::new(ErrorCode::Internal, format!("git add 失败：{error}")))?;
+        .map_err(|error| ToolError::new(ErrorCode::Internal, format!("git add failed: {error}")))?;
     if rel.is_empty() || rel == "." {
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
             .map_err(|error| {
-                ToolError::new(ErrorCode::Internal, format!("git add 失败：{error}"))
+                ToolError::new(ErrorCode::Internal, format!("git add failed: {error}"))
             })?;
     } else {
         index.add_path(Path::new(rel)).map_err(|error| {
             ToolError::new(
                 ErrorCode::BadRequest,
-                format!("git add {rel} 失败：{error}"),
+                format!("git add {rel} failed: {error}"),
             )
         })?;
     }
     index.write().map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("git add 落盘失败：{error}"))
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to persist git add: {error}"),
+        )
     })?;
     Ok(())
 }
@@ -393,16 +422,19 @@ pub fn git_add(worktree: &Path, rel: &str) -> Result<(), ToolError> {
 /// `git commit`：提交已暂存的内容。`message` 是提交信息。
 pub fn git_commit(worktree: &Path, message: &str) -> Result<String, ToolError> {
     let repo = git2::Repository::open(worktree).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("打开 worktree 失败：{error}"))
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to open worktree: {error}"),
+        )
     })?;
     let mut index = repo.index().map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("git commit 失败：{error}"))
+        ToolError::new(ErrorCode::Internal, format!("git commit failed: {error}"))
     })?;
     let tree_id = index.write_tree().map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("git commit 失败：{error}"))
+        ToolError::new(ErrorCode::Internal, format!("git commit failed: {error}"))
     })?;
     let tree = repo.find_tree(tree_id).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("git commit 失败：{error}"))
+        ToolError::new(ErrorCode::Internal, format!("git commit failed: {error}"))
     })?;
     let head = repo.head().ok();
     let parent = head.and_then(|h| h.peel_to_commit().ok());
@@ -413,14 +445,14 @@ pub fn git_commit(worktree: &Path, message: &str) -> Result<String, ToolError> {
         git2::Signature::now("acb-bridge", "acb-bridge@localhost").map_err(|error| {
             ToolError::new(
                 ErrorCode::Internal,
-                format!("git commit 需要 user.name/user.email：{error}"),
+                format!("git commit requires user.name/user.email: {error}"),
             )
         })
     })?;
     let _oid = repo
         .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
         .map_err(|error| {
-            ToolError::new(ErrorCode::Internal, format!("git commit 失败：{error}"))
+            ToolError::new(ErrorCode::Internal, format!("git commit failed: {error}"))
         })?;
     Ok("已提交".to_owned())
 }
@@ -428,24 +460,32 @@ pub fn git_commit(worktree: &Path, message: &str) -> Result<String, ToolError> {
 /// `git push`：推送到默认远端。
 pub fn git_push(worktree: &Path) -> Result<String, ToolError> {
     let repo = git2::Repository::open(worktree).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("打开 worktree 失败：{error}"))
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to open worktree: {error}"),
+        )
     })?;
     let mut remote = repo.find_remote("origin").map_err(|error| {
-        ToolError::new(ErrorCode::BadRequest, format!("没有 origin 远端：{error}"))
+        ToolError::new(ErrorCode::BadRequest, format!("no origin remote: {error}"))
     })?;
     remote
         .push(&["refs/heads/acb/HEAD"], None)
-        .map_err(|error| ToolError::new(ErrorCode::Internal, format!("git push 失败：{error}")))?;
+        .map_err(|error| {
+            ToolError::new(ErrorCode::Internal, format!("git push failed: {error}"))
+        })?;
     Ok("已推送".to_owned())
 }
 
 /// `git branch`：列出本地分支。
 pub fn git_branch(worktree: &Path) -> Result<String, ToolError> {
     let repo = git2::Repository::open(worktree).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("打开 worktree 失败：{error}"))
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to open worktree: {error}"),
+        )
     })?;
     let branches = repo.branches(None).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("git branch 失败：{error}"))
+        ToolError::new(ErrorCode::Internal, format!("git branch failed: {error}"))
     })?;
     let mut out = String::new();
     for branch in branches.flatten() {
@@ -459,12 +499,15 @@ pub fn git_branch(worktree: &Path) -> Result<String, ToolError> {
 /// `git blame`：查某一行/文件是谁改的。
 pub fn git_blame(worktree: &Path, rel: &str) -> Result<String, ToolError> {
     let repo = git2::Repository::open(worktree).map_err(|error| {
-        ToolError::new(ErrorCode::Internal, format!("打开 worktree 失败：{error}"))
+        ToolError::new(
+            ErrorCode::Internal,
+            format!("failed to open worktree: {error}"),
+        )
     })?;
     let blame = repo.blame_file(Path::new(rel), None).map_err(|error| {
         ToolError::new(
             ErrorCode::BadRequest,
-            format!("git blame {rel} 失败：{error}"),
+            format!("git blame {rel} failed: {error}"),
         )
     })?;
     let mut out = String::new();

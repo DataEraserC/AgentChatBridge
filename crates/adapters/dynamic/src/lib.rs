@@ -90,7 +90,7 @@ impl PluginLoader for DynamicLoader {
         for plugin in &self.plugins {
             let loaded =
                 LoadedPlugin::load(&plugin.path, plugin.kind.as_deref()).map_err(|detail| {
-                    PluginError::Loader(format!("加载 {} 失败：{detail}", plugin.path))
+                    PluginError::Loader(format!("failed to load {}: {detail}", plugin.path))
                 })?;
             match loaded {
                 LoadedPlugin::Adapter(factory) => manager
@@ -116,23 +116,23 @@ enum LoadedPlugin {
 
 impl LoadedPlugin {
     fn load(path: &str, expected_kind: Option<&str>) -> Result<Self, String> {
-        let library =
-            unsafe { Library::new(path) }.map_err(|error| format!("打不开动态库：{error}"))?;
+        let library = unsafe { Library::new(path) }
+            .map_err(|error| format!("cannot open dynamic library: {error}"))?;
         let entry: libloading::Symbol<'_, EntryFn> =
             unsafe { library.get(ENTRY_SYMBOL) }.map_err(|error| {
                 format!(
-                    "没有导出 {}：{error}",
+                    "missing export {}: {error}",
                     String::from_utf8_lossy(ENTRY_SYMBOL)
                 )
             })?;
         let table_ptr = unsafe { entry() };
         if table_ptr.is_null() {
-            return Err("acb_adapter_entry_v1 返回了空表".into());
+            return Err("acb_adapter_entry_v1 returned an empty table".into());
         }
         let table = unsafe { *table_ptr };
         if table.abi_version != ABI_VERSION {
             return Err(format!(
-                "ABI 版本 {} 不兼容（需要 {ABI_VERSION}）",
+                "incompatible ABI version {} (requires {ABI_VERSION})",
                 table.abi_version
             ));
         }
@@ -143,7 +143,7 @@ impl LoadedPlugin {
             || table.free_string.is_none()
         {
             return Err(
-                "插件函数表不完整（manifest/create/invoke/destroy/free_string 都要有）".into(),
+                "plugin function table is incomplete (manifest/create/invoke/destroy/free_string are all required)".into(),
             );
         }
 
@@ -151,12 +151,12 @@ impl LoadedPlugin {
         match wire.extension.as_str() {
             "platform_adapter" => {
                 let manifest = AdapterManifest::try_from(wire)
-                    .map_err(|detail| format!("manifest 不合法：{detail}"))?;
+                    .map_err(|detail| format!("invalid manifest: {detail}"))?;
                 validate_manifest(&manifest).map_err(|error| error.to_string())?;
                 if let Some(expected) = expected_kind {
                     if manifest.kind.as_ref() != expected {
                         return Err(format!(
-                            "manifest 的 kind 是 {}，配置里写的是 {expected}",
+                            "manifest kind is {}, but the config says {expected}",
                             manifest.kind
                         ));
                     }
@@ -169,18 +169,18 @@ impl LoadedPlugin {
             }
             "wake" => {
                 let provider = ProviderId::parse(&wire.id)
-                    .map_err(|error| format!("wake provider id 不合法：{error}"))?;
+                    .map_err(|error| format!("invalid wake provider id: {error}"))?;
                 if provider.namespace() == "acb" {
-                    return Err("树外插件不能用 acb namespace".into());
+                    return Err("out-of-tree plugins cannot use the acb namespace".into());
                 }
                 if wire.api_version != PLUGIN_API_VERSION {
                     return Err(format!(
-                        "插件 API 版本 {} 不兼容（需要 {PLUGIN_API_VERSION}）",
+                        "incompatible plugin API version {} (requires {PLUGIN_API_VERSION})",
                         wire.api_version
                     ));
                 }
                 let metadata = PluginMetadata::try_from(wire.metadata)
-                    .map_err(|detail| format!("metadata 不合法：{detail}"))?;
+                    .map_err(|detail| format!("invalid metadata: {detail}"))?;
                 if metadata
                     .summary
                     .as_deref()
@@ -188,11 +188,12 @@ impl LoadedPlugin {
                     .unwrap_or("")
                     .is_empty()
                 {
-                    return Err("wake 插件必须声明 metadata.summary".into());
+                    return Err("wake plugins must declare metadata.summary".into());
                 }
                 if metadata.effects.is_empty() {
                     return Err(
-                        "wake 插件必须声明 effects（至少 may_wake / may_stay_silent）".into(),
+                        "wake plugins must declare effects (at least may_wake / may_stay_silent)"
+                            .into(),
                     );
                 }
                 Ok(Self::Wake(DylibWakeManager::new(
@@ -206,18 +207,18 @@ impl LoadedPlugin {
             }
             "access" | "delivery" | "send" | "turn_error" | "receive" | "clock" => {
                 let provider = ProviderId::parse(&wire.id)
-                    .map_err(|error| format!("{} provider id 不合法：{error}", wire.extension))?;
+                    .map_err(|error| format!("invalid {} provider id: {error}", wire.extension))?;
                 if provider.namespace() == "acb" {
-                    return Err("树外插件不能用 acb namespace".into());
+                    return Err("out-of-tree plugins cannot use the acb namespace".into());
                 }
                 if wire.api_version != PLUGIN_API_VERSION {
                     return Err(format!(
-                        "插件 API 版本 {} 不兼容（需要 {PLUGIN_API_VERSION}）",
+                        "incompatible plugin API version {} (requires {PLUGIN_API_VERSION})",
                         wire.api_version
                     ));
                 }
                 let metadata = PluginMetadata::try_from(wire.metadata)
-                    .map_err(|detail| format!("metadata 不合法：{detail}"))?;
+                    .map_err(|detail| format!("invalid metadata: {detail}"))?;
                 if metadata
                     .summary
                     .as_deref()
@@ -225,7 +226,10 @@ impl LoadedPlugin {
                     .unwrap_or("")
                     .is_empty()
                 {
-                    return Err(format!("{} 插件必须声明 metadata.summary", wire.extension));
+                    return Err(format!(
+                        "{} plugins must declare metadata.summary",
+                        wire.extension
+                    ));
                 }
                 let point = match wire.extension.as_str() {
                     "access" => ExtensionPoint::Access,
@@ -234,7 +238,7 @@ impl LoadedPlugin {
                     "turn_error" => ExtensionPoint::TurnError,
                     "receive" => ExtensionPoint::Receive,
                     "clock" => ExtensionPoint::Clock,
-                    _ => unreachable!("已经按扩展点分流"),
+                    _ => unreachable!("already routed by extension point"),
                 };
                 Ok(Self::Decision(DylibDecisionManager::new(
                     Arc::new(library),
@@ -245,7 +249,7 @@ impl LoadedPlugin {
                     metadata,
                 )))
             }
-            other => Err(format!("不认识的插件扩展点：{other}")),
+            other => Err(format!("unknown plugin extension point: {other}")),
         }
     }
 }
@@ -258,10 +262,10 @@ struct DylibAdapterFactory {
 }
 
 fn read_manifest(table: &AdapterV1) -> Result<WireManifest, String> {
-    let manifest_fn = table.manifest.ok_or("没有 manifest 函数")?;
+    let manifest_fn = table.manifest.ok_or("missing manifest function")?;
     let pointer = unsafe { manifest_fn() };
     let json = take_owned_string(pointer, table)?;
-    serde_json::from_str(&json).map_err(|error| format!("manifest 不是合法 JSON：{error}"))
+    serde_json::from_str(&json).map_err(|error| format!("manifest is not valid JSON: {error}"))
 }
 
 impl AdapterFactory for DylibAdapterFactory {
@@ -302,14 +306,15 @@ impl DylibAdapterFactory {
             connection: WireConnection::from(connection),
         };
         let config_json = CString::new(
-            encode_line(&config).map_err(|error| format!("连接配置序列化失败：{error}"))?,
+            encode_line(&config)
+                .map_err(|error| format!("failed to serialize connection config: {error}"))?,
         )
-        .map_err(|_| "连接配置里含有 NUL".to_owned())?;
+        .map_err(|_| "connection config contains NUL".to_owned())?;
 
-        let create = self.table.create.ok_or("没有 create 函数")?;
+        let create = self.table.create.ok_or("missing create function")?;
         let handle_ptr = unsafe { create(config_json.as_ptr(), &host) };
         if handle_ptr.is_null() {
-            return Err("create 返回了空 handle".into());
+            return Err("create returned an empty handle".into());
         }
         let handle = Arc::new(Mutex::new(AdapterHandle {
             ptr: handle_ptr,
@@ -320,7 +325,7 @@ impl DylibAdapterFactory {
             Ok(catalog) => catalog,
             Err(detail) => {
                 destroy_handle(&self.table, &handle);
-                return Err(format!("读平台方法目录失败：{detail}"));
+                return Err(format!("failed to read platform method catalog: {detail}"));
             }
         };
 
@@ -358,12 +363,13 @@ fn describe(
         AdapterMessage::Reply {
             result: WireResult::Catalog { catalog },
             ..
-        } => convert_catalog(catalog).map_err(|detail| format!("平台方法目录不合法：{detail}")),
+        } => convert_catalog(catalog)
+            .map_err(|detail| format!("invalid platform method catalog: {detail}")),
         AdapterMessage::Reply {
             result: WireResult::Error { error },
             ..
-        } => Err(format!("插件拒绝 describe：{error:?}")),
-        other => Err(format!("describe 回执不对：{other:?}")),
+        } => Err(format!("plugin rejected describe: {error:?}")),
+        other => Err(format!("invalid describe reply: {other:?}")),
     }
 }
 
@@ -433,7 +439,7 @@ impl ManagerPlugin for DylibWakeManager {
         let ProviderOptions::Wake(policy) = options else {
             return Err(PluginError::Provider {
                 id: id.to_string(),
-                detail: "wake provider 需要 WakePolicy".into(),
+                detail: "wake provider requires WakePolicy".into(),
             });
         };
 
@@ -515,15 +521,16 @@ impl DylibWakeProvider {
             options: wake_options(policy),
         };
         let config_json = CString::new(
-            encode_line(&config).map_err(|error| format!("wake 配置序列化失败：{error}"))?,
+            encode_line(&config)
+                .map_err(|error| format!("failed to serialize wake config: {error}"))?,
         )
-        .map_err(|_| "wake 配置里含有 NUL".to_owned())?;
+        .map_err(|_| "wake config contains NUL".to_owned())?;
 
-        let create = table.create.ok_or("没有 create 函数")?;
+        let create = table.create.ok_or("missing create function")?;
         let handle_ptr = unsafe { create(config_json.as_ptr(), &host) };
         if handle_ptr.is_null() {
             return Err(format!(
-                "wake 插件 {plugin_id}（platform {platform}）create 返回空 handle"
+                "wake plugin {plugin_id} (platform {platform}) create returned an empty handle"
             ));
         }
 
@@ -543,7 +550,7 @@ impl DylibWakeProvider {
     fn note_failure(&self, detail: &str) {
         let count = self.failures.fetch_add(1, Ordering::Relaxed);
         if count < 5 || count % 100 == 0 {
-            eprintln!("wake 插件失败（第 {} 次）：{detail}", count + 1);
+            eprintln!("wake plugin failed (attempt {}): {detail}", count + 1);
         }
     }
 
@@ -600,12 +607,12 @@ impl WakeProvider for DylibWakeProvider {
                 },
                 "stay" => WakeVerdict::stay(),
                 other => {
-                    self.note_failure(&format!("不认识的 wake 判定：{other}"));
+                    self.note_failure(&format!("unknown wake decision: {other}"));
                     WakeVerdict::stay()
                 }
             },
             Ok(other) => {
-                self.note_failure(&format!("回执不是 wake 判定：{other:?}"));
+                self.note_failure(&format!("reply is not a wake decision: {other:?}"));
                 WakeVerdict::stay()
             }
             Err(detail) => {
@@ -763,7 +770,7 @@ impl ManagerPlugin for DylibDecisionManager {
             (point, _) => {
                 return Err(PluginError::Provider {
                     id: id.to_string(),
-                    detail: format!("{point:?} provider 收到的 options 类型不对"),
+                    detail: format!("{point:?} provider received options of the wrong type"),
                 });
             }
         };
@@ -812,7 +819,7 @@ impl ManagerPlugin for DylibDecisionManager {
             other => {
                 return Err(PluginError::Provider {
                     id: id.to_string(),
-                    detail: format!("不认识的决策扩展点：{other}"),
+                    detail: format!("unknown decision extension point: {other}"),
                 });
             }
         };
@@ -875,14 +882,17 @@ impl DecisionChannel {
             options,
         };
         let config_json = CString::new(
-            encode_line(&config).map_err(|error| format!("{extension} 配置序列化失败：{error}"))?,
+            encode_line(&config)
+                .map_err(|error| format!("failed to serialize {extension} config: {error}"))?,
         )
-        .map_err(|_| format!("{extension} 配置里含有 NUL"))?;
+        .map_err(|_| format!("{extension} config contains NUL"))?;
 
-        let create = table.create.ok_or("没有 create 函数")?;
+        let create = table.create.ok_or("missing create function")?;
         let handle_ptr = unsafe { create(config_json.as_ptr(), &host) };
         if handle_ptr.is_null() {
-            return Err(format!("{extension} 插件 {plugin_id} create 返回空 handle"));
+            return Err(format!(
+                "{extension} plugin {plugin_id} create returned an empty handle"
+            ));
         }
 
         Ok(Self {
@@ -910,7 +920,11 @@ impl DecisionChannel {
     fn note_failure(&self, detail: &str) {
         let count = self.failures.fetch_add(1, Ordering::Relaxed);
         if count < 5 || count % 100 == 0 {
-            eprintln!("{} 插件失败（第 {} 次）：{detail}", self.label, count + 1);
+            eprintln!(
+                "{} plugin failed (attempt {}): {detail}",
+                self.label,
+                count + 1
+            );
         }
     }
 
@@ -927,7 +941,7 @@ fn plugin_decision(channel: &DecisionChannel, message: CoreMessage) -> Option<St
             ..
         }) => Some(decision),
         Ok(other) => {
-            channel.note_failure(&format!("回执不是决策：{other:?}"));
+            channel.note_failure(&format!("reply is not a decision: {other:?}"));
             None
         }
         Err(detail) => {
@@ -966,7 +980,7 @@ impl AccessProvider for DylibAccessProvider {
             Some("deny") => AccessDecision::Deny,
             Some(other) => {
                 self.channel
-                    .note_failure(&format!("不认识的 access 判定：{other}"));
+                    .note_failure(&format!("unknown access decision: {other}"));
                 AccessDecision::Deny
             }
             None => AccessDecision::Deny,
@@ -1007,7 +1021,7 @@ impl DeliveryComposer for DylibDeliveryComposer {
             }) => default_delivery_plan(request),
             Ok(other) => {
                 self.channel
-                    .note_failure(&format!("回执不是投递计划：{other:?}"));
+                    .note_failure(&format!("reply is not a delivery plan: {other:?}"));
                 default_delivery_plan(request)
             }
             Err(detail) => {
@@ -1055,7 +1069,7 @@ impl TurnErrorProvider for DylibTurnErrorProvider {
                 .collect(),
             Ok(other) => {
                 self.channel
-                    .note_failure(&format!("回执不是失败通知动作：{other:?}"));
+                    .note_failure(&format!("reply is not a turn error action: {other:?}"));
                 DefaultTurnErrorProvider.decide(policy, request)
             }
             Err(detail) => {
@@ -1084,7 +1098,7 @@ fn parse_turn_error_action(
         WireTurnErrorAction::Send { room } => match RoomId::parse(&room) {
             Ok(room) => Some(TurnErrorAction::Send { room }),
             Err(error) => {
-                channel.note_failure(&format!("失败通知房间不合法：{room}（{error}）"));
+                channel.note_failure(&format!("invalid turn error room: {room} ({error})"));
                 None
             }
         },
@@ -1145,18 +1159,18 @@ impl SendHook for DylibSendHook {
                 ..
             }) => {
                 self.channel
-                    .note_failure(&format!("发送前钩子报错：{error:?}"));
+                    .note_failure(&format!("before-send hook error: {error:?}"));
                 Err(PluginError::Provider {
                     id: self.provider.clone(),
-                    detail: format!("发送前钩子报错：{error:?}"),
+                    detail: format!("before-send hook error: {error:?}"),
                 })
             }
             Ok(other) => {
                 self.channel
-                    .note_failure(&format!("发送前钩子回执不对：{other:?}"));
+                    .note_failure(&format!("invalid before-send hook reply: {other:?}"));
                 Err(PluginError::Provider {
                     id: self.provider.clone(),
-                    detail: format!("发送前钩子回执不对：{other:?}"),
+                    detail: format!("invalid before-send hook reply: {other:?}"),
                 })
             }
             Err(detail) => {
@@ -1218,7 +1232,7 @@ impl ReceiveProvider for DylibReceiveProvider {
             Some("drop") => ReceiveDecision::Drop,
             Some(other) => {
                 self.channel
-                    .note_failure(&format!("不认识的 receive 判定：{other}"));
+                    .note_failure(&format!("unknown receive decision: {other}"));
                 ReceiveDecision::Record
             }
             // 出错按「接收」兜底：宁可多记一条，也不误丢消息。
@@ -1252,7 +1266,7 @@ impl ClockProvider for DylibClockProvider {
             Some("skip") => false,
             Some(other) => {
                 self.channel
-                    .note_failure(&format!("不认识的 clock 判定：{other}"));
+                    .note_failure(&format!("unknown clock decision: {other}"));
                 false
             }
             // 出错按「不触发」兜底：时钟只是例行检查，不该因为插件坏了刷屏。
@@ -1327,7 +1341,7 @@ impl Outbound for DylibOutbound {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         if room.connection != self.connection {
             return Err(OutboundError::Unavailable(format!(
-                "这条连接叫 {}，收到 {}",
+                "this connection is {}, but received {}",
                 self.connection, room.connection
             )));
         }
@@ -1355,7 +1369,7 @@ impl Outbound for DylibOutbound {
                 ..
             } => Err(send_error(error)),
             other => Err(OutboundError::Unavailable(format!(
-                "动态适配器回执不是发送结果：{other:?}"
+                "dynamic adapter reply is not a send result: {other:?}"
             ))),
         }
     }
@@ -1372,7 +1386,7 @@ impl Outbound for DylibOutbound {
     ) -> Result<CallOutcome, CallError> {
         if room.connection != self.connection {
             return Err(CallError::Forbidden(format!(
-                "这条连接叫 {}，收到 {} 的调用",
+                "this connection is {}, but received a call for {}",
                 self.connection, room.connection
             )));
         }
@@ -1407,7 +1421,7 @@ impl Outbound for DylibOutbound {
                 ..
             } => Err(call_error(error)),
             other => Err(CallError::Unavailable(format!(
-                "动态适配器回执不是调用结果：{other:?}"
+                "dynamic adapter reply is not a call result: {other:?}"
             ))),
         }
     }
@@ -1418,26 +1432,28 @@ fn invoke(
     handle: &Arc<Mutex<AdapterHandle>>,
     message: &CoreMessage,
 ) -> Result<AdapterMessage, String> {
-    let request =
-        CString::new(encode_line(message).map_err(|error| format!("请求序列化失败：{error}"))?)
-            .map_err(|_| "请求里含有 NUL".to_owned())?;
+    let request = CString::new(
+        encode_line(message).map_err(|error| format!("failed to serialize request: {error}"))?,
+    )
+    .map_err(|_| "request contains NUL".to_owned())?;
 
     let guard = handle
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !guard.alive {
-        return Err("适配器已经销毁".into());
+        return Err("adapter has already been destroyed".into());
     }
-    let invoke_fn = table.invoke.ok_or("没有 invoke 函数")?;
+    let invoke_fn = table.invoke.ok_or("missing invoke function")?;
     let pointer = unsafe { invoke_fn(guard.ptr, request.as_ptr()) };
     // 锁在调用期间不放：插件的 handle 不是线程安全的，destroy 必须排队。
     drop(guard);
 
     if pointer.is_null() {
-        return Err("适配器没有返回结果".into());
+        return Err("adapter returned no result".into());
     }
     let json = take_owned_string(pointer, table)?;
-    decode_line::<AdapterMessage>(&json).map_err(|error| format!("回执不是合法 JSON：{error}"))
+    decode_line::<AdapterMessage>(&json)
+        .map_err(|error| format!("reply is not valid JSON: {error}"))
 }
 
 fn invoke_with_timeout(
@@ -1457,16 +1473,18 @@ fn invoke_with_timeout(
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "动态适配器调用超时（{} ms）；插件可能卡住了，需要重启桥",
+            "dynamic adapter call timed out ({} ms); the plugin may be stuck and the bridge needs a restart",
             timeout.as_millis()
         )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err("动态适配器调用线程没了".into()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("dynamic adapter call thread is gone".into())
+        }
     }
 }
 
 fn take_owned_string(pointer: *mut c_char, table: &AdapterV1) -> Result<String, String> {
     if pointer.is_null() {
-        return Err("适配器返回了空字符串".into());
+        return Err("adapter returned an empty string".into());
     }
     let text = unsafe { CStr::from_ptr(pointer).to_string_lossy().into_owned() };
     if let Some(free) = table.free_string {
@@ -1490,7 +1508,9 @@ fn destroy_handle(table: &AdapterV1, handle: &Arc<Mutex<AdapterHandle>>) {
             }
             Err(std::sync::TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
-                    eprintln!("动态适配器有调用卡住，跳过 destroy（等重启桥）");
+                    eprintln!(
+                        "dynamic adapter has a stuck call; skipping destroy (wait for bridge restart)"
+                    );
                     return;
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -1526,7 +1546,7 @@ fn monitor(
     // 先让插件自己收尾（Shutdown 可能返回空，忽略），再销毁 handle。
     let _ = invoke(&table, &handle, &CoreMessage::Shutdown);
     destroy_handle(&table, &handle);
-    eprintln!("适配器 {connection}（dynamic）：已收尾");
+    eprintln!("adapter {connection} (dynamic): shut down");
 }
 
 unsafe extern "C" fn submit_event(ctx: *mut c_void, message_json: *const c_char) {
@@ -1542,17 +1562,17 @@ unsafe extern "C" fn submit_event(ctx: *mut c_void, message_json: *const c_char)
             Ok(AdapterMessage::Event { record }) => {
                 if !context.events.submit(record.into()) {
                     eprintln!(
-                        "适配器 {}（dynamic）：入站队列已关闭，丢掉一条记录",
+                        "adapter {} (dynamic): inbound queue is closed; dropping a record",
                         context.connection
                     );
                 }
             }
             Ok(other) => eprintln!(
-                "适配器 {}（dynamic）：submit_event 只接受 event，收到 {:?}",
+                "adapter {} (dynamic): submit_event only accepts event; got {:?}",
                 context.connection, other
             ),
             Err(error) => eprintln!(
-                "适配器 {}（dynamic）：submit_event 收到读不懂的 JSON：{error}",
+                "adapter {} (dynamic): submit_event received unparseable JSON: {error}",
                 context.connection
             ),
         }
@@ -1588,6 +1608,6 @@ unsafe extern "C" fn log(ctx: *mut c_void, level: *const c_char, message: *const
                 .to_string_lossy()
                 .into_owned()
         };
-        eprintln!("适配器 {connection}（dynamic {level}）：{message}");
+        eprintln!("adapter {connection} (dynamic {level}): {message}");
     }));
 }

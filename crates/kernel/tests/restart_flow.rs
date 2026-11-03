@@ -106,7 +106,7 @@ fn message(text: &str) -> RecordDraft {
         Sender {
             id: "323622442".into(),
             name: "萨卡班甲鱼".into(),
-                role: None,
+            role: None,
         },
         AT,
         vec![Element::text(text)],

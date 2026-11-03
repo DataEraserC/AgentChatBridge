@@ -81,7 +81,7 @@ pub enum BridgeError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Plugin(#[from] PluginError),
-    #[error("这张票无效或本轮已结束：{0}")]
+    #[error("invalid ticket or this turn has ended: {0}")]
     UnknownTicket(String),
 }
 
@@ -608,7 +608,7 @@ impl<S: Store> Bridge<S> {
                 Ok(provider) => provider,
                 Err(error) => {
                     eprintln!(
-                        "路由 provider {} 解析失败：{error}（这条消息按 pass 处理）",
+                        "failed to resolve route provider {}: {error} (treating this message as pass)",
                         policy.provider
                     );
                     continue;
@@ -643,10 +643,10 @@ impl<S: Store> Bridge<S> {
         let mut suppressed = draft.suppressed;
         if let Some(decision) = handled {
             match decision {
-                RouteDecision::Pass => unreachable!("pass 不会放进 handled"),
+                RouteDecision::Pass => unreachable!("pass must not be placed in handled"),
                 RouteDecision::Drop { reason } => {
                     if let Some(reason) = reason {
-                        eprintln!("路由丢弃 {room} 的一条记录：{reason}");
+                        eprintln!("route dropped a record in {room}: {reason}");
                     }
                     return Ok(Ingest::Dropped { room });
                 }
@@ -813,7 +813,9 @@ impl<S: Store> Bridge<S> {
                     .first()
                     .map(|session| session.id.clone());
                 let Some(session) = session else {
-                    eprintln!("路由 send 的目标 {target} 没有订阅者，跳过这条动作");
+                    eprintln!(
+                        "route send target {target} has no subscribers; skipping this action"
+                    );
                     return Ok(());
                 };
                 let config = Arc::new(self.config.clone());
@@ -821,13 +823,13 @@ impl<S: Store> Bridge<S> {
                     Ok(prepared) => self
                         .pending_route_actions
                         .push(PreparedRouteAction::Send(prepared)),
-                    Err(error) => eprintln!("路由 send 组装失败：{error:?}"),
+                    Err(error) => eprintln!("failed to assemble route send: {error:?}"),
                 }
                 Ok(())
             }
             RouteAction::Task { handler, params } => {
                 let Some(session) = sessions.first().cloned() else {
-                    eprintln!("路由 task 没有可用会话，跳过：{handler}");
+                    eprintln!("route task has no available session; skipping: {handler}");
                     return Ok(());
                 };
                 self.pending_route_actions
@@ -887,7 +889,7 @@ impl<S: Store> Bridge<S> {
             }
         }
         eprintln!(
-            "路由 interrupt（{scope:?}）在 {room}：打断 {} 个正在跑的轮次",
+            "route interrupt ({scope:?}) in {room}: interrupted {} running turn(s)",
             interrupted.len()
         );
         self.pending_interrupts.extend(interrupted);
@@ -947,7 +949,7 @@ impl<S: Store> Bridge<S> {
         let Some(index) = index else {
             return Ok(None);
         };
-        let pending = self.pending.remove(index).expect("刚刚找到的");
+        let pending = self.pending.remove(index).expect("just found");
         self.open_turn(pending).map(Some)
     }
 
@@ -965,7 +967,7 @@ impl<S: Store> Bridge<S> {
         let Some(index) = index else {
             return Ok(None);
         };
-        let pending = self.pending.remove(index).expect("刚刚找到的");
+        let pending = self.pending.remove(index).expect("just found");
         self.open_turn(pending).map(Some)
     }
 
@@ -990,7 +992,7 @@ impl<S: Store> Bridge<S> {
         if let Some(error) = error {
             if turn.stop_requested {
                 eprintln!(
-                    "会话 {} 在 {} 的轮次被 /stop 叫停：{error}（不发失败通知）",
+                    "turn for session {} in {} was stopped by /stop: {error} (no error notice sent)",
                     turn.session, turn.room
                 );
             } else {
@@ -1032,7 +1034,7 @@ impl<S: Store> Bridge<S> {
         for prepared in self.take_pending_notices() {
             let sent = prepared.execute();
             if let Err(error) = self.finish_send(prepared, sent) {
-                eprintln!("失败通知没发成：{error:?}");
+                eprintln!("failed to send turn error notice: {error:?}");
             }
         }
     }
@@ -1055,7 +1057,7 @@ impl<S: Store> Bridge<S> {
             Ok(provider) => provider,
             Err(resolve_error) => {
                 eprintln!(
-                    "失败通知策略 {} 解析失败，回退内置：{resolve_error}",
+                    "failed to resolve turn error policy {}; falling back to built-in: {resolve_error}",
                     policy.provider
                 );
                 Arc::new(DefaultTurnErrorProvider)
@@ -1079,7 +1081,7 @@ impl<S: Store> Bridge<S> {
                 // `log` 由 endpoint 的 Log 帧负责（见 turn_end 处理），这里无需重复。
                 TurnErrorAction::Log => {}
                 TurnErrorAction::Send { room: target } => {
-                    let text = format!("[一轮失败] 会话 {session}（{room}）：{error}");
+                    let text = format!("[turn failed] session {session} ({room}): {error}");
                     // 这里只组装，不发送：endpoint 会在放下全局锁之后真正等平台。
                     // 失败通知本身发不出去也不该影响主流程，但要把原因记进日志，
                     // 别静默吞掉——否则「为什么没人收到失败提示」会变成查不出的黑洞。
@@ -1091,7 +1093,7 @@ impl<S: Store> Bridge<S> {
                         vec![Element::text(text)],
                     ) {
                         Ok(prepared) => self.pending_notices.push(prepared),
-                        Err(err) => eprintln!("失败通知组装失败：{err:?}"),
+                        Err(err) => eprintln!("failed to assemble turn error notice: {err:?}"),
                     }
                 }
             }
@@ -1114,7 +1116,7 @@ impl<S: Store> Bridge<S> {
         if !is_known(tool) {
             return Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
-                format!("没有这个工具：{tool}"),
+                format!("unknown tool: {tool}"),
             ));
         }
 
@@ -1169,8 +1171,8 @@ impl<S: Store> Bridge<S> {
             // `ToolCallStart::Wait`。这里只给直接调用 tool_call 的测试/开发 harness 一个明确错误。
             "wait_message" => Err(ToolError::new(
                 ErrorCode::BadRequest,
-                "[wait_message] 这个工具必须通过正式接入点调用（它需要锁外等待）；\
-                 当前调用路径会把整座桥卡住。",
+                "[wait_message] this tool must be called through the real endpoint (it needs to wait \
+                 outside the lock); the current call path would block the whole bridge.",
             )),
             "list_rooms" => self.list_rooms(&turn_config, sessions),
             "get_notes" => {
@@ -1259,7 +1261,7 @@ impl<S: Store> Bridge<S> {
             }
             other => Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
-                format!("没有这个工具：{other}"),
+                format!("unknown tool: {other}"),
             )),
         }?;
 
@@ -1329,8 +1331,8 @@ impl<S: Store> Bridge<S> {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
                         format!(
-                            "[bad_params] wait_message 只能等当前轮次的房间 {}；\
-                             要查别的房间用 get_history 或 fetch_records。",
+                            "[bad_params] wait_message can only wait on the current turn's room {}; \
+                             use get_history or fetch_records to inspect other rooms.",
                             ctx.room
                         ),
                     ));
@@ -1396,12 +1398,12 @@ impl<S: Store> Bridge<S> {
                 .iter()
                 .find(|method| method.group() == group_of_name(&args.method))
             {
-                Some(near) => format!("你是不是想调 {}？", near.name),
-                None => format!("这个连接支持：{}", method_names(&methods)),
+                Some(near) => format!("did you mean {}?", near.name),
+                None => format!("this connection supports: {}", method_names(&methods)),
             };
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!("[unknown_method] 没有这个方法：{}；{hint}", args.method),
+                format!("[unknown_method] unknown method: {}; {hint}", args.method),
             ));
         };
 
@@ -1425,7 +1427,7 @@ impl<S: Store> Bridge<S> {
         if spec.record != RecordMode::None && config.account_of_room(&room).is_empty() {
             return Err(ToolError::new(
                 ErrorCode::Internal,
-                format!("{room} 所属的连接没有配登录账号，不知道自己是谁"),
+                format!("connection for {room} has no configured account; cannot tell who this is"),
             ));
         }
 
@@ -1435,9 +1437,10 @@ impl<S: Store> Bridge<S> {
             return Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
                 format!(
-                    "[forbidden] {} 是破坏性操作，连接 {} 默认不开放。\
-                     要开就在 config.toml 的 [[connections]] 那段加 allow_destructive = true\
-                     （或只列要开的方法，如 allow_destructive = [\"{}\"]）",
+                    "[forbidden] {} is a destructive operation and connection {} does not allow it \
+                     by default. Enable it in the [[connections]] section of config.toml with \
+                     allow_destructive = true (or list only the methods to enable, e.g. \
+                     allow_destructive = [\"{}\"])",
                     spec.name, room.connection, spec.name
                 ),
             ));
@@ -1451,7 +1454,7 @@ impl<S: Store> Bridge<S> {
 
         let outbound = self.outbound.handle_for(&room.connection).ok_or_else(|| {
             call_error(CallError::Unavailable(format!(
-                "没有名为 {} 的连接，调不到 {}",
+                "no connection named {}; cannot call {}",
                 room.connection, room
             )))
         })?;
@@ -1585,7 +1588,10 @@ impl<S: Store> Bridge<S> {
     /// 「轮次结束了」和「桥坏了」，于是反复重试、反复被重投。
     fn turn_ctx(&mut self, ticket: &Ticket, tool: &str) -> Result<TurnCtx, ToolError> {
         if let Some(session) = self.by_ticket.get(ticket) {
-            let turn = self.active.get(session).expect("有票就一定有活跃轮次");
+            let turn = self
+                .active
+                .get(session)
+                .expect("a ticket always has an active turn");
             return Ok(TurnCtx {
                 session: turn.session.clone(),
                 room: turn.room.clone(),
@@ -1607,9 +1613,10 @@ impl<S: Store> Bridge<S> {
                     return Err(ToolError::new(
                         ErrorCode::Unauthorized,
                         format!(
-                            "[ack_expired] 这一轮结束超过 {} 秒了，补确认的口子关了。\
-                             那几条会在下一轮作为未读重投给你（编号一样），到时候再确认就行；\
-                             现在别重试——重试也不会成功。",
+                            "[ack_expired] more than {} seconds have passed since this turn ended; \
+                             the late-acknowledgement window is closed. Those records will be \
+                             delivered again as unread in the next turn (same ids); acknowledge them \
+                             then. Do not retry now - retrying will not succeed.",
                             ACK_GRACE.as_secs()
                         ),
                     ));
@@ -1741,7 +1748,7 @@ impl<S: Store> Bridge<S> {
                     ToolError::new(
                         ErrorCode::Internal,
                         format!(
-                            "[internal] 会话 {id} 的访问策略 {} 不可用：{error}",
+                            "[internal] access policy {} for session {id} is unavailable: {error}",
                             session.access.provider
                         ),
                     )
@@ -1762,16 +1769,16 @@ impl<S: Store> Bridge<S> {
             if provider.check(&session.access, &request) == AccessDecision::Allow {
                 return Ok(());
             }
-            denied.push(format!("{}（{}）", id, session.access.provider));
+            denied.push(format!("{} ({})", id, session.access.provider));
         }
 
         let detail = match action {
             AccessAction::Connection => format!(
-                "会话 {} 在连接 {connection} 上没有可访问的房间",
+                "session {} has no accessible room on connection {connection}",
                 sessions.join(", ")
             ),
             AccessAction::Read | AccessAction::Send => format!(
-                "会话 {} 没有访问 {} 的权限",
+                "session {} is not allowed to access {}",
                 sessions.join(", "),
                 room.map(ToString::to_string).unwrap_or_default()
             ),
@@ -1779,7 +1786,7 @@ impl<S: Store> Bridge<S> {
         let policy = if denied.is_empty() {
             String::new()
         } else {
-            format!("（访问策略 {}）", denied.join("；"))
+            format!("(access policy {})", denied.join("; "))
         };
         Err(ToolError::new(
             ErrorCode::RoomNotSubscribed,
@@ -1894,7 +1901,7 @@ impl<S: Store> Bridge<S> {
                     Ok(provider) => provider,
                     Err(error) => {
                         eprintln!(
-                            "时钟策略 {} 解析失败，跳过 {session}（{room}）：{error}",
+                            "failed to resolve clock policy {}; skipping {session} ({room}): {error}",
                             policy.provider
                         );
                         continue;
@@ -1903,7 +1910,7 @@ impl<S: Store> Bridge<S> {
                 let last_record_at = match self.latest_record_at(&room) {
                     Ok(at) => at,
                     Err(error) => {
-                        eprintln!("读 {room} 最后一条记录失败：{error}");
+                        eprintln!("failed to read the last record in {room}: {error}");
                         None
                     }
                 };
@@ -2011,7 +2018,7 @@ impl<S: Store> Bridge<S> {
             Ok(composer) => composer,
             Err(error) => {
                 eprintln!(
-                    "投递策略 {} 解析失败，回退内置 composer：{error}",
+                    "failed to resolve delivery policy {}; falling back to built-in composer: {error}",
                     delivery_policy.provider
                 );
                 Arc::new(DefaultDeliveryComposer)
@@ -2063,7 +2070,7 @@ impl<S: Store> Bridge<S> {
             "{}-{}-{}",
             pending.session, self.ticket_prefix, self.ticket_seq
         ))
-        .expect("票面非空");
+        .expect("ticket must not be empty");
 
         self.by_ticket
             .insert(ticket.clone(), pending.session.clone());
@@ -2210,10 +2217,11 @@ impl<S: Store> Bridge<S> {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
                 if trimmed {
-                    "[bad_params] 你的 text 整个都是调用标记（`</text>` 之类），切完没有正文可发。\
-                     把要说的话单独写一遍——参数要放在各自的字段里，别写进正文。"
+                    "[bad_params] your entire text consists of call markup (`</text>` etc.); nothing \
+                     remains to send after stripping it. Write the message itself separately - put \
+                     arguments in their own fields, not in the body."
                 } else {
-                    "没有内容可发"
+                    "nothing to send"
                 },
             ));
         }
@@ -2228,13 +2236,19 @@ impl<S: Store> Bridge<S> {
             .plugins
             .resolve_send_hooks(&outbound_policy.before)
             .map_err(|error| {
-                ToolError::new(ErrorCode::Internal, format!("发送前钩子解析失败：{error}"))
+                ToolError::new(
+                    ErrorCode::Internal,
+                    format!("failed to resolve before-send hook: {error}"),
+                )
             })?;
         let after_hooks = self
             .plugins
             .resolve_send_hooks(&outbound_policy.after)
             .map_err(|error| {
-                ToolError::new(ErrorCode::Internal, format!("发送后钩子解析失败：{error}"))
+                ToolError::new(
+                    ErrorCode::Internal,
+                    format!("failed to resolve after-send hook: {error}"),
+                )
             })?;
         let hook_context = SendContext {
             session,
@@ -2246,7 +2260,10 @@ impl<S: Store> Bridge<S> {
             let before = elements.clone();
             hook.before_send(&hook_context, &mut elements)
                 .map_err(|error| {
-                    ToolError::new(ErrorCode::Internal, format!("发送前钩子失败：{error}"))
+                    ToolError::new(
+                        ErrorCode::Internal,
+                        format!("before-send hook failed: {error}"),
+                    )
                 })?;
             // 只报告真的改了正文的钩子；没改的也在回执里列出来只会变成噪音。
             if elements != before {
@@ -2256,7 +2273,7 @@ impl<S: Store> Bridge<S> {
         if elements.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                "发送前钩子把正文清空了；检查会话的 [sessions.outbound].before 配置",
+                "before-send hook cleared the body; check the session's [sessions.outbound].before config",
             ));
         }
 
@@ -2268,14 +2285,17 @@ impl<S: Store> Bridge<S> {
         if account.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::Internal,
-                format!("{room} 所属的连接没有配登录账号，不知道自己是谁"),
+                format!("connection for {room} has no configured account; cannot tell who this is"),
             ));
         }
 
         let outbound = self.outbound.handle_for(&room.connection).ok_or_else(|| {
             ToolError::new(
                 ErrorCode::Internal,
-                format!("没有名为 {} 的连接，发不到 {room}", room.connection),
+                format!(
+                    "no connection named {}; cannot send to {room}",
+                    room.connection
+                ),
             )
         })?;
 
@@ -2488,9 +2508,10 @@ impl<S: Store> Bridge<S> {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
                         format!(
-                            "[bad_params] 文件 {} 本机存在，但桥收不下来：{error}。\
-                             平台拿不到这个文件。先看 [file_relay].dir 能不能写；\
-                             小文件（base64 后 1 MiB 内）也可以把 url 写成 base64://… 内联。",
+                            "[bad_params] file {} exists locally, but the bridge cannot accept it: \
+                             {error}. The platform cannot get this file. Check that [file_relay].dir \
+                             is writable; small files (up to 1 MiB after base64) can also be inlined \
+                             by writing the url as base64://...",
                             local.display()
                         ),
                     ));
@@ -2524,8 +2545,9 @@ impl<S: Store> Bridge<S> {
                             ToolError::new(
                                 ErrorCode::BadRequest,
                                 format!(
-                                    "[bad_params] params 里的文件 {} 本机存在，\
-                                 但桥收不下来：{error}。小文件可以改用 base64:// 内联。",
+                                    "[bad_params] file {} in params exists locally, but the bridge \
+                                     cannot accept it: {error}. Small files can be inlined with \
+                                     base64:// instead.",
                                     local.display()
                                 ),
                             )
@@ -2570,7 +2592,7 @@ impl<S: Store> Bridge<S> {
         if ids.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                "[bad_params] ids 不能为空：把投递里记录前面的 #编号写进来",
+                "[bad_params] ids must not be empty; pass the #id shown before each delivered record",
             ));
         }
 
@@ -2588,12 +2610,12 @@ impl<S: Store> Bridge<S> {
                 return Err(ToolError::new(
                     ErrorCode::BadRequest,
                     format!(
-                        "[not_delivered] #{id} 这一轮既没投给你，也没读过，确认不了。\
-                         这一轮投给你的：{delivered}；读过的：{read}。\
-                         已经确认过的编号不用再确认（跳过去就行）。",
+                        "[not_delivered] #{id} was neither delivered to you nor read this turn, so it \
+                         cannot be acknowledged. Delivered this turn: {delivered}; read: {read}. \
+                         Ids already acknowledged need no further acknowledgement (just skip them).",
                         delivered = delivery_range(delivered),
                         read = if read.is_empty() {
-                            "（没有）".to_owned()
+                            "(none)".to_owned()
                         } else {
                             delivery_range(read)
                         }
@@ -2610,7 +2632,7 @@ impl<S: Store> Bridge<S> {
                 "watermark": watermark,
                 "acked": [],
                 "already": already,
-                "note": "这些编号之前已经确认过了，水位没动。不用再确认，接着干活就行。",
+                "note": "these ids were already acknowledged; the watermark did not move. No need to acknowledge again; continue.",
             }));
         }
 
@@ -2712,7 +2734,7 @@ impl<S: Store> Bridge<S> {
         if args.ids.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                "[bad_params] ids 不能为空：把投递里记录前面的 #编号写进来",
+                "[bad_params] ids must not be empty; pass the #id shown before each delivered record",
             ));
         }
         let columns = column_set(args.columns.as_deref())?;
@@ -2833,7 +2855,7 @@ impl<S: Store> Bridge<S> {
             Some(other) => {
                 return Err(ToolError::new(
                     ErrorCode::BadRequest,
-                    format!("status 只能是 open 或 closed，收到 {other}"),
+                    format!("status must be open or closed; got {other}"),
                 ));
             }
             None => None,
@@ -2841,7 +2863,7 @@ impl<S: Store> Bridge<S> {
         if status.is_some() && kind != NoteKind::Topic {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                "status 只对 topic 有用",
+                "status only applies to topics",
             ));
         }
 
@@ -2957,7 +2979,7 @@ impl<S: Store> Bridge<S> {
                 let session = config.session(session_id).ok_or_else(|| {
                     ToolError::new(
                         ErrorCode::Internal,
-                        format!("[internal] 找不到会话 {session_id}"),
+                        format!("[internal] session {session_id} not found"),
                     )
                 })?;
                 let connection = config.connection(&room.connection);
@@ -3054,7 +3076,7 @@ impl<S: Store> Bridge<S> {
             }
             other => Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!("[bad_params] scope 只能是 session 或 global，收到 {other}"),
+                format!("[bad_params] scope must be session or global; got {other}"),
             )),
         }
     }
@@ -3087,8 +3109,8 @@ impl<S: Store> Bridge<S> {
             {
                 return Err(ToolError::new(
                     ErrorCode::BadRequest,
-                    "[bad_params] all=true 只给连接摘要，不能再给 room / connection / group / tag / query；\
-                     想展开某条连接，单独用 connection 查。",
+                    "[bad_params] all=true only returns a connection summary; do not also pass room / \
+                     connection / group / tag / query. To expand a connection, query it separately.",
                 ));
             }
             return self.connection_summaries(config, sessions, turn_room);
@@ -3112,7 +3134,7 @@ impl<S: Store> Bridge<S> {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
                         format!(
-                            "[bad_params] 没有这条连接：{connection}；先调 list_rooms 看有哪些。"
+                            "[bad_params] no such connection: {connection}; call list_rooms to list them."
                         ),
                     ));
                 }
@@ -3120,7 +3142,7 @@ impl<S: Store> Bridge<S> {
                     if room.connection != connection {
                         return Err(ToolError::new(
                             ErrorCode::BadRequest,
-                            format!("[bad_params] room {room} 不在连接 {connection} 上。"),
+                            format!("[bad_params] room {room} is not on connection {connection}."),
                         ));
                     }
                 }
@@ -3297,10 +3319,11 @@ impl<S: Store> Bridge<S> {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
                 if markup_trimmed {
-                    "[bad_params] 你的 text 整个都是调用标记（`</text>` 之类），切完没有正文。\
-                     把「被什么卡住了」写成正文再说一遍，参数放各自字段。"
+                    "[bad_params] your entire text consists of call markup (`</text>` etc.); nothing \
+                     remains after stripping it. Describe what blocked you in the body, and put \
+                     arguments in their own fields."
                 } else {
-                    "[bad_params] text 不能为空：把「你被什么卡住了」写进来，一两句话就行。"
+                    "[bad_params] text must not be empty; describe what blocked you in a sentence or two."
                 },
             ));
         }
@@ -3313,7 +3336,7 @@ impl<S: Store> Bridge<S> {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
                         format!(
-                            "[bad_params] kind 只能是 {}，收到 {kind}；不填默认 friction。",
+                            "[bad_params] kind must be one of {}; got {kind} (defaults to friction).",
                             FEEDBACK_KINDS.join(" / ")
                         ),
                     ));
@@ -3335,7 +3358,7 @@ impl<S: Store> Bridge<S> {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
                         format!(
-                            "[bad_params] severity 只能是 {}，收到 {severity}。",
+                            "[bad_params] severity must be one of {}; got {severity}.",
                             FEEDBACK_SEVERITIES.join(" / ")
                         ),
                     ));
@@ -3508,7 +3531,7 @@ impl<S: Store> Bridge<S> {
         let Some(session_cfg) = config.session(session) else {
             return Err(ToolError::new(
                 ErrorCode::Internal,
-                format!("会话 {session} 不存在"),
+                format!("session {session} does not exist"),
             ));
         };
         self.memory
@@ -3700,9 +3723,11 @@ fn delivery_range(delivered: &BTreeSet<u64>) -> String {
 fn no_active_round() -> ToolError {
     ToolError::new(
         ErrorCode::Unauthorized,
-        "[no_active_round] 这张票对应的轮次已经结束了，**这一轮不会再有工具可用——请结束本轮，别重试**。\
-         没确认的消息还在，会在下一轮作为未读重新投给你（编号不变），到那时再确认即可。\
-         还能做的只有两件：60 秒内补确认（ack_messages）、随时写反馈（report_feedback）。",
+        "[no_active_round] the turn for this ticket has ended; **no tools are available for this \
+         turn - end the turn instead of retrying**. Unacknowledged messages are still there and will \
+         be delivered again as unread next turn (same ids); acknowledge them then. Only two things \
+         remain possible: late acknowledgement within 60 seconds (ack_messages) and reporting \
+         feedback at any time (report_feedback).",
     )
 }
 
@@ -3710,7 +3735,9 @@ fn resolve_room(text: &str) -> Result<RoomId, ToolError> {
     RoomId::parse(text).map_err(|error| {
         ToolError::new(
             ErrorCode::BadRequest,
-            format!("房间要写成 连接:段/段（如 qq:group/123），收到 {text}（{error}）"),
+            format!(
+                "room must be connection:segment/segment (e.g. qq:group/123); got {text} ({error})"
+            ),
         )
     })
 }
@@ -3736,8 +3763,8 @@ fn column_set(given: Option<&[String]>) -> Result<Vec<&'static str>, ToolError> 
                 return Err(ToolError::new(
                     ErrorCode::BadRequest,
                     format!(
-                        "没有这一列：{name}。能查的列有：{}",
-                        RECORD_COLUMNS.join("、")
+                        "unknown column: {name}. Available columns: {}",
+                        RECORD_COLUMNS.join(", ")
                     ),
                 ));
             }
@@ -3800,15 +3827,19 @@ fn record_columns(record: &Record, columns: &[&str]) -> Value {
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, ToolError> {
-    serde_json::from_value(args)
-        .map_err(|error| ToolError::new(ErrorCode::BadRequest, format!("参数不对：{error}")))
+    serde_json::from_value(args).map_err(|error| {
+        ToolError::new(
+            ErrorCode::BadRequest,
+            format!("invalid parameters: {error}"),
+        )
+    })
 }
 
 fn parse_note_kind(text: &str) -> Result<NoteKind, ToolError> {
     NoteKind::parse(text).ok_or_else(|| {
         ToolError::new(
             ErrorCode::BadRequest,
-            format!("笔记种类只能是 term / member / topic，收到 {text}"),
+            format!("note kind must be term / member / topic; got {text}"),
         )
     })
 }
@@ -3863,8 +3894,6 @@ fn command_text(elements: &[Element]) -> String {
         .filter_map(Element::as_text)
         .collect::<String>()
 }
-
-
 
 // ── 反馈（ADR-0021）────────────────────────────────────────────────────
 
@@ -3952,7 +3981,9 @@ fn feedback_fingerprint(title: &str) -> String {
 fn no_catalog(connection: &str) -> ToolError {
     ToolError::new(
         ErrorCode::ToolNotAllowed,
-        format!("[unsupported_platform] 连接 {connection} 没声明任何平台特有方法"),
+        format!(
+            "[unsupported_platform] connection {connection} declares no platform-specific methods"
+        ),
     )
 }
 
@@ -4041,18 +4072,18 @@ fn no_match(
         given.push(format!("query={query}"));
     }
 
-    let mut hint = format!("这个连接有这些归属：{}", groups_of(methods).join(" / "));
+    let mut hint = format!(
+        "this connection has these groups: {}",
+        groups_of(methods).join(" / ")
+    );
     let known_tags = tag_names(methods);
     if !known_tags.is_empty() {
-        hint.push_str(&format!("；有这些标签：{}", known_tags.join(" / ")));
+        hint.push_str(&format!("; tags: {}", known_tags.join(" / ")));
     }
 
     ToolError::new(
         ErrorCode::BadRequest,
-        format!(
-            "[no_match] 没有同时满足 {} 的方法；{hint}",
-            given.join(" + ")
-        ),
+        format!("[no_match] no methods match {}; {hint}", given.join(" + ")),
     )
 }
 
@@ -4091,7 +4122,7 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
         _ => {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!("[bad_params] {} 的 params 要给一个对象（map）", spec.name),
+                format!("[bad_params] {} params must be an object (map)", spec.name),
             ));
         }
     };
@@ -4103,7 +4134,7 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
                         format!(
-                            "[bad_params] {} 少了必填参数 {}（{}）",
+                            "[bad_params] {} is missing required parameter {} ({})",
                             spec.name, param.name, param.desc
                         ),
                     ));
@@ -4114,7 +4145,7 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
                         format!(
-                            "[bad_params] {} 的参数 {} 要 {}，给的是 {value}",
+                            "[bad_params] {} parameter {} must be {}; got {value}",
                             spec.name,
                             param.name,
                             param.ty.json_type()
@@ -4138,7 +4169,7 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
                         return Err(ToolError::new(
                             ErrorCode::BadRequest,
                             format!(
-                                "[bad_params] {} 的参数 {} 只能是 {choices}，给的是 {value}",
+                                "[bad_params] {} parameter {} must be one of {choices}; got {value}",
                                 spec.name, param.name
                             ),
                         ));
@@ -4155,10 +4186,10 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
             .any(|param| param.name.as_ref() == key.as_str())
         {
             let known = if spec.params.is_empty() {
-                "这个方法不要参数".to_owned()
+                "this method takes no parameters".to_owned()
             } else {
                 format!(
-                    "能给的参数：{}",
+                    "available parameters: {}",
                     spec.params
                         .iter()
                         .map(|param| param.name.as_ref())
@@ -4168,7 +4199,10 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
             };
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!("[bad_params] {} 不认识参数 {key}；{known}", spec.name),
+                format!(
+                    "[bad_params] {} does not recognize parameter {key}; {known}",
+                    spec.name
+                ),
             ));
         }
     }
@@ -4240,9 +4274,9 @@ fn bad_target(
     ToolError::new(
         ErrorCode::BadRequest,
         format!(
-            "[bad_params] {} 的 {} 是 {given_id}，但当前房间是 {room}。\
-             **不要在 params 里换目标**；要操作它，把 platform_call 的 room 改成 \"{suggestion}\"\
-             （并确认本会话订阅了它）。",
+            "[bad_params] {} has {} = {given_id}, but the current room is {room}. \
+             **Do not retarget in params**; to operate on it, change platform_call's room to \"{suggestion}\" \
+             (and make sure this session is subscribed to it).",
             spec.name, target.param
         ),
     )
@@ -4277,10 +4311,14 @@ fn with_file_hint(detail: String) -> String {
         return detail;
     }
     format!(
-        "{detail}\n[文件问题?] 平台说的「没有」很可能不是路径写错：agent 和平台常常不在\
-         同一个文件系统命名空间（平台在容器里）。三条出路：\
-         ① 配好 [file_relay] 后重试，本机存在的文件桥会自动收下换成 URL；\
-         ② 小文件（原始内容 750 KB 内，单帧上限 1 MiB）把元素的 url 写成 base64://…；\
-         ③ 放到两边都挂载了的共享目录，传平台那边的路径。别先去查路径拼写和权限。"
+        "{detail}\n[file issue?] The platform's \"not found\" is probably not a wrong path: the agent \
+         and the platform often live in different filesystem namespaces (the platform runs in a \
+         container). Three options: \
+         (1) configure [file_relay] and retry - files that exist locally are picked up and replaced \
+         with a URL; \
+         (2) for small files (raw content up to 750 KB, single-frame limit 1 MiB), write the element \
+         url as base64://...; \
+         (3) place the file in a shared directory mounted on both sides and pass the platform-side \
+         path. Do not start by checking path spelling and permissions."
     )
 }

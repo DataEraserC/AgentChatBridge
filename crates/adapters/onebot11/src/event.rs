@@ -24,9 +24,9 @@ pub enum Parsed {
 /// 事件解析失败：格式不对或缺关键字段。缺字段说明对面不按 OneBot 11 说话，不能猜。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EventError {
-    #[error("事件缺少 {0}")]
+    #[error("event is missing {0}")]
     Missing(&'static str),
-    #[error("房间标识不合法：{0}")]
+    #[error("invalid room id: {0}")]
     BadRoom(String),
 }
 
@@ -53,8 +53,8 @@ pub fn parse(connection: &str, event: &Value, admin_qqs: &[String]) -> Result<Pa
         Some("meta_event") => Ok(Parsed::Ignored("心跳/生命周期".into())),
         Some("request") => request(connection, event, at, admin_qqs),
         other => Ok(Parsed::Ignored(format!(
-            "不认识的事件：{}",
-            other.unwrap_or("没有 post_type")
+            "unrecognized event: {}",
+            other.unwrap_or("missing post_type")
         ))),
     }
 }
@@ -323,7 +323,9 @@ fn describe_notice(notice_type: &str, event: &Value) -> Option<String> {
                 .get("duration")
                 .and_then(Value::as_i64)
                 .unwrap_or_default();
-            Some(format!("[{notice_type}] {target} 被 {operator} 禁言 {duration} 秒"))
+            Some(format!(
+                "[{notice_type}] {target} 被 {operator} 禁言 {duration} 秒"
+            ))
         }
         "group_recall" | "friend_recall" => {
             Some(format!("[{notice_type}] {operator} 撤回了一条消息"))
@@ -467,7 +469,10 @@ mod tests {
         assert!(draft.at_self);
         assert_eq!(draft.elements, vec![Element::text("[拍了拍我]")]);
         assert!(
-            matches!(&draft.kind, acb_proto::RecordKind::Event { body: false, .. }),
+            matches!(
+                &draft.kind,
+                acb_proto::RecordKind::Event { body: false, .. }
+            ),
             "拍一拍只是触发，没有正文；描述仍在 elements 里"
         );
     }
@@ -648,12 +653,16 @@ mod tests {
     fn group_message_without_group_id_is_an_error() {
         let mut event = group_message();
         event.as_object_mut().expect("是对象").remove("group_id");
-        assert_eq!(parse("qq", &event, &[]), Err(EventError::Missing("group_id")));
+        assert_eq!(
+            parse("qq", &event, &[]),
+            Err(EventError::Missing("group_id"))
+        );
     }
 
     #[test]
     fn connection_name_comes_from_config_not_hardcoded() {
-        let Parsed::Record(draft) = parse("qq-test", &group_message(), &[]).expect("能解析") else {
+        let Parsed::Record(draft) = parse("qq-test", &group_message(), &[]).expect("能解析")
+        else {
             panic!("应当成一条记录");
         };
         assert_eq!(draft.room.connection, "qq-test");
@@ -662,7 +671,8 @@ mod tests {
     #[test]
     fn admin_qqs_hit_marks_system_admin() {
         let admins = vec!["10001".to_owned()];
-        let Parsed::Record(draft) = parse("qq", &group_message(), &admins).expect("能解析") else {
+        let Parsed::Record(draft) = parse("qq", &group_message(), &admins).expect("能解析")
+        else {
             panic!("应当成一条记录");
         };
         assert_eq!(draft.sender.role, Some(SenderRole::SystemAdmin));

@@ -38,7 +38,7 @@ function parseModelRef(text) {
   if (!value) return null
   const slash = value.indexOf("/")
   if (slash <= 0 || slash === value.length - 1) {
-    throw new Error(`会话模型要写成 provider/model（收到 ${value}）`)
+    throw new Error(`session model must be provider/model (got ${value})`)
   }
   return { providerID: value.slice(0, slash), modelID: value.slice(slash + 1) }
 }
@@ -51,12 +51,12 @@ export default {
     const log = makeLogger(ctx, config.logFile)
     log(
       "info",
-      `插件加载 endpoint=${config.endpoint} harness=${config.harness} ` +
-        `会话=${config.session || "(按 acb 会话映射)"} 日志=${config.logFile}`,
+      `plugin load endpoint=${config.endpoint} harness=${config.harness} ` +
+        `session=${config.session || "(from acb session map)"} log=${config.logFile}`,
     )
 
     if (!config.token) {
-      log("warn", "没有令牌（ctx.options.token 或 ACB_TOKEN），acb 不启用")
+      log("warn", "no token (ctx.options.token or ACB_TOKEN); acb disabled")
       return
     }
 
@@ -87,16 +87,16 @@ export default {
     void link
       .connect()
       .then(async () => {
-        log("info", `已接入桥，绑定会话组 ${link.sessions.join("、")}`)
+        log("info", `connected to bridge; bound sessions ${link.sessions.join(", ")}`)
         // 把 storage 里还活着的映射主动报给桥：控制台的「harness 侧映射」
         // 靠 report_map 落盘，不报的话页面上永远是空、也没法断开。
         await driver.reportStoredMaps(link)
       })
-      .catch((error) => log("warn", `暂时连不上桥：${error.message}，会一直重试`))
+      .catch((error) => log("warn", `cannot reach the bridge yet: ${error.message}; retrying`))
 
     return async () => {
       link.close()
-      log("warn", "插件被卸载：已断开桥，不再重连。若进程还活着但不再收消息，多半是这里")
+      log("warn", "plugin unloaded: bridge disconnected and will not reconnect. If the process is still alive but receives no messages, this is likely why")
       try {
         await registration?.dispose?.()
       } catch {
@@ -163,7 +163,7 @@ class TurnDriver {
         this.sessions.set(session, stored)
         this.#reportMap(session, stored, link)
       } catch (error) {
-        this.log("warn", `回报会话 ${session} 的映射失败：${error?.message ?? error}`)
+        this.log("warn", `failed to report mapping for session ${session}: ${error?.message ?? error}`)
       }
     }
   }
@@ -181,9 +181,9 @@ class TurnDriver {
         command: "report_map",
         result: { session_id: id, meta: { title: `acb:${session}` } },
       })
-      this.log("info", `已向桥回报映射 ${session} → ${id}`)
+      this.log("info", `reported mapping ${session} -> ${id} to the bridge`)
     } catch (error) {
-      this.log("warn", `回报映射失败：${error?.message ?? error}`)
+      this.log("warn", `failed to report mapping: ${error?.message ?? error}`)
     }
   }
 
@@ -200,10 +200,10 @@ class TurnDriver {
       if (command === "interrupt") {
         const sessionID = this.pinned || this.sessions.get(session)
         if (!sessionID) {
-          throw new Error(`会话 ${session} 还没有 opencode 映射（没开过轮）`)
+          throw new Error(`session ${session} has no opencode mapping yet (no turn has run)`)
         }
         if (typeof this.ctx.session.interrupt !== "function") {
-          throw new Error("这个 opencode 版本没有 ctx.session.interrupt，无法打断")
+          throw new Error("this opencode version has no ctx.session.interrupt; cannot interrupt")
         }
         await this.ctx.session.interrupt({ sessionID })
         link.controlResult({
@@ -212,14 +212,14 @@ class TurnDriver {
           command,
           result: { ok: true, session_id: sessionID },
         })
-        this.log("info", `已打断会话 ${session}（opencode ${sessionID}）`)
+        this.log("info", `interrupted session ${session} (opencode ${sessionID})`)
         return
       }
-      if (command !== "reset") throw new Error(`不认识的指令 ${command}`)
+      if (command !== "reset") throw new Error(`unknown command ${command}`)
       this.#forget(session)
       let newId = ""
       if (this.pinned) {
-        this.log("warn", `会话 ${session} 钉死了 opencode 会话（${this.pinned}），reset 不换会话`)
+        this.log("warn", `session ${session} is pinned to an opencode session (${this.pinned}); reset will not switch sessions`)
       } else {
         // storage 刚清掉，#session 在这里必然走新建分支。
         newId = await this.#session(session)
@@ -230,10 +230,10 @@ class TurnDriver {
         command,
         result: { ok: true, ...(newId ? { session_id: newId } : {}) },
       })
-      this.log("info", `会话 ${session} 已重置${newId ? ` → 新会话 ${newId}` : ""}`)
+      this.log("info", `session ${session} reset${newId ? ` -> new session ${newId}` : ""}`)
     } catch (error) {
       const message = error?.message ?? String(error)
-      this.log("error", `重置会话 ${session} 失败：${message}`)
+      this.log("error", `failed to reset session ${session}: ${message}`)
       link.controlResult({ id, session, command, error: message })
     }
   }
@@ -260,17 +260,17 @@ class TurnDriver {
         const updated = this.personas.has(delivery.session) ? "[人格已更新]\n" : ""
         text = `${updated}${personaText}\n\n${text}`
         this.personas.set(delivery.session, signature)
-        this.log("info", `会话 ${delivery.session} 注入人格 ${delivery.persona?.id ?? ""}`)
+        this.log("info", `injected persona ${delivery.persona?.id ?? ""} into session ${delivery.session}`)
       }
       const info = delivery.session_info ?? {}
       const modelRef = parseModelRef(info.model)
       const model = modelRef
         ? `${modelRef.providerID}/${modelRef.modelID}`
-        : "(opencode 默认)"
+        : "(opencode default)"
       this.log(
         "info",
-        `开轮 ${delivery.ticket}：${roomText(delivery.room)}，${delivery.records.length} 条，` +
-          `opencode 会话 ${sessionID}，模型 ${model}`,
+        `turn start ${delivery.ticket}: ${roomText(delivery.room)}, ${delivery.records.length} record(s), ` +
+          `opencode session ${sessionID}, model ${model}`,
       )
       // prompt 把话排进会话；wait 等这一轮助手真正说完。
       // 会话配了 model 就随本轮带上，opencode 会自己校验 provider/model 是否已配置。
@@ -279,26 +279,26 @@ class TurnDriver {
         text,
         ...(modelRef ? { model: modelRef } : {}),
       })
-      this.log("info", `prompt 已发出 ${delivery.ticket}，等待模型`)
+      this.log("info", `prompt sent ${delivery.ticket}; waiting for model`)
       if (typeof this.ctx.session.wait === "function") {
         await this.ctx.session.wait({ sessionID })
       }
       this.log(
         "info",
-        `本轮完成 ${delivery.ticket}，用时 ${((Date.now() - started) / 1000).toFixed(1)} 秒，` +
-          `调用桥工具 ${link.turnCalls ?? 0} 次`,
+        `turn complete ${delivery.ticket}, elapsed ${((Date.now() - started) / 1000).toFixed(1)}s, ` +
+          `called bridge tools ${link.turnCalls ?? 0} time(s)`,
       )
       if (delivery.records.length > 0 && (link.turnCalls ?? 0) === 0) {
         this.log(
           "warn",
-          `本轮没有调用任何桥工具：模型可能没真正回复（${delivery.ticket}）`,
+          `turn called no bridge tools: the model may not have really replied (${delivery.ticket})`,
         )
       }
     } catch (error) {
       failure = error?.message ?? String(error)
       this.log(
         "error",
-        `这一轮失败了 ${delivery.ticket}：${failure}（用时 ${((Date.now() - started) / 1000).toFixed(1)} 秒）`,
+        `turn failed ${delivery.ticket}: ${failure} (elapsed ${((Date.now() - started) / 1000).toFixed(1)}s)`,
       )
       // 会话可能被删了：下次重建，别一直往一个死会话里灌。
       this.#forget(delivery.session)
@@ -306,7 +306,7 @@ class TurnDriver {
       try {
         link.endTurn(delivery.ticket, failure)
       } catch (error) {
-        this.log("warn", `回 turn_end 失败：${error.message}`)
+        this.log("warn", `failed to send turn_end: ${error.message}`)
       }
     }
   }
@@ -329,7 +329,7 @@ class TurnDriver {
     const stored = await this.#storageGet(`session:${session}`)
     if (stored && (await this.#alive(stored))) {
       this.sessions.set(session, stored)
-      this.log("info", `接上会话 ${stored}（acb:${session}）`)
+      this.log("info", `reused session ${stored} (acb:${session})`)
       return stored
     }
 
@@ -341,12 +341,12 @@ class TurnDriver {
       created?.data?.id
     if (!id) {
       throw new Error(
-        `建会话没拿到 id，opencode 的返回形状可能变了：${JSON.stringify(created).slice(0, 200)}`,
+        `session creation returned no id; the opencode response shape may have changed: ${JSON.stringify(created).slice(0, 200)}`,
       )
     }
     this.sessions.set(session, id)
     await this.#storageSet(`session:${session}`, id)
-    this.log("info", `新会话 ${id}（acb:${session}）`)
+    this.log("info", `new session ${id} (acb:${session})`)
     return id
   }
 
@@ -360,7 +360,12 @@ class TurnDriver {
 
   async #alive(sessionID) {
     try {
-      await this.ctx.session.get({ sessionID })
+      const session = await this.ctx.session.get({ sessionID })
+      const directory = session?.directory ?? session?.data?.directory
+      // A session whose recorded directory no longer exists cannot be resumed:
+      // opencode fails every prompt with "Directory not found". Treat it as
+      // dead so #session creates a fresh one under the current state dir.
+      if (typeof directory === "string" && !fs.existsSync(directory)) return false
       return true
     } catch {
       return false
@@ -407,7 +412,7 @@ async function callBridge(link, name, args) {
       : JSON.stringify(result, null, 2)
   } catch (error) {
     const code = error instanceof BridgeError ? error.code : "internal"
-    throw new Error(`${name} 没成（${code}）：${error.message}`)
+    throw new Error(`${name} failed (${code}): ${error.message}`)
   }
 }
 

@@ -25,10 +25,10 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StorageError {
     /// 后端自身出错（数据库打不开、写入失败等）。
-    #[error("存储后端出错：{0}")]
+    #[error("storage backend error: {0}")]
     Backend(String),
     /// 确认了一条不存在的记录——调用方拿错了编号。
-    #[error("房间 {room} 没有编号 {id} 的记录")]
+    #[error("room {room} has no record with id {id}")]
     UnknownRecord { room: String, id: u64 },
 }
 
@@ -549,10 +549,7 @@ pub const FEEDBACK_CAP: usize = 5000;
 /// 六样东西合起来。桥只依赖这一个约束，换后端只换实现。
 pub trait Store: Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks {}
 
-impl<T> Store for T where
-    T: Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks
-{
-}
+impl<T> Store for T where T: Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks {}
 
 mod sqlite;
 
@@ -1082,7 +1079,11 @@ mod tests {
             store.append(draft(qq.clone(), text)).expect("可写");
         }
 
-        assert_eq!(store.ack(&main, &[3]).expect("可确认"), 0, "缺 1、2，水位不动");
+        assert_eq!(
+            store.ack(&main, &[3]).expect("可确认"),
+            0,
+            "缺 1、2，水位不动"
+        );
         let pending = unread(&store, &main, 100).expect("可读");
         assert_eq!(
             pending.iter().map(|record| record.id).collect::<Vec<_>>(),
@@ -1220,7 +1221,7 @@ mod tests {
                 Sender {
                     id: "10001".into(),
                     name: "老王".into(),
-                role: None,
+                    role: None,
                 },
                 1_793_000_000_001,
                 "poke",

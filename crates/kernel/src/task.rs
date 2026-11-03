@@ -26,7 +26,7 @@ pub(crate) fn run(handler: &str, params: &Value) -> Result<TaskOutcome, String> 
     match handler {
         "exec" => exec(params),
         other => Err(format!(
-            "没有这个任务处理器：{other}（目前只支持 exec）"
+            "unknown task handler: {other} (only exec is supported)"
         )),
     }
 }
@@ -35,16 +35,16 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
     let command = params
         .get("command")
         .and_then(Value::as_array)
-        .ok_or_else(|| "exec 任务要 command 数组".to_owned())?;
+        .ok_or_else(|| "exec task requires a command array".to_owned())?;
     let mut parts = Vec::with_capacity(command.len());
     for item in command {
         let part = item
             .as_str()
-            .ok_or_else(|| "exec 的 command 里每一项都要是字符串".to_owned())?;
+            .ok_or_else(|| "every item in exec command must be a string".to_owned())?;
         parts.push(part.to_owned());
     }
     if parts.is_empty() {
-        return Err("exec 的 command 不能为空".to_owned());
+        return Err("exec command must not be empty".to_owned());
     }
 
     let cwd = params.get("cwd").and_then(Value::as_str);
@@ -55,7 +55,7 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
             .unwrap_or(false)
         {
             std::fs::create_dir_all(dir)
-                .map_err(|error| format!("建任务目录 {dir} 失败：{error}"))?;
+                .map_err(|error| format!("failed to create task directory {dir}: {error}"))?;
         }
     }
 
@@ -77,7 +77,7 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command
         .spawn()
-        .map_err(|error| format!("启动 {} 失败：{error}", parts[0]))?;
+        .map_err(|error| format!("failed to start {}: {error}", parts[0]))?;
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let status = loop {
@@ -87,21 +87,27 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("任务超过 {} 秒，已杀掉", timeout_ms / 1000));
+                    return Err(format!(
+                        "task exceeded {} seconds and was killed",
+                        timeout_ms / 1000
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(error) => return Err(format!("等待任务失败：{error}")),
+            Err(error) => return Err(format!("failed to wait for task: {error}")),
         }
     };
     if !status.success() {
-        return Err(format!("任务退出码 {}（stderr 未捕获）", status));
+        return Err(format!(
+            "task exited with code {} (stderr not captured)",
+            status
+        ));
     }
 
     let mut stdout = String::new();
     if let Some(mut pipe) = child.stdout.take() {
         pipe.read_to_string(&mut stdout)
-            .map_err(|error| format!("读任务输出失败：{error}"))?;
+            .map_err(|error| format!("failed to read task output: {error}"))?;
     }
     let stdout = stdout.trim();
 
@@ -111,7 +117,7 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
         match kind.as_str() {
             "text" => {
                 if stdout.is_empty() {
-                    return Err("任务没有输出，发不了 text".to_owned());
+                    return Err("task produced no output; cannot send text".to_owned());
                 }
                 candidates.push(vec![Element::text(stdout)]);
             }
@@ -125,11 +131,13 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
                             .map(str::trim)
                             .find(|line| !line.is_empty())
                             .ok_or_else(|| {
-                                "任务没有输出文件路径（最后一行 stdout 要是产物路径）".to_owned()
+                                "task output has no file path (the last stdout line must be the artifact path)".to_owned()
                             })?
                             .to_owned();
                         if !Path::new(&path).is_file() {
-                            return Err(format!("任务说产物是 {path}，但文件不存在"));
+                            return Err(format!(
+                                "task reported artifact {path}, but the file does not exist"
+                            ));
                         }
                         file_path = Some(path.clone());
                         path
@@ -154,7 +162,7 @@ fn exec(params: &Value) -> Result<TaskOutcome, String> {
             }
             other => {
                 return Err(format!(
-                    "exec 的 send 只支持 none / text / file / video，收到 {other:?}"
+                    "exec send only supports none / text / file / video; got {other:?}"
                 ));
             }
         }
@@ -173,17 +181,17 @@ fn send_kinds(params: &Value) -> Result<Vec<String>, String> {
             for item in items {
                 let kind = item
                     .as_str()
-                    .ok_or_else(|| "exec 的 send 数组里每一项都要是字符串".to_owned())?;
+                    .ok_or_else(|| "every item in exec send array must be a string".to_owned())?;
                 kinds.push(kind.to_owned());
             }
         }
         Some(_) => {
-            return Err("exec 的 send 要是字符串或字符串数组".to_owned());
+            return Err("exec send must be a string or an array of strings".to_owned());
         }
     }
     if kinds.iter().any(|kind| kind == "none") {
         if kinds.len() > 1 {
-            return Err("send 里的 none 不能和其他值混用".to_owned());
+            return Err("none in send cannot be mixed with other values".to_owned());
         }
         return Ok(Vec::new());
     }

@@ -346,7 +346,7 @@ test("没有 ticket 时 callBridge 报 unauthorized", async (t) => {
   // 不设 ticket，直接调。
   await assert.rejects(
     () => callBridge(link, "send_message", { text: "收到" }),
-    /没有进行中的轮次|调不动/,
+    /no turn is in progress|cannot be called/,
   )
 })
 
@@ -437,7 +437,7 @@ test("会话模型优先，selectModel 失败让这一轮失败", async (t) => {
   )
   const turnEnd = await nextTurnEnd(bridge)
   assert.equal(turnEnd.frame, "turn_end")
-  assert.match(turnEnd.error, /不可用/, "模型不存在要让整轮失败")
+  assert.match(turnEnd.error, /unavailable/, "模型不存在要让整轮失败")
   assert.equal(dsh.prompts.length, 0, "模型没选上就不该投话")
   await runPromise
 })

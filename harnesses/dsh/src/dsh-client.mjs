@@ -113,7 +113,7 @@ export function readBrowserSessionSecret() {
 /** 用签名密钥为本机 dsh 地址铸造一个会话 Cookie。 */
 export function mintBrowserSessionCookie(baseUrl, secret, { lifetimeMs = MINTED_COOKIE_LIFETIME_MS } = {}) {
   const authority = new URL(String(baseUrl)).host
-  if (!authority) throw new Error("dsh baseUrl 没有 authority")
+  if (!authority) throw new Error("dsh baseUrl has no authority")
   const issuedAt = Date.now()
   const expiresAt = issuedAt + lifetimeMs
   const body = base64url(
@@ -242,13 +242,13 @@ export class DshClient {
     if (!this.launchToken) {
       throw new DshError(
         "auth",
-        `没有可用的 dsh 鉴权：找不到 launch token，也读不到 ${path.join(resolveDshHome(), ".credentials.yaml")} 里的签名密钥。`,
+        `no dsh authentication available: cannot find a launch token or a signing key in ${path.join(resolveDshHome(), ".credentials.yaml")}.`,
       )
     }
     if (!isLoopbackBase(this.baseUrl)) {
       throw new DshError(
         "auth",
-        `拒绝把 dsh launch token 发往非本机地址（${this.baseUrl}）。`,
+        `refusing to send the dsh launch token to a non-local address (${this.baseUrl}).`,
       )
     }
     const url = new URL(this.baseUrl)
@@ -260,7 +260,7 @@ export class DshClient {
     const setCookieRaw = res.headers["set-cookie"]
     const setCookie = Array.isArray(setCookieRaw) ? setCookieRaw[0] : setCookieRaw
     if (!setCookie) {
-      throw new DshError("auth", `dsh token 交换失败：HTTP ${res.status}`)
+      throw new DshError("auth", `dsh token exchange failed: HTTP ${res.status}`)
     }
     this.cookie = setCookie.split(";")[0]
     this._strategy = "token"
@@ -290,12 +290,12 @@ export class DshClient {
     const response = await this.#fetchWithAuth(`/api/${endpoint}`, message)
     const full = await response.json()
     if (!full || full.type !== "server-response" || full.rpcId !== rpcId || !full.result) {
-      throw new DshError("protocol", `dsh 回的 ${endpoint} 不是合法 server-response`)
+      throw new DshError("protocol", `dsh returned an invalid server-response for ${endpoint}`)
     }
     // dsh 的业务结果是 { ok, value } 包装；ok=false 时带 error。
     if (full.result.ok === false) {
       const { code, message: errMsg } = full.result.error ?? {}
-      throw new DshError(code ?? "rpc", `${endpoint} 失败${code ? `（${code}）` : ""}：${errMsg ?? "未知错误"}`)
+      throw new DshError(code ?? "rpc", `${endpoint} failed${code ? ` (${code})` : ""}: ${errMsg ?? "unknown error"}`)
     }
     return full.result.value ?? full.result
   }
@@ -353,7 +353,7 @@ export class DshClient {
       ...(agentPreset === undefined ? {} : { agentPreset }),
     })
     if (!result.sessionId) {
-      throw new DshError("protocol", `dsh 建会话没回 sessionId：${JSON.stringify(result).slice(0, 200)}`)
+      throw new DshError("protocol", `dsh session creation returned no sessionId: ${JSON.stringify(result).slice(0, 200)}`)
     }
     return result.sessionId
   }
@@ -367,7 +367,7 @@ export class DshClient {
     const result = await this.callUnary("workspace/create", { path })
     const workspaceId = result?.workspace?.workspaceId
     if (!workspaceId) {
-      throw new DshError("protocol", `workspace/create 没回 workspaceId：${JSON.stringify(result).slice(0, 200)}`)
+      throw new DshError("protocol", `workspace/create returned no workspaceId: ${JSON.stringify(result).slice(0, 200)}`)
     }
     if (result.created && title) {
       await this.callUnary("workspace/rename", { workspaceId, title })
@@ -405,7 +405,7 @@ export class DshClient {
    */
   async selectModel(sessionId, { provider, model, reasoningEffort } = {}) {
     if (!sessionId || !provider || !model) {
-      throw new DshError("bad_args", "selectModel 要 sessionId + provider + model")
+      throw new DshError("bad_args", "selectModel requires sessionId + provider + model")
     }
     return this.callUnary("session/selectModel", {
       sessionId,
@@ -531,7 +531,7 @@ function httpRequest(urlStr, { method = "GET", headers = {}, body, timeoutMs = 1
         })
       },
     )
-    req.on("timeout", () => req.destroy(new Error("请求超时")))
+    req.on("timeout", () => req.destroy(new Error("request timed out")))
     req.on("error", reject)
     if (body !== undefined && body !== null) {
       req.write(typeof body === "string" ? body : JSON.stringify(body))
@@ -623,7 +623,7 @@ class MiniWebSocket {
       ].join("\r\n")
 
       socket.on("connect", () => socket.write(requestLines))
-      socket.on("timeout", () => socket.destroy(new Error("WS 连接超时")))
+      socket.on("timeout", () => socket.destroy(new Error("WS connection timed out")))
 
       let handshakeDone = false
       socket.on("data", (chunk) => {
@@ -636,7 +636,7 @@ class MiniWebSocket {
           }
           const headerText = text.slice(0, headerEnd)
           if (!headerText.includes("101")) {
-            reject(new Error(`WS 握手失败：${headerText.split("\r\n")[0]}`))
+            reject(new Error(`WS handshake failed: ${headerText.split("\r\n")[0]}`))
             socket.destroy()
             return
           }
