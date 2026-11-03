@@ -388,7 +388,8 @@
   - `extensions_catalog`：1 个模块 550 B；50 个模块 14,742 B（线性增长，1 次调用，无分页）；
   - `cargo test -p acb-kernel --test context_budget` 2/2；
     `cargo test -p acb-extensions --test authoring measure_extension_catalog_sizes` 1/1。
-- commit：`TBD`。
+- commit：`aacb555 perf(tools): drop per-record columns map and index large lists`
+  与 `b9297e3 test(tools): measure context cost of catalogs and task lists`
 - 偏离说明：阈值索引会让超过 4 KiB 的列表少给细节并多一次详情调用；这是用一次
   额外调用换体积，依据是外部报告「一次调用 ≈ 9k 工具定义 + 历史」。未对
   `describe_plugins(global)` 做索引（不在本次四个接口清单里），只记录测量值。
@@ -421,13 +422,30 @@
   - `cargo test -p acb-kernel --test observer_flow` → 2/2；
   - `cargo test -p acb-kernel --test plugin_tools_flow` → 2/2；
   - `cargo check --workspace` 通过。
-- commit：`TBD`。
+- commit：`adb89dc feat(plugin): add record observers and provider tools`
 - 偏离说明：插件工具采用「索引 + 通用调用」两步发现，新增 2 个常驻工具定义；
   这比给每个插件工具单独注册省接口面，但 agent 需要先查索引。下一步可用测量数据
   评估是否值得把频繁使用的插件工具提升为常驻（暂不做）。
 - 未决问题：ToolProvider 的权限是否只给 high-trust 载体；插件工具是否需要单独的
   调用审计/限流；`plugin_tools` 索引是否需要阈值索引（当前 limit 50）。
 - 下一步入口：TaskHandler（T8 一起）。
+
+## 2026-11-04 04:50 CST — 能力差距矩阵（外部功能清单合并）
+
+- 任务编号：capability gap matrix（用户新增，只出文档）
+- 做了什么：新增 `docs/plan/capability-gap-matrix.md`：
+  - 覆盖外部 151 条功能（A1–N14），按 14 类归组，每条给 ACB 现状/依据/优先级；
+  - 三个重点结论：平台适配器外置可行、能力必须是可查表数据、扩展点数量不是目的；
+  - 明确不做清单（独立账号、模型侧、RAG 引擎、插件分发/市场、生产 HMR 等）；
+  - 能力表字段草案、astrbot 封闭 pipeline 对照、四项口径复核与 10 项待拍板。
+- 证据：对照 `feature-inventory.md`、`extension-point-catalog.md`、platform/supervisor
+  文档，并核实 `plugin.rs` / `adapter.rs` / `tools.rs` / `outbound.rs`；文档 462 行。
+- commit：`TBD`。
+- 文档状态修正：`sample_string` 已迁走（`2a722af`）；`RecordObserver`/`ToolProvider`
+  已落地（`adb89dc`）；`TaskHandler` 留到 T8，`PluginState` 不进 core。
+- 待用户拍板高优先级：`TaskHandler` 签名与持久化、能力表首批字段、上下文注入形态、
+  tool-access 是否进 core、核心清账清单、插件分发边界、回滚边界。
+- 下一步入口：等用户拍板后，按矩阵优先级逐项落地；不为了齐平而加 core 入口。
 
 ## 环境状态
 
