@@ -127,6 +127,60 @@ provider = "dyn.routes"
 `extensions_reload`，不会自动生效。
 可抄的最小模块见 [`examples/extensions/echo`](https://github.com/DataEraserC/AgentChatBridge/tree/dev_20261025/examples/extensions/echo)。
 
+## 工具提供者（in-process）
+
+`ToolProvider` 目前**没有动态库 / 外置进程载体**：它必须和宿主程序一起编译，或由
+进程内 `ManagerPlugin` 提供。`ACB_DYNAMIC_DIR` 的声明式模块只能做 route，不能注册工具。
+
+最小可运行示例见
+[`examples/tool-provider`](https://github.com/DataEraserC/AgentChatBridge/tree/dev_20261025/examples/tool-provider)，
+它不连平台、不起服务，只演示宿主需要做的四步：
+
+```rust
+struct EchoTool;
+
+impl ToolProvider for EchoTool {
+    fn tools(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec {
+            name: "example_echo".into(),
+            summary: "回显调用方给的参数".into(),
+            schema: json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "additionalProperties": true,
+            }),
+        }]
+    }
+
+    fn call(
+        &self,
+        context: &ToolCallContext<'_>,
+        tool: &str,
+        args: Value,
+    ) -> Result<Value, ToolError> {
+        Ok(json!({ "tool": tool, "session": context.session, "args": args }))
+    }
+}
+```
+
+1. 实现 `ToolProvider`：`tools()` 声明名字/summary/JSON Schema；`call()` 处理参数。
+2. `PluginManager::register_tools(descriptor, Arc::new(EchoTool))`：descriptor 的
+   extension point 是 `Tool`，能力是 `ToolCall`，id 形如 `example.tools`。
+3. `Bridge::with_plugins(config, store, outbound, plugins)`。
+4. agent 侧先 `plugin_tools` 发现，再 `plugin_tool_call({tool, arguments})` 调用；
+   `plugin_tools({name})` 可单独查某个工具的完整 schema。
+
+边界：
+
+- 工具名不能和内置工具重名，重名在注册时拒绝，不会覆盖 `send_message` 等核心工具。
+- `ToolCallContext` 只给 session / room / origin_sender / live；拿不到 Store、票和水位。
+- 工具内部的 I/O 由插件自己负责；core 不做超时，慢工具会占住调用方。
+- 工具权限判定仍是 core 的事（`ToolAccessProvider` 只能再加否决，不能放行）。
+
+卡点记录（2026-11-04 实测）：写这个最小示例时，必须读 `plugin_tools_flow` 测试才知道
+`Bridge::with_plugins` 与 `tool_call` 的组合方式；文档此前只覆盖 dynamic wake 和声明式
+route。上面的步骤即据此补上。动态库 ABI 的 tool 载体是后续缺口，不在本示例范围内。
+
 ## 嵌套 manager
 
 `ManagerPlugin::children()` 返回子 manager；Root 先安装父 manager，再递归安装子 manager，
