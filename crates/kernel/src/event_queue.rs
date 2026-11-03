@@ -8,11 +8,11 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::Frame;
 use crate::endpoint::ControlRegistry;
 use crate::engine::Bridge;
 use crate::route_worker::RouteWorker;
 use crate::storage::{RecordDraft, Store};
-use crate::Frame;
 
 /// 入站队列的写端。可克隆，给每条适配器连接一个。
 #[derive(Clone)]
@@ -77,7 +77,7 @@ pub fn drain_events<S: Store + Send + 'static>(
                     };
                     if !controls.send_control(frame) {
                         eprintln!(
-                            "路由 interrupt：会话 {} 没有 harness 连接，打断指令没发出去",
+                            "route interrupt: session {} has no harness connection; interrupt was not delivered",
                             interrupt.session
                         );
                     }
@@ -86,7 +86,7 @@ pub fn drain_events<S: Store + Send + 'static>(
 
                 if let Err(error) = result {
                     // 记不下来是真问题，说清楚，别装作没事。
-                    eprintln!("事件队列：这条事件没能写进流水：{error}");
+                    eprintln!("event queue: failed to write this event to the record log: {error}");
                 }
             }
             Err(RecvTimeoutError::Timeout) => continue,
@@ -127,8 +127,14 @@ mod tests {
         queue.submit(draft("一"));
         queue.submit(draft("二"));
 
-        let first = receiver.rx.recv_timeout(Duration::from_secs(1)).expect("第一条");
-        let second = receiver.rx.recv_timeout(Duration::from_secs(1)).expect("第二条");
+        let first = receiver
+            .rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("第一条");
+        let second = receiver
+            .rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("第二条");
         assert!(matches!(&first.elements[0], Element::Text { text } if text == "一"));
         assert!(matches!(&second.elements[0], Element::Text { text } if text == "二"));
     }

@@ -53,7 +53,10 @@ pub const OPS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryError {
     /// 字段不存在。
-    UnknownField { field: String, available: Vec<String> },
+    UnknownField {
+        field: String,
+        available: Vec<String>,
+    },
     /// 比较方式不认识。
     UnknownOp { op: String },
     /// `in` 配了非数组、`not_null` 配了值之类。
@@ -67,20 +70,23 @@ impl std::fmt::Display for QueryError {
         match self {
             Self::UnknownField { field, available } => write!(
                 formatter,
-                "[bad_field] 没有字段 {field}；这批数据里有的字段：{}",
+                "[bad_field] unknown field {field}; fields present in this data: {}",
                 available.join(" / ")
             ),
             Self::UnknownOp { op } => write!(
                 formatter,
-                "[bad_params] 不认识的比较方式 {op}；能用的：{}",
+                "[bad_params] unknown comparison operator {op}; available: {}",
                 OPS.join(" / ")
             ),
             Self::BadValue { field, detail } => {
-                write!(formatter, "[bad_params] 字段 {field} 的值不对：{detail}")
+                write!(
+                    formatter,
+                    "[bad_params] invalid value for field {field}: {detail}"
+                )
             }
             Self::BadOrder { text } => write!(
                 formatter,
-                "[bad_params] order_by 要写成「字段」或「字段 desc/asc」，收到「{text}」"
+                "[bad_params] order_by must be \"field\" or \"field desc/asc\"; got \"{text}\""
             ),
         }
     }
@@ -92,7 +98,10 @@ pub enum Outcome {
     /// 过滤/排序/投影之后的条目。
     Items { items: Vec<Value>, matched: usize },
     /// 分组计数。`key` 是分组字段的取值（字符串化），按条数从多到少排。
-    Groups { groups: Vec<(String, usize)>, matched: usize },
+    Groups {
+        groups: Vec<(String, usize)>,
+        matched: usize,
+    },
 }
 
 /// 作用在一个对象数组上。
@@ -152,11 +161,7 @@ pub fn apply(items: &[Value], query: &Query) -> Result<Outcome, QueryError> {
         let (field, descending) = order_spec(order)?;
         kept.sort_by(|a, b| {
             let order = compare(&pick(a, field), &pick(b, field));
-            if descending {
-                order.reverse()
-            } else {
-                order
-            }
+            if descending { order.reverse() } else { order }
         });
     }
 
@@ -167,7 +172,10 @@ pub fn apply(items: &[Value], query: &Query) -> Result<Outcome, QueryError> {
             .collect::<Vec<_>>();
     }
 
-    Ok(Outcome::Items { items: kept, matched })
+    Ok(Outcome::Items {
+        items: kept,
+        matched,
+    })
 }
 
 /// 结果里所有出现过的顶层字段，按首次出现的顺序去重。给人看的白名单就是它。
@@ -275,9 +283,11 @@ fn contains(actual: &Value, needle: &Value) -> bool {
         (Value::String(text), Value::String(needle)) => text.contains(needle.as_str()),
         (Value::Array(items), _) => items.iter().any(|item| equal(item, needle)),
         // 对象里任何一个字符串字段含这个词也算：模型不用知道内容是嵌在哪一层。
-        (Value::Object(map), Value::String(needle)) => map
-            .values()
-            .any(|value| value.as_str().is_some_and(|text| text.contains(needle.as_str()))),
+        (Value::Object(map), Value::String(needle)) => map.values().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|text| text.contains(needle.as_str()))
+        }),
         _ => false,
     }
 }
@@ -451,7 +461,8 @@ mod tests {
             other => panic!("应当返回条目，实际 {other:?}"),
         }
 
-        let q = query(json!({"where": [{"field": "role", "op": "in", "value": ["admin", "owner"]}]}));
+        let q =
+            query(json!({"where": [{"field": "role", "op": "in", "value": ["admin", "owner"]}]}));
         match apply(&members(), &q).expect("能查") {
             Outcome::Items { items, .. } => assert_eq!(items.len(), 2),
             other => panic!("应当返回条目，实际 {other:?}"),

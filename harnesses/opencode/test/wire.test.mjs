@@ -85,7 +85,7 @@ test("桥断了会自己重连，重连成功后重新绑上设备", async (t) =
   bridge.socket.destroy()
 
   await waitFor(
-    () => logs.some((line) => line.includes("重连成功")),
+    () => logs.some((line) => line.includes("reconnected")),
     "应该自己重连回来，日志是：" + logs.join(" | "),
   )
   assert.deepEqual(link.sessions, ["main"], "重连之后会话要重新绑上，不然工具会一直 unauthorized")
@@ -460,7 +460,7 @@ test("endpoint 只认 host:port", () => {
     port: 7700,
   })
   assert.throws(() => parseEndpoint("127.0.0.1"), /127\.0\.0\.1:7700/)
-  assert.throws(() => parseEndpoint("127.0.0.1:abc"), /端口/)
+  assert.throws(() => parseEndpoint("127.0.0.1:abc"), /port/)
 })
 
 test("text 是单段文本的糖，elements 才是本体", () => {
@@ -475,9 +475,9 @@ test("text 是单段文本的糖，elements 才是本体", () => {
   )
   assert.throws(
     () => normalizeToolArgs("send_message", { elements: [{ type: "sticker" }] }),
-    /不认识的元素类型/,
+    /unknown element type/,
   )
-  assert.throws(() => normalizeToolArgs("send_message", {}), /至少要有 text/)
+  assert.throws(() => normalizeToolArgs("send_message", {}), /requires text/)
 })
 
 test("发到别的房间必须有 to", () => {
@@ -485,7 +485,7 @@ test("发到别的房间必须有 to", () => {
     normalizeToolArgs("send_message_to", { to: "qq:group/1", text: "喂" }),
     { elements: [{ type: "text", text: "喂" }], to: "qq:group/1" },
   )
-  assert.throws(() => normalizeToolArgs("send_message_to", { text: "喂" }), /要写 to/)
+  assert.throws(() => normalizeToolArgs("send_message_to", { text: "喂" }), /requires to/)
 })
 
 test("send_message_to 不再有 device 身份参数（跨会话发送已砍）", () => {
@@ -504,10 +504,10 @@ test("确认的编号必须是整数，空的不算", () => {
   assert.deepEqual(normalizeToolArgs("ack_messages", { ids: [1, 2] }), {
     ids: [1, 2],
   })
-  assert.throws(() => normalizeToolArgs("ack_messages", { ids: [] }), /要带 ids/)
+  assert.throws(() => normalizeToolArgs("ack_messages", { ids: [] }), /requires ids/)
   assert.throws(
     () => normalizeToolArgs("ack_messages", { ids: ["1"] }),
-    /只能是整数/,
+    /must be integers/,
   )
 })
 

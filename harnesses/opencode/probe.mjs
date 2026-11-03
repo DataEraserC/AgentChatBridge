@@ -9,7 +9,7 @@ import { BridgeLink, renderTurn } from "./plugin/acb-wire.mjs"
 
 const options = parseArgs(process.argv.slice(2))
 if (!options.token) {
-  console.error("用法：node probe.mjs --token <设备令牌> [--endpoint 127.0.0.1:7700] [--reply 收到] [--once]")
+  console.error("usage: node probe.mjs --token <device token> [--endpoint 127.0.0.1:7700] [--reply <text>] [--once]")
   process.exit(2)
 }
 
@@ -31,15 +31,15 @@ const link = new BridgeLink({
         const sent = await link.call("send_message", {
           elements: [{ type: "text", text: options.reply }],
         })
-        console.log(`  已发出，平台消息号 ${sent?.platform_id ?? "-"}`)
+        console.log(`  sent, platform message id ${sent?.platform_id ?? "-"}`)
         const acked = await link.call("ack_messages", {
           ids: delivery.records.map((record) => record.id),
         })
-        console.log(`  水位推到 #${acked?.watermark ?? "?"}`)
+        console.log(`  watermark advanced to #${acked?.watermark ?? "?"}`)
       }
     } catch (error) {
       failure = error.message
-      console.error(`  这一轮出错：${error.message}（${error.code}）`)
+      console.error(`  turn failed: ${error.message} (${error.code})`)
     } finally {
       link.endTurn(delivery.ticket, failure)
     }
@@ -54,11 +54,11 @@ const link = new BridgeLink({
 try {
   await link.connect()
 } catch (error) {
-  console.error(`连不上桥：${error.message}`)
+  console.error(`cannot connect to bridge: ${error.message}`)
   process.exit(1)
 }
 
-console.log(`已绑定到会话组 ${link.sessions.join("、")}，等着开轮（Ctrl-C 退出）`)
+console.log(`bound to sessions ${link.sessions.join(", ")}; waiting for turns (Ctrl-C to exit)`)
 
 process.on("SIGINT", () => {
   link.close()
@@ -92,11 +92,11 @@ function parseArgs(argv) {
         break
       case "--help":
       case "-h":
-        console.log("用法：node probe.mjs --token <设备令牌> [--endpoint 127.0.0.1:7700] [--reply 收到] [--once]")
+        console.log("usage: node probe.mjs --token <device token> [--endpoint 127.0.0.1:7700] [--reply <text>] [--once]")
         process.exit(0)
         break
       default:
-        console.error(`不认识的参数：${arg}`)
+        console.error(`unknown argument: ${arg}`)
         process.exit(2)
     }
   }

@@ -8,8 +8,8 @@
 //! manifest / 能力 / 版本审计。
 
 use std::borrow::Cow;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use thiserror::Error;
 
@@ -71,7 +71,9 @@ pub struct AdapterHost {
 
 impl std::fmt::Debug for AdapterHost {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("AdapterHost").finish_non_exhaustive()
+        formatter
+            .debug_struct("AdapterHost")
+            .finish_non_exhaustive()
     }
 }
 
@@ -112,30 +114,31 @@ pub trait AdapterFactory: Send + Sync {
 /// 适配器注册/实例化错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AdapterError {
-    #[error("适配器 kind 重复注册：{0}")]
+    #[error("duplicate adapter kind registration: {0}")]
     DuplicateKind(String),
-    #[error("适配器 id 重复：{0}")]
+    #[error("duplicate adapter id: {0}")]
     DuplicateId(String),
-    #[error("没有这个适配器 kind：{0}")]
+    #[error("unknown adapter kind: {0}")]
     UnknownKind(String),
-    #[error("适配器 {adapter} 不支持 transport {transport}")]
-    UnsupportedTransport {
-        adapter: String,
-        transport: String,
-    },
-    #[error("适配器 manifest 的 kind 是 {manifest}，但连接 {connection} 配的是 {configured}")]
+    #[error("adapter {adapter} does not support transport {transport}")]
+    UnsupportedTransport { adapter: String, transport: String },
+    #[error(
+        "adapter manifest kind is {manifest}, but connection {connection} is configured as {configured}"
+    )]
     KindMismatch {
         connection: String,
         manifest: String,
         configured: String,
     },
-    #[error("适配器 {0} 的接口版本 {1} 不兼容（需要 {ADAPTER_API_VERSION}）")]
+    #[error("adapter {0} API version {1} is incompatible (requires {ADAPTER_API_VERSION})")]
     ApiVersion(String, u32),
-    #[error("适配器 id 不合法：{0}（要写成 namespace.name）")]
+    #[error("invalid adapter id: {0} (must be namespace.name)")]
     BadId(String),
-    #[error("适配器 {0} 实例化失败：{1}")]
+    #[error("failed to instantiate adapter {0}: {1}")]
     Create(String, String),
-    #[error("第三方适配器 {0} 没有声明 metadata.summary（agent 需要知道它是干什么的）")]
+    #[error(
+        "third-party adapter {0} declares no metadata.summary (the agent needs to know what it does)"
+    )]
     MissingDocs(String),
 }
 
@@ -203,11 +206,7 @@ mod tests {
     struct FakeOutbound;
 
     impl Outbound for FakeOutbound {
-        fn send(
-            &mut self,
-            _room: &RoomId,
-            _elements: &[Element],
-        ) -> Result<Sent, OutboundError> {
+        fn send(&mut self, _room: &RoomId, _elements: &[Element]) -> Result<Sent, OutboundError> {
             Ok(Sent {
                 platform_id: "p".into(),
                 at: 0,
@@ -280,10 +279,12 @@ mod tests {
         plugins
             .register_adapter(Arc::new(FakeFactory))
             .expect("能注册");
-        assert!(plugins
-            .adapter_manifests()
-            .iter()
-            .any(|manifest| manifest.kind.as_ref() == "fake"));
+        assert!(
+            plugins
+                .adapter_manifests()
+                .iter()
+                .any(|manifest| manifest.kind.as_ref() == "fake")
+        );
 
         let instance = plugins
             .create_adapter(&connection("fake", Transport::WsClient), events())
@@ -340,10 +341,7 @@ mod tests {
     fn third_party_adapter_needs_docs() {
         let mut plugins = PluginManager::with_native_builtins();
         assert!(matches!(
-            plugins.register_adapter_with_source(
-                Arc::new(NoDocsFactory),
-                PluginSource::Dynamic
-            ),
+            plugins.register_adapter_with_source(Arc::new(NoDocsFactory), PluginSource::Dynamic),
             Err(AdapterError::MissingDocs(_))
         ));
     }

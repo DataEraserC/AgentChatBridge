@@ -78,8 +78,9 @@ impl OneBotOutbound {
     /// 超时不是明确失败：请求可能还在上传/处理，也可能已经执行。
     fn timeout_detail(timeout: Duration) -> String {
         format!(
-            "请求已经交给适配器，但平台在 {} 秒内没有回话；可能还在处理，也可能已经执行。\
-             不要直接重发；先用 get_history / fetch_records 确认是否已经发出。",
+            "the request was handed to the adapter, but the platform did not reply within {} seconds; \
+             it may still be processing or may already have executed. Do not resend blindly; use \
+             get_history / fetch_records to confirm whether it was sent.",
             timeout.as_secs()
         )
     }
@@ -89,7 +90,7 @@ impl Outbound for OneBotOutbound {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         if room.connection != self.connection {
             return Err(OutboundError::Unavailable(format!(
-                "这条连接叫 {}，收到 {}",
+                "this connection is {}, but received {}",
                 self.connection, room.connection
             )));
         }
@@ -97,7 +98,7 @@ impl Outbound for OneBotOutbound {
         let (action, params) = action_of(room, elements)?;
         let Some(sender) = self.slot.current() else {
             return Err(OutboundError::Unavailable(format!(
-                "{} 还没连上",
+                "{} is not connected yet",
                 self.connection
             )));
         };
@@ -110,7 +111,7 @@ impl Outbound for OneBotOutbound {
                 body: json!({"action": action, "params": params, "echo": echo}),
                 reply: reply_tx,
             })
-            .map_err(|_| OutboundError::Unavailable("连接刚断了".into()))?;
+            .map_err(|_| OutboundError::Unavailable("connection was just lost".into()))?;
 
         let timeout = self.send_timeout(elements);
         let response = reply_rx
@@ -133,7 +134,7 @@ impl Outbound for OneBotOutbound {
     ) -> Result<CallOutcome, CallError> {
         if room.connection != self.connection {
             return Err(CallError::Forbidden(format!(
-                "这条连接叫 {}，收到 {} 的调用",
+                "this connection is {}, but received a call for {}",
                 self.connection, room.connection
             )));
         }
@@ -175,7 +176,7 @@ impl OneBotOutbound {
             .filter(|id| !id.is_empty())
             .ok_or_else(|| {
                 CallError::BadParams(
-                    "要 id：消息里 forward 段的 data.id（整段内容看起来像 [合并转发] 时用它）"
+                    "id is required: the data.id of the forward element (use it when the content looks like [merged forward])"
                         .into(),
                 )
             })?;
@@ -208,7 +209,7 @@ impl OneBotOutbound {
     ) -> Result<Value, CallError> {
         let Some(sender) = self.slot.current() else {
             return Err(CallError::Unavailable(format!(
-                "{} 还没连上",
+                "{} is not connected yet",
                 self.connection
             )));
         };
@@ -221,7 +222,7 @@ impl OneBotOutbound {
                 body: json!({"action": action, "params": params, "echo": echo}),
                 reply: reply_tx,
             })
-            .map_err(|_| CallError::Unavailable("连接刚断了".into()))?;
+            .map_err(|_| CallError::Unavailable("connection was just lost".into()))?;
 
         reply_rx
             .recv_timeout(timeout)
@@ -241,7 +242,7 @@ fn action_of_route(route: &Route, room: &RoomId) -> Result<&'static str, CallErr
             [kind, _] if kind == "group" => Ok(group),
             [kind, _] if kind == "private" => Ok(private),
             _ => Err(CallError::BadParams(format!(
-                "{} 要分群聊和私聊，但房间 {} 既不是 group/ 也不是 private/",
+                "{} requires a group or private room, but room {} is neither group/ nor private/",
                 route.method,
                 room.key()
             ))),
@@ -257,7 +258,11 @@ fn call_payload(route: &Route, room: &RoomId, params: &Value) -> Result<Value, C
     let mut payload = match params {
         Value::Object(map) => map.clone(),
         Value::Null => serde_json::Map::new(),
-        _ => return Err(CallError::BadParams("params 要给一个对象（map）".into())),
+        _ => {
+            return Err(CallError::BadParams(
+                "params must be an object (map)".into(),
+            ));
+        }
     };
 
     // 房间目标参数（group_id / user_id）只能从当前房间推导，**不允许在 params 里换房间**。
@@ -272,16 +277,15 @@ fn call_payload(route: &Route, room: &RoomId, params: &Value) -> Result<Value, C
                     // - 其它（如 message.send_forward）：user_id 指向另一个私聊房间，拒绝。
                     if route.method != "poke.send" && payload.contains_key(private_key) {
                         return Err(CallError::BadParams(format!(
-                            "{} 的 {} 指向另一个私聊房间；当前房间是 {}。\
-                             要发到私聊，请用 room 参数选那个私聊房间，不要在 params 里改目标",
-                            route.method,
-                            private_key,
-                            room
+                            "{} has {} pointing to another private chat; the current room is {}. \
+                             To send to a private chat, select that room with the room parameter; \
+                             do not retarget in params",
+                            route.method, private_key, room
                         )));
                     }
                     if route.method == "poke.send" && !payload.contains_key(private_key) {
                         return Err(CallError::BadParams(
-                            "poke.send 在群里要给 user_id：拍谁就写谁".into(),
+                            "poke.send in a group requires user_id: pass who to poke".into(),
                         ));
                     }
                 }
@@ -289,17 +293,16 @@ fn call_payload(route: &Route, room: &RoomId, params: &Value) -> Result<Value, C
                     fill_room_target(&mut payload, route.method, private_key, room, id)?;
                     if payload.contains_key(group_key) {
                         return Err(CallError::BadParams(format!(
-                            "{} 的 {} 指向另一个群；当前房间是 {}。\
-                             要发到群，请用 room 参数选那个群，不要在 params 里改目标",
-                            route.method,
-                            group_key,
-                            room
+                            "{} has {} pointing to another group; the current room is {}. \
+                             To send to a group, select that group with the room parameter; \
+                             do not retarget in params",
+                            route.method, group_key, room
                         )));
                     }
                 }
                 _ => {
                     return Err(CallError::BadParams(format!(
-                        "{} 需要群聊或私聊房间，但房间 {} 既不是 group/ 也不是 private/",
+                        "{} requires a group or private room, but room {} is neither group/ nor private/",
                         route.method,
                         room.key()
                     )));
@@ -325,9 +328,9 @@ fn fill_matching_group_target(
         if let Some(value) = payload.get(key) {
             let target = value.as_str().unwrap_or_default();
             return Err(CallError::BadParams(format!(
-                "{} 的 {} 指向群 {target}，但当前房间是 {}；\
-                 要操作它，把 platform_call 的 room 改成 \"{}\"（并确认本会话订阅了它），\
-                 不要在 params 里换目标",
+                "{} has {} pointing to group {target}, but the current room is {}; \
+                 to operate on it, change platform_call's room to \"{}\" (and make sure this \
+                 session is subscribed to it); do not retarget in params",
                 method,
                 key,
                 room,
@@ -335,7 +338,7 @@ fn fill_matching_group_target(
             )));
         }
         return Err(CallError::BadParams(format!(
-            "{} 要 {}，但房间 {} 不是群类型，params 里得自己给",
+            "{} requires {}, but room {} is not a group; provide it in params",
             method,
             key,
             room.key()
@@ -355,9 +358,9 @@ fn fill_matching_private_target(
         if let Some(value) = payload.get(key) {
             let target = value.as_str().unwrap_or_default();
             return Err(CallError::BadParams(format!(
-                "{} 的 {} 指向私聊 {target}，但当前房间是 {}；\
-                 要操作它，把 platform_call 的 room 改成 \"{}\"（并确认本会话订阅了它），\
-                 不要在 params 里换目标",
+                "{} has {} pointing to private chat {target}, but the current room is {}; \
+                 to operate on it, change platform_call's room to \"{}\" (and make sure this \
+                 session is subscribed to it); do not retarget in params",
                 method,
                 key,
                 room,
@@ -365,7 +368,7 @@ fn fill_matching_private_target(
             )));
         }
         return Err(CallError::BadParams(format!(
-            "{} 要 {}，但房间 {} 不是私聊类型，params 里得自己给",
+            "{} requires {}, but room {} is not a private chat; provide it in params",
             method,
             key,
             room.key()
@@ -386,11 +389,15 @@ fn fill_room_target(
         Some(value) => {
             let given = value.as_str().unwrap_or_default();
             if given != room_id {
-                let kind = if key == "group_id" { "group" } else { "private" };
+                let kind = if key == "group_id" {
+                    "group"
+                } else {
+                    "private"
+                };
                 return Err(CallError::BadParams(format!(
-                    "{} 的 {} 是 {given}，但当前房间是 {room}；\
-                     不要在 params 里换目标。要操作它，把 platform_call 的 room 改成 \"{}\"\
-                     （并确认本会话订阅了它）",
+                    "{} has {} = {given}, but the current room is {room}; \
+                     do not retarget in params. To operate on it, change platform_call's room to \"{}\" \
+                     (and make sure this session is subscribed to it)",
                     method,
                     key,
                     target_room_text(room, kind, given)
@@ -501,15 +508,15 @@ fn parse_call_response(method: &str, value: Value) -> Result<Value, CallError> {
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .or_else(|| value.get("message").and_then(Value::as_str))
-        .unwrap_or("平台没说原因");
-    let reason = format!("{detail}（retcode {retcode}）");
+        .unwrap_or("the platform gave no reason");
+    let reason = format!("{detail} (retcode {retcode})");
 
     Err(match retcode {
         // go-cqhttp 系沿用 HTTP 风格码。
         1400 => CallError::BadParams(reason),
         1401 | 1403 => CallError::Forbidden(reason),
         1404 => CallError::NotImplemented(reason),
-        _ => CallError::UnsupportedPlatform(format!("{method}：{reason}")),
+        _ => CallError::UnsupportedPlatform(format!("{method}: {reason}")),
     })
 }
 
@@ -528,7 +535,7 @@ fn action_of(room: &RoomId, elements: &[Element]) -> Result<(&'static str, Value
                 json!({"user_id": id, "file": url, "name": name}),
             )),
             _ => Err(OutboundError::Unsupported(format!(
-                "不认识的房间写法：{}（QQ 要写成 group/群号 或 private/号码）",
+                "unrecognized room format: {} (QQ rooms must be group/<group id> or private/<user id>)",
                 room.key()
             ))),
         };
@@ -547,7 +554,7 @@ fn action_of(room: &RoomId, elements: &[Element]) -> Result<(&'static str, Value
             json!({"user_id": id, "message": message}),
         )),
         _ => Err(OutboundError::Unsupported(format!(
-            "不认识的房间写法：{}（QQ 要写成 group/群号 或 private/号码）",
+            "unrecognized room format: {} (QQ rooms must be group/<group id> or private/<user id>)",
             room.key()
         ))),
     }
@@ -563,9 +570,9 @@ fn parse_response(value: Value) -> Result<Sent, OutboundError> {
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
             .or_else(|| value.get("message").and_then(Value::as_str))
-            .unwrap_or("平台没说原因");
+            .unwrap_or("the platform gave no reason");
         return Err(OutboundError::Rejected(format!(
-            "{detail}（retcode {retcode}）"
+            "{detail} (retcode {retcode})"
         )));
     }
 
@@ -678,9 +685,9 @@ mod tests {
         );
 
         let detail = OneBotOutbound::timeout_detail(UPLOAD_TIMEOUT);
-        assert!(detail.contains("45 秒"), "{detail}");
-        assert!(detail.contains("可能已经执行"), "{detail}");
-        assert!(detail.contains("不要直接重发"), "{detail}");
+        assert!(detail.contains("45 seconds"), "{detail}");
+        assert!(detail.contains("may already have executed"), "{detail}");
+        assert!(detail.contains("Do not resend blindly"), "{detail}");
     }
 
     #[test]
@@ -778,7 +785,9 @@ mod tests {
         let outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
         for method in outbound.catalog("qq").iter() {
             assert!(
-                ROUTES.iter().any(|route| route.method == method.name.as_ref()),
+                ROUTES
+                    .iter()
+                    .any(|route| route.method == method.name.as_ref()),
                 "{} 声明了但没有路由",
                 method.name
             );
@@ -802,23 +811,27 @@ mod tests {
             .iter()
             .find(|method| method.name.as_ref() == "poke.send")
             .expect("有 poke");
-        assert!(poke
-            .targets
-            .iter()
-            .any(|target| target.param.as_ref() == "group_id" && target.role == TargetRole::Room));
-        assert!(poke
-            .targets
-            .iter()
-            .any(|target| target.param.as_ref() == "user_id" && target.role == TargetRole::Member));
+        assert!(
+            poke.targets.iter().any(
+                |target| target.param.as_ref() == "group_id" && target.role == TargetRole::Room
+            )
+        );
+        assert!(
+            poke.targets
+                .iter()
+                .any(|target| target.param.as_ref() == "user_id"
+                    && target.role == TargetRole::Member)
+        );
 
         let forward = methods
             .iter()
             .find(|method| method.name.as_ref() == "message.send_forward")
             .expect("有合并转发");
-        assert!(forward
-            .targets
-            .iter()
-            .any(|target| target.param.as_ref() == "group_id" && target.role == TargetRole::Room));
+        assert!(
+            forward.targets.iter().any(
+                |target| target.param.as_ref() == "group_id" && target.role == TargetRole::Room
+            )
+        );
         assert!(forward
             .targets
             .iter()
@@ -1069,7 +1082,9 @@ mod tests {
         assert!(matches!(record.elements[0], Element::Text { .. }));
 
         // 读方法不记账：它们不改变房间里的聊天记录。
-        assert!(outgoing_record("message.get", &json!({"message_id": "1"}), &Value::Null).is_none());
+        assert!(
+            outgoing_record("message.get", &json!({"message_id": "1"}), &Value::Null).is_none()
+        );
     }
 
     /// 公告和合并转发在流水里是事件：内容概括成一两句话，不是原样重放。

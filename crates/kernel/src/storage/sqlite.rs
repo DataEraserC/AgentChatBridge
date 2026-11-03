@@ -168,12 +168,15 @@ impl SqliteStore {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|error| {
-                    backend(format!("建目录 {} 失败：{error}", parent.display()))
+                    backend(format!(
+                        "failed to create directory {}: {error}",
+                        parent.display()
+                    ))
                 })?;
             }
         }
         let conn = Connection::open(path)
-            .map_err(|error| backend(format!("打开 {} 失败：{error}", path.display())))?;
+            .map_err(|error| backend(format!("failed to open {}: {error}", path.display())))?;
         Self::prepare(conn, true)
     }
 
@@ -189,12 +192,12 @@ impl SqliteStore {
         // WAL 让「读」不被「写」挡住；内存库没有意义，跳过。
         if on_disk {
             conn.execute_batch("PRAGMA journal_mode = WAL;")
-                .map_err(|error| backend(format!("开 WAL 失败：{error}")))?;
+                .map_err(|error| backend(format!("failed to enable WAL: {error}")))?;
         }
         conn.execute_batch("PRAGMA synchronous = NORMAL;")
             .map_err(|error| backend(error.to_string()))?;
         conn.execute_batch(SCHEMA)
-            .map_err(|error| backend(format!("建表失败：{error}")))?;
+            .map_err(|error| backend(format!("failed to create tables: {error}")))?;
 
         let store = Self { conn };
         store.check_version()?;
@@ -212,7 +215,7 @@ impl SqliteStore {
                 "CREATE INDEX IF NOT EXISTS records_platform
                      ON records (connection, room_key, platform_id);",
             )
-            .map_err(|error| backend(format!("建索引失败：{error}")))
+            .map_err(|error| backend(format!("failed to create indexes: {error}")))
     }
 
     /// 把库升到 [`SCHEMA_VERSION`]。
@@ -236,7 +239,7 @@ impl SqliteStore {
             Some(raw) => raw
                 .trim()
                 .parse::<i64>()
-                .map_err(|_| backend(format!("库里的版本号读不懂：{raw}")))?,
+                .map_err(|_| backend(format!("unrecognized schema version in database: {raw}")))?,
         };
 
         if version > SCHEMA_VERSION {
@@ -267,7 +270,7 @@ impl SqliteStore {
             // 留着只是白占写入开销，删掉。
             self.conn
                 .execute_batch("DROP INDEX IF EXISTS records_platform_id;")
-                .map_err(|error| backend(format!("清理旧索引失败：{error}")))?;
+                .map_err(|error| backend(format!("failed to drop old indexes: {error}")))?;
         }
 
         // 3 → 4：device 概念升级为「harness 会话」。只改名不搬数据——`device` 那一列
@@ -313,7 +316,7 @@ impl SqliteStore {
                 "CREATE INDEX IF NOT EXISTS records_by_platform_id
                      ON records (connection, room_key, platform_id);",
             )
-            .map_err(|error| backend(format!("建索引失败：{error}")))?;
+            .map_err(|error| backend(format!("failed to create indexes: {error}")))?;
         Ok(())
     }
 
@@ -332,7 +335,7 @@ impl SqliteStore {
             .execute_batch(&format!(
                 "ALTER TABLE {table} RENAME COLUMN {old} TO {new};"
             ))
-            .map_err(|error| backend(format!("把 {table}.{old} 改名成 {new} 失败：{error}")))
+            .map_err(|error| backend(format!("failed to rename {table}.{old} to {new}: {error}")))
     }
 
     /// 表里有哪些列。
@@ -366,7 +369,7 @@ impl SqliteStore {
             .execute_batch(&format!(
                 "ALTER TABLE {table} ADD COLUMN {column} {definition};"
             ))
-            .map_err(|error| backend(format!("给 {table} 补列 {column} 失败：{error}")))
+            .map_err(|error| backend(format!("failed to add column {column} to {table}: {error}")))
     }
 
     /// 库里有多少东西。只给启动摘要用，不算进 [`Store`] 约束。
@@ -419,17 +422,17 @@ impl Transcript for SqliteStore {
                         summary: summary.clone(),
                         body: *body,
                     })
-                    .map_err(|error| backend(format!("事件元数据存不进库：{error}")))?,
+                    .map_err(|error| backend(format!("failed to store event metadata: {error}")))?,
                 ),
             ),
         };
         let elements = serde_json::to_string(&draft.elements)
-            .map_err(|error| backend(format!("内容元素存不进库：{error}")))?;
+            .map_err(|error| backend(format!("failed to store content elements: {error}")))?;
 
         // 路径的原始结构也存一份：以后房间要换成更自由的形状，原始数据还在，
         // 重新算键是一次脚本的事，不用重导。
         let room_json = serde_json::to_string(&draft.room.path)
-            .map_err(|error| backend(format!("房间路径存不进库：{error}")))?;
+            .map_err(|error| backend(format!("failed to store room path: {error}")))?;
 
         let transaction = self.conn.transaction().map_err(io_error)?;
         // 编号是「房间内」的：同一个房间接着往上数，不同连接同号互不相干。
@@ -564,7 +567,7 @@ impl Transcript for SqliteStore {
             let (connection, room_key) = row.map_err(io_error)?;
             let room = RoomId::new(&connection, &room_key).map_err(|error| {
                 backend(format!(
-                    "库里的房间读不懂：{connection}:{room_key}（{error}）"
+                    "unrecognized room in database: {connection}:{room_key} ({error})"
                 ))
             })?;
             rooms.push(room);
@@ -657,7 +660,7 @@ impl Transcript for SqliteStore {
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
-            .map_err(|error| backend(format!("记录标签读不出来：{error}")))?
+            .map_err(|error| backend(format!("failed to read record labels: {error}")))?
             .unwrap_or_default();
         let before = current.len();
         for label in labels {
@@ -669,7 +672,7 @@ impl Transcript for SqliteStore {
             return Ok(false);
         }
         let text = serde_json::to_string(&current)
-            .map_err(|error| backend(format!("记录标签存不进库：{error}")))?;
+            .map_err(|error| backend(format!("failed to store record labels: {error}")))?;
         self.conn
             .execute(
                 "UPDATE records SET labels = ?4
@@ -810,7 +813,7 @@ impl RawRow {
                     .as_deref()
                     .map(serde_json::from_str)
                     .transpose()
-                    .map_err(|error| backend(format!("事件元数据读不出来：{error}")))?
+                    .map_err(|error| backend(format!("failed to read event metadata: {error}")))?
                     .unwrap_or_default();
                 RecordKind::Event {
                     event: self.event.unwrap_or_default(),
@@ -820,16 +823,20 @@ impl RawRow {
                     body: meta.body,
                 }
             }
-            other => return Err(backend(format!("库里有不认识的记录种类：{other}"))),
+            other => {
+                return Err(backend(format!(
+                    "unrecognized record kind in database: {other}"
+                )));
+            }
         };
         let elements: Vec<Element> = serde_json::from_str(&self.elements)
-            .map_err(|error| backend(format!("内容元素读不出来：{error}")))?;
+            .map_err(|error| backend(format!("failed to read content elements: {error}")))?;
         let labels: Vec<String> = self
             .labels
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
-            .map_err(|error| backend(format!("记录标签读不出来：{error}")))?
+            .map_err(|error| backend(format!("failed to read record labels: {error}")))?
             .unwrap_or_default();
 
         Ok(Record {
@@ -1123,7 +1130,9 @@ impl Notes for SqliteStore {
         for row in rows {
             let (kind, key, value, label, status, corrected, updated_at) = row.map_err(io_error)?;
             let Some(kind) = NoteKind::parse(&kind) else {
-                return Err(backend(format!("库里有不认识的笔记种类：{kind}")));
+                return Err(backend(format!(
+                    "unrecognized note kind in database: {kind}"
+                )));
             };
             notes.push(Note {
                 key: NoteKey::new(room.clone(), kind, key),
@@ -1210,8 +1219,9 @@ impl SessionMaps for SqliteStore {
         let Some((harness_session, meta, updated_at)) = row else {
             return Ok(None);
         };
-        let meta: serde_json::Value = serde_json::from_str(&meta)
-            .map_err(|error| backend(format!("会话映射的元信息读不懂：{error}")))?;
+        let meta: serde_json::Value = serde_json::from_str(&meta).map_err(|error| {
+            backend(format!("failed to parse session mapping metadata: {error}"))
+        })?;
         Ok(Some(SessionMap {
             session: session.to_owned(),
             harness_session,
@@ -1221,8 +1231,9 @@ impl SessionMaps for SqliteStore {
     }
 
     fn upsert_session_map(&mut self, map: SessionMap) -> Result<(), StorageError> {
-        let meta = serde_json::to_string(&map.meta)
-            .map_err(|error| backend(format!("会话映射的元信息存不进库：{error}")))?;
+        let meta = serde_json::to_string(&map.meta).map_err(|error| {
+            backend(format!("failed to store session mapping metadata: {error}"))
+        })?;
         self.conn
             .execute(
                 "INSERT INTO session_maps (session, harness_session, meta, updated_at)
@@ -1240,7 +1251,10 @@ impl SessionMaps for SqliteStore {
     fn delete_session_map(&mut self, session: &str) -> Result<bool, StorageError> {
         let removed = self
             .conn
-            .execute("DELETE FROM session_maps WHERE session = ?1", params![session])
+            .execute(
+                "DELETE FROM session_maps WHERE session = ?1",
+                params![session],
+            )
             .map_err(io_error)?;
         Ok(removed > 0)
     }
@@ -1267,8 +1281,9 @@ impl SessionMaps for SqliteStore {
         let mut maps = Vec::new();
         for row in rows {
             let (session, harness_session, meta, updated_at) = row.map_err(io_error)?;
-            let meta: serde_json::Value = serde_json::from_str(&meta)
-                .map_err(|error| backend(format!("会话映射的元信息读不懂：{error}")))?;
+            let meta: serde_json::Value = serde_json::from_str(&meta).map_err(|error| {
+                backend(format!("failed to parse session mapping metadata: {error}"))
+            })?;
             maps.push(SessionMap {
                 session,
                 harness_session,
@@ -1283,9 +1298,9 @@ impl SessionMaps for SqliteStore {
 impl Feedbacks for SqliteStore {
     fn record_feedback(&mut self, draft: FeedbackDraft) -> Result<Recorded, StorageError> {
         let refs = serde_json::to_string(&draft.refs)
-            .map_err(|error| backend(format!("反馈的出处存不进库：{error}")))?;
+            .map_err(|error| backend(format!("failed to store feedback origin: {error}")))?;
         let context = serde_json::to_string(&draft.context)
-            .map_err(|error| backend(format!("反馈的现场存不进库：{error}")))?;
+            .map_err(|error| backend(format!("failed to store feedback context: {error}")))?;
 
         // 先看指纹在不在。在就合并，不在就新建——比 upsert 多一次查询，但两种情况的
         // 返回不一样（新建要给新 id，合并要给累计次数），分开写更好读。

@@ -102,7 +102,10 @@ fn main() -> std::io::Result<()> {
                 )?;
             }
             CoreMessage::Call {
-                id, method: method_name, params, ..
+                id,
+                method: method_name,
+                params,
+                ..
             } => {
                 let result = match method_name.as_str() {
                     "fixture.echo" => WireResult::Call {
@@ -139,10 +142,7 @@ fn main() -> std::io::Result<()> {
                         },
                     },
                 };
-                write_message(
-                    &mut stdout,
-                    &AdapterMessage::Reply { id, result },
-                )?;
+                write_message(&mut stdout, &AdapterMessage::Reply { id, result })?;
             }
             CoreMessage::Shutdown => break,
         }
@@ -185,7 +185,7 @@ fn catalog() -> Vec<WireMethodSpec> {
         WireMethodSpec {
             name: "fixture.fail".into(),
             summary: "永远返回参数错误".into(),
-            tags: vec![ "system".into() ],
+            tags: vec!["system".into()],
             risk: "read".into(),
             scope: "room".into(),
             params: Vec::new(),

@@ -41,7 +41,7 @@ export class McpServer {
       try {
         message = JSON.parse(text)
       } catch {
-        this.log("warn", `收到非 JSON 的 MCP 消息：${text.slice(0, 200)}`)
+        this.log("warn", `received non-JSON MCP message: ${text.slice(0, 200)}`)
         return
       }
       this.#dispatch(message)
@@ -84,7 +84,7 @@ export class McpServer {
         this.#handleCall(message)
         return
       default:
-        this.#respond(message.id, null, -32601, `不知道的 MCP 方法 ${message.method}`)
+        this.#respond(message.id, null, -32601, `unknown MCP method ${message.method}`)
     }
   }
 

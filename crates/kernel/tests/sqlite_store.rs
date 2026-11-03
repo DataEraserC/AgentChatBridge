@@ -54,7 +54,7 @@ fn message(room: &RoomId, text: &str) -> RecordDraft {
         Sender {
             id: "323622442".into(),
             name: "萨卡班甲鱼".into(),
-                role: None,
+            role: None,
         },
         AT,
         vec![Element::text(text)],
@@ -186,7 +186,7 @@ fn elements_survive_the_round_trip() {
         Sender {
             id: "1".into(),
             name: "老王".into(),
-                role: None,
+            role: None,
         },
         AT,
         elements.clone(),
@@ -275,7 +275,10 @@ fn event_meta_survives_a_restart() {
             assert_eq!(tags, &["poke".to_string(), "notice".to_string()]);
             assert!(!body, "无正文标记要能跟着记录落库、重启后还在");
             assert_eq!(
-                payload.as_ref().and_then(|value| value.get("sub_type")).and_then(|value| value.as_str()),
+                payload
+                    .as_ref()
+                    .and_then(|value| value.get("sub_type"))
+                    .and_then(|value| value.as_str()),
                 Some("poke")
             );
             assert_eq!(summary.as_deref(), Some("[拍了拍我]"));
@@ -394,11 +397,11 @@ fn recall_marker_survives_reopen() {
     }
 
     let mut store = acb_kernel::SqliteStore::open(db.path()).expect("能再打开");
-    let stored = store
-        .located(&qq, "m-1")
-        .expect("能查")
-        .expect("记录还在");
-    assert!(stored.labels.contains(&"recall".to_owned()), "撤回标记要落盘");
+    let stored = store.located(&qq, "m-1").expect("能查").expect("记录还在");
+    assert!(
+        stored.labels.contains(&"recall".to_owned()),
+        "撤回标记要落盘"
+    );
 
     // 撤回事件本身也在流水里，供 agent 事后查询。
     store
@@ -723,7 +726,7 @@ fn a_version_one_database_is_migrated_in_place() {
         Sender {
             id: "3683924053".into(),
             name: "bot".into(),
-                role: None,
+            role: None,
         },
         AT,
         vec![Element::text("新消息")],
@@ -935,16 +938,27 @@ fn feedback_survives_a_restart_and_merges_by_fingerprint() {
         assert_eq!(items[0].occurrences, 5);
         assert_eq!(items[0].status, "open");
 
-        assert!(store
-            .set_feedback_status(items[0].id, "resolved", Some("已按 ADR-0022 修"))
-            .expect("能改"));
+        assert!(
+            store
+                .set_feedback_status(items[0].id, "resolved", Some("已按 ADR-0022 修"))
+                .expect("能改")
+        );
         // 又出现了：合并时要把 resolved 退回 open——复发是事实，不用人再点一次。
         let back = store.record_feedback(draft(AT + 2, 1)).expect("能写");
         assert_eq!(back.repeats, 3);
         let items = store.feedback(Some("open"), 10).expect("能读");
         assert_eq!(items.len(), 1, "复发要重新打开");
-        assert_eq!(items[0].note.as_deref(), Some("已按 ADR-0022 修"), "备注留着");
-        assert!(store.feedback(Some("resolved"), 10).expect("能读").is_empty());
+        assert_eq!(
+            items[0].note.as_deref(),
+            Some("已按 ADR-0022 修"),
+            "备注留着"
+        );
+        assert!(
+            store
+                .feedback(Some("resolved"), 10)
+                .expect("能读")
+                .is_empty()
+        );
     }
 }
 
@@ -957,9 +971,21 @@ fn merging_fills_empty_fields_in_sqlite_too() {
         title: "平台方法清单里没有撤回".to_owned(),
         body: "平台方法清单里没有「撤回」这个动作名".to_owned(),
         suggestion: full.then(|| "跟 delete_msg 对齐".to_owned()),
-        kind: if full { "gap".to_owned() } else { "friction".to_owned() },
-        severity: if full { "major".to_owned() } else { "minor".to_owned() },
-        refs: if full { vec!["#700".to_owned()] } else { Vec::new() },
+        kind: if full {
+            "gap".to_owned()
+        } else {
+            "friction".to_owned()
+        },
+        severity: if full {
+            "major".to_owned()
+        } else {
+            "minor".to_owned()
+        },
+        refs: if full {
+            vec!["#700".to_owned()]
+        } else {
+            Vec::new()
+        },
         occurrences: 1,
         tool: full.then(|| "platform_methods".to_owned()),
         session: "main".to_owned(),

@@ -12,17 +12,17 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use acb_adapter_api::{
-    WireConnection, WireError, WireManifest, WireMethodSpec, WireOutgoingKind,
-    WireOutgoingRecord, WireParamSpec, WirePluginMetadata, WireRecord, WireTargetSpec,
+    WireConnection, WireError, WireManifest, WireMethodSpec, WireOutgoingKind, WireOutgoingRecord,
+    WireParamSpec, WirePluginMetadata, WireRecord, WireTargetSpec,
 };
 
 use crate::adapter::{AdapterCapability, AdapterManifest};
 use crate::config::Connection;
-use crate::plugin_meta::{PluginEffect, PluginMetadata};
 use crate::outbound::{
     CallError, Effect, MethodSpec, OutboundError, OutgoingKind, OutgoingRecord, ParamSpec,
     ParamType, RecordMode, Risk, Scope, TargetRole, TargetSpec,
 };
+use crate::plugin_meta::{PluginEffect, PluginMetadata};
 use crate::storage::RecordDraft;
 
 impl TryFrom<WireManifest> for AdapterManifest {
@@ -35,7 +35,7 @@ impl TryFrom<WireManifest> for AdapterManifest {
                 "receive_events" => AdapterCapability::ReceiveEvents,
                 "send" => AdapterCapability::Send,
                 "catalog" => AdapterCapability::Catalog,
-                other => return Err(format!("不认识的适配器能力：{other}")),
+                other => return Err(format!("unknown adapter capability: {other}")),
             });
         }
         let transports = manifest
@@ -53,8 +53,8 @@ impl TryFrom<WireManifest> for AdapterManifest {
             .into_iter()
             .map(Cow::Owned)
             .collect::<Vec<_>>();
-        let metadata =
-            PluginMetadata::try_from(manifest.metadata).map_err(|detail| format!("metadata：{detail}"))?;
+        let metadata = PluginMetadata::try_from(manifest.metadata)
+            .map_err(|detail| format!("metadata: {detail}"))?;
         Ok(AdapterManifest {
             id: Cow::Owned(manifest.id),
             platform: Cow::Owned(manifest.platform),
@@ -79,7 +79,7 @@ impl TryFrom<WirePluginMetadata> for PluginMetadata {
         for effect in &metadata.effects {
             effects.push(
                 PluginEffect::parse(effect)
-                    .ok_or_else(|| format!("不认识的插件效果：{effect}"))?,
+                    .ok_or_else(|| format!("unknown plugin effect: {effect}"))?,
             );
         }
         Ok(Self {
@@ -139,10 +139,10 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
     fn try_from(spec: WireMethodSpec) -> Result<Self, Self::Error> {
         let name = spec.name.trim();
         if name.is_empty() {
-            return Err("方法名不能为空".into());
+            return Err("method name must not be empty".into());
         }
         if !name.contains('.') {
-            return Err(format!("方法名要写成 resource.method：{name}"));
+            return Err(format!("method name must be resource.method: {name}"));
         }
 
         let risk = parse_risk(&spec.risk)?;
@@ -186,14 +186,10 @@ impl TryFrom<WireParamSpec> for ParamSpec {
     fn try_from(param: WireParamSpec) -> Result<Self, Self::Error> {
         let name = param.name.trim();
         if name.is_empty() {
-            return Err("参数名不能为空".into());
+            return Err("parameter name must not be empty".into());
         }
         let ty = parse_param_type(&param.ty)?;
-        let values = param
-            .values
-            .into_iter()
-            .map(Cow::Owned)
-            .collect::<Vec<_>>();
+        let values = param.values.into_iter().map(Cow::Owned).collect::<Vec<_>>();
         Ok(ParamSpec {
             name: Cow::Owned(name.to_owned()),
             ty,
@@ -211,12 +207,12 @@ impl TryFrom<WireTargetSpec> for TargetSpec {
         let param = target.param.trim();
         let room_kind = target.room_kind.trim();
         if param.is_empty() || room_kind.is_empty() {
-            return Err("目标参数的 param / room_kind 不能为空".into());
+            return Err("target parameter param / room_kind must not be empty".into());
         }
         let role = match target.role.as_str() {
             "room" => TargetRole::Room,
             "member" => TargetRole::Member,
-            other => return Err(format!("不认识的目标角色：{other}（room / member）")),
+            other => return Err(format!("unknown target role: {other} (room / member)")),
         };
         Ok(TargetSpec {
             param: Cow::Owned(param.to_owned()),
@@ -252,7 +248,7 @@ pub fn convert_catalog(specs: Vec<WireMethodSpec>) -> Result<Arc<[MethodSpec]>, 
             .iter()
             .any(|existing: &MethodSpec| existing.name.as_ref() == name.as_str())
         {
-            return Err(format!("方法名重复：{name}"));
+            return Err(format!("duplicate method name: {name}"));
         }
         methods.push(MethodSpec::try_from(spec)?);
     }
@@ -288,7 +284,7 @@ pub fn send_error(error: WireError) -> OutboundError {
         | WireError::NotImplemented { detail } => OutboundError::Unsupported(detail),
         WireError::Unavailable { detail } => OutboundError::Unavailable(detail),
         WireError::UnknownMethod { method, .. } => {
-            OutboundError::Unsupported(format!("没有发送方法：{method}"))
+            OutboundError::Unsupported(format!("no send method: {method}"))
         }
         WireError::BadParams { detail } => OutboundError::Rejected(detail),
     }
@@ -302,7 +298,7 @@ fn parse_param_type(text: &str) -> Result<ParamType, String> {
         "string_list" => Ok(ParamType::StringList),
         "object" => Ok(ParamType::Object),
         "any" => Ok(ParamType::Any),
-        other => Err(format!("不认识的参数类型：{other}")),
+        other => Err(format!("unknown parameter type: {other}")),
     }
 }
 
@@ -311,7 +307,7 @@ fn parse_risk(text: &str) -> Result<Risk, String> {
         "read" => Ok(Risk::Read),
         "write" => Ok(Risk::Write),
         "destructive" => Ok(Risk::Destructive),
-        other => Err(format!("不认识的风险级别：{other}")),
+        other => Err(format!("unknown risk level: {other}")),
     }
 }
 
@@ -319,7 +315,7 @@ fn parse_scope(text: &str) -> Result<Scope, String> {
     match text {
         "room" => Ok(Scope::Room),
         "connection" => Ok(Scope::Connection),
-        other => Err(format!("不认识的作用域：{other}")),
+        other => Err(format!("unknown scope: {other}")),
     }
 }
 
@@ -329,7 +325,7 @@ fn parse_effect(text: &str) -> Result<Effect, String> {
         "write" => Ok(Effect::Write),
         "send" => Ok(Effect::Send),
         "delete" => Ok(Effect::Delete),
-        other => Err(format!("不认识的 effect：{other}")),
+        other => Err(format!("unknown effect: {other}")),
     }
 }
 
@@ -338,7 +334,7 @@ fn parse_record(text: &str) -> Result<RecordMode, String> {
         "none" => Ok(RecordMode::None),
         "message" => Ok(RecordMode::Message),
         "event" => Ok(RecordMode::Event),
-        other => Err(format!("不认识的 record 模式：{other}")),
+        other => Err(format!("unknown record mode: {other}")),
     }
 }
 
@@ -399,7 +395,7 @@ mod tests {
     fn duplicate_method_names_are_rejected() {
         let specs = vec![wire_method(), wire_method()];
         let error = convert_catalog(specs).expect_err("重复要报错");
-        assert!(error.contains("重复"), "{error}");
+        assert!(error.contains("duplicate"), "{error}");
     }
 
     #[test]
@@ -472,16 +468,25 @@ mod tests {
             metadata: WirePluginMetadata::default(),
         })
         .expect("能转换");
-        assert!(manifest.events.iter().any(|event| event.as_ref() == "knock"));
-        assert!(manifest
-            .event_tags
-            .iter()
-            .any(|tag| tag.as_ref() == "mention"));
+        assert!(
+            manifest
+                .events
+                .iter()
+                .any(|event| event.as_ref() == "knock")
+        );
+        assert!(
+            manifest
+                .event_tags
+                .iter()
+                .any(|tag| tag.as_ref() == "mention")
+        );
         assert!(manifest.supports_at && manifest.supports_reply);
         assert_eq!(manifest.kind, "demo");
-        assert!(manifest
-            .capabilities
-            .iter()
-            .any(|capability| *capability == AdapterCapability::Send));
+        assert!(
+            manifest
+                .capabilities
+                .iter()
+                .any(|capability| *capability == AdapterCapability::Send)
+        );
     }
 }

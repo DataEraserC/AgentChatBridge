@@ -45,7 +45,7 @@ export class McpHttpServer {
       server.listen(port, host, () => {
         this.server = server
         this.port = server.address().port
-        this.log("info", `MCP streamable-http 端点就位：http://${host}:${this.port}/mcp`)
+        this.log("info", `MCP streamable-http endpoint ready: http://${host}:${this.port}/mcp`)
         resolve(this.port)
       })
     })

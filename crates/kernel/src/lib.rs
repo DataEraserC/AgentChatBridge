@@ -6,8 +6,8 @@
 pub mod adapter;
 pub mod config;
 pub mod endpoint;
-pub mod event_queue;
 pub mod engine;
+pub mod event_queue;
 pub mod memory;
 pub mod outbound;
 pub mod plugin;
@@ -23,46 +23,43 @@ pub mod tools;
 pub mod wire;
 
 pub use adapter::{
-    AdapterCapability, AdapterError, AdapterFactory, AdapterHost, AdapterInstance,
-    AdapterManifest, ADAPTER_API_VERSION, create_instance, manifest_supports_transport,
+    ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
+    AdapterInstance, AdapterManifest, create_instance, manifest_supports_transport,
     validate_manifest,
 };
-pub use event_queue::{drain_events, EventQueue, EventReceiver};
-pub use route_worker::RouteWorker;
-pub use plugin_meta::{PluginEffect, PluginInfo, PluginMetadata, PluginSource};
 pub use config::{
     AccessPolicy, ClockPolicy, Config, Connection, ConsoleConfig, DEFAULT_MAX_AGE_DAYS,
-    PluginConfig,
     DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH, DEFAULT_WORKTREES_ROOT, DeliveryPolicy,
-    EndpointConfig, Harness,
-    KNOWN_MEMORY_KINDS, Memory, OutboundPolicy, Persona, ReceivePolicy, RoutePolicy,
-    RetentionConfig, Session, StorageConfig, Subscription, Transport, TurnErrorAction,
-    TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput, WakePolicy, WakeVerdict,
+    EndpointConfig, Harness, KNOWN_MEMORY_KINDS, Memory, OutboundPolicy, Persona, PluginConfig,
+    ReceivePolicy, RetentionConfig, RoutePolicy, Session, StorageConfig, Subscription, Transport,
+    TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput, WakePolicy,
+    WakeVerdict,
 };
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
-pub use relay::{FileRelay, RelayError};
 pub use engine::{Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned};
+pub use event_queue::{EventQueue, EventReceiver, drain_events};
 pub use outbound::{
-    CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, OutgoingKind,
-    OutgoingRecord, Outbounds, ParamSpec, ParamType, RecordMode, Risk, Scope, Sent, TargetRole,
-    TargetSpec,
+    CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, Outbounds, OutgoingKind,
+    OutgoingRecord, ParamSpec, ParamType, RecordMode, Risk, Scope, Sent, TargetRole, TargetSpec,
 };
 pub use plugin::{
-    AcceptAllReceiveProvider, AccessAction, AccessDecision, AccessProvider, AccessRequest,
-    AllRoomsAccessProvider, Capability, ClockContext, ClockOffProvider, ClockProvider,
-    DefaultDeliveryComposer,
-    DefaultTurnErrorProvider, DefaultWakeProvider, DeliveryComposer, DeliveryPlan, DeliveryRequest,
-    ElevatedInRoomsAccessProvider, ExtensionPoint, Health, IntervalIdleClockProvider, LoaderKind,
-    LoaderManifest, MAX_MANAGER_DEPTH, ManagerHealth, ManagerManifest, ManagerPlugin, NativeLoader,
-    PluginError, PluginLoader, PluginManager, ProviderDescriptor, ProviderId, ProviderInstance,
-    ProviderOptions, ReceiveDecision, ReceiveProvider, ReceiveRequest, ReloadScope, RouteAction,
-    RouteContext, RouteDecision, RouteProvider, InterruptScope,
-    SendContext, SendHook, SendOrigin, SubscribedAccessProvider, TurnErrorProvider, TurnErrorRequest,
-    WakeContext, WakeProvider, ALL_ROOMS_ACCESS_PROVIDER, CLOCK_INTERVAL_IDLE_PROVIDER,
-    DEFAULT_ACCESS_PROVIDER, DEFAULT_CLOCK_PROVIDER, DEFAULT_DELIVERY_PROVIDER,
-    DEFAULT_RECEIVE_PROVIDER, DEFAULT_TURN_ERROR_PROVIDER, ELEVATED_ACCESS_PROVIDER,
-    PLUGIN_API_VERSION, default_delivery_plan,
+    ALL_ROOMS_ACCESS_PROVIDER, AcceptAllReceiveProvider, AccessAction, AccessDecision,
+    AccessProvider, AccessRequest, AllRoomsAccessProvider, CLOCK_INTERVAL_IDLE_PROVIDER,
+    Capability, ClockContext, ClockOffProvider, ClockProvider, DEFAULT_ACCESS_PROVIDER,
+    DEFAULT_CLOCK_PROVIDER, DEFAULT_DELIVERY_PROVIDER, DEFAULT_RECEIVE_PROVIDER,
+    DEFAULT_TURN_ERROR_PROVIDER, DefaultDeliveryComposer, DefaultTurnErrorProvider,
+    DefaultWakeProvider, DeliveryComposer, DeliveryPlan, DeliveryRequest, ELEVATED_ACCESS_PROVIDER,
+    ElevatedInRoomsAccessProvider, ExtensionPoint, Health, InterruptScope,
+    IntervalIdleClockProvider, LoaderKind, LoaderManifest, MAX_MANAGER_DEPTH, ManagerHealth,
+    ManagerManifest, ManagerPlugin, NativeLoader, PLUGIN_API_VERSION, PluginError, PluginLoader,
+    PluginManager, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions,
+    ReceiveDecision, ReceiveProvider, ReceiveRequest, ReloadScope, RouteAction, RouteContext,
+    RouteDecision, RouteProvider, SendContext, SendHook, SendOrigin, SubscribedAccessProvider,
+    TurnErrorProvider, TurnErrorRequest, WakeContext, WakeProvider, default_delivery_plan,
 };
+pub use plugin_meta::{PluginEffect, PluginInfo, PluginMetadata, PluginSource};
+pub use relay::{FileRelay, RelayError};
+pub use route_worker::RouteWorker;
 pub use storage::{
     Counts, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, Feedbacks, MIN_KEPT,
     MemoryStore, Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft, Recorded, SCHEMA_VERSION,

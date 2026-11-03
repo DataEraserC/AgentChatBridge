@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use acb_adapter_onebot11::OneBotAdapterFactory;
 use acb_adapter_dynamic::DynamicLoader;
+use acb_adapter_onebot11::OneBotAdapterFactory;
 use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::{
     AdapterHost, AdapterInstance, Bridge, Config, ControlRegistry, EventQueue, FileRelay,
@@ -36,7 +36,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("起不来：{error}");
+            eprintln!("error: acb-bridge failed to start: {error}");
             ExitCode::FAILURE
         }
     }
@@ -54,14 +54,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let warnings = config.warnings();
     if !warnings.is_empty() {
         for warning in &warnings {
-            eprintln!("注意：{warning}");
+            eprintln!("warning: {warning}");
         }
-        eprintln!("这些是你配的，就按这样跑。三秒后继续（Ctrl-C 可以停）。");
+        eprintln!("continuing with the configured warnings in 3 seconds (Ctrl-C stops).");
         std::thread::sleep(Duration::from_secs(3));
     }
 
     if options.check_only {
-        println!("配置没问题（只检查，没有启动）");
+        println!("config OK (check only, not started)");
         return Ok(());
     }
 
@@ -70,7 +70,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = SqliteStore::open(&config.storage.path)?;
     let counts = store.counts()?;
     println!(
-        "状态库：{}（已有 {} 条记录、{} 个房间、{} 条笔记）",
+        "store: {} ({} record(s), {} room(s), {} note(s))",
         config.storage.path, counts.records, counts.rooms, counts.notes
     );
 
@@ -161,12 +161,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let controls = controls.clone();
             std::thread::spawn(move || {
                 if let Err(error) = serve(listener, bridge, shutdown, controls) {
-                    eprintln!("接入点停了：{error}");
+                    eprintln!("error: endpoint stopped: {error}");
                 }
             });
-            println!("接入点已监听 {}", endpoint.listen);
+            println!("endpoint listening on {}", endpoint.listen);
         }
-        None => println!("没有配 [endpoint]，harness 连不进来"),
+        None => println!("no [endpoint] configured; harness connections are disabled"),
     }
 
     // 控制台：可远程访问的管理 HTTP 服务（ADR-0018）。
@@ -183,9 +183,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::spawn(move || {
                 Console::serve(listener, console_service, shutdown);
             });
-            println!("控制台已监听 {}（token 鉴权）", console.listen);
+            println!("console listening on {} (token auth)", console.listen);
         }
-        None => println!("没有配 [console]，控制台不起"),
+        None => println!("no [console] configured; console disabled"),
     }
 
     // 文件中继：平台在别的文件系统命名空间里时（典型：平台在容器、agent 在宿主机），
@@ -200,11 +200,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let shutdown = Arc::clone(&shutdown);
             std::thread::spawn(move || FileRelay::serve(listener, relay, shutdown));
             println!(
-                "文件中继已监听 {}，平台从 {} 取文件（存 {}）",
+                "file relay listening on {}; platforms fetch from {} (stored in {})",
                 relay_config.listen, relay_config.public_base, relay_config.dir
             );
         }
-        None => println!("没有配 [file_relay]，本机文件路径原样透传"),
+        None => println!("no [file_relay] configured; local file paths pass through"),
     }
 
     {
@@ -237,14 +237,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     guard.tick_clock(now)
                 };
                 if queued > 0 {
-                    println!("时钟：排了 {queued} 轮例行检查");
+                    println!("clock: queued {queued} scheduled check(s)");
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
         });
     }
 
-    println!("桥在跑。按 Ctrl-C 停。");
+    println!("bridge running; press Ctrl-C to stop");
     while !shutdown.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_secs(3600));
     }
@@ -270,12 +270,14 @@ fn prune_once(bridge: &Mutex<Bridge<SqliteStore>>) {
         Ok(pruned) => {
             for item in pruned {
                 println!(
-                    "清理：{} 删掉 {} 条已读记录，留 {} 条",
+                    "prune: {} removed {} read record(s), kept {}",
                     item.room, item.deleted, item.kept
                 );
             }
         }
-        Err(error) => eprintln!("清理失败（不影响收发，下次再试）：{error}"),
+        Err(error) => {
+            eprintln!("warning: prune failed (send/receive unaffected, retry next cycle): {error}")
+        }
     }
 }
 
@@ -294,14 +296,14 @@ impl Options {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--config" => {
-                    config = args.next().ok_or("--config 后面要跟配置文件路径")?;
+                    config = args.next().ok_or("--config requires a file path")?;
                 }
                 "--check" => check_only = true,
                 "--help" | "-h" => {
-                    println!("用法：acb-bridge [--config 路径] [--check]");
+                    println!("usage: acb-bridge [--config PATH] [--check]");
                     std::process::exit(0);
                 }
-                other => return Err(format!("不认识的参数：{other}（用 --help 看用法）").into()),
+                other => return Err(format!("unknown argument: {other} (see --help)").into()),
             }
         }
 
@@ -310,38 +312,38 @@ impl Options {
 }
 
 fn print_summary(config: &Config, path: &str) {
-    println!("配置：{path}");
+    println!("config: {path}");
 
-    println!("  连接：{} 条", config.connections.len());
+    println!("  connections: {}", config.connections.len());
     for connection in &config.connections {
         println!(
-            "    - {}（{} / {}，{}）连 {}，登录账号 {}",
+            "    - {} ({}, {}, {}) -> {}, account {}",
             connection.id,
             connection.platform,
             connection.kind,
             connection.transport.as_str(),
-            connection.url.as_deref().unwrap_or("（无地址）"),
+            connection.url.as_deref().unwrap_or("(none)"),
             connection.account
         );
     }
 
-    println!("  人格：{} 张", config.personas.len());
+    println!("  personas: {}", config.personas.len());
     for persona in &config.personas {
-        println!("    - {}（{}）", persona.id, persona.name);
+        println!("    - {} ({})", persona.id, persona.name);
     }
 
-    println!("  记忆：{} 份", config.memories.len());
+    println!("  memories: {}", config.memories.len());
     for memory in &config.memories {
         println!(
-            "    - {}（{}，{} @ {}）",
+            "    - {} ({}, {} @ {})",
             memory.id, memory.name, memory.kind, memory.location
         );
     }
 
-    println!("  会话：{} 个", config.sessions.len());
+    println!("  sessions: {}", config.sessions.len());
     for session in &config.sessions {
         println!(
-            "    - {}（harness {}，人格 {}，记忆 {:?}，{} 条订阅）",
+            "    - {} (harness {}, persona {}, memories {:?}, {} subscription(s))",
             session.id,
             session.harness,
             session.persona,
@@ -356,17 +358,17 @@ fn print_summary(config: &Config, path: &str) {
     let retention = config.retention;
     if retention.enabled() {
         let by_count = if retention.max_records_per_room > 0 {
-            format!("每房间留 {} 条", retention.max_records_per_room)
+            format!("keep {} per room", retention.max_records_per_room)
         } else {
-            "不按条数清".to_owned()
+            "no per-room count limit".to_owned()
         };
         let by_age = if retention.max_age_days > 0 {
-            format!("最多留 {} 天", retention.max_age_days)
+            format!("at most {} day(s)", retention.max_age_days)
         } else {
-            "不按天数清".to_owned()
+            "no age limit".to_owned()
         };
-        println!("  流水保留：{by_count}，{by_age}（只削已读的，未读一条不动）");
+        println!("  retention: {by_count}, {by_age} (read records only; unread are never pruned)");
     } else {
-        println!("  流水保留：不清理——库只增不减");
+        println!("  retention: disabled (the store only grows)");
     }
 }

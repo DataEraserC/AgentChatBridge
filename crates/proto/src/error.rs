@@ -7,28 +7,28 @@ use thiserror::Error;
 /// 构造协议类型时的错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProtoError {
-    #[error("连接名不能为空")]
+    #[error("connection name must not be empty")]
     EmptyConnection,
-    #[error("房间路径不能为空（要写成 段/段，如 group/123）")]
+    #[error("room path must not be empty (write it as segment/segment, e.g. group/123)")]
     EmptyPath,
-    #[error("连接名或路径段里不能有分隔符（: 与 /）：{0}")]
+    #[error("connection name or path segment must not contain a separator (: or /): {0}")]
     SeparatorInPart(String),
-    #[error("回合票不能为空")]
+    #[error("turn ticket must not be empty")]
     EmptyTicket,
-    #[error("帧编码失败：{0}")]
+    #[error("frame encode failed: {0}")]
     Encode(String),
 }
 
 /// 解帧失败。除了「太大」，其余都不是断连理由之外的错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DecodeError {
-    #[error("帧太大：{size} 字节，上限 {max}")]
+    #[error("frame too large: {size} bytes (limit {max})")]
     TooLarge { size: usize, max: usize },
-    #[error("不是合法 JSON：{detail}")]
+    #[error("not valid JSON: {detail}")]
     NotJson { detail: String },
-    #[error("不认识的帧：{frame}")]
+    #[error("unknown frame: {frame}")]
     UnknownFrame { frame: String },
-    #[error("帧缺少必需字段：{detail}")]
+    #[error("frame is missing a required field: {detail}")]
     MissingField { detail: String },
 }
 
@@ -41,7 +41,7 @@ mod tests {
         let error = ProtoError::EmptyPath;
         assert_eq!(
             error.to_string(),
-            "房间路径不能为空（要写成 段/段，如 group/123）"
+            "room path must not be empty (write it as segment/segment, e.g. group/123)"
         );
 
         let decode = DecodeError::TooLarge { size: 9, max: 4 };

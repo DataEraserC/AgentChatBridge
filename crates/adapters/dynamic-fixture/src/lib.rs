@@ -4,8 +4,8 @@
 //! 按连接创建实例、发事件、回发送/调用结果、按 shutdown 收尾。
 
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -56,11 +56,7 @@ unsafe extern "C" fn fixture_manifest() -> *mut c_char {
         kind: "demo".into(),
         transports: vec!["dynamic".into()],
         api_version: 1,
-        capabilities: vec![
-            "receive_events".into(),
-            "send".into(),
-            "catalog".into(),
-        ],
+        capabilities: vec!["receive_events".into(), "send".into(), "catalog".into()],
         events: vec!["knock".into(), "poke".into()],
         event_tags: vec!["notice".into(), "poke".into()],
         supports_at: true,
@@ -77,12 +73,13 @@ unsafe extern "C" fn fixture_manifest() -> *mut c_char {
         },
     };
     let json = serde_json::to_string(&manifest).expect("manifest 可序列化");
-    CString::new(json)
-        .expect("manifest 没有 NUL")
-        .into_raw()
+    CString::new(json).expect("manifest 没有 NUL").into_raw()
 }
 
-unsafe extern "C" fn fixture_create(config_json: *const c_char, host: *const HostV1) -> *mut c_void {
+unsafe extern "C" fn fixture_create(
+    config_json: *const c_char,
+    host: *const HostV1,
+) -> *mut c_void {
     if config_json.is_null() || host.is_null() {
         return std::ptr::null_mut();
     }
@@ -140,7 +137,10 @@ unsafe extern "C" fn fixture_create(config_json: *const c_char, host: *const Hos
     Box::into_raw(Box::new(fixture)) as *mut c_void
 }
 
-unsafe extern "C" fn fixture_invoke(handle: *mut c_void, request_json: *const c_char) -> *mut c_char {
+unsafe extern "C" fn fixture_invoke(
+    handle: *mut c_void,
+    request_json: *const c_char,
+) -> *mut c_char {
     if handle.is_null() || request_json.is_null() {
         return std::ptr::null_mut();
     }
@@ -156,9 +156,7 @@ unsafe extern "C" fn fixture_invoke(handle: *mut c_void, request_json: *const c_
     let reply = match message {
         CoreMessage::Describe { id } => AdapterMessage::Reply {
             id,
-            result: WireResult::Catalog {
-                catalog: catalog(),
-            },
+            result: WireResult::Catalog { catalog: catalog() },
         },
         CoreMessage::Send { id, .. } => AdapterMessage::Reply {
             id,
@@ -168,10 +166,7 @@ unsafe extern "C" fn fixture_invoke(handle: *mut c_void, request_json: *const c_
             },
         },
         CoreMessage::Call {
-            id,
-            method,
-            params,
-            ..
+            id, method, params, ..
         } => {
             let result = match method.as_str() {
                 "demo.echo" => WireResult::Call {

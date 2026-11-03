@@ -38,15 +38,15 @@ pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 /// 适配器错误。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LinkError {
-    #[error("地址不合法：{0}（要写成 ws://主机:端口/路径）")]
+    #[error("invalid URL: {0} (must be ws://host:port/path)")]
     BadUrl(String),
-    #[error("连不上 {address}：{detail}")]
+    #[error("cannot connect to {address}: {detail}")]
     Connect { address: String, detail: String },
-    #[error("WebSocket 握手失败：{0}")]
+    #[error("WebSocket handshake failed: {0}")]
     Handshake(String),
-    #[error("连接出错：{0}")]
+    #[error("connection error: {0}")]
     Transport(String),
-    #[error("等平台回话超时")]
+    #[error("timed out waiting for the platform")]
     Timeout,
 }
 
@@ -130,13 +130,18 @@ fn build_request(
 
     let mut request = url
         .into_client_request()
-        .map_err(|error| LinkError::BadUrl(format!("{url}（{error}）")))?;
+        .map_err(|error| LinkError::BadUrl(format!("{url} ({error})")))?;
 
     if let Some(token) = token {
         let token = token.trim();
         if !token.is_empty() {
             let value = tungstenite::http::HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|_| LinkError::BadUrl("访问令牌里有不能放进请求头的字符".into()))?;
+                .map_err(|_| {
+                    LinkError::BadUrl(
+                        "access token contains characters that cannot be used in a request header"
+                            .into(),
+                    )
+                })?;
             request
                 .headers_mut()
                 .insert(tungstenite::http::header::AUTHORIZATION, value);
@@ -189,7 +194,7 @@ pub fn pump(
                         waiting.insert(echo.to_owned(), action.reply);
                     }
                     if let Err(error) = ws.send(Message::text(action.body.to_string())) {
-                        fail_all(&mut waiting, "发送时连接断了");
+                        fail_all(&mut waiting, "connection lost while sending");
                         return Err(LinkError::Transport(error.to_string()));
                     }
                 }
@@ -220,13 +225,13 @@ pub fn pump(
             Err(WsError::Io(error)) if is_timeout(&error) => continue,
             Err(WsError::ConnectionClosed | WsError::AlreadyClosed) => return Ok(()),
             Err(error) => {
-                fail_all(&mut waiting, "读的时候连接断了");
+                fail_all(&mut waiting, "connection lost while reading");
                 return Err(LinkError::Transport(error.to_string()));
             }
         }
     }
 
-    fail_all(&mut waiting, "桥要退出了");
+    fail_all(&mut waiting, "the bridge is shutting down");
     Ok(())
 }
 
@@ -248,7 +253,7 @@ fn handle_text(
     waiting: &mut HashMap<String, Sender<Result<Value, LinkError>>>,
 ) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        eprintln!("适配器 {connection}：收到一段不是 JSON 的内容，丢掉");
+        eprintln!("adapter {connection}: received non-JSON content; dropping it");
         return;
     };
 
@@ -283,16 +288,16 @@ fn submit_event(events: &EventQueue, connection: &str, value: &Value, admin_qqs:
     match event::parse(connection, value, admin_qqs) {
         Ok(Parsed::Record(draft)) => {
             if !events.submit(draft) {
-                eprintln!("适配器 {connection}：入站队列已关闭，丢掉一条记录");
+                eprintln!("adapter {connection}: inbound queue is closed; dropping a record");
             }
         }
         Ok(Parsed::Ignored(reason)) => {
             // 心跳之类，不值得每次都打日志。
-            if reason.starts_with("不认识") {
-                eprintln!("适配器 {connection}：{reason}");
+            if reason.starts_with("unrecognized") {
+                eprintln!("adapter {connection}: {reason}");
             }
         }
-        Err(error) => eprintln!("适配器 {connection}：这条事件读不懂：{error}"),
+        Err(error) => eprintln!("adapter {connection}: cannot parse this event: {error}"),
     }
 }
 
@@ -333,7 +338,7 @@ fn spawn_poke_lookup(
                     }
                 }
                 Err(error) => eprintln!(
-                    "适配器 {connection}：查 {user} 的昵称失败，沿用号码：{error}"
+                    "adapter {connection}: failed to resolve nickname for {user}; using the number: {error}"
                 ),
             }
         }
@@ -373,7 +378,7 @@ pub fn supervise(
     while !shutdown.load(Ordering::Relaxed) {
         match connect(&url, token.as_deref(), READ_TICK) {
             Ok(ws) => {
-                eprintln!("适配器 {id}：已连上 {url}");
+                eprintln!("adapter {id}: connected to {url}");
                 let (sender, actions) = mpsc::channel();
                 slot.install(sender.clone());
 
@@ -386,30 +391,24 @@ pub fn supervise(
                     std::thread::spawn(move || probe_login(&sender, &account, &id));
                 }
 
-                let outcome = pump(
-                    ws,
-                    actions,
-                    &events,
-                    &id,
-                    &admin_qqs,
-                    &slot,
-                    &shutdown,
-                );
+                let outcome = pump(ws, actions, &events, &id, &admin_qqs, &slot, &shutdown);
                 slot.clear();
                 if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
                 match outcome {
                     Ok(()) => {
-                        eprintln!("适配器 {id}：连接关了，{RECONNECT_DELAY:?} 后重连")
+                        eprintln!(
+                            "adapter {id}: connection closed; reconnecting in {RECONNECT_DELAY:?}"
+                        )
                     }
                     Err(error) => {
-                        eprintln!("适配器 {id}：{error}，{RECONNECT_DELAY:?} 后重连")
+                        eprintln!("adapter {id}: {error}; reconnecting in {RECONNECT_DELAY:?}")
                     }
                 }
             }
             Err(error) => {
-                eprintln!("适配器 {id}：{error}");
+                eprintln!("adapter {id}: {error}");
             }
         }
 
@@ -434,7 +433,9 @@ fn probe_login(sender: &Sender<Action>, configured: &str, connection: &str) {
     }
 
     let Ok(Ok(value)) = reply_rx.recv_timeout(Duration::from_secs(5)) else {
-        eprintln!("适配器 {connection}：问不出登录账号（不影响收发）");
+        eprintln!(
+            "adapter {connection}: cannot determine the login account (send/receive unaffected)"
+        );
         return;
     };
 
@@ -442,16 +443,18 @@ fn probe_login(sender: &Sender<Action>, configured: &str, connection: &str) {
         Some(Value::Number(number)) => number.to_string(),
         Some(Value::String(text)) => text.clone(),
         _ => {
-            eprintln!("适配器 {connection}：对面没说登录账号（不影响收发）");
+            eprintln!(
+                "adapter {connection}: peer did not report the login account (send/receive unaffected)"
+            );
             return;
         }
     };
-    eprintln!("适配器 {connection}：登录账号 {self_id}");
+    eprintln!("adapter {connection}: login account {self_id}");
 
     if !configured.is_empty() && configured != self_id {
         eprintln!(
-            "注意：连接 {connection} 登录的是 {self_id}，但配置里写的是 {configured}。\
-             这样自己发的消息会被当成别人说的，请把 account 改成 {self_id}"
+            "warning: connection {connection} is logged in as {self_id}, but the config says {configured}. \
+             Messages sent by the bridge itself would be treated as someone else's; change account to {self_id}"
         );
     }
 }

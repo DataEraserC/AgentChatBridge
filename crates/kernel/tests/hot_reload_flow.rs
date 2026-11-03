@@ -106,9 +106,7 @@ fn staged_config_applies_at_next_ingest_and_new_room_wakes() {
     assert!(!bridge.has_staged_config());
 
     // 管理员保存新配置：暂存，不立即生效。
-    bridge.stage_config(
-        acb_kernel::Config::parse(&config_with_extra_room()).expect("新配置合法"),
-    );
+    bridge.stage_config(acb_kernel::Config::parse(&config_with_extra_room()).expect("新配置合法"));
     assert!(bridge.has_staged_config());
     assert_eq!(bridge.config_version(), 0, "暂存不换版本，还没生效");
 
@@ -138,16 +136,17 @@ fn staged_config_applies_at_next_ingest_and_new_room_wakes() {
     assert_eq!(delivery.session, "main");
     assert_eq!(delivery.room, RoomId::parse("qq:group/999").expect("合法"));
     assert_eq!(delivery.reason, TurnReason::Wake);
-    assert_eq!(delivery.records[0].elements[0], Element::text("新房间第一条"));
+    assert_eq!(
+        delivery.records[0].elements[0],
+        Element::text("新房间第一条")
+    );
 }
 
 #[test]
 fn discard_staged_config_keeps_old_config() {
     let mut bridge = bridge(&config_base());
 
-    bridge.stage_config(
-        acb_kernel::Config::parse(&config_with_extra_room()).expect("新配置合法"),
-    );
+    bridge.stage_config(acb_kernel::Config::parse(&config_with_extra_room()).expect("新配置合法"));
     assert!(bridge.discard_staged_config(), "有暂存可丢");
     assert!(!bridge.has_staged_config());
     assert_eq!(bridge.config_version(), 0, "没换过配置");
@@ -170,19 +169,14 @@ fn discard_staged_config_keeps_old_config() {
         matches!(ingested, Ingest::NotSubscribed { .. }),
         "丢弃暂存后回到旧订阅范围：{ingested:?}"
     );
-    assert!(
-        !bridge.discard_staged_config(),
-        "没有暂存时丢弃返回 false"
-    );
+    assert!(!bridge.discard_staged_config(), "没有暂存时丢弃返回 false");
 }
 
 #[test]
 fn re_staging_replaces_previous_staged_config() {
     let mut bridge = bridge(&config_base());
 
-    bridge.stage_config(
-        acb_kernel::Config::parse(&config_with_extra_room()).expect("第一份暂存"),
-    );
+    bridge.stage_config(acb_kernel::Config::parse(&config_with_extra_room()).expect("第一份暂存"));
     // 再存一次别的：只保留最后一份。
     let third = config_base().replace("accumulate = 50", "accumulate = 3");
     bridge.stage_config(acb_kernel::Config::parse(&third).expect("第三份合法"));

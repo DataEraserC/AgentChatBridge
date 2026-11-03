@@ -714,7 +714,7 @@ fn policy_options(
     label: &str,
 ) -> Result<serde_json::Value, ConfigError> {
     serde_json::to_value(table).map_err(|error| ConfigError::ParseFailed {
-        detail: format!("{label} 的 options 读不懂：{error}"),
+        detail: format!("failed to parse {label} options: {error}"),
     })
 }
 
@@ -738,162 +738,172 @@ fn matches_any(names: &[String], text: &str) -> bool {
 /// 配置错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigError {
-    #[error("配置读不懂：{detail}")]
+    #[error("failed to parse config: {detail}")]
     ParseFailed { detail: String },
-    #[error("配置引用了环境变量 {name}，但进程环境里没有它")]
+    #[error(
+        "config references environment variable {name}, but it is not set in the process environment"
+    )]
     MissingEnv { name: String },
-    #[error("配置里的环境变量写法不合法：{detail}")]
+    #[error("invalid environment variable syntax in config: {detail}")]
     BadEnvRef { detail: String },
-    #[error("会话 {session} 的 {field} 不能为空")]
+    #[error("session {session} has an empty {field}")]
     EmptyField {
         session: String,
         field: &'static str,
     },
-    #[error("会话 id 重复：{session}")]
+    #[error("duplicate session id: {session}")]
     DuplicateSession { session: String },
-    #[error("会话 {session} 重复订阅了房间 {room}")]
+    #[error("session {session} subscribes to room {room} more than once")]
     DuplicateRoom { session: String, room: String },
-    #[error("会话 {session} 的房间标识不合法：{room}（{detail}）")]
+    #[error("session {session} has an invalid room id: {room} ({detail})")]
     BadRoom {
         session: String,
         room: String,
         detail: String,
     },
-    #[error("会话 {session} 订阅了 {room}，但没有名为 {connection} 的连接")]
+    #[error(
+        "session {session} subscribes to {room}, but there is no connection named {connection}"
+    )]
     UnknownConnection {
         session: String,
         room: String,
         connection: String,
     },
-    #[error("会话 {session} 的房间 {room} 的 accumulate 必须是正整数")]
+    #[error("session {session} room {room}: accumulate must be a positive integer")]
     BadAccumulate { session: String, room: String },
-    #[error("会话 {session} 的房间 {room} 的唤醒事件 {event} 不属于该房间的平台 {platform}")]
+    #[error(
+        "session {session} room {room}: wake event {event} does not belong to the room's platform {platform}"
+    )]
     BadWakeEvent {
         session: String,
         room: String,
         event: String,
         platform: String,
     },
-    #[error("会话 {session} 的房间 {room} 的唤醒策略 provider 不合法：{provider}（{detail}）")]
+    #[error("session {session} room {room}: invalid wake provider {provider} ({detail})")]
     BadWakeProvider {
         session: String,
         room: String,
         provider: String,
         detail: String,
     },
-    #[error("会话 {session} 的访问策略 provider 不合法：{provider}（{detail}）")]
+    #[error("session {session}: invalid access provider {provider} ({detail})")]
     BadAccessProvider {
         session: String,
         provider: String,
         detail: String,
     },
-    #[error("会话 {session} 的访问策略房间不合法：{room}（{detail}）")]
+    #[error("session {session}: invalid access room {room} ({detail})")]
     BadAccessRoom {
         session: String,
         room: String,
         detail: String,
     },
-    #[error("会话 {session} 的访问策略重复列了房间 {room}")]
+    #[error("session {session} lists access room {room} more than once")]
     DuplicateAccessRoom { session: String, room: String },
-    #[error("会话 {session} 的访问策略房间 {room} 引用了不存在的连接 {connection}")]
+    #[error("session {session} access room {room} references unknown connection {connection}")]
     UnknownAccessConnection {
         session: String,
         room: String,
         connection: String,
     },
-    #[error("会话 {session} 的投递策略 provider 不合法：{provider}（{detail}）")]
+    #[error("session {session}: invalid delivery provider {provider} ({detail})")]
     BadDeliveryProvider {
         session: String,
         provider: String,
         detail: String,
     },
-    #[error("会话 {session} 的发送钩子 provider 不合法：{provider}（{detail}）")]
+    #[error("session {session}: invalid send hook provider {provider} ({detail})")]
     BadSendHookProvider {
         session: String,
         provider: String,
         detail: String,
     },
-    #[error("会话 {session} 的失败通知 provider 不合法：{provider}（{detail}）")]
+    #[error("session {session}: invalid turn error provider {provider} ({detail})")]
     BadTurnErrorProvider {
         session: String,
         provider: String,
         detail: String,
     },
-    #[error("会话 {session} 的房间 {room} 的时钟 provider 不合法：{provider}（{detail}）")]
+    #[error("session {session} room {room}: invalid clock provider {provider} ({detail})")]
     BadClockProvider {
         session: String,
         room: String,
         provider: String,
         detail: String,
     },
-    #[error("会话 {session} 的接入令牌不能为空")]
+    #[error("session {session} access token must not be empty")]
     EmptyToken { session: String },
-    #[error("会话 {session} 引用了不存在的人格 {persona}")]
+    #[error("session {session} references unknown persona {persona}")]
     UnknownPersona { session: String, persona: String },
-    #[error("会话 {session} 引用了不存在的记忆 {memory}")]
+    #[error("session {session} references unknown memory {memory}")]
     UnknownMemory { session: String, memory: String },
-    #[error("人格 id 重复：{persona}")]
+    #[error("duplicate persona id: {persona}")]
     DuplicatePersona { persona: String },
-    #[error("人格 {persona} 的 {field} 不能为空")]
+    #[error("persona {persona} has an empty {field}")]
     EmptyPersonaField {
         persona: String,
         field: &'static str,
     },
-    #[error("记忆 id 重复：{memory}")]
+    #[error("duplicate memory id: {memory}")]
     DuplicateMemory { memory: String },
-    #[error("记忆 {memory} 的 {field} 不能为空")]
+    #[error("memory {memory} has an empty {field}")]
     EmptyMemoryField { memory: String, field: &'static str },
-    #[error("记忆 {memory} 的种类不认识：{kind}（目前只有 git）")]
+    #[error("memory {memory} has unknown kind: {kind} (only git is supported)")]
     UnknownMemoryKind { memory: String, kind: String },
-    #[error("harness id 重复：{harness}")]
+    #[error("duplicate harness id: {harness}")]
     DuplicateHarness { harness: String },
-    #[error("harness {harness} 的 {field} 不能为空")]
+    #[error("harness {harness} has an empty {field}")]
     EmptyHarnessField {
         harness: String,
         field: &'static str,
     },
-    #[error("会话 {session} 引用了不存在的 harness {harness}")]
+    #[error("session {session} references unknown harness {harness}")]
     UnknownHarness { session: String, harness: String },
-    #[error("接入点监听地址不合法：{address}（{detail}）")]
+    #[error("invalid endpoint listen address: {address} ({detail})")]
     BadListen { address: String, detail: String },
-    #[error("连接名不能为空")]
+    #[error("connection name must not be empty")]
     EmptyConnectionId,
-    #[error("连接名重复：{connection}")]
+    #[error("duplicate connection name: {connection}")]
     DuplicateConnection { connection: String },
-    #[error("连接 {connection} 的 platform 不能为空")]
+    #[error("connection {connection} platform must not be empty")]
     EmptyConnectionPlatform { connection: String },
-    #[error("连接 {connection} 的 kind 不能为空")]
+    #[error("connection {connection} kind must not be empty")]
     EmptyConnectionKind { connection: String },
-    #[error("连接 {connection} 的连接方式不认识：{transport}（不能为空）")]
+    #[error("connection {connection} has unknown transport: {transport} (must not be empty)")]
     UnknownTransport {
         connection: String,
         transport: String,
     },
-    #[error("连接 {connection} 的地址不合法：{url}（ws-client 要写成 ws://主机:端口/路径）")]
+    #[error(
+        "connection {connection} has invalid URL: {url} (ws-client requires ws://host:port/path)"
+    )]
     BadUrl { connection: String, url: String },
-    #[error("连接 {connection} 的登录账号不能为空——桥要靠它分辨「哪句是我说的」")]
+    #[error(
+        "connection {connection} account must not be empty; the bridge uses it to tell which messages are its own"
+    )]
     EmptyAccount { connection: String },
-    #[error("动态插件路径不能为空")]
+    #[error("dynamic plugin path must not be empty")]
     EmptyPluginPath,
-    #[error("动态插件路径重复：{path}")]
+    #[error("duplicate dynamic plugin path: {path}")]
     DuplicatePluginPath { path: String },
-    #[error("连接 {connection} 的入站策略 provider 不合法：{provider}（{detail}）")]
+    #[error("connection {connection}: invalid receive provider {provider} ({detail})")]
     BadReceiveProvider {
         connection: String,
         provider: String,
         detail: String,
     },
-    #[error("连接 {connection} 的路由 provider 不合法：{provider}（{detail}）")]
+    #[error("connection {connection}: invalid route provider {provider} ({detail})")]
     BadRouteProvider {
         connection: String,
         provider: String,
         detail: String,
     },
-    #[error("存储路径不能为空（不配就用默认的 {DEFAULT_STORAGE_PATH}）")]
+    #[error("storage path must not be empty (defaults to {DEFAULT_STORAGE_PATH})")]
     EmptyStoragePath,
-    #[error("worktree 根目录不能为空（不配就用默认的 {DEFAULT_WORKTREES_ROOT}）")]
+    #[error("worktree root must not be empty (defaults to {DEFAULT_WORKTREES_ROOT})")]
     EmptyWorktreesRoot,
-    #[error("失败通知动作不合法：{action}（要写成 log 或 send:连接:段/段）")]
+    #[error("invalid turn error action: {action} (use log or send:connection:segment/segment)")]
     BadTurnErrorAction { action: String },
 }
 
@@ -918,7 +928,10 @@ fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
             (&rest[start + 2..], "}")
         };
         let end = after.find(close).ok_or_else(|| ConfigError::BadEnvRef {
-            detail: format!("`{}` 后面缺 `{close}`", &rest[start..start + 2 + raw as usize]),
+            detail: format!(
+                "missing `{close}` after `{}`",
+                &rest[start..start + 2 + raw as usize]
+            ),
         })?;
         let (name, fallback) = match after[..end].split_once(":-") {
             Some((name, fallback)) => (name, Some(fallback)),
@@ -930,7 +943,7 @@ fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
         {
             return Err(ConfigError::BadEnvRef {
-                detail: format!("`${{{name}}}` 不是合法的环境变量名"),
+                detail: format!("`${{{name}}}` is not a valid environment variable name"),
             });
         }
         let value = match std::env::var(name) {
@@ -971,9 +984,10 @@ impl Config {
     /// 不静默变成空串（空 token 会以很难查的方式失败）。
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let expanded = expand_env_vars(text)?;
-        let raw: RawConfig = toml::from_str(&expanded).map_err(|error| ConfigError::ParseFailed {
-            detail: error.to_string(),
-        })?;
+        let raw: RawConfig =
+            toml::from_str(&expanded).map_err(|error| ConfigError::ParseFailed {
+                detail: error.to_string(),
+            })?;
         Self::from_raw(raw)
     }
 
@@ -1019,7 +1033,7 @@ impl Config {
                 if address.parse::<std::net::SocketAddr>().is_err() {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "要写成 主机:端口，如 127.0.0.1:7700".into(),
+                        detail: "must be host:port, e.g. 127.0.0.1:7700".into(),
                     });
                 }
                 Some(EndpointConfig { listen: address })
@@ -1033,14 +1047,15 @@ impl Config {
                 if address.parse::<std::net::SocketAddr>().is_err() {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "控制台要写成 主机:端口，如 127.0.0.1:3100".into(),
+                        detail: "console must be host:port, e.g. 127.0.0.1:3100".into(),
                     });
                 }
                 let token = raw.token.trim().to_owned();
                 if token.is_empty() {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "控制台可远程访问，token 不能为空".into(),
+                        detail: "the console is remotely accessible; token must not be empty"
+                            .into(),
                     });
                 }
                 Some(ConsoleConfig {
@@ -1064,8 +1079,8 @@ impl Config {
                     return Err(ConfigError::BadListen {
                         address: mode.clone(),
                         detail: format!(
-                            "file_relay.mode 只认 \"{FILE_RELAY_MODE_FILE_SERVER}\"（当前唯一实现）。\
-                             留空或写 file-server 都行，别的方式还没做"
+                            "file_relay.mode only accepts \"{FILE_RELAY_MODE_FILE_SERVER}\" (the only \
+                             implemented mode); leave it empty or write file-server"
                         ),
                     });
                 }
@@ -1073,15 +1088,16 @@ impl Config {
                 if address.parse::<std::net::SocketAddr>().is_err() {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "文件中继要写成 主机:端口，如 0.0.0.0:3131".into(),
+                        detail: "file relay must be host:port, e.g. 0.0.0.0:3131".into(),
                     });
                 }
                 let public_base = raw.public_base.trim().trim_end_matches('/').to_owned();
                 if !public_base.starts_with("http://") && !public_base.starts_with("https://") {
                     return Err(ConfigError::BadListen {
                         address,
-                        detail: "file_relay.public_base 要写平台那边访问桥的完整地址，\
-                                 如 http://10.89.0.1:3131（平台在容器里时通常是宿主网关）"
+                        detail: "file_relay.public_base must be the full URL the platform uses to \
+                                 reach the bridge, e.g. http://10.89.0.1:3131 (usually the host \
+                                 gateway when the platform runs in a container)"
                             .into(),
                     });
                 }
@@ -1458,9 +1474,9 @@ impl Config {
         for (room, sessions) in rooms {
             if sessions.len() > 1 {
                 warnings.push(format!(
-                    "房间 {room} 同时被会话 {} 订阅：两边各有各的水位，\
-                     发消息到这个房间时要用 session 指明是谁在说。",
-                    sessions.join("、")
+                    "room {room} is subscribed by multiple sessions ({}): each session has its own \
+                     watermark, so specify the session when sending to this room.",
+                    sessions.join(", ")
                 ));
             }
         }
@@ -1503,7 +1519,7 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
         let Some(address) = url.as_deref() else {
             return Err(ConfigError::BadUrl {
                 connection: id,
-                url: "（空）".into(),
+                url: "(empty)".into(),
             });
         };
         if !(address.starts_with("ws://") && address.len() > "ws://".len()) {
@@ -1521,7 +1537,7 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
     };
 
     let options = serde_json::to_value(&raw.options).map_err(|error| ConfigError::ParseFailed {
-        detail: format!("连接 {id} 的 options 读不懂：{error}"),
+        detail: format!("failed to parse options for connection {id}: {error}"),
     })?;
 
     let receive = build_receive(&id, raw.receive)?;
@@ -1562,22 +1578,24 @@ fn build_routes(connection: &str, raw: Vec<RawRoute>) -> Result<Vec<RoutePolicy>
             .map(str::trim)
             .filter(|text| !text.is_empty())
         {
-            Some(text) => ProviderId::parse(text).map_err(|error| ConfigError::BadRouteProvider {
-                connection: connection.to_owned(),
-                provider: text.to_owned(),
-                detail: error.to_string(),
-            })?,
+            Some(text) => {
+                ProviderId::parse(text).map_err(|error| ConfigError::BadRouteProvider {
+                    connection: connection.to_owned(),
+                    provider: text.to_owned(),
+                    detail: error.to_string(),
+                })?
+            }
             None => {
                 return Err(ConfigError::BadRouteProvider {
                     connection: connection.to_owned(),
                     provider: format!("routes[{index}]"),
-                    detail: "provider 不能为空".to_owned(),
+                    detail: "provider must not be empty".to_owned(),
                 });
             }
         };
         routes.push(RoutePolicy {
             provider,
-            options: policy_options(route.options, "路由策略")?,
+            options: policy_options(route.options, "route policy")?,
         });
     }
     Ok(routes)
@@ -1599,7 +1617,7 @@ fn build_receive(connection: &str, raw: RawReceive) -> Result<ReceivePolicy, Con
     };
     Ok(ReceivePolicy {
         provider,
-        options: policy_options(raw.options, "入站策略")?,
+        options: policy_options(raw.options, "receive policy")?,
     })
 }
 
@@ -1645,7 +1663,7 @@ fn build_clock(
         provider,
         interval_secs: raw.interval_secs,
         idle_secs: raw.idle_secs,
-        options: policy_options(raw.options, "时钟策略")?,
+        options: policy_options(raw.options, "clock policy")?,
     })
 }
 
@@ -1726,7 +1744,7 @@ fn build_access(
         provider,
         rooms,
         origins,
-        options: policy_options(raw.options, "访问策略")?,
+        options: policy_options(raw.options, "access policy")?,
     })
 }
 
@@ -1748,7 +1766,7 @@ fn build_delivery(session: &str, raw: RawDelivery) -> Result<DeliveryPolicy, Con
     };
     Ok(DeliveryPolicy {
         provider,
-        options: policy_options(raw.options, "投递策略")?,
+        options: policy_options(raw.options, "delivery policy")?,
     })
 }
 
@@ -1789,7 +1807,7 @@ fn build_turn_error(session: &str, raw: RawTurnError) -> Result<TurnErrorPolicy,
     };
     Ok(TurnErrorPolicy {
         provider,
-        options: policy_options(raw.options, "失败通知策略")?,
+        options: policy_options(raw.options, "turn error policy")?,
     })
 }
 
@@ -1841,7 +1859,7 @@ fn build_wake(session: &str, room: &RoomId, raw: RawWake) -> Result<WakePolicy, 
         events: normalize_list(raw.events.unwrap_or(default.events)),
         keywords: raw.keywords.unwrap_or(default.keywords),
         ignore_speakers: raw.ignore_speakers.unwrap_or(default.ignore_speakers),
-        options: policy_options(raw.options, "唤醒策略")?,
+        options: policy_options(raw.options, "wake policy")?,
     })
 }
 
@@ -2231,13 +2249,9 @@ mod tests {
         let text = config_with(ONE_CONNECTION, ONE_SESSION)
             .replace("t-main", "${ACB_TEST_SURELY_MISSING_VAR:-t-default}");
         let config = Config::parse(&text).expect("有默认值就能解析");
-        assert_eq!(
-            config.session("main").expect("会话在").token,
-            "t-default"
-        );
+        assert_eq!(config.session("main").expect("会话在").token, "t-default");
 
-        let text = config_with(ONE_CONNECTION, ONE_SESSION)
-            .replace("t-main", "${PATH:-unused}");
+        let text = config_with(ONE_CONNECTION, ONE_SESSION).replace("t-main", "${PATH:-unused}");
         let config = Config::parse(&text).expect("有环境变量就用环境变量");
         assert_eq!(
             config.session("main").expect("会话在").token,
@@ -2248,8 +2262,10 @@ mod tests {
     #[test]
     fn raw_env_placeholder_injects_toml_literals() {
         // 原样注入：数字不需要引号，默认值也按原文落进 TOML。
-        let text = config_with(ONE_CONNECTION, ONE_SESSION)
-            .replace("[[connections]]", "delivery_limit = ${{ACB_TEST_SURELY_MISSING_VAR:-42}}\n\n[[connections]]");
+        let text = config_with(ONE_CONNECTION, ONE_SESSION).replace(
+            "[[connections]]",
+            "delivery_limit = ${{ACB_TEST_SURELY_MISSING_VAR:-42}}\n\n[[connections]]",
+        );
         let config = Config::parse(&text).expect("原样注入的数字能解析");
         assert_eq!(config.delivery_limit, 42);
     }

@@ -90,11 +90,11 @@ impl ControlRegistry {
 /// 接入点错误。
 #[derive(Debug, Error)]
 pub enum EndpointError {
-    #[error("网络读写失败：{0}")]
+    #[error("network I/O failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("协议不对：{0}")]
+    #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("握手失败：{0}")]
+    #[error("handshake failed: {0}")]
     Handshake(String),
     #[error(transparent)]
     Bridge(#[from] BridgeError),
@@ -110,22 +110,22 @@ pub fn handshake<S: Store>(bridge: &Bridge<S>, frame: Frame) -> Result<Vec<Strin
         } => (version, harness, token),
         other => {
             return Err(EndpointError::Handshake(format!(
-                "第一帧必须是 hello，收到 {}",
+                "first frame must be hello, got {}",
                 other.kind()
             )));
         }
     };
     if !acb_proto::frame::version_compatible(version) {
         return Err(EndpointError::Handshake(format!(
-            "协议版本不兼容：对面是 {version}，这边是 {}",
+            "incompatible protocol version: peer is {version}, local is {}",
             acb_proto::frame::PROTOCOL_VERSION
         )));
     }
     if harness.trim().is_empty() {
-        return Err(EndpointError::Handshake("没有报 harness 名".into()));
+        return Err(EndpointError::Handshake("harness name not provided".into()));
     }
     let Some(token) = token else {
-        return Err(EndpointError::Handshake("没有带接入令牌".into()));
+        return Err(EndpointError::Handshake("access token not provided".into()));
     };
     // harness 名下的所有会话，再按令牌筛出「这次接入能代表的」。
     let sessions: Vec<String> = bridge
@@ -136,7 +136,9 @@ pub fn handshake<S: Store>(bridge: &Bridge<S>, frame: Frame) -> Result<Vec<Strin
         .map(|session| session.id.clone())
         .collect();
     if sessions.is_empty() {
-        return Err(EndpointError::Handshake("harness 名或接入令牌无效".into()));
+        return Err(EndpointError::Handshake(
+            "invalid harness name or access token".into(),
+        ));
     }
     Ok(sessions)
 }
@@ -224,7 +226,8 @@ impl Conn {
                 let Some(session) = owned else {
                     return Ok(vec![Frame::Log {
                         level: LogLevel::Warn,
-                        message: "收到了不属于当前轮次的 turn_end，已忽略".into(),
+                        message: "ignoring turn_end that does not belong to the current turn"
+                            .into(),
                     }]);
                 };
                 self.tickets.remove(&session);
@@ -233,7 +236,7 @@ impl Conn {
                 if let Some(error) = error {
                     replies.push(Frame::Log {
                         level: LogLevel::Warn,
-                        message: format!("harness 报告本轮出错：{error}"),
+                        message: format!("harness reported a turn error: {error}"),
                     });
                 }
                 Ok(replies)
@@ -253,7 +256,7 @@ impl Conn {
                                 // 重置失败：不动映射，记一笔日志。
                                 Ok(vec![Frame::Log {
                                     level: LogLevel::Warn,
-                                    message: format!("重置会话 {session} 失败：{err}"),
+                                    message: format!("failed to reset session {session}: {err}"),
                                 }])
                             }
                             None => {
@@ -273,7 +276,7 @@ impl Conn {
                                 }
                                 Ok(vec![Frame::Log {
                                     level: LogLevel::Info,
-                                    message: format!("会话 {session} 已重置"),
+                                    message: format!("session {session} reset"),
                                 }])
                             }
                         }
@@ -281,11 +284,11 @@ impl Conn {
                     "interrupt" => match error {
                         Some(err) => Ok(vec![Frame::Log {
                             level: LogLevel::Warn,
-                            message: format!("会话 {session} 打断失败：{err}"),
+                            message: format!("failed to interrupt session {session}: {err}"),
                         }]),
                         None => Ok(vec![Frame::Log {
                             level: LogLevel::Info,
-                            message: format!("会话 {session} 已打断"),
+                            message: format!("session {session} interrupted"),
                         }]),
                     },
                     "report_map" => {
@@ -293,7 +296,9 @@ impl Conn {
                         match error {
                             Some(err) => Ok(vec![Frame::Log {
                                 level: LogLevel::Warn,
-                                message: format!("会话 {session} 回报映射失败：{err}"),
+                                message: format!(
+                                    "session {session} failed to report its mapping: {err}"
+                                ),
                             }]),
                             None => {
                                 if let Some(serde_json::Value::Object(map)) = &result {
@@ -317,14 +322,14 @@ impl Conn {
                     }
                     other => Ok(vec![Frame::Log {
                         level: LogLevel::Warn,
-                        message: format!("不认识的 control_result 指令：{other}"),
+                        message: format!("unknown control_result command: {other}"),
                     }]),
                 }
             }
             Frame::Ping => Ok(vec![Frame::Pong]),
             Frame::Pong => Ok(Vec::new()),
             other => Err(EndpointError::Protocol(format!(
-                "harness 不该发 {} 这种帧",
+                "harness must not send {} frames",
                 other.kind()
             ))),
         }
@@ -373,8 +378,12 @@ pub fn run_connection<S: Store>(
     let sessions = {
         let line = match read_line(&mut stream, &mut buffer, HANDSHAKE_TIMEOUT)? {
             Incoming::Line(line) => line,
-            Incoming::Idle => return Err(EndpointError::Handshake("握手超时".into())),
-            Incoming::Closed => return Err(EndpointError::Handshake("还没握手就断了".into())),
+            Incoming::Idle => return Err(EndpointError::Handshake("handshake timed out".into())),
+            Incoming::Closed => {
+                return Err(EndpointError::Handshake(
+                    "connection closed before handshake".into(),
+                ));
+            }
         };
         let frame = decode(&line).map_err(|error| EndpointError::Protocol(error.to_string()))?;
         let guard = lock(bridge);
@@ -407,9 +416,9 @@ pub fn run_connection<S: Store>(
     // 连上就吭一声：以后「它不理我」时，一眼能看出是不是这里断了。
     if let Ok(peer) = stream.peer_addr() {
         eprintln!(
-            "接入点：harness 已连上（{}），代表会话组 [{}]",
+            "endpoint: harness connected ({}), representing sessions [{}]",
             peer,
-            sessions.join("、")
+            sessions.join(", ")
         );
     }
 
@@ -548,7 +557,7 @@ pub fn run_connection<S: Store>(
                             let sent = prepared.execute();
                             let mut guard = lock(bridge);
                             if let Err(error) = guard.finish_send(prepared, sent) {
-                                eprintln!("失败通知没发成：{error:?}");
+                                eprintln!("failed to send turn error notice: {error:?}");
                             }
                         }
                         replies
@@ -578,12 +587,12 @@ pub fn run_connection<S: Store>(
     // 顺带报一下队列：要是断的时候还压着活，就是「没人接了」，一眼能看出。
     match &outcome {
         Ok(()) => eprintln!(
-            "接入点：harness 断开（会话组 [{}]）；队列里还压着 {queued} 个待开轮次",
-            session.sessions().join("、")
+            "endpoint: harness disconnected (sessions [{}]); {queued} pending turn(s) still queued",
+            session.sessions().join(", ")
         ),
         Err(error) => eprintln!(
-            "接入点：harness 连接异常结束（会话组 [{}]）：{error}；队列里还压着 {queued} 个待开轮次",
-            session.sessions().join("、")
+            "endpoint: harness connection ended abnormally (sessions [{}]): {error}; {queued} pending turn(s) still queued",
+            session.sessions().join(", ")
         ),
     }
     outcome
@@ -609,7 +618,7 @@ pub fn serve<S: Store + Send + 'static>(
                 std::thread::spawn(move || {
                     // 一条连接坏了不影响别的连接，但要说清楚为什么坏的。
                     if let Err(error) = run_connection(&bridge, stream, &controls) {
-                        eprintln!("接入点：一条连接结束了：{error}");
+                        eprintln!("endpoint: connection ended: {error}");
                     }
                 });
             }
@@ -618,7 +627,7 @@ pub fn serve<S: Store + Send + 'static>(
             }
             Err(error) => {
                 // 单个连接建不起来不算致命，接着等下一个。
-                eprintln!("接入点：接受连接失败：{error}");
+                eprintln!("endpoint: failed to accept connection: {error}");
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
@@ -661,11 +670,13 @@ fn read_line(
         if let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = buffer.drain(..=position).collect();
             let text = String::from_utf8(line)
-                .map_err(|error| EndpointError::Protocol(format!("不是 UTF-8：{error}")))?;
+                .map_err(|error| EndpointError::Protocol(format!("not UTF-8: {error}")))?;
             return Ok(Incoming::Line(text));
         }
         if buffer.len() > acb_proto::frame::MAX_FRAME_BYTES {
-            return Err(EndpointError::Protocol("帧太大，没有换行".into()));
+            return Err(EndpointError::Protocol(
+                "frame too large without a newline".into(),
+            ));
         }
 
         let mut chunk = [0_u8; 8192];
@@ -674,7 +685,9 @@ fn read_line(
                 return if buffer.is_empty() {
                     Ok(Incoming::Closed)
                 } else {
-                    Err(EndpointError::Protocol("连接在半个帧处断了".into()))
+                    Err(EndpointError::Protocol(
+                        "connection closed mid-frame".into(),
+                    ))
                 };
             }
             Ok(read) => buffer.extend_from_slice(&chunk[..read]),
@@ -692,7 +705,11 @@ fn read_line(
 
 /// 给测试用：把一端连好的 socket 包成 [`Conn`] 的对手方，方便直接写帧。
 pub fn reader_of(stream: &TcpStream) -> std::io::BufReader<TcpStream> {
-    std::io::BufReader::new(stream.try_clone().expect("能复制句柄"))
+    std::io::BufReader::new(
+        stream
+            .try_clone()
+            .expect("must be able to clone the handle"),
+    )
 }
 
 /// 给测试用：从连接上读一帧。

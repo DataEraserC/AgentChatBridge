@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// 单次工具结果给模型的预算：24 KiB。约 6～8k token，一条工具结果占到这么多已经很重了。
 ///
@@ -55,7 +55,9 @@ pub fn fit(label: &str, value: Value, spill_dir: &Path) -> Value {
 
 /// 结果有多大（序列化后的字节数）。
 pub fn size_of(value: &Value) -> usize {
-    serde_json::to_vec(value).map(|bytes| bytes.len()).unwrap_or(0)
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
 }
 
 /// 结果里那个「主体数组」在哪：顶层就是数组，返回 `None`；在顶层某个字段里，返回字段名。
@@ -68,7 +70,10 @@ pub(crate) fn array_slot(value: &Value) -> Option<(Option<String>, usize)> {
         Value::Array(items) => Some((None, items.len())),
         Value::Object(map) => map
             .iter()
-            .filter_map(|(key, item)| item.as_array().map(|items| (Some(key.clone()), items.len())))
+            .filter_map(|(key, item)| {
+                item.as_array()
+                    .map(|items| (Some(key.clone()), items.len()))
+            })
             .max_by_key(|(_, len)| *len),
         _ => None,
     }
@@ -323,7 +328,10 @@ mod tests {
         assert_eq!(out["_page"]["offset"], 0);
         let returned = out["_page"]["returned"].as_u64().expect("有数字");
         assert!(returned > 0 && returned < 2000);
-        assert_eq!(out["data"].as_array().expect("还是数组").len(), returned as usize);
+        assert_eq!(
+            out["data"].as_array().expect("还是数组").len(),
+            returned as usize
+        );
         assert_eq!(out["retcode"], 0, "不认识的字断不能丢");
         assert!(size_of(&out) <= MAX_RESULT_BYTES);
     }

@@ -119,7 +119,7 @@ fn normalize_element(value: &mut serde_json::Value) {
 /// 本机路径桥会自动中继）、认哪些别名。
 pub fn parse_elements(value: serde_json::Value) -> Result<Vec<Element>, String> {
     let serde_json::Value::Array(items) = value else {
-        return Err(format!("elements 要是数组，收到的是：{value}"));
+        return Err(format!("elements must be an array; got: {value}"));
     };
     let mut elements = Vec::with_capacity(items.len());
     for (index, mut item) in items.into_iter().enumerate() {
@@ -130,10 +130,10 @@ pub fn parse_elements(value: serde_json::Value) -> Result<Vec<Element>, String> 
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("?");
             format!(
-                "第 {index} 段（{kind}）解析失败：{error}。\
-                 image/audio/video/file 段要 url 字段——可以是 http(s) 地址，\
-                 也可以是本机文件路径（桥会自动中继成平台取得到的地址）；\
-                 字段名 file/path/src 也认。原文：{item}"
+                "element {index} ({kind}) failed to parse: {error}. \
+                 image/audio/video/file elements require a url field - it may be an http(s) URL \
+                 or a local file path (the bridge relays it to a platform-reachable URL); \
+                 file/path/src are also accepted as field names. Original: {item}"
             )
         })?;
         elements.push(element);
@@ -317,8 +317,8 @@ mod compat_tests {
             {"type": "image", "note": "没给地址"}
         ]))
         .expect_err("缺 url 要报错");
-        assert!(error.contains("第 0 段（image）"), "{error}");
-        assert!(error.contains("本机文件路径"), "{error}");
+        assert!(error.contains("element 0 (image)"), "{error}");
+        assert!(error.contains("local file path"), "{error}");
         assert!(error.contains("file/path/src"), "{error}");
         assert!(error.contains("没给地址"), "{error}");
     }

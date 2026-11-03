@@ -128,7 +128,7 @@ impl LuaCaller {
             HookTriggers::new().every_nth_instruction(TIMEOUT_HOOK_STEP),
             move |_, _| {
                 if Instant::now() >= deadline {
-                    Err(mlua::Error::runtime("Lua provider 调用超时"))
+                    Err(mlua::Error::runtime("Lua provider call timed out"))
                 } else {
                     Ok(VmState::Continue)
                 }
@@ -143,7 +143,7 @@ impl LuaCaller {
 
     fn record_failure(&self, error: &mlua::Error) {
         self.failures.fetch_add(1, Ordering::Relaxed);
-        eprintln!("Lua provider {} 调用失败：{error}", self.label);
+        eprintln!("Lua provider {} call failed: {error}", self.label);
     }
 }
 
@@ -256,7 +256,7 @@ impl SendHook for LuaSendHook {
             Ok(Value::Nil) => return Ok(()),
             Ok(Value::Table(table)) => elements_from_table(&table),
             Ok(other) => Err(mlua::Error::runtime(format!(
-                "send.before 要返回元素数组或 nil，收到 {other:?}"
+                "send.before must return an element array or nil; got {other:?}"
             ))),
             Err(error) => Err(error),
         };
@@ -337,14 +337,14 @@ impl ClockProvider for LuaClockProvider {
                 "skip" | "stay" => false,
                 other => {
                     self.caller.record_failure(&mlua::Error::runtime(format!(
-                        "clock.is_due 返回了不认识的字符串 {other:?}"
+                        "clock.is_due returned an unrecognized string {other:?}"
                     )));
                     false
                 }
             },
             Ok(other) => {
                 self.caller.record_failure(&mlua::Error::runtime(format!(
-                    "clock.is_due 要返回布尔值或 due/skip，收到 {other:?}"
+                    "clock.is_due must return a boolean or due/skip; got {other:?}"
                 )));
                 false
             }
@@ -380,14 +380,14 @@ impl ReceiveProvider for LuaReceiveProvider {
                 "drop" => ReceiveDecision::Drop,
                 other => {
                     self.caller.record_failure(&mlua::Error::runtime(format!(
-                        "receive.decide 返回了不认识的字符串 {other:?}"
+                        "receive.decide returned an unrecognized string {other:?}"
                     )));
                     ReceiveDecision::Record
                 }
             },
             Ok(other) => {
                 self.caller.record_failure(&mlua::Error::runtime(format!(
-                    "receive.decide 要返回 record/drop 或布尔值，收到 {other:?}"
+                    "receive.decide must return record/drop or a boolean; got {other:?}"
                 )));
                 ReceiveDecision::Record
             }
@@ -550,7 +550,7 @@ impl ManagerPlugin for LuaManager {
         if !same_set {
             return Err(PluginError::Manager {
                 namespace: self.namespace.clone(),
-                detail: "脚本增删了 provider；descriptor 集合变化需要重启桥".to_owned(),
+                detail: "scripts added or removed providers; changing the descriptor set requires a bridge restart".to_owned(),
             });
         }
         *self
@@ -565,7 +565,7 @@ impl ManagerPlugin for LuaManager {
         if failures == 0 {
             Health::Healthy
         } else {
-            Health::Degraded(format!("{failures} 次 Lua 调用失败"))
+            Health::Degraded(format!("{failures} Lua call(s) failed"))
         }
     }
 }
@@ -619,12 +619,18 @@ fn load_scripts(
     failures: &Arc<AtomicU64>,
 ) -> Result<(Vec<ProviderDescriptor>, HashMap<ProviderId, LoadedProvider>), PluginError> {
     let entries = fs::read_dir(dir).map_err(|error| {
-        PluginError::Loader(format!("读不了 Lua 插件目录 {}：{error}", dir.display()))
+        PluginError::Loader(format!(
+            "cannot read Lua plugin directory {}: {error}",
+            dir.display()
+        ))
     })?;
     let mut paths = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
-            PluginError::Loader(format!("读 Lua 插件目录 {} 失败：{error}", dir.display()))
+            PluginError::Loader(format!(
+                "failed to read Lua plugin directory {}: {error}",
+                dir.display()
+            ))
         })?;
         let path = entry.path();
         let is_lua = path
@@ -643,7 +649,7 @@ fn load_scripts(
         let loaded = load_script(&path, namespace, failures)?;
         if providers.contains_key(&loaded.id) {
             return Err(PluginError::Loader(format!(
-                "{} 的 provider id {} 重复",
+                "duplicate provider id {} in {}",
                 path.display(),
                 loaded.id
             )));
@@ -686,29 +692,37 @@ fn load_script(
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .ok_or_else(|| PluginError::Loader(format!("{}：文件名不是合法 UTF-8", path.display())))?;
+        .ok_or_else(|| {
+            PluginError::Loader(format!("{}: filename is not valid UTF-8", path.display()))
+        })?;
     let id = ProviderId::parse(&format!("{namespace}.{stem}")).map_err(|error| {
         PluginError::Loader(format!(
-            "{}：文件名要能当 provider 名（字母/数字/下划线/短横线）：{error}",
+            "{}: filename must be usable as a provider name (letters/digits/underscores/hyphens): {error}",
             path.display()
         ))
     })?;
     let source = fs::read_to_string(path)
-        .map_err(|error| PluginError::Loader(format!("读不了 {}：{error}", path.display())))?;
+        .map_err(|error| PluginError::Loader(format!("cannot read {}: {error}", path.display())))?;
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default()).map_err(|error| {
-        PluginError::Loader(format!("{}：创建 Lua 状态失败：{error}", path.display()))
+        PluginError::Loader(format!(
+            "{}: failed to create Lua state: {error}",
+            path.display()
+        ))
     })?;
     let table: Table = lua
         .load(&source)
         .set_name(path.display().to_string())
         .eval()
         .map_err(|error| {
-            PluginError::Loader(format!("{}：脚本执行失败：{error}", path.display()))
+            PluginError::Loader(format!(
+                "{}: script execution failed: {error}",
+                path.display()
+            ))
         })?;
 
     let extension: String = table.get("extension").map_err(|error| {
         PluginError::Loader(format!(
-            "{}：缺少 extension（wake / access / delivery / send）：{error}",
+            "{}: missing extension (wake / access / delivery / send): {error}",
             path.display()
         ))
     })?;
@@ -723,7 +737,7 @@ fn load_script(
         "route" => ExtensionPoint::Route,
         other => {
             return Err(PluginError::Loader(format!(
-                "{}：不支持的 extension {other:?}（只支持 wake / access / delivery / send / turn_error / clock / receive / route）",
+                "{}: unsupported extension {other:?} (supported: wake / access / delivery / send / turn_error / clock / receive / route)",
                 path.display()
             )));
         }
@@ -732,7 +746,10 @@ fn load_script(
         ExtensionPoint::Wake => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!("{}：保存 decide 失败：{error}", path.display()))
+                PluginError::Loader(format!(
+                    "{}: failed to save decide: {error}",
+                    path.display()
+                ))
             })?;
             LoadedInstance::Wake(Arc::new(LuaWakeProvider {
                 caller: LuaCaller {
@@ -747,7 +764,10 @@ fn load_script(
         ExtensionPoint::Access => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!("{}：保存 decide 失败：{error}", path.display()))
+                PluginError::Loader(format!(
+                    "{}: failed to save decide: {error}",
+                    path.display()
+                ))
             })?;
             LoadedInstance::Access(Arc::new(LuaAccessProvider {
                 caller: LuaCaller {
@@ -762,7 +782,10 @@ fn load_script(
         ExtensionPoint::Delivery => {
             let function = required_function(&table, "compose", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!("{}：保存 compose 失败：{error}", path.display()))
+                PluginError::Loader(format!(
+                    "{}: failed to save compose: {error}",
+                    path.display()
+                ))
             })?;
             LoadedInstance::Delivery(Arc::new(LuaDeliveryComposer {
                 caller: LuaCaller {
@@ -779,7 +802,7 @@ fn load_script(
             let after = optional_function(&table, "after", path)?;
             if before.is_none() && after.is_none() {
                 return Err(PluginError::Loader(format!(
-                    "{}：send 脚本至少要有一个 before 或 after",
+                    "{}: send script requires at least one of before or after",
                     path.display()
                 )));
             }
@@ -787,13 +810,19 @@ fn load_script(
                 .map(|function| lua.create_registry_value(function))
                 .transpose()
                 .map_err(|error| {
-                    PluginError::Loader(format!("{}：保存 before 失败：{error}", path.display()))
+                    PluginError::Loader(format!(
+                        "{}: failed to save before: {error}",
+                        path.display()
+                    ))
                 })?;
             let after_key = after
                 .map(|function| lua.create_registry_value(function))
                 .transpose()
                 .map_err(|error| {
-                    PluginError::Loader(format!("{}：保存 after 失败：{error}", path.display()))
+                    PluginError::Loader(format!(
+                        "{}: failed to save after: {error}",
+                        path.display()
+                    ))
                 })?;
             let lua = Arc::new(Mutex::new(lua));
             let before = before_key.map(|key| LuaCaller {
@@ -815,7 +844,10 @@ fn load_script(
         ExtensionPoint::TurnError => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!("{}：保存 decide 失败：{error}", path.display()))
+                PluginError::Loader(format!(
+                    "{}: failed to save decide: {error}",
+                    path.display()
+                ))
             })?;
             LoadedInstance::TurnError(Arc::new(LuaTurnErrorProvider {
                 caller: LuaCaller {
@@ -830,7 +862,10 @@ fn load_script(
         ExtensionPoint::Clock => {
             let function = required_function(&table, "is_due", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!("{}：保存 is_due 失败：{error}", path.display()))
+                PluginError::Loader(format!(
+                    "{}: failed to save is_due: {error}",
+                    path.display()
+                ))
             })?;
             LoadedInstance::Clock(Arc::new(LuaClockProvider {
                 caller: LuaCaller {
@@ -845,7 +880,10 @@ fn load_script(
         ExtensionPoint::Receive => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!("{}：保存 decide 失败：{error}", path.display()))
+                PluginError::Loader(format!(
+                    "{}: failed to save decide: {error}",
+                    path.display()
+                ))
             })?;
             LoadedInstance::Receive(Arc::new(LuaReceiveProvider {
                 caller: LuaCaller {
@@ -860,7 +898,10 @@ fn load_script(
         ExtensionPoint::Route => {
             let function = required_function(&table, "decide", path)?;
             let key = lua.create_registry_value(function).map_err(|error| {
-                PluginError::Loader(format!("{}：保存 decide 失败：{error}", path.display()))
+                PluginError::Loader(format!(
+                    "{}: failed to save decide: {error}",
+                    path.display()
+                ))
             })?;
             LoadedInstance::Route(Arc::new(LuaRouteProvider {
                 caller: LuaCaller {
@@ -872,7 +913,7 @@ fn load_script(
                 },
             }))
         }
-        _ => unreachable!("extension 已在上面筛过"),
+        _ => unreachable!("extension was already filtered above"),
     };
     Ok(LoadedProvider {
         id,
@@ -883,7 +924,10 @@ fn load_script(
 
 fn required_function(table: &Table, name: &str, path: &Path) -> Result<Function, PluginError> {
     table.get::<Function>(name).map_err(|error| {
-        PluginError::Loader(format!("{}：缺少 {name} 函数：{error}", path.display()))
+        PluginError::Loader(format!(
+            "{}: missing {name} function: {error}",
+            path.display()
+        ))
     })
 }
 
@@ -893,7 +937,10 @@ fn optional_function(
     path: &Path,
 ) -> Result<Option<Function>, PluginError> {
     table.get::<Option<Function>>(name).map_err(|error| {
-        PluginError::Loader(format!("{}：{name} 不是函数：{error}", path.display()))
+        PluginError::Loader(format!(
+            "{}: {name} is not a function: {error}",
+            path.display()
+        ))
     })
 }
 
@@ -1126,7 +1173,7 @@ fn element_to_table(lua: &Lua, element: &Element) -> mlua::Result<Table> {
             table.set(
                 "payload_json",
                 serde_json::to_string(payload).map_err(|error| {
-                    mlua::Error::runtime(format!("opaque 载荷序列化失败：{error}"))
+                    mlua::Error::runtime(format!("failed to serialize opaque payload: {error}"))
                 })?,
             )?;
         }
@@ -1176,7 +1223,7 @@ fn element_from_table(table: &Table) -> mlua::Result<Element> {
         "opaque" => {
             let payload_json: String = table.get("payload_json")?;
             let payload = serde_json::from_str(&payload_json).map_err(|error| {
-                mlua::Error::runtime(format!("opaque 载荷不是合法 JSON：{error}"))
+                mlua::Error::runtime(format!("opaque payload is not valid JSON: {error}"))
             })?;
             Element::Opaque {
                 platform: table.get::<String>("platform")?,
@@ -1185,7 +1232,7 @@ fn element_from_table(table: &Table) -> mlua::Result<Element> {
         }
         other => {
             return Err(mlua::Error::runtime(format!(
-                "不认识的元素类型 {other:?}；合法值：text/at/quote/image/audio/video/file/face/opaque"
+                "unknown element type {other:?}; valid values: text/at/quote/image/audio/video/file/face/opaque"
             )));
         }
     })
@@ -1209,7 +1256,7 @@ fn sent_table(lua: &Lua, sent: &Sent) -> mlua::Result<Table> {
 fn interpret_delivery_plan(value: Value) -> mlua::Result<DeliveryPlan> {
     let Value::Table(table) = value else {
         return Err(mlua::Error::runtime(format!(
-            "delivery composer 要返回 table 或 nil，收到 {value:?}"
+            "delivery composer must return a table or nil; got {value:?}"
         )));
     };
     let keep = match table.get::<Option<Table>>("keep")? {
@@ -1278,7 +1325,7 @@ fn turn_error_action_table(lua: &Lua, action: &TurnErrorAction) -> mlua::Result<
 fn interpret_turn_error_actions(value: Value) -> mlua::Result<Vec<TurnErrorAction>> {
     let Value::Table(table) = value else {
         return Err(mlua::Error::runtime(format!(
-            "turn_error provider 要返回动作数组，收到 {value:?}"
+            "turn_error provider must return an action array; got {value:?}"
         )));
     };
     let mut actions = Vec::new();
@@ -1290,13 +1337,13 @@ fn interpret_turn_error_actions(value: Value) -> mlua::Result<Vec<TurnErrorActio
             "send" => {
                 let room: String = action.get("room")?;
                 let room = RoomId::parse(&room).map_err(|error| {
-                    mlua::Error::runtime(format!("失败通知房间不合法：{room}（{error}）"))
+                    mlua::Error::runtime(format!("invalid turn error room: {room} ({error})"))
                 })?;
                 actions.push(TurnErrorAction::Send { room });
             }
             other => {
                 return Err(mlua::Error::runtime(format!(
-                    "不认识的失败通知动作 {other:?}（只支持 log / send）"
+                    "unknown turn error action {other:?} (only log / send are supported)"
                 )));
             }
         }
@@ -1410,7 +1457,7 @@ fn interpret_route_decision(value: &Value) -> mlua::Result<RouteDecision> {
             "pass" => Ok(RouteDecision::Pass),
             "drop" => Ok(RouteDecision::Drop { reason: None }),
             other => Err(mlua::Error::runtime(format!(
-                "route.decide 返回了不认识的字符串 {other:?}（要 pass / drop 或动作 table）"
+                "route.decide returned an unrecognized string {other:?} (expected pass / drop or an action table)"
             ))),
         },
         Value::Table(table) => {
@@ -1426,14 +1473,14 @@ fn interpret_route_decision(value: &Value) -> mlua::Result<RouteDecision> {
             let actions: Option<Table> = table.get("actions")?;
             let Some(actions) = actions else {
                 return Err(mlua::Error::runtime(
-                    "route.decide 的 table 要有 action 或 actions",
+                    "route.decide table must contain action or actions",
                 ));
             };
             let mut parsed = Vec::new();
             for value in actions.sequence_values::<Table>() {
                 let action = value?;
                 let name: String = action.get("action").map_err(|_| {
-                    mlua::Error::runtime("route 的每个 action 都要有 action 字段")
+                    mlua::Error::runtime("every route action must have an action field")
                 })?;
                 parsed.push(route_action(&name, &action)?);
             }
@@ -1447,7 +1494,7 @@ fn interpret_route_decision(value: &Value) -> mlua::Result<RouteDecision> {
             })
         }
         other => Err(mlua::Error::runtime(format!(
-            "route.decide 要返回 pass / drop 或动作 table，收到 {other:?}"
+            "route.decide must return pass / drop or an action table; got {other:?}"
         ))),
     }
 }
@@ -1465,27 +1512,28 @@ fn route_action(name: &str, table: &Table) -> mlua::Result<RouteAction> {
                 (None, Some(text)) => vec![Element::text(text)],
                 (Some(_), Some(_)) => {
                     return Err(mlua::Error::runtime(
-                        "send 动作的 elements 和 text 只能给一个",
+                        "send action may provide only one of elements or text",
                     ));
                 }
                 (None, None) => {
                     return Err(mlua::Error::runtime(
-                        "send 动作要给 text 或 elements",
+                        "send action must provide text or elements",
                     ));
                 }
             };
             let room: Option<String> = table.get("room")?;
             let room = room
                 .map(|room| {
-                    RoomId::parse(&room)
-                        .map_err(|error| mlua::Error::runtime(format!("send 的 room 不合法：{error}")))
+                    RoomId::parse(&room).map_err(|error| {
+                        mlua::Error::runtime(format!("invalid send room: {error}"))
+                    })
                 })
                 .transpose()?;
             Ok(RouteAction::Send { room, elements })
         }
         "task" => {
             let handler: String = table.get("handler").map_err(|_| {
-                mlua::Error::runtime("task 动作要写 handler（目前支持 exec）")
+                mlua::Error::runtime("task action must specify handler (only exec is supported)")
             })?;
             let params = match table.get::<Option<Table>>("params")? {
                 Some(params) => lua_to_json(Value::Table(params))?,
@@ -1494,7 +1542,7 @@ fn route_action(name: &str, table: &Table) -> mlua::Result<RouteAction> {
             Ok(RouteAction::Task { handler, params })
         }
         other => Err(mlua::Error::runtime(format!(
-            "不认识的路由动作 {other:?}（支持 interrupt / send / task）"
+            "unknown route action {other:?} (supported: interrupt / send / task)"
         ))),
     }
 }
@@ -1513,7 +1561,7 @@ fn interrupt_scope(table: &Table) -> mlua::Result<InterruptScope> {
         None | Some("room") => Ok(InterruptScope::Room),
         Some("connection") => Ok(InterruptScope::Connection),
         Some(other) => Err(mlua::Error::runtime(format!(
-            "interrupt.scope 只支持 room / connection（或用 sessions = {{...}}），收到 {other:?}"
+            "interrupt.scope only supports room / connection (or sessions = {{...}}); got {other:?}"
         ))),
     }
 }
@@ -1525,8 +1573,12 @@ fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
         Value::Integer(number) => Ok(serde_json::Value::Number(number.into())),
         Value::Number(number) => serde_json::Number::from_f64(number)
             .map(serde_json::Value::Number)
-            .ok_or_else(|| mlua::Error::runtime(format!("数字 {number} 不能转成 JSON"))),
-        Value::String(text) => Ok(serde_json::Value::String(text.to_string_lossy().to_string())),
+            .ok_or_else(|| {
+                mlua::Error::runtime(format!("number {number} cannot be converted to JSON"))
+            }),
+        Value::String(text) => Ok(serde_json::Value::String(
+            text.to_string_lossy().to_string(),
+        )),
         Value::Table(table) => {
             let len = table.raw_len();
             if len > 0 {
@@ -1543,7 +1595,7 @@ fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
                     Value::String(key) => key.to_string_lossy().to_string(),
                     other => {
                         return Err(mlua::Error::runtime(format!(
-                            "JSON 对象的键必须是字符串，收到 {other:?}"
+                            "JSON object keys must be strings; got {other:?}"
                         )));
                     }
                 };
@@ -1552,7 +1604,7 @@ fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
             Ok(serde_json::Value::Object(map))
         }
         other => Err(mlua::Error::runtime(format!(
-            "这个 Lua 值不能转成 JSON：{other:?}"
+            "this Lua value cannot be converted to JSON: {other:?}"
         ))),
     }
 }
@@ -1573,7 +1625,7 @@ fn interpret_wake(value: Value) -> mlua::Result<WakeVerdict> {
             }),
             "stay" => Ok(WakeVerdict::stay()),
             other => Err(mlua::Error::runtime(format!(
-                "wake provider 要返回 \"wake\"/\"stay\"，收到 {other:?}"
+                "wake provider must return \"wake\"/\"stay\"; got {other:?}"
             ))),
         },
         Value::Table(table) => {
@@ -1588,12 +1640,12 @@ fn interpret_wake(value: Value) -> mlua::Result<WakeVerdict> {
                 }),
                 "stay" => Ok(WakeVerdict::stay()),
                 other => Err(mlua::Error::runtime(format!(
-                    "wake provider 的 decision 要是 \"wake\"/\"stay\"，收到 {other:?}"
+                    "wake provider decision must be \"wake\"/\"stay\"; got {other:?}"
                 ))),
             }
         }
         other => Err(mlua::Error::runtime(format!(
-            "wake provider 要返回 \"wake\"/\"stay\"、布尔值或 {{decision, reason, delay_ms}} 表，收到 {other:?}"
+            "wake provider must return \"wake\"/\"stay\", a boolean, or a {{decision, reason, delay_ms}} table; got {other:?}"
         ))),
     }
 }
@@ -1609,11 +1661,11 @@ fn interpret_access(value: Value) -> mlua::Result<AccessDecision> {
             "allow" => Ok(AccessDecision::Allow),
             "deny" => Ok(AccessDecision::Deny),
             other => Err(mlua::Error::runtime(format!(
-                "access provider 要返回 \"allow\"/\"deny\"，收到 {other:?}"
+                "access provider must return \"allow\"/\"deny\"; got {other:?}"
             ))),
         },
         other => Err(mlua::Error::runtime(format!(
-            "access provider 要返回 \"allow\"/\"deny\" 或布尔值，收到 {other:?}"
+            "access provider must return \"allow\"/\"deny\" or a boolean; got {other:?}"
         ))),
     }
 }

@@ -46,7 +46,7 @@ fn one_to_onebot(element: &Element) -> Result<Value, SegmentError> {
         Element::Opaque { platform, payload } if platform == PLATFORM => payload.clone(),
         Element::Opaque { platform, .. } => {
             return Err(SegmentError::Unsupported(format!(
-                "这是 {platform} 特有的内容，QQ 发不了"
+                "this is {platform}-specific content; QQ cannot send it"
             )));
         }
     })

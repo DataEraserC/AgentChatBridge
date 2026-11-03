@@ -7,8 +7,8 @@
 use std::borrow::Cow;
 
 use acb_kernel::{
-    AdapterCapability, AdapterError, AdapterFactory, AdapterHost, AdapterInstance,
-    AdapterManifest, Connection, EventQueue, PluginEffect, PluginMetadata, ADAPTER_API_VERSION,
+    ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
+    AdapterInstance, AdapterManifest, Connection, EventQueue, PluginEffect, PluginMetadata,
 };
 
 use crate::{LinkSlot, OneBotOutbound, supervise};
@@ -58,10 +58,7 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
         summary: Some(Cow::Borrowed("QQ 群与私聊：收消息、发消息、平台方法目录")),
         description: None,
         tags: Cow::Borrowed(&[]),
-        effects: Cow::Borrowed(&[
-            PluginEffect::ExternalCall,
-            PluginEffect::Nondeterministic,
-        ]),
+        effects: Cow::Borrowed(&[PluginEffect::ExternalCall, PluginEffect::Nondeterministic]),
         docs_url: None,
         options_schema: None,
     },
@@ -84,7 +81,7 @@ impl AdapterFactory for OneBotAdapterFactory {
         if connection.url.is_none() {
             return Err(AdapterError::Create(
                 connection.id.clone(),
-                "onebot11 需要 url（ws://主机:端口/路径）".into(),
+                "onebot11 requires a url (ws://host:port/path)".into(),
             ));
         }
         let slot = LinkSlot::new();

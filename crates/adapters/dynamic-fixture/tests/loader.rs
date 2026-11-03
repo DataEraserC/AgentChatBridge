@@ -3,8 +3,8 @@
 //! 真的用 libloading 打开本 crate 编出来的 cdylib，走 C ABI + 共用 wire：
 //! manifest、describe 目录、入站事件、发送/调用回执、错误分类、shutdown。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -136,10 +136,7 @@ fn dynamic_adapter_loads_and_speaks_the_wire_protocol() {
     let sent_call = outbound
         .call(&room, "demo.send", &json!({ "text": "记一笔" }))
         .expect("发送类调用应当成功");
-    assert_eq!(
-        sent_call.record.expect("要带流水").elements.len(),
-        1
-    );
+    assert_eq!(sent_call.record.expect("要带流水").elements.len(), 1);
 
     let failure = outbound
         .call(&room, "demo.fail", &json!({}))
@@ -165,7 +162,7 @@ fn dynamic_adapter_loads_and_speaks_the_wire_protocol() {
         started.elapsed()
     );
     assert!(
-        matches!(&timeout, CallError::Unavailable(detail) if detail.contains("超时")),
+        matches!(&timeout, CallError::Unavailable(detail) if detail.contains("timed out")),
         "{timeout:?}"
     );
     // 等插件线程自己睡醒，避免卸载库时它还在执行代码。

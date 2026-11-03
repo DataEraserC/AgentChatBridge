@@ -179,7 +179,10 @@ fn decision_providers_use_the_shared_wire() {
             last_record_at: None,
         };
         assert!(provider.is_due(&policy, &context));
-        let early = ClockContext { now: 1_000, ..context };
+        let early = ClockContext {
+            now: 1_000,
+            ..context
+        };
         assert!(!provider.is_due(&policy, &early));
     }
 
@@ -263,9 +266,7 @@ fn decision_providers_use_the_shared_wire() {
     {
         let plugins = load(&path);
         let id = ProviderId::parse("fixture.send").expect("id 合法");
-        let hook = plugins
-            .resolve_send_hook(&id)
-            .expect("能解析发送钩子");
+        let hook = plugins.resolve_send_hook(&id).expect("能解析发送钩子");
         let context = SendContext {
             session: "main",
             room: &room,

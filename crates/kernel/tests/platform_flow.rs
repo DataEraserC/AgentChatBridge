@@ -7,11 +7,11 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use acb_kernel::{
-    AdapterError, AdapterFactory, AdapterInstance, AdapterManifest, Bridge, CallError, CallOutcome,
-    Connection, Cursor, Effect, Element, ErrorCode, EventQueue, Ingest, MemoryStore, MethodSpec,
-    Outbound, OutboundError, OutgoingKind, OutgoingRecord, ParamSpec, ParamType, PluginManager,
-    PluginMetadata, RecordDraft, RecordMode, Risk, RoomId, Scope, Sender, Sent, TargetSpec, Ticket,
-    Transcript, Watermarks, ADAPTER_API_VERSION, outbound::tags, unread,
+    ADAPTER_API_VERSION, AdapterError, AdapterFactory, AdapterInstance, AdapterManifest, Bridge,
+    CallError, CallOutcome, Connection, Cursor, Effect, Element, ErrorCode, EventQueue, Ingest,
+    MemoryStore, MethodSpec, Outbound, OutboundError, OutgoingKind, OutgoingRecord, ParamSpec,
+    ParamType, PluginManager, PluginMetadata, RecordDraft, RecordMode, Risk, RoomId, Scope, Sender,
+    Sent, TargetSpec, Ticket, Transcript, Watermarks, outbound::tags, unread,
 };
 use serde_json::{Value, json};
 
@@ -189,10 +189,10 @@ impl Outbound for Platformy {
         method: &str,
         params: &Value,
     ) -> Result<CallOutcome, CallError> {
-        self.calls.lock().expect("没被毒死").push((
-            method.to_owned(),
-            params.clone(),
-        ));
+        self.calls
+            .lock()
+            .expect("没被毒死")
+            .push((method.to_owned(), params.clone()));
         match method {
             "forward.get_content" => Ok(CallOutcome::value(json!({
                 "messages": [{"sender": "老王", "text": "转发的正文"}]
@@ -320,8 +320,7 @@ static ADAPTER_CAPABILITIES: &[acb_kernel::AdapterCapability] = &[
 ];
 static ADAPTER_EVENTS: &[Cow<'static, str>] =
     &[Cow::Borrowed("poke"), Cow::Borrowed("group_increase")];
-static ADAPTER_EVENT_TAGS: &[Cow<'static, str>] =
-    &[Cow::Borrowed("poke"), Cow::Borrowed("notice")];
+static ADAPTER_EVENT_TAGS: &[Cow<'static, str>] = &[Cow::Borrowed("poke"), Cow::Borrowed("notice")];
 
 /// 假的 OneBot manifest：只用来验证能力声明能被 agent 看到，不提供实例。
 struct FakeAdapterFactory;
@@ -375,11 +374,7 @@ fn open_turn(bridge: &mut Bridge<MemoryStore>) -> Ticket {
         ))
         .expect("能记下来");
     assert!(matches!(ingested, Ingest::Recorded { .. }));
-    bridge
-        .poll_turn()
-        .expect("能开轮")
-        .expect("有活")
-        .ticket
+    bridge.poll_turn().expect("能开轮").expect("有活").ticket
 }
 
 // ── 目录 ────────────────────────────────────────────────────────────────
@@ -395,12 +390,18 @@ fn describe_plugins_shows_effective_session_providers() {
         .expect("能查插件目录");
     assert_eq!(session["scope"], "session");
     assert_eq!(session["session"], "main");
-    assert_eq!(session["providers"]["access"]["id"], "acb.access.subscribed");
+    assert_eq!(
+        session["providers"]["access"]["id"],
+        "acb.access.subscribed"
+    );
     assert_eq!(
         session["providers"]["access"]["metadata"]["title"],
         "只访问订阅房间"
     );
-    assert_eq!(session["providers"]["delivery"]["id"], "acb.delivery.default");
+    assert_eq!(
+        session["providers"]["delivery"]["id"],
+        "acb.delivery.default"
+    );
     assert_eq!(
         session["providers"]["turn_error"]["id"],
         "acb.turn_error.default"
@@ -449,12 +450,12 @@ fn describe_plugins_shows_effective_session_providers() {
         .expect("能查全局目录");
     assert_eq!(global["scope"], "global");
     let plugins = global["plugins"].as_array().expect("有插件");
-    assert!(plugins
-        .iter()
-        .any(|plugin| plugin["id"] == "acb.wake.default"));
-    assert!(plugins
-        .iter()
-        .all(|plugin| plugin["extension"] == "wake"));
+    assert!(
+        plugins
+            .iter()
+            .any(|plugin| plugin["id"] == "acb.wake.default")
+    );
+    assert!(plugins.iter().all(|plugin| plugin["extension"] == "wake"));
 
     let bad_scope = bridge
         .tool_call(
@@ -504,7 +505,12 @@ fn platform_methods_can_target_a_connection_and_summarize_all() {
     let ticket = open_turn(&mut bridge);
 
     let all = bridge
-        .tool_call(&ticket, &sessions(), "platform_methods", json!({"all": true}))
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_methods",
+            json!({"all": true}),
+        )
         .expect("能查连接摘要");
     assert_eq!(all["scope"], "connections");
     assert_eq!(all["total"], 2);
@@ -516,11 +522,13 @@ fn platform_methods_can_target_a_connection_and_summarize_all() {
     assert_eq!(qq["method_count"], 8);
     assert_eq!(qq["supports_at"], true);
     assert_eq!(qq["supports_reply"], true);
-    assert!(qq["events"]
-        .as_array()
-        .expect("事件能力")
-        .iter()
-        .any(|event| event == "poke"));
+    assert!(
+        qq["events"]
+            .as_array()
+            .expect("事件能力")
+            .iter()
+            .any(|event| event == "poke")
+    );
     let dc = connections
         .iter()
         .find(|connection| connection["connection"] == "dc")
@@ -1014,7 +1022,10 @@ fn platform_call_cannot_change_the_room_target_via_params() {
         "错误要给出怎么改：{}",
         error.message
     );
-    assert!(calls.lock().expect("没被毒死").is_empty(), "拒绝前不该调平台");
+    assert!(
+        calls.lock().expect("没被毒死").is_empty(),
+        "拒绝前不该调平台"
+    );
 }
 
 /// 好友列表、账号资料这类跟房间无关：不该逼模型先编一个群号出来。
@@ -1210,7 +1221,10 @@ fn catalog_details_carry_a_copyable_example() {
         .expect("能查这一组");
 
     let example = &result["methods"][0]["example"];
-    assert_eq!(example["method"], "forward.get_content", "样例要能直接喂给 platform_call");
+    assert_eq!(
+        example["method"], "forward.get_content",
+        "样例要能直接喂给 platform_call"
+    );
     assert_eq!(example["params"]["id"], "123456");
     assert!(result["hint"].as_str().expect("有说明").contains("example"));
 
@@ -1228,7 +1242,12 @@ fn example_values_look_real() {
     let ticket = open_turn(&mut bridge);
 
     let result = bridge
-        .tool_call(&ticket, &sessions(), "platform_methods", json!({"tag": "send"}))
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_methods",
+            json!({"tag": "send"}),
+        )
         .expect("能查");
 
     let methods = result["methods"].as_array().expect("有方法");
@@ -1253,10 +1272,8 @@ impl TempRelayDir {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("时间正常")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "acb-relay-{}-{name}-{nanos}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("acb-relay-{}-{name}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("能建临时目录");
         Self(dir)
     }
@@ -1310,7 +1327,9 @@ fn 平台调用的params里本机文件换成中继URL() {
         file.starts_with("http://10.89.0.1:3131/f/"),
         "本机路径应该换成中继 URL，实际是 {file}"
     );
-    let rest = file.strip_prefix("http://10.89.0.1:3131/f/").expect("前缀对");
+    let rest = file
+        .strip_prefix("http://10.89.0.1:3131/f/")
+        .expect("前缀对");
     assert!(
         temp.0.join("relay").join(rest).is_file(),
         "文件应该真的落在中继目录里"

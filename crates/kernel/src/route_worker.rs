@@ -32,7 +32,7 @@ impl RouteWorker {
     pub(crate) fn enqueue(&self, actions: Vec<PreparedRouteAction>) {
         for action in actions {
             if self.tx.send(action).is_err() {
-                eprintln!("路由动作 worker 已经停了，丢掉后续动作");
+                eprintln!("route action worker has stopped; dropping remaining actions");
                 break;
             }
         }
@@ -59,7 +59,7 @@ fn run_action<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, action: PreparedRouteAct
             let result = prepared.execute();
             let mut guard = lock(bridge);
             if let Err(error) = guard.finish_send(prepared, result) {
-                eprintln!("路由发送没成：{error:?}");
+                eprintln!("route send failed: {error:?}");
             }
         }
         PreparedRouteAction::Task(task) => run_task(bridge, task),
@@ -70,7 +70,7 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
     let outcome = match task::run(&task.handler, &task.params) {
         Ok(outcome) => outcome,
         Err(error) => {
-            eprintln!("路由任务 {} 失败：{error}", task.handler);
+            eprintln!("route task {} failed: {error}", task.handler);
             return;
         }
     };
@@ -95,7 +95,7 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
-                eprintln!("路由任务的结果组装成发送失败：{error:?}");
+                eprintln!("failed to assemble route task result into a send: {error:?}");
                 return;
             }
         };
@@ -103,20 +103,20 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
             Ok(sent) => {
                 let mut guard = lock(bridge);
                 if let Err(error) = guard.finish_send(prepared, Ok(sent)) {
-                    eprintln!("路由任务的结果发送失败：{error:?}");
+                    eprintln!("failed to send route task result: {error:?}");
                 }
                 return;
             }
             Err(OutboundError::Unsupported(detail)) if index + 1 < total => {
                 eprintln!(
-                    "路由任务候选 {} 不被平台支持：{detail}；试下一个",
+                    "route task candidate {} is unsupported by the platform: {detail}; trying the next one",
                     index + 1
                 );
             }
             Err(error) => {
                 let mut guard = lock(bridge);
                 if let Err(error) = guard.finish_send(prepared, Err(error)) {
-                    eprintln!("路由任务的结果发送失败：{error:?}");
+                    eprintln!("failed to send route task result: {error:?}");
                 }
                 return;
             }

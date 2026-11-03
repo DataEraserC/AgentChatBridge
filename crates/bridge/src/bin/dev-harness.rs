@@ -22,7 +22,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("dev-harness：{error}");
+            eprintln!("dev-harness: {error}");
             ExitCode::FAILURE
         }
     }
@@ -46,8 +46,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     match read(&mut reader)? {
-        Frame::Ready { sessions, .. } => println!("已绑定到会话组：{}", sessions.join("、")),
-        other => return Err(format!("握手失败：收到 {}", other.kind()).into()),
+        Frame::Ready { sessions, .. } => println!("bound to sessions: {}", sessions.join(", ")),
+        other => return Err(format!("handshake failed: got {}", other.kind()).into()),
     }
 
     loop {
@@ -61,13 +61,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match frame {
             Frame::TurnStart { delivery } => {
                 println!(
-                    "\n--- 开轮：{}（{} 条记录）---",
+                    "\n--- turn start: {} ({} records) ---",
                     delivery.room,
                     delivery.records.len()
                 );
                 for record in &delivery.records {
                     println!(
-                        "  #{} {}：{}",
+                        "  #{} {}: {}",
                         record.id,
                         record.sender.name,
                         flatten_text(&record.elements)
@@ -102,7 +102,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Frame::Ping => send(&mut writer, &Frame::Pong)?,
             Frame::Pong | Frame::Log { .. } => {}
-            other => println!("收到 {}", other.kind()),
+            other => println!("received {}", other.kind()),
         }
     }
 }
@@ -129,11 +129,11 @@ fn reply(
     match read(reader)? {
         Frame::ToolResult { id, result, error } => {
             if let Some(error) = error {
-                eprintln!("发言失败：{}（{:?}）", error.message, error.code);
+                eprintln!("send failed: {} ({:?})", error.message, error.code);
             } else {
                 let sent = result.unwrap_or_default();
                 println!(
-                    "  已发出，平台消息号 {}",
+                    "  sent, platform message id {}",
                     sent.get("platform_id")
                         .and_then(|id| id.as_str())
                         .unwrap_or("-")
@@ -141,7 +141,7 @@ fn reply(
             }
             assert_eq!(id, "dev-reply");
         }
-        other => eprintln!("等工具结果，收到 {}", other.kind()),
+        other => eprintln!("waiting for tool result, got {}", other.kind()),
     }
     Ok(())
 }
@@ -167,16 +167,16 @@ fn ack(
     match read(reader)? {
         Frame::ToolResult { result, error, .. } => {
             if let Some(error) = error {
-                eprintln!("确认失败：{}（{:?}）", error.message, error.code);
+                eprintln!("acknowledge failed: {} ({:?})", error.message, error.code);
             } else if let Some(watermark) = result
                 .unwrap_or_default()
                 .get("watermark")
                 .and_then(|value| value.as_u64())
             {
-                println!("  水位推到 #{watermark}");
+                println!("  watermark advanced to #{watermark}");
             }
         }
-        other => eprintln!("等确认结果，收到 {}", other.kind()),
+        other => eprintln!("waiting for acknowledgement result, got {}", other.kind()),
     }
     Ok(())
 }
@@ -193,7 +193,7 @@ fn read(reader: &mut BufReader<TcpStream>) -> std::io::Result<Frame> {
     if line.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
-            "桥把连接关了",
+            "the bridge closed the connection",
         ));
     }
     decode(&line).map_err(|error| std::io::Error::other(error.to_string()))
@@ -218,10 +218,10 @@ impl Options {
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--endpoint" => endpoint = args.next().ok_or("--endpoint 后面要跟地址")?,
-                "--harness" => harness = args.next().ok_or("--harness 后面要跟 harness 名")?,
-                "--token" => token = args.next().ok_or("--token 后面要跟令牌")?,
-                "--reply" => reply = args.next().ok_or("--reply 后面要跟内容")?,
+                "--endpoint" => endpoint = args.next().ok_or("--endpoint requires an address")?,
+                "--harness" => harness = args.next().ok_or("--harness requires a harness name")?,
+                "--token" => token = args.next().ok_or("--token requires a token")?,
+                "--reply" => reply = args.next().ok_or("--reply requires content")?,
                 "--once" => once = true,
                 "--help" | "-h" => {
                     println!(
@@ -230,15 +230,17 @@ impl Options {
                     );
                     std::process::exit(0);
                 }
-                other => return Err(format!("不认识的参数：{other}").into()),
+                other => return Err(format!("unknown argument: {other}").into()),
             }
         }
 
         if harness.trim().is_empty() {
-            return Err("必须给 --harness，跟配置里会话的 harness 名一致".into());
+            return Err(
+                "--harness is required; it must match a session's harness name in config".into(),
+            );
         }
         if token.trim().is_empty() {
-            return Err("必须给 --token，跟配置里会话的 token 一致".into());
+            return Err("--token is required; it must match a session's token in config".into());
         }
 
         Ok(Self {

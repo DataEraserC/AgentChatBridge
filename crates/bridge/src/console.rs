@@ -67,7 +67,7 @@ impl<S: Store + Send + 'static> Console<S> {
                     let console = Arc::clone(&console);
                     std::thread::spawn(move || {
                         if let Err(error) = console.handle(stream) {
-                            eprintln!("控制台：处理请求失败：{error}");
+                            eprintln!("console: failed to handle request: {error}");
                         }
                     });
                 }
@@ -75,7 +75,7 @@ impl<S: Store + Send + 'static> Console<S> {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 Err(error) => {
-                    eprintln!("控制台：接受连接失败：{error}");
+                    eprintln!("console: failed to accept connection: {error}");
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
@@ -83,7 +83,9 @@ impl<S: Store + Send + 'static> Console<S> {
     }
 
     fn handle(&self, mut stream: TcpStream) -> std::io::Result<()> {
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
         let mut buffer = Vec::new();
         // 读请求头 + body（简版：读到空行结束头，再按 Content-Length 读 body）。
         let mut header_end = None;
@@ -103,17 +105,23 @@ impl<S: Store + Send + 'static> Console<S> {
             }
         }
         let Some(header_end) = header_end else {
-            return write_response(&mut stream, 400, "application/json", r#"{"error":"请求头不完整"}"#, &[]);
+            return write_response(
+                &mut stream,
+                400,
+                "application/json",
+                r#"{"error":"请求头不完整"}"#,
+                &[],
+            );
         };
         let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
-    let (method, path, auth) = parse_request_line(&header_text);
-    let cookie = header_text
-        .lines()
-        .find_map(|l| l.strip_prefix("Cookie:").map(str::trim))
-        .unwrap_or_default()
-        .to_owned();
-    // 读 body（反馈改状态要带 {"status": "...", "note": "..."}）。
-    let body = read_body(&mut stream, &buffer[header_end + 4..], &header_text);
+        let (method, path, auth) = parse_request_line(&header_text);
+        let cookie = header_text
+            .lines()
+            .find_map(|l| l.strip_prefix("Cookie:").map(str::trim))
+            .unwrap_or_default()
+            .to_owned();
+        // 读 body（反馈改状态要带 {"status": "...", "note": "..."}）。
+        let body = read_body(&mut stream, &buffer[header_end + 4..], &header_text);
 
         // 浏览器自动请求 favicon 且不带 token；放鉴权前 204 收掉，别给 DevTools 留 401 噪音。
         if method == "GET" && (path == "/favicon.ico" || path == "/apple-touch-icon.png") {
@@ -125,14 +133,19 @@ impl<S: Store + Send + 'static> Console<S> {
         // ?token=（登录表单跳转用）。cookie 是刷新后不掉登录的关键：localStorage
         // 在某些嵌入环境（沙箱 iframe）里会被禁/清掉，cookie 由浏览器自己管。
         let query_ok = query_token_matches(query, &self.token);
-        let authorized = self.authorized(&auth)
-            || query_ok
-            || cookie_token_matches(&cookie, &self.token);
+        let authorized =
+            self.authorized(&auth) || query_ok || cookie_token_matches(&cookie, &self.token);
 
         if !authorized {
             // 页面本身：没 token 时给登录页（不是 JSON），人才能输 token 进来。
             if method == "GET" && path == "/" {
-                return write_response(&mut stream, 401, "text/html; charset=utf-8", LOGIN_HTML, &[]);
+                return write_response(
+                    &mut stream,
+                    401,
+                    "text/html; charset=utf-8",
+                    LOGIN_HTML,
+                    &[],
+                );
             }
             return write_response(
                 &mut stream,
@@ -154,7 +167,13 @@ impl<S: Store + Send + 'static> Console<S> {
             } else {
                 String::new()
             };
-            return write_response(&mut stream, 200, "text/html; charset=utf-8", CONSOLE_HTML, &[&set_cookie]);
+            return write_response(
+                &mut stream,
+                200,
+                "text/html; charset=utf-8",
+                CONSOLE_HTML,
+                &[&set_cookie],
+            );
         }
 
         let (status, body) = self.route(&method, path, &body);
@@ -197,12 +216,9 @@ impl<S: Store + Send + 'static> Console<S> {
             ("POST", "/api/config/discard") => {
                 let mut bridge = lock(&self.bridge);
                 let discarded = bridge.discard_staged_config();
-                (
-                    200,
-                    json!({"ok": true, "discarded": discarded}).to_string(),
-                )
+                (200, json!({"ok": true, "discarded": discarded}).to_string())
             }
-            _ => (404, json!({"error":"没有这个端点"}).to_string()),
+            _ => (404, json!({"error":"no such endpoint"}).to_string()),
         }
     }
 
@@ -262,8 +278,8 @@ impl<S: Store + Send + 'static> Console<S> {
                 "account": c.account,
                 "admin_qqs": c.admin_qqs,
                 "allow_destructive": match &c.allow_destructive {
-                    DestructivePolicy::None => json!("默认全拒"),
-                    DestructivePolicy::All => json!("全部放行"),
+                    DestructivePolicy::None => json!("deny all by default"),
+                    DestructivePolicy::All => json!("allow all"),
                     DestructivePolicy::Only(methods) => json!(methods),
                 },
             })).collect::<Vec<_>>(),
@@ -313,7 +329,7 @@ impl<S: Store + Send + 'static> Console<S> {
             ),
             Err(error) => (
                 500,
-                json!({"error": format!("读配置文件 {} 失败：{error}", self.config_path)})
+                json!({"error": format!("failed to read config file {}: {error}", self.config_path)})
                     .to_string(),
             ),
         }
@@ -332,13 +348,16 @@ impl<S: Store + Send + 'static> Console<S> {
             Err(error) => {
                 return (
                     400,
-                    json!({"error": format!("body 要是 JSON：{{\"text\": \"…\"}}（{error}）")})
+                    json!({"error": format!("body must be JSON: {{\"text\": \"...\"}} ({error})")})
                         .to_string(),
                 );
             }
         };
         let Some(text) = parsed.get("text").and_then(serde_json::Value::as_str) else {
-            return (400, json!({"error": "body 里要有 text 字段（配置 TOML 原文）"}).to_string());
+            return (
+                400,
+                json!({"error": "body must contain a text field (raw config TOML)"}).to_string(),
+            );
         };
 
         // 1. 校验：解析不过就拒绝，什么都不写。
@@ -348,7 +367,7 @@ impl<S: Store + Send + 'static> Console<S> {
                 return (
                     400,
                     json!({
-                        "error": format!("配置解析不过，一个字节都没写：{error}"),
+                        "error": format!("config failed to parse; nothing was written: {error}"),
                         "saved": false,
                     })
                     .to_string(),
@@ -373,16 +392,22 @@ impl<S: Store + Send + 'static> Console<S> {
             Err(error) => {
                 return (
                     400,
-                    json!({"error": format!("body 要是 JSON：{{\"ops\":[…]}}（{error}）")})
+                    json!({"error": format!("body must be JSON: {{\"ops\":[...]}} ({error})")})
                         .to_string(),
                 );
             }
         };
         let Some(ops) = parsed.get("ops").and_then(serde_json::Value::as_array) else {
-            return (400, json!({"error": "body 里要有 ops 数组"}).to_string());
+            return (
+                400,
+                json!({"error": "body must contain an ops array"}).to_string(),
+            );
         };
         if ops.is_empty() {
-            return (400, json!({"error": "ops 是空的，没有可保存的改动"}).to_string());
+            return (
+                400,
+                json!({"error": "ops is empty; nothing to save"}).to_string(),
+            );
         }
 
         let text = match std::fs::read_to_string(&self.config_path) {
@@ -390,7 +415,7 @@ impl<S: Store + Send + 'static> Console<S> {
             Err(error) => {
                 return (
                     500,
-                    json!({"error": format!("读配置文件 {} 失败：{error}", self.config_path)})
+                    json!({"error": format!("failed to read config file {}: {error}", self.config_path)})
                         .to_string(),
                 );
             }
@@ -407,7 +432,7 @@ impl<S: Store + Send + 'static> Console<S> {
                 return (
                     400,
                     json!({
-                        "error": format!("补丁后的配置解析不过，一个字节都没写：{error}"),
+                        "error": format!("patched config failed to parse; nothing was written: {error}"),
                         "saved": false,
                     })
                     .to_string(),
@@ -441,7 +466,7 @@ impl<S: Store + Send + 'static> Console<S> {
                 return Err((
                     400,
                     json!({
-                        "error": format!("配置里的 provider 不存在或不可用：{error}"),
+                        "error": format!("the configured provider does not exist or is unavailable: {error}"),
                         "saved": false,
                     }),
                 ));
@@ -454,13 +479,13 @@ impl<S: Store + Send + 'static> Console<S> {
         if let Some(old_text) = &old_text {
             let backup_path = format!("{}.bak", self.config_path);
             if let Err(error) = std::fs::write(&backup_path, old_text) {
-                eprintln!("控制台：备份配置到 {backup_path} 失败：{error}");
+                eprintln!("console: failed to back up config to {backup_path}: {error}");
             }
         }
         if let Err(error) = std::fs::write(&self.config_path, text) {
             return Err((
                 500,
-                json!({"error": format!("写配置文件 {} 失败：{error}", self.config_path), "saved": false}),
+                json!({"error": format!("failed to write config file {}: {error}", self.config_path), "saved": false}),
             ));
         }
 
@@ -472,7 +497,7 @@ impl<S: Store + Send + 'static> Console<S> {
         Ok(json!({
             "ok": true,
             "saved": true,
-            "note": "已保存并暂存，下一次收消息/开轮自动生效（轮次边界重载，ADR-0009）",
+            "note": "saved and staged; takes effect on the next message/turn (reloaded at turn boundaries, ADR-0009)",
             "changes": changes,
             "hot_reload": hot,
             "needs_restart": restart,
@@ -539,7 +564,10 @@ impl<S: Store + Send + 'static> Console<S> {
             .trim_start_matches("/api/feedback/")
             .trim_end_matches("/status");
         let Ok(id) = rest.parse::<i64>() else {
-            return (400, json!({"error": "路径要写成 /api/feedback/:id/status"}).to_string());
+            return (
+                400,
+                json!({"error": "path must be /api/feedback/:id/status"}).to_string(),
+            );
         };
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
         let status = parsed
@@ -549,15 +577,21 @@ impl<S: Store + Send + 'static> Console<S> {
         if !["open", "acked", "resolved", "wontfix"].contains(&status) {
             return (
                 400,
-                json!({"error": "status 只能是 open / acked / resolved / wontfix"}).to_string(),
+                json!({"error": "status must be open / acked / resolved / wontfix"}).to_string(),
             );
         }
         let note = parsed.get("note").and_then(serde_json::Value::as_str);
 
         let mut bridge = lock(&self.bridge);
         match bridge.store_mut().set_feedback_status(id, status, note) {
-            Ok(true) => (200, json!({"ok": true, "id": id, "status": status}).to_string()),
-            Ok(false) => (404, json!({"error": format!("没有编号 {id} 的反馈")}).to_string()),
+            Ok(true) => (
+                200,
+                json!({"ok": true, "id": id, "status": status}).to_string(),
+            ),
+            Ok(false) => (
+                404,
+                json!({"error": format!("no feedback with id {id}")}).to_string(),
+            ),
             Err(error) => (500, json!({"error": error.to_string()}).to_string()),
         }
     }
@@ -573,7 +607,10 @@ impl<S: Store + Send + 'static> Console<S> {
         };
         let session = session.to_owned();
         if session.is_empty() {
-            return (400, json!({"error":"会话 id 不能为空"}).to_string());
+            return (
+                400,
+                json!({"error":"session id must not be empty"}).to_string(),
+            );
         }
         // 确认会话存在。
         let exists = {
@@ -581,7 +618,10 @@ impl<S: Store + Send + 'static> Console<S> {
             bridge.config().session(&session).is_some()
         };
         if !exists {
-            return (404, json!({"error": format!("没有会话 {session}")}).to_string());
+            return (
+                404,
+                json!({"error": format!("no such session {session}")}).to_string(),
+            );
         }
         // 发 control 帧（reset / interrupt）给管理这个会话的 harness。
         let frame = Frame::Control {
@@ -594,12 +634,13 @@ impl<S: Store + Send + 'static> Console<S> {
         if delivered {
             (
                 200,
-                json!({"ok": true, "session": session, "note": format!("{command} 指令已发出")}).to_string(),
+                json!({"ok": true, "session": session, "note": format!("{command} command sent")})
+                    .to_string(),
             )
         } else {
             (
                 409,
-                json!({"ok": false, "session": session, "error": "没有 harness 在管理这个会话（可能没连上）"}).to_string(),
+                json!({"ok": false, "session": session, "error": "no harness manages this session (it may not be connected)"}).to_string(),
             )
         }
     }
@@ -743,10 +784,10 @@ fn parse_request_line(header_text: &str) -> (String, String, String) {
 
 fn read_body(stream: &mut TcpStream, leftover: &[u8], header_text: &str) -> String {
     let mut body = leftover.to_vec();
-    if let Some(len) = header_text
-        .lines()
-        .find_map(|l| l.strip_prefix("Content-Length:").and_then(|v| v.trim().parse::<usize>().ok()))
-    {
+    if let Some(len) = header_text.lines().find_map(|l| {
+        l.strip_prefix("Content-Length:")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+    }) {
         while body.len() < len {
             let mut chunk = [0_u8; 8192];
             match stream.read(&mut chunk) {
@@ -829,58 +870,67 @@ fn reload_impact(old: &acb_kernel::Config, new: &acb_kernel::Config) -> (Vec<Str
     let mut restart = Vec::new();
 
     if old.sessions != new.sessions {
-        hot.push("sessions（会话/订阅/唤醒策略/人格与记忆挂载）".to_owned());
+        hot.push(
+            "sessions (sessions/subscriptions/wake policy/persona and memory mounts)".to_owned(),
+        );
     }
     if old.harnesses != new.harnesses {
         hot.push("harnesses".to_owned());
     }
     if old.personas != new.personas {
-        hot.push("personas（人格）".to_owned());
+        hot.push("personas".to_owned());
     }
     if old.memories != new.memories {
-        hot.push("memories（记忆仓库声明）".to_owned());
+        hot.push("memories (memory repository declarations)".to_owned());
     }
     if old.retention != new.retention {
-        hot.push("retention（流水保留）".to_owned());
+        hot.push("retention".to_owned());
     }
     if old.default_on_turn_error != new.default_on_turn_error {
-        hot.push("default_on_turn_error（默认失败通知）".to_owned());
+        hot.push("default_on_turn_error (default turn error action)".to_owned());
     }
     if old.delivery_limit != new.delivery_limit {
-        hot.push("delivery_limit（单轮投递上限）".to_owned());
+        hot.push("delivery_limit (per-turn delivery limit)".to_owned());
     }
     if old.turn_timeout_secs != new.turn_timeout_secs {
-        hot.push("turn_timeout_secs（单轮自动超时，0=关）".to_owned());
+        hot.push("turn_timeout_secs (per-turn timeout, 0=off)".to_owned());
     }
     match (&old.file_relay, &new.file_relay) {
         (Some(a), Some(b)) => {
             if a.public_base != b.public_base || a.dir != b.dir {
-                hot.push("file_relay.public_base/dir（发布端下一轮重建）".to_owned());
+                hot.push(
+                    "file_relay.public_base/dir (rebuilt by the publisher next turn)".to_owned(),
+                );
             }
             if a.listen != b.listen {
-                restart.push("file_relay.listen（文件服务监听在启动时绑定）".to_owned());
+                restart.push(
+                    "file_relay.listen (file server listen address bound at startup)".to_owned(),
+                );
             }
         }
         (None, Some(_)) | (Some(_), None) => {
-            restart.push("file_relay（增删要重起/停掉文件服务，监听在启动时定）".to_owned());
+            restart.push("file_relay (adding/removing restarts or stops the file server; listen address fixed at startup)".to_owned());
         }
         (None, None) => {}
     }
 
     if old.endpoint != new.endpoint {
-        restart.push("endpoint（接入点监听在启动时绑定）".to_owned());
+        restart.push("endpoint (listen address bound at startup)".to_owned());
     }
     if old.console != new.console {
-        restart.push("console（控制台监听与令牌在启动时定死）".to_owned());
+        restart.push("console (listen address and token fixed at startup)".to_owned());
     }
     if old.connections != new.connections {
-        restart.push("connections（连接守护线程持有旧连接信息，改 url/token 要重启）".to_owned());
+        restart.push("connections (connection threads hold old connection info; changing url/token requires a restart)".to_owned());
     }
     if old.storage != new.storage {
-        restart.push("storage（状态库启动时打开，换路径等于换了一个桥）".to_owned());
+        restart.push(
+            "storage (the store is opened at startup; changing the path swaps the bridge)"
+                .to_owned(),
+        );
     }
     if old.worktrees_root != new.worktrees_root {
-        restart.push("worktrees_root（已有记忆 worktree 在旧根下，换根要重启）".to_owned());
+        restart.push("worktrees_root (existing memory worktrees live under the old root; changing the root requires a restart)".to_owned());
     }
 
     (hot, restart)
@@ -936,8 +986,14 @@ mod tests {
     #[test]
     fn cookie_token_matches_reads_acb_console_pair() {
         assert!(cookie_token_matches("acb_console=s3cret", "s3cret"));
-        assert!(cookie_token_matches("other=1; acb_console=s3cret", "s3cret"));
-        assert!(cookie_token_matches("acb_console=s3cret; extra=2", "s3cret"));
+        assert!(cookie_token_matches(
+            "other=1; acb_console=s3cret",
+            "s3cret"
+        ));
+        assert!(cookie_token_matches(
+            "acb_console=s3cret; extra=2",
+            "s3cret"
+        ));
         assert!(!cookie_token_matches("acb_console=wrong", "s3cret"));
         assert!(!cookie_token_matches("acb_console=", "s3cret"));
         assert!(!cookie_token_matches("other=1", "s3cret"));
@@ -1010,8 +1066,11 @@ token = "ctok123"
         assert_eq!(hot, Vec::<String>::new());
         assert!(restart.iter().any(|item| item.contains("endpoint")));
 
-        let conn_changed =
-            toml_with("", "127.0.0.1:37700", "ws://127.0.0.1:53002/ws?token=newsecret");
+        let conn_changed = toml_with(
+            "",
+            "127.0.0.1:37700",
+            "ws://127.0.0.1:53002/ws?token=newsecret",
+        );
         let new = acb_kernel::Config::parse(&conn_changed).expect("能解析");
         let (_, restart) = reload_impact(&old, &new);
         assert!(restart.iter().any(|item| item.contains("connections")));
