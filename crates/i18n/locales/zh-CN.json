@@ -569,6 +569,8 @@
   "kernel.plugin.observer_failed": "观察者 {id} 实例化失败：{error}",
   "kernel.plugin.observer_panicked": "观察者 {id} panic，已跳过：{panic}",
   "kernel.plugin.instantiate_panicked": "插件 provider {id} 在实例化时 panic：{panic}",
+  "kernel.plugin.manager_call_panicked": "插件 manager {namespace} 在 {call} 时 panic：{panic}",
+  "kernel.plugin.manager_health_panicked": "插件 manager {namespace} 的健康检查 panic：{panic}",
   "kernel.plugin.tool_name_conflict": "插件工具 {name}（{id}）和内置工具重名，已忽略",
   "kernel.plugin.tool_name_taken": "工具名 {name}（{id}）已被内置工具或其它 provider 占用；请换一个名字",
   "kernel.plugin.tool_manager_owned": "工具 provider {id} 由 manager 提供，不能单独卸载；请卸载它的 manager",

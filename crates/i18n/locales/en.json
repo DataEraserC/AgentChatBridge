@@ -569,6 +569,8 @@
   "kernel.plugin.observer_failed": "failed to instantiate observer {id}: {error}",
   "kernel.plugin.observer_panicked": "observer {id} panicked; skipped: {panic}",
   "kernel.plugin.instantiate_panicked": "plugin provider {id} panicked while instantiating: {panic}",
+  "kernel.plugin.manager_call_panicked": "plugin manager {namespace} panicked during {call}: {panic}",
+  "kernel.plugin.manager_health_panicked": "plugin manager {namespace} panicked during health check: {panic}",
   "kernel.plugin.tool_name_conflict": "plugin tool {name} from {id} conflicts with a built-in tool; ignored",
   "kernel.plugin.tool_name_taken": "tool name {name} from {id} is already used by a built-in tool or another provider; choose a different name",
   "kernel.plugin.tool_manager_owned": "tool provider {id} is manager-owned; uninstall its manager instead",
