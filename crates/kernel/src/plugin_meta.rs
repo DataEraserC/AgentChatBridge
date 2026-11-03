@@ -159,6 +159,28 @@ impl PluginSource {
     }
 }
 
+/// 插件在 Root 里的生命周期状态。
+///
+/// `Resident` 是当前载体不支持热卸载（内置、v1 动态库、平台适配器、Lua/trusted）；
+/// `Unloadable` 是已加载且 loader 声明可安全卸载；`Unloaded` 是已卸载但仍留在目录里，
+/// 供控制台展示并触发重新加载。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PluginLifecycle {
+    Resident,
+    Unloadable,
+    Unloaded,
+}
+
+impl PluginLifecycle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Resident => "resident",
+            Self::Unloadable => "unloadable",
+            Self::Unloaded => "unloaded",
+        }
+    }
+}
+
 /// Root 目录里的一条。给控制台和 agent 的只读视图。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginInfo {
@@ -169,6 +191,7 @@ pub struct PluginInfo {
     pub kind: Option<String>,
     pub source: PluginSource,
     pub health: Health,
+    pub lifecycle: PluginLifecycle,
 }
 
 impl PluginInfo {
@@ -180,6 +203,7 @@ impl PluginInfo {
             "kind": self.kind,
             "source": self.source.as_str(),
             "health": health_json(&self.health),
+            "lifecycle": self.lifecycle.as_str(),
             "metadata": self.metadata.to_json(),
         })
     }
@@ -190,5 +214,28 @@ fn health_json(health: &Health) -> Value {
         Health::Healthy => json!({ "state": "healthy" }),
         Health::Degraded(detail) => json!({ "state": "degraded", "detail": detail }),
         Health::Unhealthy(detail) => json!({ "state": "unhealthy", "detail": detail }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::Health;
+
+    #[test]
+    fn lifecycle_is_visible_in_catalog_json() {
+        let info = PluginInfo {
+            id: ProviderId::parse("test.unloaded").expect("合法"),
+            extension: ExtensionPoint::Wake,
+            metadata: PluginMetadata::EMPTY,
+            capabilities: Vec::new(),
+            kind: None,
+            source: PluginSource::Dynamic,
+            health: Health::Healthy,
+            lifecycle: PluginLifecycle::Unloaded,
+        };
+        let value = info.to_json();
+        assert_eq!(value["lifecycle"], "unloaded");
+        assert_eq!(value["id"], "test.unloaded");
     }
 }
