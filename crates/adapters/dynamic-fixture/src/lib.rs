@@ -259,6 +259,7 @@ fn catalog() -> Vec<WireMethodSpec> {
         required: true,
         desc: "正文".into(),
         values: Vec::new(),
+        example: None,
     };
     vec![
         WireMethodSpec {
