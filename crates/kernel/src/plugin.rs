@@ -199,6 +199,8 @@ pub enum ExtensionPoint {
     Observer,
     /// 插件提供的工具。
     Tool,
+    /// 插件提供的后台任务 handler。
+    Task,
     PlatformAdapter,
     Manager,
     Loader,
@@ -217,6 +219,7 @@ impl ExtensionPoint {
             Self::TurnError => "turn_error",
             Self::Observer => "observer",
             Self::Tool => "tool",
+            Self::Task => "task",
             Self::PlatformAdapter => "platform_adapter",
             Self::Manager => "manager",
             Self::Loader => "loader",
@@ -245,6 +248,8 @@ pub enum Capability {
     ObservedRecord,
     /// 提供插件工具。
     ToolCall,
+    /// 提供后台任务 handler。
+    TaskHandle,
 }
 
 impl Capability {
@@ -265,6 +270,7 @@ impl Capability {
             Self::WakeRequest => "wake_request",
             Self::ObservedRecord => "observed_record",
             Self::ToolCall => "tool_call",
+            Self::TaskHandle => "task_handle",
         }
     }
 }
@@ -1083,6 +1089,8 @@ pub enum ProviderOptions<'a> {
     Observer,
     /// 工具提供者不需要策略配置。
     Tool,
+    /// 任务 handler 不需要策略配置。
+    Task,
     /// 平台适配器：按这条连接的配置实例化。
     PlatformAdapter(&'a Connection),
     /// 不需要 options 的扩展点（发送钩子）。
@@ -1101,6 +1109,7 @@ pub enum ProviderInstance {
     Route(Arc<dyn RouteProvider>),
     Observer(Arc<dyn RecordObserver>),
     Tool(Arc<dyn ToolProvider>),
+    Task(Arc<dyn crate::task::TaskHandler>),
     PlatformAdapter(Arc<dyn AdapterFactory>),
 }
 
@@ -1118,6 +1127,7 @@ impl ProviderInstance {
             Self::Route(_) => ExtensionPoint::Route,
             Self::Observer(_) => ExtensionPoint::Observer,
             Self::Tool(_) => ExtensionPoint::Tool,
+            Self::Task(_) => ExtensionPoint::Task,
             Self::PlatformAdapter(_) => ExtensionPoint::PlatformAdapter,
         }
     }
@@ -1412,6 +1422,9 @@ pub struct PluginManager {
     routes: HashMap<ProviderId, Arc<dyn RouteProvider>>,
     observers: HashMap<ProviderId, Arc<dyn RecordObserver>>,
     tool_providers: HashMap<ProviderId, Arc<dyn ToolProvider>>,
+    /// handler 名 → (注册者 provider id, 执行器)。名字可比 provider id 短，所以
+    /// 卸载时按注册者归属清，而不是猜名字前缀。
+    task_handlers: HashMap<String, (ProviderId, Arc<dyn crate::task::TaskHandler>)>,
     /// 直接注册的平台适配器工厂，键是连接配置里的 `kind`。
     adapters: HashMap<String, Arc<dyn AdapterFactory>>,
     /// manager 子树声明的适配器：`kind` → provider id。
@@ -1491,6 +1504,7 @@ impl PluginManager {
                     | ExtensionPoint::Route
                     | ExtensionPoint::Observer
                     | ExtensionPoint::Tool
+                    | ExtensionPoint::Task
                     | ExtensionPoint::PlatformAdapter
             ) {
                 return Err(PluginError::UnsupportedExtensionPoint {
@@ -1582,6 +1596,8 @@ impl PluginManager {
             self.observers.retain(|id, _| id.namespace() != namespace);
             self.tool_providers
                 .retain(|id, _| id.namespace() != namespace);
+            self.task_handlers
+                .retain(|_, (owner, _)| owner.namespace() != namespace);
             self.adapter_providers
                 .retain(|_, id| id.namespace() != namespace);
         }
@@ -2033,6 +2049,61 @@ impl PluginManager {
         names
     }
 
+    /// 注册后台任务 handler。handler 名不能是内置 `exec`，也不能重复。
+    pub fn register_task_handler(
+        &mut self,
+        descriptor: ProviderDescriptor,
+        name: &str,
+        handler: Arc<dyn crate::task::TaskHandler>,
+    ) -> Result<(), PluginError> {
+        self.check_descriptor(&descriptor, ExtensionPoint::Task, Capability::TaskHandle)?;
+        if self.descriptors.contains_key(&descriptor.id) {
+            return Err(PluginError::DuplicateProvider(descriptor.id.to_string()));
+        }
+        if name == "exec" || self.task_handlers.contains_key(name) {
+            return Err(PluginError::DuplicateProvider(name.to_owned()));
+        }
+        self.descriptors
+            .insert(descriptor.id.clone(), descriptor.clone());
+        self.task_handlers
+            .insert(name.to_owned(), (descriptor.id, handler));
+        Ok(())
+    }
+
+    /// 按 handler 名取任务执行器。直接注册优先；否则把名字当 provider id 委托 manager。
+    pub fn task_handler(&self, name: &str) -> Option<Arc<dyn crate::task::TaskHandler>> {
+        if let Some((_, handler)) = self.task_handlers.get(name) {
+            return Some(handler.clone());
+        }
+        let id = ProviderId::parse(name).ok()?;
+        let descriptor = self.descriptors.get(&id)?;
+        if descriptor.extension_point != ExtensionPoint::Task {
+            return None;
+        }
+        let manager = self.managers.get(id.namespace())?;
+        match manager.instantiate(&id, ProviderOptions::Task) {
+            Ok(ProviderInstance::Task(handler)) => Some(handler),
+            Ok(other) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.plugin.task_wrong_kind",
+                        id = id,
+                        found = format!("{:?}", other.extension_point())
+                    )
+                );
+                None
+            }
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("kernel.plugin.task_failed", id = id, error = error)
+                );
+                None
+            }
+        }
+    }
+
     /// 注册记录观察者。只读，不参与调度。
     pub fn register_observer(
         &mut self,
@@ -2208,6 +2279,7 @@ impl PluginManager {
                 ExtensionPoint::Route => Capability::RouteDecision,
                 ExtensionPoint::Observer => Capability::ObservedRecord,
                 ExtensionPoint::Tool => Capability::ToolCall,
+                ExtensionPoint::Task => Capability::TaskHandle,
                 ExtensionPoint::PlatformAdapter => Capability::PlatformCatalog,
                 point => {
                     return Err(PluginError::UnsupportedExtensionPoint {
@@ -3107,6 +3179,66 @@ mod tests {
             manager.register_wake(descriptor, Arc::new(DefaultWakeProvider)),
             Err(PluginError::DuplicateProvider(_))
         ));
+    }
+
+    struct StubTask;
+
+    impl crate::task::TaskHandler for StubTask {
+        fn handle(
+            &self,
+            _task_id: &str,
+            _payload: &Value,
+        ) -> Result<crate::task::TaskOutcome, String> {
+            Ok(crate::task::TaskOutcome::Nothing)
+        }
+    }
+
+    #[test]
+    fn task_handler_is_removed_with_its_registration_namespace() {
+        struct DemoManager;
+
+        impl ManagerPlugin for DemoManager {
+            fn manifest(&self) -> ManagerManifest {
+                ManagerManifest::new("demo", PLUGIN_API_VERSION, Vec::new())
+            }
+
+            fn descriptors(&self) -> Vec<ProviderDescriptor> {
+                Vec::new()
+            }
+
+            fn instantiate(
+                &self,
+                id: &ProviderId,
+                _options: ProviderOptions<'_>,
+            ) -> Result<ProviderInstance, PluginError> {
+                Err(PluginError::UnknownProvider(id.to_string()))
+            }
+        }
+
+        let mut manager = PluginManager::with_native_builtins();
+        manager
+            .install_manager(Arc::new(DemoManager))
+            .expect("能装 demo manager");
+        let id = ProviderId::parse("demo.echo").expect("合法");
+        manager
+            .register_task_handler(
+                ProviderDescriptor::new(
+                    id,
+                    ExtensionPoint::Task,
+                    PLUGIN_API_VERSION,
+                    vec![Capability::TaskHandle],
+                ),
+                "echo",
+                Arc::new(StubTask),
+            )
+            .expect("能注册");
+        assert!(manager.task_handler("echo").is_some());
+
+        manager.uninstall_manager("demo").expect("能卸载");
+        assert!(
+            manager.task_handler("echo").is_none(),
+            "卸载 namespace 后 handler 不能残留"
+        );
     }
 
     /// 树外 manager 的嵌套子树：父 manager 自己不提供 provider，子 manager 提供。

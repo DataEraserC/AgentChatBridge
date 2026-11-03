@@ -569,6 +569,8 @@
   "kernel.plugin.tool_name_conflict": "plugin tool {name} from {id} conflicts with a built-in tool; ignored",
   "kernel.plugin.tool_wrong_kind": "tool provider {id} manager returned {found}, not a tool",
   "kernel.plugin.tool_failed": "failed to instantiate tool provider {id}: {error}",
+  "kernel.plugin.task_wrong_kind": "task provider {id} manager returned {found}, not a task",
+  "kernel.plugin.task_failed": "failed to instantiate task provider {id}: {error}",
   "kernel.engine.unknown_tool": "unknown tool: {tool}",
   "kernel.engine.unknown_plugin": "unknown plugin provider: {id}",
   "kernel.engine.unload_applied": "unloaded dynamic provider {id}",
