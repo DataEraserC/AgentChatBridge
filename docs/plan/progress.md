@@ -440,7 +440,7 @@
   - 能力表字段草案、astrbot 封闭 pipeline 对照、四项口径复核与 10 项待拍板。
 - 证据：对照 `feature-inventory.md`、`extension-point-catalog.md`、platform/supervisor
   文档，并核实 `plugin.rs` / `adapter.rs` / `tools.rs` / `outbound.rs`；文档 462 行。
-- commit：`TBD`。
+- commit：`28cc75e docs(plan): merge external feature inventory into capability gap matrix`
 - 文档状态修正：`sample_string` 已迁走（`2a722af`）；`RecordObserver`/`ToolProvider`
   已落地（`adb89dc`）；`TaskHandler` 留到 T8，`PluginState` 不进 core。
 - 待用户拍板高优先级：`TaskHandler` 签名与持久化、能力表首批字段、上下文注入形态、
