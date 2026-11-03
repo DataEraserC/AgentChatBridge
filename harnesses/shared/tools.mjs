@@ -191,7 +191,7 @@ false 是「这次没查」，不是「这条没这个值」，要的话把它�
         key: { type: "string", description: "笔记的键" },
         value: { type: "string", description: "笔记的内容" },
         label: { type: "string", description: "给人看的名字" },
-        status: { type: "string", description: "只有 topic 用：open / closed" },
+        status: { type: "string", description: "只有 topic 用：open / closed；term/member 不传或传空字符串" },
       },
       required: ["key", "value"],
       additionalProperties: false,
