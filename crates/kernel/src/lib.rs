@@ -55,8 +55,9 @@ pub use plugin::{
     PluginManager, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions,
     ReceiveDecision, ReceiveProvider, ReceiveRequest, RecordObserver, ReloadScope, RouteAction,
     RouteContext, RouteDecision, RouteProvider, SendContext, SendHook, SendOrigin,
-    SubscribedAccessProvider, ToolCallContext, ToolProvider, ToolSpec, TurnErrorProvider,
-    TurnErrorRequest, WakeContext, WakeProvider, default_delivery_plan,
+    SubscribedAccessProvider, ToolAccessContext, ToolAccessProvider, ToolAccessVerdict,
+    ToolCallContext, ToolProvider, ToolSpec, TurnErrorProvider, TurnErrorRequest, WakeContext,
+    WakeProvider, default_delivery_plan,
 };
 pub use plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetadata, PluginSource};
 pub use relay::{FileRelay, RelayError};

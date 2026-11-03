@@ -188,6 +188,8 @@ impl FromStr for ProviderId {
 pub enum ExtensionPoint {
     Wake,
     Access,
+    /// 工具调用的只读否决点；只能拒绝，不能放行 core 的判定。
+    ToolAccess,
     Receive,
     /// 入库前的消息路由（命令、链接、任务）。
     Route,
@@ -211,6 +213,7 @@ impl ExtensionPoint {
         match self {
             Self::Wake => "wake",
             Self::Access => "access",
+            Self::ToolAccess => "tool_access",
             Self::Receive => "receive",
             Self::Route => "route",
             Self::Send => "send",
@@ -250,6 +253,8 @@ pub enum Capability {
     ToolCall,
     /// 提供后台任务 handler。
     TaskHandle,
+    /// 只读否决工具调用。不能覆盖 core 的既有判定。
+    ToolAccessDecision,
 }
 
 impl Capability {
@@ -271,6 +276,7 @@ impl Capability {
             Self::ObservedRecord => "observed_record",
             Self::ToolCall => "tool_call",
             Self::TaskHandle => "task_handle",
+            Self::ToolAccessDecision => "tool_access_decision",
         }
     }
 }
@@ -517,6 +523,35 @@ pub trait ToolProvider: Send + Sync {
         tool: &str,
         args: Value,
     ) -> Result<Value, ToolError>;
+}
+
+/// 工具调用否决点的上下文。只读；不含 Store、票和水位。
+#[derive(Debug, Clone, Copy)]
+pub struct ToolAccessContext<'a> {
+    pub tool: &'a str,
+    pub args: &'a Value,
+    pub session: &'a str,
+    pub room: &'a RoomId,
+    pub platform: &'a str,
+    pub origin_sender: Option<&'a str>,
+    pub is_admin: bool,
+    /// `true` = 轮次在跑；`false` = 轮次结束后的宽限窗口。
+    pub live: bool,
+}
+
+/// 插件只能否决，不能放行。`Allow` 只是「我不拦」，core 的判定仍然优先。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolAccessVerdict {
+    Allow,
+    Deny { reason: String },
+}
+
+/// 工具访问判定 provider。
+///
+/// 契约：同步、只读、快；不要做网络/磁盘 I/O，不要依赖调用次数（同一次调用可能
+/// 被两层入口各问一次）。返回 `Err` 时 core 按失败关闭处理（拒绝本次调用）。
+pub trait ToolAccessProvider: Send + Sync {
+    fn check(&self, context: &ToolAccessContext<'_>) -> Result<ToolAccessVerdict, String>;
 }
 
 /// 内置唤醒策略：等价于原来的 `WakePolicy::decide`。
@@ -1091,6 +1126,8 @@ pub enum ProviderOptions<'a> {
     Tool,
     /// 任务 handler 不需要策略配置。
     Task,
+    /// 工具访问判定不需要策略配置。
+    ToolAccess,
     /// 平台适配器：按这条连接的配置实例化。
     PlatformAdapter(&'a Connection),
     /// 不需要 options 的扩展点（发送钩子）。
@@ -1110,6 +1147,7 @@ pub enum ProviderInstance {
     Observer(Arc<dyn RecordObserver>),
     Tool(Arc<dyn ToolProvider>),
     Task(Arc<dyn crate::task::TaskHandler>),
+    ToolAccess(Arc<dyn ToolAccessProvider>),
     PlatformAdapter(Arc<dyn AdapterFactory>),
 }
 
@@ -1128,6 +1166,7 @@ impl ProviderInstance {
             Self::Observer(_) => ExtensionPoint::Observer,
             Self::Tool(_) => ExtensionPoint::Tool,
             Self::Task(_) => ExtensionPoint::Task,
+            Self::ToolAccess(_) => ExtensionPoint::ToolAccess,
             Self::PlatformAdapter(_) => ExtensionPoint::PlatformAdapter,
         }
     }
@@ -1422,6 +1461,7 @@ pub struct PluginManager {
     routes: HashMap<ProviderId, Arc<dyn RouteProvider>>,
     observers: HashMap<ProviderId, Arc<dyn RecordObserver>>,
     tool_providers: HashMap<ProviderId, Arc<dyn ToolProvider>>,
+    tool_access: HashMap<ProviderId, Arc<dyn ToolAccessProvider>>,
     /// handler 名 → (注册者 provider id, 执行器)。名字可比 provider id 短，所以
     /// 卸载时按注册者归属清，而不是猜名字前缀。
     task_handlers: HashMap<String, (ProviderId, Arc<dyn crate::task::TaskHandler>)>,
@@ -1505,6 +1545,7 @@ impl PluginManager {
                     | ExtensionPoint::Observer
                     | ExtensionPoint::Tool
                     | ExtensionPoint::Task
+                    | ExtensionPoint::ToolAccess
                     | ExtensionPoint::PlatformAdapter
             ) {
                 return Err(PluginError::UnsupportedExtensionPoint {
@@ -1596,6 +1637,7 @@ impl PluginManager {
             self.observers.retain(|id, _| id.namespace() != namespace);
             self.tool_providers
                 .retain(|id, _| id.namespace() != namespace);
+            self.tool_access.retain(|id, _| id.namespace() != namespace);
             self.task_handlers
                 .retain(|_, (owner, _)| owner.namespace() != namespace);
             self.adapter_providers
@@ -2161,6 +2203,90 @@ impl PluginManager {
         }
     }
 
+    /// 注册工具访问否决点。和观察者一样，安装即生效；不额外占会话配置。
+    pub fn register_tool_access(
+        &mut self,
+        descriptor: ProviderDescriptor,
+        provider: Arc<dyn ToolAccessProvider>,
+    ) -> Result<(), PluginError> {
+        self.check_descriptor(
+            &descriptor,
+            ExtensionPoint::ToolAccess,
+            Capability::ToolAccessDecision,
+        )?;
+        if self.descriptors.contains_key(&descriptor.id) {
+            return Err(PluginError::DuplicateProvider(descriptor.id.to_string()));
+        }
+        self.descriptors
+            .insert(descriptor.id.clone(), descriptor.clone());
+        self.tool_access.insert(descriptor.id, provider);
+        Ok(())
+    }
+
+    /// 依次询问所有工具访问 provider（按 provider id 排序，保证可复现）。
+    ///
+    /// 返回 `None` = 没人拦；`Some((provider, reason))` = 拒绝本次调用。
+    /// provider 返回错误或 manager 实例化失败时按**失败关闭**处理：宁可拒绝，
+    /// 也不让一个坏掉的策略插件变成隐式放行。
+    pub fn check_tool_access(
+        &self,
+        context: &ToolAccessContext<'_>,
+    ) -> Option<(ProviderId, String)> {
+        let mut ids: Vec<&ProviderId> = self
+            .descriptors
+            .values()
+            .filter(|descriptor| descriptor.extension_point == ExtensionPoint::ToolAccess)
+            .map(|descriptor| &descriptor.id)
+            .collect();
+        ids.sort();
+        for id in ids {
+            let provider = if let Some(provider) = self.tool_access.get(id) {
+                provider.clone()
+            } else {
+                let Some(manager) = self.managers.get(id.namespace()) else {
+                    // descriptor 在、实现不在：加载器自己的健康问题，不影响 core 判定。
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("kernel.plugin.tool_access_missing", id = id)
+                    );
+                    continue;
+                };
+                match manager.instantiate(id, ProviderOptions::ToolAccess) {
+                    Ok(ProviderInstance::ToolAccess(provider)) => provider,
+                    Ok(other) => {
+                        let reason = acb_i18n::t!(
+                            "kernel.plugin.tool_access_wrong_kind",
+                            id = id,
+                            found = format!("{:?}", other.extension_point())
+                        );
+                        eprintln!("{reason}");
+                        return Some((id.clone(), reason));
+                    }
+                    Err(error) => {
+                        let reason = acb_i18n::t!(
+                            "kernel.plugin.tool_access_failed",
+                            id = id,
+                            error = error
+                        );
+                        eprintln!("{reason}");
+                        return Some((id.clone(), reason));
+                    }
+                }
+            };
+            match provider.check(context) {
+                Ok(ToolAccessVerdict::Allow) => {}
+                Ok(ToolAccessVerdict::Deny { reason }) => return Some((id.clone(), reason)),
+                Err(error) => {
+                    let reason =
+                        acb_i18n::t!("kernel.plugin.tool_access_error", id = id, error = error);
+                    eprintln!("{reason}");
+                    return Some((id.clone(), reason));
+                }
+            }
+        }
+        None
+    }
+
     /// 安装一棵树外 manager 子树。它拥有自己的 namespace 和子树注册表；Root 只做
     /// namespace / 版本 / 能力 / id 审计，之后把它子树里的 id 委托给它。
     ///
@@ -2280,6 +2406,7 @@ impl PluginManager {
                 ExtensionPoint::Observer => Capability::ObservedRecord,
                 ExtensionPoint::Tool => Capability::ToolCall,
                 ExtensionPoint::Task => Capability::TaskHandle,
+                ExtensionPoint::ToolAccess => Capability::ToolAccessDecision,
                 ExtensionPoint::PlatformAdapter => Capability::PlatformCatalog,
                 point => {
                     return Err(PluginError::UnsupportedExtensionPoint {
@@ -3193,28 +3320,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn task_handler_is_removed_with_its_registration_namespace() {
-        struct DemoManager;
+    struct DemoManager;
 
-        impl ManagerPlugin for DemoManager {
-            fn manifest(&self) -> ManagerManifest {
-                ManagerManifest::new("demo", PLUGIN_API_VERSION, Vec::new())
-            }
-
-            fn descriptors(&self) -> Vec<ProviderDescriptor> {
-                Vec::new()
-            }
-
-            fn instantiate(
-                &self,
-                id: &ProviderId,
-                _options: ProviderOptions<'_>,
-            ) -> Result<ProviderInstance, PluginError> {
-                Err(PluginError::UnknownProvider(id.to_string()))
-            }
+    impl ManagerPlugin for DemoManager {
+        fn manifest(&self) -> ManagerManifest {
+            ManagerManifest::new("demo", PLUGIN_API_VERSION, Vec::new())
         }
 
+        fn descriptors(&self) -> Vec<ProviderDescriptor> {
+            Vec::new()
+        }
+
+        fn instantiate(
+            &self,
+            id: &ProviderId,
+            _options: ProviderOptions<'_>,
+        ) -> Result<ProviderInstance, PluginError> {
+            Err(PluginError::UnknownProvider(id.to_string()))
+        }
+    }
+
+    #[test]
+    fn task_handler_is_removed_with_its_registration_namespace() {
         let mut manager = PluginManager::with_native_builtins();
         manager
             .install_manager(Arc::new(DemoManager))
@@ -3238,6 +3365,59 @@ mod tests {
         assert!(
             manager.task_handler("echo").is_none(),
             "卸载 namespace 后 handler 不能残留"
+        );
+    }
+
+    struct StubDeny;
+
+    impl ToolAccessProvider for StubDeny {
+        fn check(&self, _context: &ToolAccessContext<'_>) -> Result<ToolAccessVerdict, String> {
+            Ok(ToolAccessVerdict::Deny {
+                reason: "blocked".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn tool_access_provider_is_removed_with_its_namespace() {
+        let mut manager = PluginManager::with_native_builtins();
+        manager
+            .install_manager(Arc::new(DemoManager))
+            .expect("能装 demo manager");
+        let id = ProviderId::parse("demo.access").expect("合法");
+        manager
+            .register_tool_access(
+                ProviderDescriptor::new(
+                    id,
+                    ExtensionPoint::ToolAccess,
+                    PLUGIN_API_VERSION,
+                    vec![Capability::ToolAccessDecision],
+                ),
+                Arc::new(StubDeny),
+            )
+            .expect("能注册");
+
+        let room = test_room();
+        let args = Value::Null;
+        let context = ToolAccessContext {
+            tool: "list_rooms",
+            args: &args,
+            session: "main",
+            room: &room,
+            platform: "qq",
+            origin_sender: None,
+            is_admin: false,
+            live: true,
+        };
+        assert!(
+            manager.check_tool_access(&context).is_some(),
+            "注册后应当能拦"
+        );
+
+        manager.uninstall_manager("demo").expect("能卸载");
+        assert!(
+            manager.check_tool_access(&context).is_none(),
+            "卸载 namespace 后否决点不能残留"
         );
     }
 
