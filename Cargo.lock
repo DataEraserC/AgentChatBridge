@@ -81,6 +81,7 @@ dependencies = [
  "acb-plugin-lua",
  "acb-plugin-trusted",
  "acb-proto",
+ "libc",
  "serde_json",
  "toml_edit",
 ]

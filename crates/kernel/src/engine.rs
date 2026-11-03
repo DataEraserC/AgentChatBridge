@@ -479,6 +479,8 @@ pub struct Bridge<S: Store> {
     wake_audit: VecDeque<WakeAuditEntry>,
     /// 直接唤醒的限流窗口：来源 provider → 最近请求时间。
     wake_rates: HashMap<ProviderId, VecDeque<i64>>,
+    /// 排空中：继续入库，但不再开新轮、不再跑路由动作。由信号/运维入口置位。
+    draining: bool,
     /// 配置版本号：每换一次配置 +1，控制台靠它展示「配置换过没有」。
     config_version: u64,
 }
@@ -554,6 +556,7 @@ impl<S: Store> Bridge<S> {
             task_seq: 0,
             wake_audit: VecDeque::new(),
             wake_rates: HashMap::new(),
+            draining: false,
             config_version: 0,
         }
     }
@@ -1576,7 +1579,7 @@ impl<S: Store> Bridge<S> {
         let event_ref = event.as_deref();
         let tags_ref: Vec<&str> = tag_names.iter().map(String::as_str).collect();
 
-        let route_policies = if skip_route || from_self {
+        let route_policies = if skip_route || from_self || self.draining {
             Vec::new()
         } else {
             self.config
@@ -1691,11 +1694,13 @@ impl<S: Store> Bridge<S> {
         // 先把这一轮要用的 provider 都解析出来。放 append 之前是有意的：provider id 写错
         // 应该在入库前就报错，不能先写一条流水再发现叫不醒。
         let mut wake_providers = Vec::with_capacity(subscribers.len());
-        for subscriber in &subscribers {
-            wake_providers.push(
-                self.plugins
-                    .resolve_wake(&subscriber.wake.provider, &subscriber.wake)?,
-            );
+        if !self.draining {
+            for subscriber in &subscribers {
+                wake_providers.push(
+                    self.plugins
+                        .resolve_wake(&subscriber.wake.provider, &subscriber.wake)?,
+                );
+            }
         }
 
         // 路由决定「只存不叫醒」时，要真的把 suppressed 落进记录：
@@ -1728,6 +1733,11 @@ impl<S: Store> Bridge<S> {
             // 平台把我们自己说的话回传回来：记下来，但不是未读，也不叫醒自己。
             if record.sender.id == subscriber.account {
                 self.store.ack(&cursor, &[record.id])?;
+                continue;
+            }
+
+            // 排空中不再叫醒任何人；记录留在流水里，下一进程凭未读接着处理。
+            if self.draining {
                 continue;
             }
 
@@ -2072,6 +2082,66 @@ impl<S: Store> Bridge<S> {
         })
     }
 
+    /// 进入排空：不再开新轮、不再执行路由动作；入站记录仍照常写流水。
+    pub fn begin_drain(&mut self) -> Value {
+        self.draining = true;
+        self.drain_snapshot()
+    }
+
+    /// 是否已在排空。
+    pub fn is_draining(&self) -> bool {
+        self.draining
+    }
+
+    /// 排空/健康探针的快照。
+    pub fn drain_snapshot(&self) -> Value {
+        json!({
+            "state": if self.draining { "draining" } else { "ready" },
+            "active_turns": self.active.len(),
+            "queued_turns": self.pending.len(),
+            "queued_tasks": self.tasks.iter().filter(|task| task.status == TaskStatus::Queued).count(),
+            "running_tasks": self.tasks.iter().filter(|task| task.status == TaskStatus::Running).count(),
+            "pending_route_actions": self.pending_route_actions.len(),
+            "plugin_errors": self.plugin_errors.len() + self.manager_errors.len(),
+            "schema_version": crate::storage::SCHEMA_VERSION,
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+    }
+
+    /// 排空超时后还剩什么。只用于日志/运维，不用于恢复。
+    pub fn drain_leftovers(&self) -> Value {
+        let tasks: Vec<Value> = self
+            .tasks
+            .iter()
+            .filter(|task| matches!(task.status, TaskStatus::Queued | TaskStatus::Running))
+            .map(|task| {
+                json!({
+                    "id": task.id,
+                    "session": task.session,
+                    "room": task.room.to_string(),
+                    "handler": task.handler,
+                    "status": task.status.as_str(),
+                })
+            })
+            .collect();
+        let turns: Vec<Value> = self
+            .pending
+            .iter()
+            .map(|pending| {
+                json!({
+                    "session": pending.session,
+                    "room": pending.room.to_string(),
+                    "reason": pending.reason,
+                })
+            })
+            .collect();
+        json!({
+            "tasks": tasks,
+            "queued_turns": turns,
+            "pending_route_actions": self.pending_route_actions.len(),
+        })
+    }
+
     /// 提前结束轮次。只清 `pending`，不动未读水位：被停掉的消息还在流水里，
     /// 之后任何一个新的唤醒（下一条消息、攒够未读、时钟）都会照常把它们带出来。
     fn interrupt(&mut self, scope: InterruptScope, room: &RoomId) {
@@ -2172,6 +2242,9 @@ impl<S: Store> Bridge<S> {
 
     /// 取下一轮，不管是谁的。没有就返回 `None`。
     pub fn poll_turn(&mut self) -> Result<Option<Delivery>, BridgeError> {
+        if self.draining {
+            return Ok(None);
+        }
         self.apply_pending_plugin_actions();
         self.apply_staged_config();
         let now = now_millis();
@@ -2188,6 +2261,9 @@ impl<S: Store> Bridge<S> {
 
     /// 只给这一组会话取活。接入点用这个——一条连接只代表它自己那组会话。
     pub fn poll_turn_for(&mut self, sessions: &[String]) -> Result<Option<Delivery>, BridgeError> {
+        if self.draining {
+            return Ok(None);
+        }
         self.apply_pending_plugin_actions();
         self.apply_staged_config();
         let now = now_millis();

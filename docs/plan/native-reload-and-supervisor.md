@@ -102,13 +102,14 @@ TimeoutStopSec=45
 KillMode=mixed
 ExecStart=/path/to/acb-bridge-launch --config /path/to/config.toml
 ExecReload=/bin/kill -HUP $MAINPID
-ExecStartPost=/path/to/acb-health-gate --unit=acb-bridge.service
+ExecStartPost=/bin/sh -c 'sleep 5; curl -fsS --max-time 5 -H "Authorization: Bearer $(cat ${XDG_RUNTIME_DIR}/acb-health.token)" http://127.0.0.1:3100/healthz >/dev/null'
 ```
 
 - `ExecStart` 不再直接写死 store path，而是指向**启动包装器**；包装器读
   `state/deploy/current`（符号链接或文本文件），`exec` 对应 store 的二进制。
-- `ExecStartPost` 在启动后等待 `readyz` + 稳定窗口（例如 10 秒）；失败时执行回滚，
-  然后以非零退出让 systemd 停掉本轮。
+- `ExecStartPost` 只做本机 curl 健康探针（token 由 core 写到运行时目录，0600）；
+  **MVP 不做自动回滚**：探针失败让本轮启动失败，连续失败撞 StartLimit 后停在 failed，
+  由人切换回上一个可用 store path。完整版再让门禁自动改 `current`。
 - `TimeoutStopSec` 必须大于 core 的 `drain_timeout_ms`，否则 systemd 会在排空完成前
   `SIGKILL`。
 - `KillMode=mixed`：SIGTERM 先给主进程，超时后再杀 cgroup；避免插件子进程先死、
@@ -120,15 +121,17 @@ ExecStartPost=/path/to/acb-health-gate --unit=acb-bridge.service
 
 | 配置 | 默认 | 含义 |
 |---|---|---|
-| `drain_timeout_ms` | `30000` | 等轮次/任务收尾的上限 |
-| `drain_poll_ms` | `250` | 排空状态轮询间隔 |
-| `health_bind` | `127.0.0.1:3101` | 健康探针监听地址（独立于控制台） |
-| `ready_grace_ms` | `10000` | 启动后多久才算 ready（给插件加载/首连留时间） |
+| `drain_timeout_ms` | `30000` | 等轮次/任务收尾的上限（MVP 先写死为 30s，配置化留后） |
+| `drain_poll_ms` | `250` | 排空状态轮询间隔（MVP 常量） |
+| `health_bind` | `127.0.0.1:3101` | 健康探针监听地址；MVP 直接复用控制台端口 + loopback 限制 |
+| `ready_grace_ms` | `10000` | 启动后多久才算 ready（空日后插件加载用） |
 | `restart_on_untrusted_unload` | `false` | native 卸载后是否主动请求重启 |
-| `last_good_root` | `state/deploy` | 版本 last-good 指针所在目录 |
-| `plugin_lkg_root` | `state/plugins` | 插件 last-known-good 快照所在目录 |
+| `last_good_root` | `state/deploy` | 版本 last-good 指针所在目录（MVP 由人维护） |
+| `plugin_lkg_root` | `state/plugins` | 插件 last-known-good 快照所在目录（MVP 只记录） |
 
-退出码本身是合同，不进配置。
+退出码本身是合同，不进配置。MVP 实现说明：drain 预算/轮询是常量；`/healthz` 挂在
+控制台 HTTP 上，但强制 loopback；token 复用控制台 token，core 另写一份 0600 的运行时
+token 文件供 systemd 侧 curl。
 
 ### 2.5 需要改 core 的具体位置
 
@@ -154,20 +157,24 @@ ExecStartPost=/path/to/acb-health-gate --unit=acb-bridge.service
 - `state/deploy/last-good`：最近一次通过健康门禁的 store path + build 标识。
 - `state/deploy/attempt`：本轮启动时间、目标 path、结果（`pending` / `healthy` / `failed`）。
 
-**谁写**
+**谁写（MVP）**
 
-- 部署脚本/人写 `current`。
-- `ExecStartPost` 的健康门禁在稳定窗口通过后写 `last-good`；失败时把 `current`
-  改回 `last-good` 并退出非零，systemd 重新拉起旧版本。
+- 部署脚本/人写 `current` 与 `last-good`；**人是回滚的执行者**。
+- `ExecStartPost` 只做健康检查：失败让本轮启动失败，连续失败撞 StartLimit 后停在
+  failed，不自动改 `current`。
 - core 只读自己的 build 信息，不写部署指针。
 
-**流程**
+**流程（MVP）**
 
 ```text
 部署新 store path → current 指向新版本 → systemd 启动
-  → 10s 健康窗口：/readyz 连续通过 → last-good = 新版本
-  → 失败：current = last-good → 本轮失败退出 → systemd 重启用旧版本
+  → 5s 后 curl /healthz：通过 → 正常运行
+  → 失败：本轮启动失败；连续失败后 unit failed
+  → 人把 current/last-good 切回上一个 store path，再 systemd restart
 ```
+
+自动回滚放在完整版：健康门禁在稳定窗口通过后写 `last-good`，失败时改 `current`
+并退出非零；前提是健康判定足够可信。
 
 ### 3.2 插件回滚（last-known-good 清单）
 
@@ -237,14 +244,19 @@ ExecStartPost=/path/to/acb-health-gate --unit=acb-bridge.service
 1. core：`RuntimeState` + SIGTERM/SIGHUP + `/healthz` `/readyz` + 退出码（不改 systemd）。
 2. systemd：`Restart=on-failure` / `RestartForceExitStatus=75` / `RestartPreventExitStatus=78` /
    `TimeoutStopSec` / StartLimit。
-3. 启动包装器 + `current`/`last-good` + 健康门禁脚本。
-4. 插件 LKG：core 写 `current.json`，门禁提升 `last-good.json`，启动失败回退。
+3. 启动包装器 + `current`/`last-good` + 本机健康探针（MVP 不做自动回滚）。
+4. 插件 LKG：先只记录清单（`current.json` / `last-good.json`），自动回退留到有真实需求。
 5. 完整版 supervisor 只在出现多实例/灰度需求后再做。
 
-## 7. 需要用户拍板
+## 7. 已代行决策（2026-11-04）与剩余待拍板
 
-1. 是否接受「重启是 native 生命周期的唯一可信边界」，并把 ADR-0030 D3 的回滚措辞
-   降级为「supervisor 重启保底」。
-2. 排空超时后强制退出，是否接受内存任务记录丢失（消息不丢，任务记录丢）。
-3. 健康探针是否允许 loopback 无 token；还是复用控制台 token（会让探针脚本依赖凭据文件）。
-4. 版本回滚由「启动包装器 + 健康门禁」实现，还是等独立 supervisor 再做。
+已按用户授权确定：
+
+1. 进程重启是 native 生命周期的唯一可信边界；core 只排空后退出，拉起交 systemd。
+2. drain 默认 30s，超时强制退出并记录剩余内存任务清单；任务记录会丢，消息不丢。
+3. `/healthz` 只允许 loopback，且要求 token；token 复用控制台 token，core 写运行时
+   0600 文件供 systemd curl，单元文件不出现 token 明文。
+4. 回滚 MVP 为手动：保留上一个可用 store path（Nix generation）+ 插件 LKG 清单；
+   自动回滚留到完整版。
+
+仍需用户确认：ADR-0030 D3 的措辞是否按「supervisor 重启保底」修订（本轮不改 ADR）。

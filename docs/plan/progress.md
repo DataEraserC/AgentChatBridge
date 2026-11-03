@@ -321,6 +321,39 @@
 - 上下文预算定位：属于第 1/2 项的权衡，不是独立最高目标；短 id 用「可读前缀 + 短 id」
   折中，不放弃唯一性/可对账性。
 
+## 2026-11-04 03:40 CST — Supervisor MVP：排空、退出码、健康探针
+
+- 任务编号：supervisor（用户授权代行决策）
+- 代行决策：
+  - 进程重启是 native 生命周期的唯一可信边界；core 只做排空后退出，拉起交 systemd；
+  - drain 默认 30s（常量，配置化留后），超时强制退出并记录剩余内存任务清单；
+  - `/healthz` 只允许 loopback，且要求控制台 token；core 另写 0600 运行时 token 文件
+    供 systemd curl，单元文件不出现 token 明文；
+  - 回滚 MVP 手动：Nix generation 保留上一个 store path + 插件 LKG 清单留后；
+  - 退出码：0 = 运维停止，75 = core 请求重启，78 = 配置/启动失败（不自动重启）。
+  - 可否回退：删除信号处理与排空分支即可恢复原行为；systemd 单元可退回
+    `Restart=always`。不改外部协议/配置格式。
+- 做了什么：
+  - `crates/kernel/src/engine.rs`：`draining` 状态、`begin_drain` / `is_draining` /
+    `drain_snapshot` / `drain_leftovers`；排空时继续入库、跳过 route/wake 解析与开轮。
+  - `crates/kernel/src/route_worker.rs`：`busy` 计数，排空等待后台发送/任务收尾。
+  - `crates/bridge/src/main.rs`：SIGTERM/SIGHUP handler（只写原子量）、30s drain 循环、
+    退出码 0/75/78、写 0600 health token 文件。
+  - `crates/bridge/src/console.rs`：`GET /healthz`（都走 token 鉴权 + 强制 loopback）。
+  - `deploy/systemd/acb-bridge.service`：`Restart=on-failure`、
+    `RestartForceExitStatus=75`、`RestartPreventExitStatus=78`、`StartLimit`、
+    `TimeoutStopSec=45`、`ExecReload=kill -HUP`、`ExecStartPost` 本机 curl 探针。
+  - `crates/kernel/tests/drain_flow.rs`（新）：排空跳过 route/wake、记录仍落库、
+    active turn 计入快照、leftovers 可报告。
+- 证据：
+  - `cargo test -p acb-kernel --test drain_flow` → 3/3；
+  - `cargo test --workspace` → 全通过（exit 0）；`cargo fmt` 无差异。
+- commit：`TBD`。
+- 偏离说明：`/healthz` 复用控制台 HTTP 端口（不强开 3101），用 loopback 限制 +
+  token 鉴权保证只给本机；代价是控制台若绑 0.0.0.0，探针路径也走同一端口。
+- 未决问题：自动回滚/插件 LKG 提升逻辑是否要做；drain 参数是否配置化。
+- 下一步入口：平台能力 flags（仅现有适配器真实能力）。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
