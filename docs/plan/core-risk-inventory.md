@@ -143,7 +143,7 @@ src 内测试模块单列。
 | 扩展工厂/插件分发未做 | `docs/plan/decision-brief.md` | 只能手工放文件/配置；无安装器/市场 | 保留 `extensions_*` + 控制台；用户未拍板 | — |
 | 动态库 tool 载体 ABI 未定 | `docs/plan/decision-brief.md` | tool 目前只能 in-process（`ToolLoader`）；跨语言 tool 需进程方案 | 短期 in-process 可用；中期需在 `.so` 与 subprocess 之间选型 | — |
 | 自动回滚/ADR-0030 D3 未实现 | `docs/plan/native-reload-rollback-options.md`；`dynamic/src/lib.rs:355-358` 注释 | 同路径 reload 失败后只能保持 unloaded；旧实现已 `dlclose` | 维持手动；可信健康判据未定 | P2 |
-| 插件 manager 的 `manifest()` / `children()` / `details()` / `root()` 未 catch | `plugin.rs:1246-1282` 接口；调用点 `plugin.rs:2707/2823` 等 | 坏 manager 在这些只读接口 panic 会让安装/控制台路径 unwind（可能毒锁） | 本次已 catch `descriptors()` / `health()`；其余接口成本相仿，建议按同一 helper 补齐 | P2 |
+| 插件 manager 的 `manifest()` / `children()` / `details()` / `root()` 未 catch | `plugin.rs:1246-1282` 接口；调用点 `plugin.rs:2666/2823` 等 | 坏 manager 在这些只读接口 panic 会让安装/控制台路径 unwind（可能毒锁） | 本次已 catch `descriptors()` / `health()`；其余接口成本相仿，建议按同一 helper 补齐 | P2 |
 | FFI 内 panic 无法由 core 安全 catch | `docs/plan/callback-panic-policy.md` §1.5 | 插件 panic 跨 `extern "C"` → abort/进程退出 | 策略已定：插件自己在 FFI 入口 catch；supervisor 拉起。属已知限制 | P2 |
 | 动态库调用超时后线程无法安全取消 | `dynamic/src/lib.rs:58-60,1932-1955` | 每次超时留下一个阻塞线程 | 见 §4 P1；至少先停止后续调用并标记句柄 | P1 |
 | 无入站限流/配额 | `event_queue.rs`/`engine.rs` | 单个平台/账号刷屏会挤占所有会话的入库与唤醒 | 可先做队列上限（§4），再评估按房间速率限制 | P2 |
