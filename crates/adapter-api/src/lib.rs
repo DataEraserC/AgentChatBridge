@@ -355,6 +355,9 @@ pub struct WireParamSpec {
     pub desc: String,
     #[serde(default)]
     pub values: Vec<String>,
+    /// 平台给的示例值；core 不再按参数名猜平台语义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<serde_json::Value>,
 }
 
 /// 一个房间目标的 wire 形状。

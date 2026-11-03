@@ -56,7 +56,19 @@ fn spec(
             .into(),
         risk,
         scope,
-        params: params.to_vec().into(),
+        params: params
+            .iter()
+            .cloned()
+            .map(|param| match param.name.as_ref() {
+                "file" => param.with_example("https://example.com/a.png"),
+                "group_id" => param.with_example("123456"),
+                "file_id" => param.with_example("123456"),
+                "id" => param.with_example("123456"),
+                "user_id" => param.with_example("10001"),
+                _ => param,
+            })
+            .collect::<Vec<_>>()
+            .into(),
         targets: targets.to_vec().into(),
         effect,
         record,
