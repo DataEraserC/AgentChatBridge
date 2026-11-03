@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use acb_adapter_api::abi::{ABI_VERSION, HostV1};
 use acb_adapter_dynamic::{DynamicLoader, UnloadSafeLibrary};
-use acb_kernel::{PluginConfig, PluginManager, ProviderId, WakePolicy};
+use acb_kernel::{PluginConfig, PluginLifecycle, PluginManager, ProviderId, WakePolicy};
 
 fn temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
@@ -113,6 +113,30 @@ fn unload_safe_v2_strategy_is_removed_from_root() {
         plugins.resolve_wake(&id, &WakePolicy::default()).is_err(),
         "卸载后 manager 与 descriptor 都必须消失"
     );
+    let info = plugins.info(&id).expect("卸载后仍应保留目录快照");
+    assert_eq!(info.lifecycle, PluginLifecycle::Unloaded);
+    assert!(
+        plugins
+            .catalog()
+            .iter()
+            .any(|entry| entry.id == id && entry.lifecycle == PluginLifecycle::Unloaded),
+        "控制台目录要能看到已卸载状态"
+    );
+
+    plugins.reload_provider(&id).expect("应当能重新加载");
+    assert!(
+        plugins.resolve_wake(&id, &WakePolicy::default()).is_ok(),
+        "重新加载后 provider 必须恢复"
+    );
+    assert_eq!(
+        plugins.info(&id).expect("目录").lifecycle,
+        PluginLifecycle::Unloadable
+    );
+    assert!(
+        plugins.reload_provider(&id).is_err(),
+        "已加载的 provider 不能重复重载"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

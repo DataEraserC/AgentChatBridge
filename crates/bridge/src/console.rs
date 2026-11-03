@@ -196,8 +196,11 @@ impl<S: Store + Send + 'static> Console<S> {
                     json!({ "count": plugins.len(), "plugins": plugins }).to_string(),
                 )
             }
-            // 动态插件卸载：只入队，真正的 dlclose 在轮次边界执行。
-            ("POST", "/api/plugins/unload") => self.unload_plugin(body),
+            // 动态插件卸载/重载：只入队，真正的 dlclose/dlopen 在轮次边界执行。
+            ("POST", "/api/plugins/unload") => self.plugin_action(body, false),
+            ("POST", "/api/plugins/reload") => self.plugin_action(body, true),
+            // 控制台前端 i18n：当前 locale + 完整 message map。
+            ("GET", "/api/i18n") => (200, acb_i18n::catalog_json()),
             ("GET", "/api/feedback") => self.feedback(query),
             ("POST", p) if p.starts_with("/api/feedback/") => self.set_feedback(p, body),
             ("POST", p) if p.starts_with("/api/session/") => self.reset(p),
@@ -570,30 +573,47 @@ impl<S: Store + Send + 'static> Console<S> {
         json!({ "sessions": sessions }).to_string()
     }
 
-    /// 请求卸载一个动态插件；真正的卸载在下一个轮次边界执行。
-    fn unload_plugin(&self, body: &str) -> (u16, String) {
+    /// 请求卸载或重载一个动态插件；真正的动作在下一个轮次边界执行。
+    fn plugin_action(&self, body: &str, reload: bool) -> (u16, String) {
         let value: serde_json::Value = match serde_json::from_str(body) {
             Ok(value) => value,
             Err(error) => {
                 return (
                     400,
-                    json!({"error": format!("invalid JSON body: {error}")}).to_string(),
+                    json!({"error": acb_i18n::t!("bridge.console.invalid_json", error = error)})
+                        .to_string(),
                 );
             }
         };
         let Some(id) = value.get("id").and_then(serde_json::Value::as_str) else {
             return (
                 400,
-                json!({"error": "body must contain a string field `id`"}).to_string(),
+                json!({"error": acb_i18n::t!("bridge.console.body_plugin_id")}).to_string(),
             );
         };
         let mut bridge = lock(&self.bridge);
-        match bridge.queue_unload(id) {
-            Ok(()) => (
-                202,
-                json!({"queued": true, "id": id, "note": "unload runs at the next turn boundary"})
-                    .to_string(),
-            ),
+        let result = if reload {
+            bridge.queue_reload(id)
+        } else {
+            bridge.queue_unload(id)
+        };
+        match result {
+            Ok(()) => {
+                let state = if reload {
+                    "pending_reload"
+                } else {
+                    "pending_unload"
+                };
+                let note = if reload {
+                    acb_i18n::t!("bridge.console.plugin_reload_queued", id = id)
+                } else {
+                    acb_i18n::t!("bridge.console.plugin_unload_queued", id = id)
+                };
+                (
+                    202,
+                    json!({"queued": true, "id": id, "state": state, "note": note}).to_string(),
+                )
+            }
             Err(error) => (409, json!({"error": error.to_string()}).to_string()),
         }
     }

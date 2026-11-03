@@ -32,6 +32,11 @@
   .pill.acked { background:#3a342b; color:var(--warn); }
   .pill.resolved { background:#2b3a2e; color:var(--ok); }
   .pill.wontfix { background:#2b2d3a; color:var(--dim); }
+  .pill.resident { background:#2b2d3a; color:var(--dim); }
+  .pill.unloadable { background:#22303f; color:var(--accent); }
+  .pill.pending { background:#3a342b; color:var(--warn); }
+  .pill.unloaded { background:#2b2d3a; color:var(--dim); }
+  .ok { color:var(--ok); }
   button.act { background:var(--accent); border:none; color:#fff; border-radius:6px; padding:4px 12px; cursor:pointer; font-size:13px; }
   button.act.danger { background:var(--err); }
   button.act.ghost { background:none; border:1px solid var(--line); color:var(--dim); }
@@ -75,12 +80,19 @@
   <button data-tab="status" class="active">概览</button>
   <button data-tab="sessions">会话</button>
   <button data-tab="feedback">反馈</button>
+  <button data-tab="plugins" data-i18n="console.nav.plugins">插件</button>
   <button data-tab="config">配置</button>
 </nav>
 <main>
   <section id="tab-status" class="active"><div class="card"><h2>概览</h2><div class="stat" id="status"></div><p class="muted" id="status-note"></p></div></section>
   <section id="tab-sessions"><div id="sessions"></div></section>
   <section id="tab-feedback"><div class="card"><h2>agent 反馈</h2><div id="feedback"></div></div></section>
+  <section id="tab-plugins"><div class="card">
+    <h2><span data-i18n="console.plugins.title">插件生命周期</span><button class="mini" onclick="loadPlugins()" style="float:right" data-i18n="console.plugins.refresh">刷新</button></h2>
+    <p class="muted" data-i18n="console.plugins.intro">这里展示 Root 目录与热卸载状态。只有声明 UNLOAD_SAFE 的 v2 策略插件可以在轮次边界卸载或重新加载；内置、v1 动态库和平台适配器保持常驻。</p>
+    <p class="err" id="plugins-error"></p>
+    <div id="plugins"></div>
+  </div></section>
   <section id="tab-config"><div id="config"></div></section>
 </main>
 <div id="modal" onclick="if(event.target===this)closeModal()"><div id="modal-box"></div></div>
@@ -110,6 +122,21 @@ async function api(path, options = {}) {
 }
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const secret = (v) => '<span class="secret">******</span>';
+
+// 前端 i18n：locale 与消息表由桥侧 /api/i18n 提供（和 Rust 日志同一套 key）。
+// 插件页所有文案都走 t()，不在页面里硬编码。
+let locale = "zh-CN";
+let messages = {};
+const t = (key, params = {}) => String(messages[key] ?? key).replace(/\{(\w+)\}/g, (m, name) => params[name] ?? m);
+async function loadI18n() {
+  try {
+    const reply = await api("/api/i18n");
+    locale = reply.locale || locale;
+    messages = reply.messages || {};
+    document.documentElement.lang = locale;
+    document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  } catch (e) { console.error("i18n failed", e); }
+}
 
 async function loadStatus() {
   const s = await api("/api/status");
@@ -185,6 +212,92 @@ async function resolveFeedback(id) {
   const note = prompt("备注（可空）", "") ?? "";
   try { await api("/api/feedback/" + id + "/status", { method: "POST", body: JSON.stringify({ status, note }) }); loadFeedback(); }
   catch (e) { alert(e.message); }
+}
+
+// ---------------------------------------------------------------------------
+// 插件生命周期（ADR-0029 D4/D8）：常驻 / 可卸载 / 已入队 / 已卸载
+// ---------------------------------------------------------------------------
+const pluginStateClass = (state) => (state === "pending_unload" || state === "pending_reload" ? "pending" : state);
+
+function pluginHealth(health) {
+  if (!health || health.state === "healthy") return t("console.plugins.healthHealthy");
+  const detail = health.detail || "";
+  return health.state === "degraded"
+    ? t("console.plugins.healthDegraded", { detail })
+    : t("console.plugins.healthUnhealthy", { detail });
+}
+
+function pluginActions(p) {
+  if (p.pending) return `<span class="muted">${esc(t("console.plugins.pendingHint"))}</span>`;
+  if ((p.refs || []).length) return `<span class="muted">${esc(t("console.plugins.referencedHint"))}</span>`;
+  if (p.state === "unloadable") {
+    return `<button class="act" onclick="pluginAction('${esc(p.id)}','reload','unloadable')">${esc(t("console.plugins.reload"))}</button>
+      <button class="act danger" onclick="pluginAction('${esc(p.id)}','unload','unloadable')">${esc(t("console.plugins.unload"))}</button>`;
+  }
+  if (p.state === "unloaded") {
+    return `<button class="act" onclick="pluginAction('${esc(p.id)}','reload','unloaded')">${esc(t("console.plugins.load"))}</button>`;
+  }
+  return `<span class="muted">${esc(t("console.plugins.residentHint"))}</span>`;
+}
+
+async function loadPlugins() {
+  const box = $("#plugins");
+  const error = $("#plugins-error");
+  error.className = "err";
+  error.textContent = "";
+  box.innerHTML = `<p class="muted">…</p>`;
+  try {
+    const { plugins } = await api("/api/plugins");
+    if (!plugins.length) {
+      box.innerHTML = `<p class="empty">${esc(t("console.plugins.empty"))}</p>`;
+      return;
+    }
+    const rows = plugins.map((p) => {
+      const meta = p.metadata || {};
+      const summary = meta.summary || meta.title || t("console.plugins.summaryMissing");
+      const refs = (p.refs || []).length ? p.refs.map(esc).join("<br>") : esc(t("console.plugins.none"));
+      const lastError = p.lastError
+        ? `<br><span class="err">${esc(t("console.plugins.lastError", { error: p.lastError }))}</span>`
+        : "";
+      return `<tr>
+        <td class="wrap"><code>${esc(p.id)}</code><br><span class="muted">${esc(summary)}</span>${lastError}</td>
+        <td>${esc(p.extension)}</td>
+        <td>${esc(p.source)}${p.kind ? '<br><span class="muted">kind: ' + esc(p.kind) + "</span>" : ""}</td>
+        <td><span class="pill ${esc(pluginStateClass(p.state))}">${esc(t("console.plugins.state." + p.state))}</span></td>
+        <td class="wrap">${refs}</td>
+        <td>${esc(pluginHealth(p.health))}</td>
+        <td>${pluginActions(p)}</td>
+      </tr>`;
+    }).join("");
+    box.innerHTML = `<table>
+      <tr><th>${esc(t("console.plugins.col.id"))}</th><th>${esc(t("console.plugins.col.extension"))}</th>
+      <th>${esc(t("console.plugins.col.source"))}</th><th>${esc(t("console.plugins.col.state"))}</th>
+      <th>${esc(t("console.plugins.col.refs"))}</th><th>${esc(t("console.plugins.col.health"))}</th>
+      <th>${esc(t("console.plugins.col.actions"))}</th></tr>${rows}</table>`;
+  } catch (e) {
+    box.innerHTML = "";
+    error.textContent = t("console.plugins.actionFailed", { error: e.message });
+  }
+}
+
+async function pluginAction(id, action, state) {
+  const confirmKey = action === "unload"
+    ? "console.plugins.confirmUnload"
+    : (state === "unloaded" ? "console.plugins.confirmLoad" : "console.plugins.confirmReload");
+  if (!confirm(t(confirmKey, { id }))) return;
+  const error = $("#plugins-error");
+  error.textContent = "";
+  try {
+    const reply = await api("/api/plugins/" + action, { method: "POST", body: JSON.stringify({ id }) });
+    await loadPlugins();
+    if (!error.textContent) {
+      error.className = "ok";
+      error.textContent = t("console.plugins.queued", { note: reply.note || "" });
+    }
+  } catch (e) {
+    error.className = "err";
+    error.textContent = t("console.plugins.actionFailed", { error: e.message });
+  }
 }
 
 function wakeText(w) {
@@ -324,6 +437,7 @@ const tabs = {
   status: loadStatus,
   sessions: loadSessions,
   feedback: loadFeedback,
+  plugins: loadPlugins,
   config: loadConfig,
 };
 
@@ -594,16 +708,21 @@ function addMemory() {
       return submitPatch([{ op: "memory", id: g("nm-id"), name: g("nm-name") || g("nm-id"), kind: g("nm-kind") || "git", location: g("nm-loc") }]);
     });
 }
-document.querySelectorAll("nav button").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b === btn));
-    document.querySelectorAll("main section").forEach((sec) => sec.classList.toggle("active", sec.id === "tab-" + btn.dataset.tab));
-    tabs[btn.dataset.tab]().catch((e) => console.error(e));
+async function boot() {
+  // 先拉 i18n，再绑定导航；插件页文案不在页面里写死。
+  await loadI18n();
+  document.querySelectorAll("nav button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b === btn));
+      document.querySelectorAll("main section").forEach((sec) => sec.classList.toggle("active", sec.id === "tab-" + btn.dataset.tab));
+      tabs[btn.dataset.tab]().catch((e) => console.error(e));
+    });
   });
-});
-$("#logout").addEventListener("click", () => { store.del("acb-console-token"); location.href = "/?login=1"; });
-$("#conn-note").textContent = "登录态存在浏览器 cookie 和 localStorage 里，刷新不用重输";
-loadStatus().catch((e) => console.error(e));
+  $("#logout").addEventListener("click", () => { store.del("acb-console-token"); location.href = "/?login=1"; });
+  $("#conn-note").textContent = "登录态存在浏览器 cookie 和 localStorage 里，刷新不用重输";
+  loadStatus().catch((e) => console.error(e));
+}
+boot().catch((e) => console.error(e));
 </script>
 </body>
 </html>

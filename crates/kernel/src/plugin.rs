@@ -27,7 +27,7 @@ use crate::config::{
 };
 use crate::event_queue::EventQueue;
 use crate::outbound::Sent;
-use crate::plugin_meta::{PluginEffect, PluginInfo, PluginMetadata, PluginSource};
+use crate::plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetadata, PluginSource};
 
 /// 插件 API 版本。provider / manager / loader 的 manifest 都要对得上。
 pub const PLUGIN_API_VERSION: u32 = 1;
@@ -1118,6 +1118,24 @@ pub trait PluginLoader: Send + Sync {
             id = id
         )))
     }
+
+    /// 这个 provider 是否能由本 loader 安全热卸载。默认不能。
+    fn can_unload(&self, _id: &ProviderId) -> bool {
+        false
+    }
+
+    /// 已卸载但仍留在目录里的 provider 快照。默认没有。
+    fn inactive(&self) -> Vec<PluginInfo> {
+        Vec::new()
+    }
+
+    /// 重新加载一个已卸载的 provider。默认不支持——动态 loader 再覆盖。
+    fn reload(&self, _manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
+        Err(PluginError::Loader(acb_i18n::t!(
+            "kernel.plugin.loader_no_reload",
+            id = id
+        )))
+    }
 }
 
 fn native_meta(
@@ -1399,7 +1417,23 @@ impl PluginManager {
         }
         Err(last.unwrap_or_else(|| PluginError::Provider {
             id: id.to_string(),
-            detail: "no installed loader can unload this provider".to_owned(),
+            detail: acb_i18n::t!("kernel.plugin.no_loader_unload", id = id),
+        }))
+    }
+
+    /// 重新加载一个已卸载的 provider。只能在安全点调用（无在途轮次）。
+    pub fn reload_provider(&mut self, id: &ProviderId) -> Result<(), PluginError> {
+        let loaders = self.loaders.clone();
+        let mut last = None;
+        for loader in loaders {
+            match loader.reload(self, id) {
+                Ok(()) => return Ok(()),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| PluginError::Provider {
+            id: id.to_string(),
+            detail: acb_i18n::t!("kernel.plugin.no_loader_reload", id = id),
         }))
     }
 
@@ -1498,6 +1532,10 @@ impl PluginManager {
                     .get(descriptor.id.namespace())
                     .map(|manager| manager.health())
                     .unwrap_or(Health::Healthy);
+                let unloadable = self
+                    .loaders
+                    .iter()
+                    .any(|loader| loader.can_unload(&descriptor.id));
                 PluginInfo {
                     id: descriptor.id.clone(),
                     extension: descriptor.extension_point,
@@ -1506,9 +1544,23 @@ impl PluginManager {
                     kind: descriptor.kind.clone(),
                     source: descriptor.source,
                     health,
+                    lifecycle: if unloadable {
+                        PluginLifecycle::Unloadable
+                    } else {
+                        PluginLifecycle::Resident
+                    },
                 }
             })
             .collect();
+        // 卸载后的插件不在 descriptors 里，但仍在 loader 的 inactive 目录里；
+        // 合并进来，控制台才能显示「已卸载」并触发重新加载。
+        for loader in &self.loaders {
+            for info in loader.inactive() {
+                if !infos.iter().any(|existing| existing.id == info.id) {
+                    infos.push(info);
+                }
+            }
+        }
         infos.sort_by(|left, right| {
             (left.extension.as_str(), left.id.to_string())
                 .cmp(&(right.extension.as_str(), right.id.to_string()))

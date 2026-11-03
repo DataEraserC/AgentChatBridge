@@ -57,7 +57,7 @@ pub use plugin::{
     RouteDecision, RouteProvider, SendContext, SendHook, SendOrigin, SubscribedAccessProvider,
     TurnErrorProvider, TurnErrorRequest, WakeContext, WakeProvider, default_delivery_plan,
 };
-pub use plugin_meta::{PluginEffect, PluginInfo, PluginMetadata, PluginSource};
+pub use plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetadata, PluginSource};
 pub use relay::{FileRelay, RelayError};
 pub use route_worker::RouteWorker;
 pub use storage::{

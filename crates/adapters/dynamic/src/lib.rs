@@ -44,11 +44,11 @@ use acb_kernel::{
     DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest, Element, EventQueue,
     ExtensionPoint, Health, LoaderKind, LoaderManifest, ManagerManifest, ManagerPlugin, MethodSpec,
     Outbound, OutboundError, OutgoingRecord, PLUGIN_API_VERSION, PluginConfig, PluginError,
-    PluginLoader, PluginManager, PluginMetadata, PluginSource, ProviderDescriptor, ProviderId,
-    ProviderInstance, ProviderOptions, ReceiveDecision, ReceivePolicy, ReceiveProvider,
-    ReceiveRequest, RoomId, SendContext, SendHook, Sent, TurnErrorAction, TurnErrorPolicy,
-    TurnErrorProvider, TurnErrorRequest, WakeContext, WakeDecision, WakePolicy, WakeProvider,
-    WakeVerdict, default_delivery_plan, validate_manifest,
+    PluginInfo, PluginLifecycle, PluginLoader, PluginManager, PluginMetadata, PluginSource,
+    ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision,
+    ReceivePolicy, ReceiveProvider, ReceiveRequest, RoomId, SendContext, SendHook, Sent,
+    TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest, WakeContext,
+    WakeDecision, WakePolicy, WakeProvider, WakeVerdict, default_delivery_plan, validate_manifest,
 };
 use libloading::Library;
 use serde_json::{Value, json};
@@ -211,6 +211,10 @@ pub struct DynamicLoader {
     plugins: Vec<PluginConfig>,
     /// 只登记声明 UNLOAD_SAFE 的 v2 策略插件：provider id -> 库句柄。
     unloadable: Mutex<HashMap<ProviderId, Arc<Library>>>,
+    /// 可卸载策略插件在配置里的路径，用于卸载后重新加载。
+    known: Mutex<HashMap<ProviderId, PathBuf>>,
+    /// 已卸载的插件快照；Root 目录据此继续展示「已卸载」。
+    unloaded: Mutex<HashMap<ProviderId, PluginInfo>>,
 }
 
 impl DynamicLoader {
@@ -218,7 +222,38 @@ impl DynamicLoader {
         Self {
             plugins: plugins.to_vec(),
             unloadable: Mutex::new(HashMap::new()),
+            known: Mutex::new(HashMap::new()),
+            unloaded: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 把已经 dlopen 的插件登记进 Root，并返回需要保留的库句柄（仅 UNLOAD_SAFE 策略）。
+    fn install_loaded(
+        manager: &mut PluginManager,
+        loaded: LoadedPlugin,
+    ) -> Result<Option<(ProviderId, Arc<Library>)>, PluginError> {
+        let LoadedPlugin {
+            inner,
+            provider_id,
+            library,
+            unload_safe,
+        } = loaded;
+        match inner {
+            LoadedKind::Adapter(factory) => manager
+                .register_adapter_with_source(Arc::new(factory), PluginSource::Dynamic)
+                .map_err(|error| PluginError::Loader(error.to_string()))?,
+            LoadedKind::Wake(wake) => manager
+                .install_manager(Arc::new(wake))
+                .map_err(|error| PluginError::Loader(error.to_string()))?,
+            LoadedKind::Decision(decision) => manager
+                .install_manager(Arc::new(decision))
+                .map_err(|error| PluginError::Loader(error.to_string()))?,
+        }
+        Ok(if unload_safe {
+            provider_id.map(|id| (id, library))
+        } else {
+            None
+        })
     }
 }
 
@@ -250,30 +285,15 @@ impl PluginLoader for DynamicLoader {
                         detail = detail
                     ))
                 })?;
-            let LoadedPlugin {
-                inner,
-                provider_id,
-                library,
-                unload_safe,
-            } = loaded;
-            match inner {
-                LoadedKind::Adapter(factory) => manager
-                    .register_adapter_with_source(Arc::new(factory), PluginSource::Dynamic)
-                    .map_err(|error| PluginError::Loader(error.to_string()))?,
-                LoadedKind::Wake(wake) => manager
-                    .install_manager(Arc::new(wake))
-                    .map_err(|error| PluginError::Loader(error.to_string()))?,
-                LoadedKind::Decision(decision) => manager
-                    .install_manager(Arc::new(decision))
-                    .map_err(|error| PluginError::Loader(error.to_string()))?,
-            }
-            if unload_safe {
-                if let Some(id) = provider_id {
-                    self.unloadable
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .insert(id, library);
-                }
+            if let Some((id, library)) = Self::install_loaded(manager, loaded)? {
+                self.known
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(id.clone(), PathBuf::from(&plugin.path));
+                self.unloadable
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(id, library);
             }
         }
         Ok(())
@@ -289,13 +309,103 @@ impl PluginLoader for DynamicLoader {
                 PluginError::Loader(acb_i18n::t!("adapter.dynamic.unload_unknown", id = id))
             })?
         };
+        let mut info = manager.info(id).ok_or_else(|| PluginError::Provider {
+            id: id.to_string(),
+            detail: acb_i18n::t!("kernel.plugin.unknown_provider", id = id),
+        })?;
         manager.uninstall_manager(id.namespace())?;
         self.unloadable
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(id);
+        info.lifecycle = PluginLifecycle::Unloaded;
+        self.unloaded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.clone(), info);
         // manager 已丢弃，剩下的库引用在这里释放，触发 dlclose。
         drop(library);
+        Ok(())
+    }
+
+    fn can_unload(&self, id: &ProviderId) -> bool {
+        self.known
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(id)
+    }
+
+    fn inactive(&self) -> Vec<PluginInfo> {
+        self.unloaded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn reload(&self, manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
+        let path = self
+            .known
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .cloned()
+            .ok_or_else(|| {
+                PluginError::Loader(acb_i18n::t!("adapter.dynamic.reload_unknown", id = id))
+            })?;
+        if self
+            .unloadable
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(id)
+        {
+            return Err(PluginError::Loader(acb_i18n::t!(
+                "adapter.dynamic.reload_loaded",
+                id = id
+            )));
+        }
+
+        let path_text = path.to_string_lossy().into_owned();
+        let loaded = LoadedPlugin::load(&path_text, None).map_err(|detail| {
+            PluginError::Loader(acb_i18n::t!(
+                "adapter.dynamic.reload_failed",
+                path = path_text,
+                detail = detail
+            ))
+        })?;
+        let found = loaded
+            .provider_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "-".to_owned());
+        if loaded.provider_id.as_ref() != Some(id) {
+            return Err(PluginError::Loader(acb_i18n::t!(
+                "adapter.dynamic.reload_id_mismatch",
+                expected = id,
+                found = found
+            )));
+        }
+        if !loaded.unload_safe {
+            return Err(PluginError::Loader(acb_i18n::t!(
+                "adapter.dynamic.reload_not_unload_safe",
+                id = id
+            )));
+        }
+        let Some((_, library)) = Self::install_loaded(manager, loaded)? else {
+            return Err(PluginError::Loader(acb_i18n::t!(
+                "adapter.dynamic.reload_not_unload_safe",
+                id = id
+            )));
+        };
+        self.unloadable
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.clone(), library);
+        self.unloaded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
         Ok(())
     }
 }

@@ -84,6 +84,31 @@ agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例
 - 边界：`uninstall_manager` 目前只处理单层动态策略 manager；嵌套子 namespace 仍需逐层卸载。
       控制台接口没有专门 UI 按钮，先用 API 调用。
 
+### T4c. 控制台插件生命周期 UI（ADR-0029 D4/D8）
+
+设计结论：
+
+- ADR-0029 D4 要求「轮次边界替换」，当前 `queue_unload` + `poll_turn` 正好是 D4 的实现，
+  不是语义冲突。API 继续返回 202，UI 必须展示「已入队待卸载/重载」，不能暗示立即 dlclose。
+- 当前阶段只覆盖 T4b 已落地的载体：声明 `UNLOAD_SAFE` 的 v2 策略插件。内置、v1 动态库、
+  平台适配器、Lua/trusted 全部标注为常驻；平台适配器热卸载、嵌套 namespace 递归卸载、
+  扩展目录/manifest/审批（T5/T6/T10）不在本阶段。
+- 安全边界：控制台只能操作 `config.toml` 已声明的插件路径，不能输入任意 `.so`；
+  被当前配置引用的 provider 禁止卸载/重载，先改配置；已加载插件重载 = 同一安全点
+  先卸载再加载，失败保持 unloaded 并记录 `lastError`。
+
+- [x] `PluginInfo` 增加 lifecycle（resident / unloadable / unloaded）；
+      `PluginLoader` 增加 `can_unload` / `inactive` / `reload`；Root 目录合并已卸载快照。
+- [x] `DynamicLoader` 记录可卸载插件的配置路径与已卸载快照，支持卸载后重新加载。
+- [x] `Bridge` 增加 `pending_reloads` / `plugin_errors`；目录输出 state / pending / refs / lastError；
+      新增 `queue_reload`，卸载/重载仍在无在途轮次时执行。
+- [x] 控制台增加 `GET /api/i18n`、`POST /api/plugins/reload` 和「插件」页；
+      状态 pill、卸载/重载/加载按钮、确认、pending 禁用、错误可见；新增文案全部走 i18n。
+- [x] 测试：`crates/kernel/tests/plugin_lifecycle.rs` 8 个场景；`unload_v2` 扩展卸载后目录与重载；
+      `cargo test --workspace` 全通过。
+- 边界：卸载/重载失败原因只保留最近一次（按 provider），未做审计历史；审批记录仍由控制台
+  token + `config.toml` 承担，T10 再接入显式审批与审计。
+
 ### T5. 增加 PluginManager 嵌套样例
 
 - [ ] 新增可构建样例（建议 `examples/dynamic/nested-manager/` 或独立 fixture crate），

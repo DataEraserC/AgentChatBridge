@@ -66,6 +66,20 @@ pub fn locale() -> &'static str {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// 当前 locale 与完整 message map 的 JSON，给控制台前端做运行时 i18n。
+pub fn catalog_json() -> String {
+    let messages = catalogs()
+        .get(locale())
+        .or_else(|| catalogs().get("en"))
+        .cloned()
+        .unwrap_or_default();
+    serde_json::json!({
+        "locale": locale(),
+        "messages": messages,
+    })
+    .to_string()
+}
+
 /// Translate one key. Missing keys fall back to `en`, then to the key itself.
 pub fn tr(key: &str) -> String {
     tr_args(key, &[])
@@ -96,6 +110,26 @@ pub fn tr_args(key: &str, args: &[(&str, String)]) -> String {
 /// use acb_i18n::t;
 /// let _ = t!("bridge.main.start_failed", error = "boom");
 /// ```
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_json_contains_locale_and_console_messages() {
+        let value: serde_json::Value =
+            serde_json::from_str(&catalog_json()).expect("catalog JSON 必须合法");
+        assert!(value.get("locale").and_then(|v| v.as_str()).is_some());
+        assert!(
+            value
+                .get("messages")
+                .and_then(|messages| messages.get("console.plugins.title"))
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "控制台插件页文案必须在两个 locale 里都存在"
+        );
+    }
+}
+
 #[macro_export]
 macro_rules! t {
     ($key:expr $(,)?) => {

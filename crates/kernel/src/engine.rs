@@ -41,6 +41,7 @@ use crate::plugin::{
     ProviderId, ReceiveDecision, ReceiveRequest, RouteAction, RouteContext, RouteDecision,
     SendContext, SendHook, SendOrigin, TurnErrorRequest, WakeContext,
 };
+use crate::plugin_meta::PluginLifecycle;
 use crate::render;
 use crate::storage::{
     Cursor, MIN_KEPT, Note, NoteKey, NoteKind, PrunePlan, RecordDraft, StorageError, Store,
@@ -313,6 +314,10 @@ pub struct Bridge<S: Store> {
     staged_config: Option<Config>,
     /// 等待在轮次边界执行的动态插件卸载。
     pending_unloads: Vec<ProviderId>,
+    /// 等待在轮次边界执行的动态插件重新加载。
+    pending_reloads: Vec<ProviderId>,
+    /// 轮次边界卸载/重载失败的原因，控制台按 provider 显示。
+    plugin_errors: HashMap<ProviderId, String>,
     /// 配置版本号：每换一次配置 +1，控制台靠它展示「配置换过没有」。
     config_version: u64,
 }
@@ -380,6 +385,8 @@ impl<S: Store> Bridge<S> {
             relay,
             staged_config: None,
             pending_unloads: Vec::new(),
+            pending_reloads: Vec::new(),
+            plugin_errors: HashMap::new(),
             config_version: 0,
         }
     }
@@ -395,18 +402,149 @@ impl<S: Store> Bridge<S> {
     }
 
     /// 插件目录的只读 JSON 视图（控制台用）。
+    ///
+    /// 在 `PluginInfo::to_json` 之上补齐控制台需要的生命周期字段：
+    /// pending 状态、配置引用位置、轮次边界失败原因。
     pub fn plugin_catalog(&self) -> Vec<Value> {
-        self.plugins.catalog_json()
+        self.plugins
+            .catalog()
+            .into_iter()
+            .map(|info| {
+                let pending = if self
+                    .pending_reloads
+                    .iter()
+                    .any(|pending| pending == &info.id)
+                {
+                    Some("reload")
+                } else if self
+                    .pending_unloads
+                    .iter()
+                    .any(|pending| pending == &info.id)
+                {
+                    Some("unload")
+                } else {
+                    None
+                };
+                let state = match pending {
+                    Some("unload") => "pending_unload",
+                    Some("reload") => "pending_reload",
+                    _ => info.lifecycle.as_str(),
+                };
+                let refs = self.plugin_references(&info.id);
+                let error = self.plugin_errors.get(&info.id);
+                let mut value = info.to_json();
+                if let Value::Object(fields) = &mut value {
+                    fields.insert("state".into(), json!(state));
+                    fields.insert("pending".into(), json!(pending));
+                    fields.insert("refs".into(), json!(refs));
+                    fields.insert(
+                        "lastError".into(),
+                        error.map(|error| json!(error)).unwrap_or(Value::Null),
+                    );
+                }
+                value
+            })
+            .collect()
+    }
+
+    /// 一个 provider 被当前生效配置引用的位置。引用中的插件不能卸载，
+    /// 否则下一轮解析配置会失败。返回形如 `session:main wake qq:group/123` 的稳定标识。
+    fn plugin_references(&self, id: &ProviderId) -> Vec<String> {
+        let mut refs = Vec::new();
+        for connection in &self.config.connections {
+            if &connection.receive.provider == id {
+                refs.push(format!("connection:{} receive", connection.id));
+            }
+            for route in &connection.routes {
+                if &route.provider == id {
+                    refs.push(format!("connection:{} route", connection.id));
+                }
+            }
+        }
+        for session in &self.config.sessions {
+            if &session.access.provider == id {
+                refs.push(format!("session:{} access", session.id));
+            }
+            if &session.delivery.provider == id {
+                refs.push(format!("session:{} delivery", session.id));
+            }
+            if session.outbound.before.iter().any(|hook| hook == id)
+                || session.outbound.after.iter().any(|hook| hook == id)
+            {
+                refs.push(format!("session:{} outbound", session.id));
+            }
+            if &session.turn_error.provider == id {
+                refs.push(format!("session:{} turn_error", session.id));
+            }
+            for subscription in &session.subscriptions {
+                if &subscription.wake.provider == id {
+                    refs.push(format!("session:{} wake {}", session.id, subscription.room));
+                }
+                if &subscription.clock.provider == id {
+                    refs.push(format!(
+                        "session:{} clock {}",
+                        session.id, subscription.room
+                    ));
+                }
+            }
+        }
+        refs.sort();
+        refs
+    }
+
+    fn plugin_lifecycle(&self, id: &ProviderId) -> Result<PluginLifecycle, BridgeError> {
+        match self.plugins.info(id) {
+            Some(info) => Ok(info.lifecycle),
+            None => Err(BridgeError::Plugin(PluginError::Provider {
+                id: id.to_string(),
+                detail: acb_i18n::t!("kernel.engine.unknown_plugin", id = id),
+            })),
+        }
+    }
+
+    fn plugin_not_hot(&self, id: &ProviderId, lifecycle: PluginLifecycle) -> BridgeError {
+        BridgeError::Plugin(PluginError::Provider {
+            id: id.to_string(),
+            detail: acb_i18n::t!(
+                "kernel.engine.plugin_not_unloadable",
+                id = id,
+                lifecycle = lifecycle.as_str()
+            ),
+        })
+    }
+
+    fn plugin_pending(&self, id: &ProviderId, action: &str) -> BridgeError {
+        BridgeError::Plugin(PluginError::Provider {
+            id: id.to_string(),
+            detail: acb_i18n::t!("kernel.engine.plugin_pending", id = id, action = action),
+        })
+    }
+
+    fn reject_if_referenced(&self, id: &ProviderId) -> Result<(), BridgeError> {
+        let refs = self.plugin_references(id);
+        if refs.is_empty() {
+            return Ok(());
+        }
+        Err(BridgeError::Plugin(PluginError::Provider {
+            id: id.to_string(),
+            detail: acb_i18n::t!(
+                "kernel.engine.plugin_in_use",
+                id = id,
+                refs = refs.join(", ")
+            ),
+        }))
     }
 
     /// 请求在下一个轮次边界卸载一个动态插件。不会在轮次进行中直接 dlclose。
     pub fn queue_unload(&mut self, id: &str) -> Result<(), BridgeError> {
         let id = ProviderId::parse(id)?;
-        if self.plugins.info(&id).is_none() {
-            return Err(BridgeError::Plugin(PluginError::Provider {
-                id: id.to_string(),
-                detail: acb_i18n::t!("kernel.engine.unknown_plugin", id = id),
-            }));
+        let lifecycle = self.plugin_lifecycle(&id)?;
+        if lifecycle != PluginLifecycle::Unloadable {
+            return Err(self.plugin_not_hot(&id, lifecycle));
+        }
+        self.reject_if_referenced(&id)?;
+        if self.pending_reloads.iter().any(|pending| pending == &id) {
+            return Err(self.plugin_pending(&id, "reload"));
         }
         if !self.pending_unloads.iter().any(|pending| pending == &id) {
             self.pending_unloads.push(id);
@@ -414,18 +552,74 @@ impl<S: Store> Bridge<S> {
         Ok(())
     }
 
-    fn apply_pending_unloads(&mut self) {
-        if !self.active.is_empty() || self.pending_unloads.is_empty() {
+    /// 请求在下一个轮次边界重新加载一个动态插件。
+    ///
+    /// 已卸载的直接排重载；已加载且可卸载的同时排卸载和重载，净效果是一次安全点
+    /// 内的「卸载 → 重新加载」。
+    pub fn queue_reload(&mut self, id: &str) -> Result<(), BridgeError> {
+        let id = ProviderId::parse(id)?;
+        let lifecycle = self.plugin_lifecycle(&id)?;
+        match lifecycle {
+            PluginLifecycle::Resident => return Err(self.plugin_not_hot(&id, lifecycle)),
+            // 已加载时重载包含卸载，仍被配置引用会中断下一轮，必须拒绝。
+            PluginLifecycle::Unloadable => self.reject_if_referenced(&id)?,
+            // 已卸载时重载是在恢复服务；即使配置又引用它，也应该允许。
+            PluginLifecycle::Unloaded => {}
+        }
+        if !self.pending_reloads.iter().any(|pending| pending == &id) {
+            self.pending_reloads.push(id.clone());
+        }
+        if lifecycle == PluginLifecycle::Unloadable
+            && !self.pending_unloads.iter().any(|pending| pending == &id)
+        {
+            self.pending_unloads.push(id);
+        }
+        Ok(())
+    }
+
+    fn apply_pending_plugin_actions(&mut self) {
+        if !self.active.is_empty() {
             return;
         }
-        let pending = std::mem::take(&mut self.pending_unloads);
-        for id in pending {
+        if self.pending_unloads.is_empty() && self.pending_reloads.is_empty() {
+            return;
+        }
+        let unloads = std::mem::take(&mut self.pending_unloads);
+        let reloads = std::mem::take(&mut self.pending_reloads);
+        let mut unload_failed = Vec::new();
+        for id in unloads {
             match self.plugins.unload_provider(&id) {
-                Ok(()) => eprintln!("{}", acb_i18n::t!("kernel.engine.unload_applied", id = id)),
-                Err(error) => eprintln!(
-                    "{}",
-                    acb_i18n::t!("kernel.engine.unload_failed", id = id, error = error)
-                ),
+                Ok(()) => {
+                    self.plugin_errors.remove(&id);
+                    eprintln!("{}", acb_i18n::t!("kernel.engine.unload_applied", id = id));
+                }
+                Err(error) => {
+                    unload_failed.push(id.clone());
+                    self.plugin_errors.insert(id.clone(), error.to_string());
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("kernel.engine.unload_failed", id = id, error = error)
+                    );
+                }
+            }
+        }
+        for id in reloads {
+            // 卸载失败说明旧版本还在；重载必然报「已加载」，不要把错误覆盖成更难懂的提示。
+            if unload_failed.iter().any(|failed| failed == &id) {
+                continue;
+            }
+            match self.plugins.reload_provider(&id) {
+                Ok(()) => {
+                    self.plugin_errors.remove(&id);
+                    eprintln!("{}", acb_i18n::t!("kernel.engine.reload_applied", id = id));
+                }
+                Err(error) => {
+                    self.plugin_errors.insert(id.clone(), error.to_string());
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("kernel.engine.reload_failed", id = id, error = error)
+                    );
+                }
             }
         }
     }
@@ -1004,7 +1198,7 @@ impl<S: Store> Bridge<S> {
 
     /// 取下一轮，不管是谁的。没有就返回 `None`。
     pub fn poll_turn(&mut self) -> Result<Option<Delivery>, BridgeError> {
-        self.apply_pending_unloads();
+        self.apply_pending_plugin_actions();
         self.apply_staged_config();
         let now = now_millis();
         let index = (0..self.pending.len()).find(|&index| {
@@ -1020,7 +1214,7 @@ impl<S: Store> Bridge<S> {
 
     /// 只给这一组会话取活。接入点用这个——一条连接只代表它自己那组会话。
     pub fn poll_turn_for(&mut self, sessions: &[String]) -> Result<Option<Delivery>, BridgeError> {
-        self.apply_pending_unloads();
+        self.apply_pending_plugin_actions();
         self.apply_staged_config();
         let now = now_millis();
         let index = (0..self.pending.len()).find(|&index| {
