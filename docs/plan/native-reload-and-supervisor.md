@@ -217,14 +217,18 @@ ExecStartPost=/path/to/acb-health-gate --unit=acb-bridge.service
 
 ## 5. 代价与取舍
 
-| 维度 | MVP | 完整版 |
+按四项统一口径评估（开发难度不计入）：
+
+| 口径 | MVP | 完整版 |
 |---|---|---|
-| 形态 | systemd `Restart=on-failure` + core drain + `/healthz` + 启动包装器 | 独立 `acb-supervisor` 进程 + 健康窗口 + 多实例/灰度 |
-| core 改动 | 信号、排空状态、探针、退出码 | 同上 + 部署/插件状态接口 |
-| systemd 改动 | 重启策略、StartLimit、ExecStart 包装器、TimeoutStopSec | 同上 + watchdog、自动回滚脚本 |
-| 内存 | 不增加常驻进程 | +10–30 MB（supervisor 常驻） |
-| 可测试性 | 进程内单测 drain 状态机；集成测退出码；systemd 需 NixOS test | 可做故障注入、灰度、回滚演练 |
-| 作者影响 | native 作者要知道「重启 = 唯一可信边界」 | 提供 LKG 与审批记录，降低试错成本 |
+| 稳态运行成本 | 不增加常驻进程；每次重启 = 启动 + 重放未读的一轮成本 | 额外常驻 10–30 MB；多一层代理/健康窗口开销 |
+| 可观测性 / 可审计性 | 退出码 + `/healthz` + journal + 回滚脚本退出码，足以对账 | supervisor 自带状态机/灰度指标/回滚审计，更完整 |
+| 接口面增长速度 | core 只加信号、排空状态、探针、退出码；不按功能加入口 | 新增 supervisor 配置/协议，接口面变宽，需要版本化 |
+| 可变更性 | 退出码与探针 schema 一旦被外部脚本依赖就难改，先定窄接口 | supervisor API 一旦被部署脚本依赖更难改，宜先内部 |
+
+形态：MVP = systemd `Restart=on-failure` + core drain + `/healthz` + 启动包装器；
+完整版 = 独立 `acb-supervisor` + 健康窗口 + 多实例/灰度。内存数字来自常驻进程估算，
+不是承诺。
 
 **MVP 明确不做**：进程内自重启、第二常驻进程、跨版本数据迁移回滚、插件产物回滚。
 
