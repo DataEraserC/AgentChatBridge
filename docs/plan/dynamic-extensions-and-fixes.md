@@ -126,16 +126,29 @@ agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例
 
 ### T6. ADR-0029 P1：动态扩展闭环
 
-- [ ] 增加 `ACB_DYNAMIC_DIR` 与动态模块 manifest（meta/extension/capabilities/scope）。
-- [ ] 增加稳定分派器（route 先做），新增/删除模块不改 `config.toml`。
-- [ ] 接入真实热重载：解析目录 → 校验/编译 → 轮次边界整体替换 dynamic namespace；
-      provider 集合变化也允许。
-- [ ] 增加 authoring 工具：`extensions_list` / `extensions_read` / `extensions_write` /
-      `extensions_reload`，仅管理员会话，路径 jail、大小上限。
-- [ ] 模块级可观察性：summary、effects、source、hash、mtime、health、引用关系、失败计数。
-- [ ] 测试：新增模块在下一轮生效；删模块失效；坏模块不替换线上版本；并发写不破坏目录。
+#### T6a：动态目录与稳定分派器（已完成）
+
+- [x] 增加 `ACB_DYNAMIC_DIR` 与声明式模块 manifest（id / api_version / carrier /
+      extension / capabilities / effects / scope / match / action）。
+- [x] 增加稳定分派器 `dyn.routes`（route 先做），新增/删除模块不改 `config.toml`。
+- [x] 接入真实热重载：解析目录 → 校验 → 轮次边界整体替换快照；坏模块不替换线上版本。
+- [x] 模块级可观察性：summary、effects、source、scope、hash、mtime、calls、
+      health、路径；`GET /api/extensions` 与 `POST /api/extensions/reload`。
+- [x] 安全边界：只从受信目录发现；拒绝符号链接、路径逃逸、超大 manifest、
+      重复 id、未知字段、非 declarative carrier、非 route extension。
+- [x] 测试：发现与分派、重复 id、非法 manifest、符号链接、坏模块不替换线上版本、
+      增删模块在边界生效。
+- 实测：`cargo test -p acb-extensions` 10/10；`cargo test --workspace` 全通过。
+
+#### T6b：authoring 工具（待办）
+
+- [ ] `extensions_list` / `extensions_read` / `extensions_write` / `extensions_reload`。
+- [ ] 仅管理员会话；路径 jail、大小上限、原子写入。
+- [ ] 写完显式 reload，下一轮边界生效。
 - 依据：ADR-0029 P1、D3、D4、D7、D8、D9。
 - 验收：AI 写一个 route 模块 → reload → 下一轮真实生效，全程不重启桥。
+- 拆分理由：T6a 先固定目录/manifest/分派器/安全与边界语义，T6b 只加工具面；
+  工具面依赖“轮次来源发送者”进入 TurnCtx 的管理员判定，单独提交更容易验证。
 
 ### T7. 任务结果与反馈回复的唤醒闭环
 

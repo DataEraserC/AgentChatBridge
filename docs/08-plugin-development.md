@@ -73,6 +73,50 @@ core ──▶ 插件   create(WireInstanceConfig) / invoke(CoreMessage) / Shutd
 更完整的 conformance fixture 见 `crates/adapters/dynamic-fixture` 和
 `crates/plugins/wake-fixture`。
 
+## 动态扩展目录（声明式 route）
+
+`ACB_DYNAMIC_DIR` 指向一个受信目录；每个子目录一个声明式模块。模块只写
+`manifest.toml`，由 core 解释，不执行任意代码：
+
+```toml
+id = "dyn.echo"
+api_version = 1
+carrier = "declarative"
+extension = "route"
+summary = "命中 /echo 时回一条固定消息"
+capabilities = ["route_decision"]
+effects = ["may_drop"]
+
+[match]
+text_prefix = "/echo"
+
+[action]
+kind = "send"
+text = "echo"
+```
+
+配置里只引用稳定分派器一次；增删模块不需要改 `config.toml`：
+
+```toml
+[[connections.routes]]
+provider = "dyn.routes"
+```
+
+安全边界：
+
+- 只从 `ACB_DYNAMIC_DIR` 发现；根目录会规范化。
+- 模块目录与 `manifest.toml` 必须是普通目录/文件；符号链接拒绝。
+- manifest 上限 64 KiB；未知字段直接拒绝。
+- `carrier` 目前只接受 `declarative`；`extension` 目前只接受 `route`。
+- 同一目录内重复 `id` 拒绝；任一模块坏，整次重载不替换线上快照。
+- `scope` 支持 `global` / `connection` / `session`；后两者必须给出
+  `connections` / `sessions` 列表。
+
+重载由 `POST /api/extensions/reload`（默认 namespace `dyn`）或后续的
+`extensions_reload` 工具触发；它只入队，真正扫描与替换发生在下一个轮次边界。
+`GET /api/extensions` 返回模块级目录、health、最近错误、hash / mtime / calls。
+可抄的最小模块见 [`examples/extensions/echo`](https://github.com/DataEraserC/AgentChatBridge/tree/dev_20261025/examples/extensions/echo)。
+
 ## 嵌套 manager
 
 `ManagerPlugin::children()` 返回子 manager；Root 先安装父 manager，再递归安装子 manager，

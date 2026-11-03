@@ -75,6 +75,7 @@ dependencies = [
  "acb-adapter-dynamic",
  "acb-adapter-onebot11",
  "acb-adapter-process",
+ "acb-extensions",
  "acb-i18n",
  "acb-kernel",
  "acb-plugin-lua",
@@ -82,6 +83,17 @@ dependencies = [
  "acb-proto",
  "serde_json",
  "toml_edit",
+]
+
+[[package]]
+name = "acb-extensions"
+version = "0.1.0"
+dependencies = [
+ "acb-i18n",
+ "acb-kernel",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]

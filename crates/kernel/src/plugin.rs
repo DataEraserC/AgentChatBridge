@@ -1083,6 +1083,11 @@ pub trait ManagerPlugin: Send + Sync {
     fn health(&self) -> Health {
         Health::Healthy
     }
+
+    /// 子树自己的模块级信息（动态扩展目录用）。默认没有。
+    fn details(&self) -> Value {
+        Value::Null
+    }
 }
 
 /// 一种载体的加载器。`NativeLoader` 是内置实现；动态/进程/Lua 后续加。
@@ -1996,6 +2001,18 @@ impl PluginManager {
             }
         }
         failures
+    }
+
+    /// 指定 namespace 的 manager 是否已安装。
+    pub fn has_manager(&self, namespace: &str) -> bool {
+        self.managers.contains_key(namespace)
+    }
+
+    /// 指定 manager 的模块级信息（动态扩展目录用）。
+    pub fn manager_details(&self, namespace: &str) -> Option<Value> {
+        self.managers
+            .get(namespace)
+            .map(|manager| manager.details())
     }
 
     /// 汇总所有 manager 的自报健康状态（按安装顺序）。
