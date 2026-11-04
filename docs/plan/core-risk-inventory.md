@@ -10,9 +10,10 @@
 - **P1**：规模化、异常输入或坏插件下会拖垮服务、长期泄漏或无法自愈。
 - **P2**：局部、低概率或只影响可诊断性；可在相关改动时顺手做。
 
-**结论**：本次没有发现 P0。原 P1 共 6 项；2026-11-04 跟进已修 3 项（relay 锁内复制、
-process `stdin` 持锁写、relay 过期目录清理），剩余 3 项待拍板：入站队列上限、路由队列
-上限、动态库调用线程泄漏（设计见 `queue-backpressure.md` / `dynamic-call-timeout.md`）。
+**结论**：本次没有发现 P0。原 P1 共 6 项；2026-11-04 跟进已修 4 项（relay 锁内复制、
+process `stdin` 持锁写、relay 过期目录清理、动态库句柄超时隔离），剩余 2 项待拍板
+（入站队列上限、路由队列上限，见 `queue-backpressure.md`）。动态库方案 D 只隔离句柄，
+**卡住的插件线程仍无法回收**，作为已知残留保留 P1。
 
 ---
 
@@ -118,7 +119,7 @@ src 内测试模块单列。
 |---|---|---|---|---|---|---|
 | `crates/kernel/src/event_queue.rs:41-44` | 入站 `mpsc::channel`（`EventQueue`） | **无界**（注释明说“队列无界，不阻塞平台读循环”） | 平台洪峰 / SQLite 写入变慢 / drain 线程卡住 | 内存持续上涨直到 OOM；适配器线程不背压 | 上限与超限语义设计见 `queue-backpressure.md`（待拍板） | P1 |
 | `crates/kernel/src/route_worker.rs:19,29,36-44` | 路由动作队列 | **无界** | 路由插件批量产生 send/task，或平台 I/O 慢 | 同上 | 上限与超限语义设计见 `queue-backpressure.md`（待拍板） | P1 |
-| `crates/adapters/dynamic/src/lib.rs:1932-1955` | 每次调用 `thread::spawn` 一个工作线程等插件返回 | 无界 | 插件挂死；调用方 2s 超时后继续发新调用 | 线程数无界增长，且全部堵在 handle 锁上；RSS 上涨、适配器永久不可用 | 修法对比见 `dynamic-call-timeout.md`（推荐先做 D：超时标死句柄） | P1 |
+| `crates/adapters/dynamic/src/lib.rs:2056-2087` | 每次调用 `thread::spawn` 一个工作线程等插件返回 | 超时后不再新增调用，但已 spawn 的线程无法取消 | 插件挂死后，第一次超时线程永久卡在 FFI | **D 已实施（10791f8）**：超时标死句柄，后续 `send/call` 立即失败、catalog `Unhealthy`、新 handle 恢复；**残留**：卡住线程与库引用泄漏到进程退出 | P1（残留） |
 | `crates/kernel/src/relay.rs:27,165-219` + `crates/bridge/src/main.rs:36-38,264-291` | 收下的文件目录 | 启动扫描 + **每小时**定期清理（保留 24h） | 长期运行、频繁发文件 | 磁盘无界增长；最坏写满分区 | **已修（ba39c88）**：过期文件最多多留 1h；删除失败只记日志 | 已修 |
 | `crates/kernel/src/engine.rs:72,811` | `tasks: VecDeque<TaskRecord>` | 200 条，超出丢最旧 | 正常 | 旧任务查询丢失；内存有界 | 已知取舍；需要保留时落库（见 §5） | P2 |
 | `crates/kernel/src/engine.rs:458,2400-2401` | `ended: HashMap<Ticket, EndedTurn>` | 每次 `end_turn` 按 `TURN_GRACE`（600s）清理 | 轮次持续结束 | 有界（最多 600s 内的结束轮次） | 可保持；若并发会话极多可再加硬上限 | P2 |
@@ -146,7 +147,7 @@ src 内测试模块单列。
 | 自动回滚/ADR-0030 D3 未实现 | `docs/plan/native-reload-rollback-options.md`；`dynamic/src/lib.rs:355-358` 注释 | 同路径 reload 失败后只能保持 unloaded；旧实现已 `dlclose` | 维持手动；可信健康判据未定 | P2 |
 | 插件 manager 的 `manifest()` / `children()` / `details()` / `root()` 未 catch | `plugin.rs:1246-1282` 接口；调用点 `plugin.rs:2666/2823` 等 | 坏 manager 在这些只读接口 panic 会让安装/控制台路径 unwind（可能毒锁） | 本次已 catch `descriptors()` / `health()`；其余接口成本相仿，建议按同一 helper 补齐 | P2 |
 | FFI 内 panic 无法由 core 安全 catch | `docs/plan/callback-panic-policy.md` §1.5 | 插件 panic 跨 `extern "C"` → abort/进程退出 | 策略已定：插件自己在 FFI 入口 catch；supervisor 拉起。属已知限制 | P2 |
-| 动态库调用超时后线程无法安全取消 | `dynamic/src/lib.rs:58-60,1932-1955` | 每次超时留下一个阻塞线程 | 修法对比与推荐见 `dynamic-call-timeout.md`（先做 D） | P1 |
+| 动态库调用超时后线程无法安全取消 | `dynamic/src/lib.rs:58-70,2056-2087` | 超时线程仍卡在插件 FFI，无法强制中断 | **D 已实施（10791f8）**：句柄隔离 + 快速失败 + catalog 可见 + 新 handle 恢复；线程残留到进程退出（见 `dynamic-call-timeout.md`） | P1（残留） |
 | 无入站限流/配额 | `event_queue.rs`/`engine.rs` | 单个平台/账号刷屏会挤占所有会话的入库与唤醒 | 可先做队列上限（§4），再评估按房间速率限制 | P2 |
 
 ---
@@ -178,6 +179,6 @@ src 内测试模块单列。
 2. **P1（已修）**：process `stdin` 写入超时/独立写线程（f0ea047）。
 3. **P1（已修）**：relay 过期清理挂到周期线程（ba39c88）。
 4. **P1（待拍板）**：入站队列与路由队列上限，设计见 `queue-backpressure.md`。
-5. **P1（待拍板）**：动态适配器超时后标记句柄 dead，设计见 `dynamic-call-timeout.md`。
+5. **P1（已做 D，残留）**：动态适配器超时隔离句柄（10791f8）；卡死线程仍无法回收。
 6. **P2**：补动态库 ABI 安全契约与 `unsafe impl Send` 注释；把 manager 其余只读接口
    纳入 `call_manager`；控制台查询出锁。

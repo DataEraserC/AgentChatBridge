@@ -1,8 +1,8 @@
-# 动态库调用超时与线程泄漏（设计，待拍板）
+# 动态库调用超时与线程泄漏（D 已实施）
 
-状态：只出设计，未改代码。
+状态：方案 D 已实施（提交 `10791f8`）；A/B 仍是待拍板方向。
 范围：`crates/adapters/dynamic/src/lib.rs` 的 `invoke_with_timeout` 及句柄生命周期。
-相关常量：`CALL_TIMEOUT = 2s`（`lib.rs:58-60`）。
+相关默认值：`DEFAULT_CALL_TIMEOUT_MS = 5000`，可用 `[[plugins]].timeout_ms` 覆盖。
 
 ## 0. 结论摘要
 
@@ -14,6 +14,17 @@
 | C. 共享线程池 | 否，且会拖垮其它插件 | 中 | 不推荐 |
 
 **推荐路径：先 D 止血，再评估 A；B 作为不可信插件或需要硬隔离时的中期方案。**
+
+**D 已落地的事实**：
+
+- 超时后 `DylibOutbound` 把该连接句柄写入锁外的 `OnceLock` 失效标记；后续 `send/call`
+  在拿任何锁之前直接返回明确错误，不再 spawn 线程排队。
+- `DylibAdapterFactory` 按连接记录失效原因，`PluginManager::catalog` 对平台适配器读取
+  工厂 `health()`，因此 catalog 显示 `Unhealthy`。
+- 重新 `create` 该连接的适配器实例（新 handle）会清掉该连接的失效记录并恢复 `Healthy`；
+  不需要重启进程。适配器本身仍不支持热 reload，这是载体限制，不是失效恢复的限制。
+- **残留（未解决）**：超时的那次调用线程仍卡在插件 FFI 里，线程与库引用都泄漏到进程
+  退出；core 只做到“不再放大”和“隔离该句柄”，没有强制中断。
 
 ---
 
