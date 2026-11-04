@@ -582,8 +582,14 @@ impl<S: Store> Bridge<S> {
         plugins: PluginManager,
         lkg_path: PathBuf,
     ) -> Self {
-        let mut bridge =
-            Self::with_plugins_inner(config, store, outbound, plugins, PluginLkg::new(lkg_path));
+        let lkg_config = config.lkg;
+        let mut bridge = Self::with_plugins_inner(
+            config,
+            store,
+            outbound,
+            plugins,
+            PluginLkg::new_with_config(lkg_path, lkg_config),
+        );
         bridge.register_startup_lkg_candidates();
         bridge
     }

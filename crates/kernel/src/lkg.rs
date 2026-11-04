@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::LkgConfig;
 use crate::plugin::ProviderId;
 
 /// 失败窗口：10 分钟。
@@ -91,11 +92,18 @@ pub struct PluginLkg {
     path: Option<PathBuf>,
     entries: Vec<LkgEntry>,
     tracked: HashMap<ProviderId, Tracked>,
+    max_failures: u64,
+    window_ms: i64,
 }
 
 impl PluginLkg {
-    /// 从文件恢复历史；文件不存在/损坏时降级为空历史。
+    /// 默认阈值（3 次 / 10 分钟）。
     pub fn new(path: PathBuf) -> Self {
+        Self::new_with_config(path, LkgConfig::default())
+    }
+
+    /// 从文件恢复历史；文件不存在/损坏时降级为空历史。
+    pub fn new_with_config(path: PathBuf, config: LkgConfig) -> Self {
         let entries = match fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<LkgFile>(&text) {
                 Ok(mut file) => {
@@ -123,15 +131,20 @@ impl PluginLkg {
             path: Some(path),
             entries,
             tracked: HashMap::new(),
+            max_failures: config.max_failures,
+            window_ms: config.window_secs.saturating_mul(1000) as i64,
         }
     }
 
     /// 不写文件的 LKG（测试、嵌入式）。
     pub fn disabled() -> Self {
+        let config = LkgConfig::default();
         Self {
             path: None,
             entries: Vec::new(),
             tracked: HashMap::new(),
+            max_failures: config.max_failures,
+            window_ms: config.window_secs.saturating_mul(1000) as i64,
         }
     }
 
@@ -205,13 +218,13 @@ impl PluginLkg {
         while tracked
             .failures
             .front()
-            .map(|at| now.saturating_sub(*at) > FAILURE_WINDOW_MS)
+            .map(|at| now.saturating_sub(*at) > self.window_ms)
             .unwrap_or(false)
         {
             tracked.failures.pop_front();
         }
         let count = tracked.failures.len();
-        if count >= FAILURE_THRESHOLD && tracked.rollback_pending.is_none() {
+        if count as u64 >= self.max_failures && tracked.rollback_pending.is_none() {
             tracked.rollback_pending = Some(reason.to_owned());
         }
         Some(count)
@@ -494,6 +507,25 @@ mod tests {
         let (found, reason) = lkg.take_rollback_request().expect("应触发回滚");
         assert_eq!(found, id());
         assert_eq!(reason, "boom");
+    }
+
+    #[test]
+    fn configurable_threshold_and_window() {
+        let mut lkg = PluginLkg::new_with_config(
+            temp_path("configurable"),
+            LkgConfig {
+                max_failures: 2,
+                window_secs: 1,
+            },
+        );
+        lkg.register_candidate(id(), "1".into(), "digest".into(), "/tmp/a.so".into());
+        assert_eq!(lkg.note_failure(&id(), "boom", 0), Some(1));
+        assert_eq!(lkg.note_failure(&id(), "boom", 1), Some(2));
+        let (found, reason) = lkg.take_rollback_request().expect("2 次就应触发");
+        assert_eq!(found, id());
+        assert_eq!(reason, "boom");
+        // 1 秒窗口：旧失败被裁掉，不会继续累加。
+        assert_eq!(lkg.note_failure(&id(), "boom", 1002), Some(1));
     }
 
     #[test]

@@ -392,6 +392,7 @@
   "kernel.config.empty_tool_plugin_command": "工具插件 {id} 的 command 为空",
   "kernel.config.bad_tool_plugin_timeout": "工具插件 {id} 的超时 {timeout_ms} ms 超出范围",
   "kernel.config.bad_queue_limit": "队列 {field} 容量必须大于 0（当前 {value}）",
+  "kernel.config.bad_lkg_config": "LKG {field} 必须大于 0（当前 {value}）",
   "kernel.config.duplicate_plugin_path": "动态插件路径重复：{path}",
   "kernel.config.duplicate_room": "会话 {session} 重复订阅了房间 {room}",
   "kernel.config.duplicate_session": "会话 id 重复：{session}",

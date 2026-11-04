@@ -1049,6 +1049,20 @@
   `cargo test --workspace` 全绿。
 - 可回退：把 `retryDelaysMs` 设为 `[]` 并恢复 `pinModel` 的统一包装即可。
 
+## 2026-11-04 — LKG 阈值可配置 + 语义书面化
+
+- 做了什么：
+  - 新增 `[lkg]` 配置：`max_failures`（默认 3）、`window_secs`（默认 600）；
+    0 在解析期拒绝；`Bridge::with_plugins_lkg` 把配置传给 `PluginLkg`。
+  - 默认值下行为与之前完全一致；新增可配置阈值/窗口的单元测试。
+  - 在 `docs/plan/native-reload-and-supervisor.md` 补「运行时 LKG」一节，写清：
+    什么算失败、什么不算、计数何时清零、回滚后候选是否保留、是否有冷却。
+- 语义核对结论：实现是「窗口内累计达到 max_failures」，不是严格连续 N 次；
+  成功调用不清零，只在候选登记/成功提升/成功回滚时清零。原本文案里的“连续”
+  与实现不完全一致；本次只改文档，不改行为。
+- 证据：`cargo test -p acb-kernel` 全绿；clippy / fmt 待提交前统一跑。
+- 可回退：删掉 `[lkg]` 配置接线即可回到常量默认值。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
