@@ -1394,6 +1394,12 @@
   外部 delivery composer（`namespace != acb`）且启用 provider 超时。当前量级
   可接受；若调大投递上限或记录元素变重，可改为共享只读快照或先传编号集合，
   避免每轮深拷贝全部记录。
+- in-process / dynamic 平台载体尚未上报 `AdapterStatus`：`/api/dependencies`
+  会一直显示 `unknown`，不会进入 `down`。这是「平台断开被人看见」的最后一块
+  覆盖缺口；需要把该载体的连接建立/断开接入 `AdapterStatus`，或在 manifest
+  里声明能力并让 core 采用安全兜底。暂不实现。
+- 控制台尚未展示 `/api/dependencies`：目前只有 API 与 `/api/plugins` 的
+  `connections` 字段，运维/管理员需要在页面上看到逐依赖状态与迁移历史。暂不实现。
 
 ## 待决（用户拍板前不实现）
 
