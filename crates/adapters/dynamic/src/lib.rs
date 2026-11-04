@@ -22,7 +22,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -55,9 +55,19 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 
-/// 动态库的一次发送/调用最多等这么久。超时只保证 core 不被卡死；插件线程本身
-/// 无法安全打断，超时后会把该 handle 视为不可用（后续调用继续超时，重启桥即可）。
-pub const CALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// 动态库适配器单次调用的保守默认超时。超时只保证 core 不被卡死；插件线程本身
+/// 无法安全打断，超时后把该连接句柄标死，后续调用立即失败，不再排队。
+pub const DEFAULT_CALL_TIMEOUT_MS: u64 = 5000;
+const MIN_CALL_TIMEOUT_MS: u64 = 100;
+const MAX_CALL_TIMEOUT_MS: u64 = 60_000;
+
+fn call_timeout(plugin: &PluginConfig) -> Duration {
+    let millis = match plugin.timeout_ms {
+        Some(0) | None => DEFAULT_CALL_TIMEOUT_MS,
+        Some(millis) => millis.clamp(MIN_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS),
+    };
+    Duration::from_millis(millis)
+}
 
 /// ABI v2 的独立装载器：只接受声明 `UNLOAD_SAFE` 的插件，调用方显式
 /// `destroy` 全部 handle 后可以 `unload`（dlclose）。
@@ -285,8 +295,12 @@ impl PluginLoader for DynamicLoader {
 
     fn install(&self, manager: &mut PluginManager) -> Result<(), PluginError> {
         for plugin in &self.plugins {
-            let loaded =
-                LoadedPlugin::load(&plugin.path, plugin.kind.as_deref()).map_err(|detail| {
+            let loaded = LoadedPlugin::load(
+                &plugin.path,
+                plugin.kind.as_deref(),
+                call_timeout(plugin),
+            )
+            .map_err(|detail| {
                     PluginError::Loader(acb_i18n::t!(
                         "adapter.dynamic.load_failed",
                         path = plugin.path,
@@ -379,7 +393,12 @@ impl PluginLoader for DynamicLoader {
         }
 
         let path_text = path.to_string_lossy().into_owned();
-        let loaded = LoadedPlugin::load(&path_text, None).map_err(|detail| {
+        let loaded = LoadedPlugin::load(
+            &path_text,
+            None,
+            Duration::from_millis(DEFAULT_CALL_TIMEOUT_MS),
+        )
+        .map_err(|detail| {
             PluginError::Loader(acb_i18n::t!(
                 "adapter.dynamic.reload_failed",
                 path = path_text,
@@ -436,7 +455,11 @@ enum LoadedKind {
 }
 
 impl LoadedPlugin {
-    fn load(path: &str, expected_kind: Option<&str>) -> Result<Self, String> {
+    fn load(
+        path: &str,
+        expected_kind: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
         let library = unsafe { Library::new(path) }
             .map_err(|error| acb_i18n::t!("adapter.dynamic.open_library_failed", error = error))?;
         let (table, unload_safe) = read_abi_table(&library)?;
@@ -462,6 +485,8 @@ impl LoadedPlugin {
                         _library: library.clone(),
                         table,
                         manifest,
+                        timeout,
+                        dead: Arc::new(Mutex::new(HashMap::new())),
                     }),
                     provider_id: None,
                     library,
@@ -654,11 +679,20 @@ fn read_abi_table(library: &Library) -> Result<(AdapterV1, bool), String> {
     Ok((table, false))
 }
 
+/// 某个连接句柄被标死后的状态：连接 id → 原因。工厂据此向 catalog 报 Unhealthy。
+type DeadRegistry = Arc<Mutex<HashMap<String, String>>>;
+/// 单个句柄的失效标记。超时线程不会持有 handle 锁，所以失效状态必须放在锁外。
+type DeadCell = Arc<OnceLock<String>>;
+
 struct DylibAdapterFactory {
     /// 库必须活到进程退出：函数指针都指向它。
     _library: Arc<Library>,
     table: AdapterV1,
     manifest: AdapterManifest,
+    /// 单次调用超时；来自 `[[plugins]].timeout_ms`。
+    timeout: Duration,
+    /// 已标死的连接。新句柄创建成功后清掉对应条目，实现无需重启的恢复。
+    dead: DeadRegistry,
 }
 
 fn read_manifest(table: &AdapterV1) -> Result<WireManifest, String> {
@@ -683,6 +717,22 @@ impl AdapterFactory for DylibAdapterFactory {
     ) -> Result<AdapterInstance, AdapterError> {
         self.create_instance(connection, events)
             .map_err(|detail| AdapterError::Create(connection.id.clone(), detail))
+    }
+
+    fn health(&self) -> Health {
+        let dead = self
+            .dead
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if dead.is_empty() {
+            return Health::Healthy;
+        }
+        let detail = dead
+            .iter()
+            .map(|(connection, reason)| format!("{connection}: {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Health::Unhealthy(detail)
     }
 }
 
@@ -737,6 +787,12 @@ impl DylibAdapterFactory {
             }
         };
 
+        // 新句柄可用：清掉这个连接上一次的失效记录，catalog 恢复 Healthy。
+        self.dead
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&connection.id);
+
         let outbound: Box<dyn Outbound> = Box::new(DylibOutbound {
             _library: Arc::clone(&self._library),
             _context: Arc::clone(&context),
@@ -745,6 +801,9 @@ impl DylibAdapterFactory {
             connection: connection.id.clone(),
             catalog,
             seq: 0,
+            timeout: self.timeout,
+            dead: Arc::new(OnceLock::new()),
+            dead_registry: Arc::clone(&self.dead),
         });
 
         let table = self.table;
@@ -766,7 +825,7 @@ fn describe(
     table: &AdapterV1,
     handle: &Arc<Mutex<AdapterHandle>>,
 ) -> Result<Arc<[MethodSpec]>, String> {
-    let reply = invoke(table, handle, &CoreMessage::Describe { id: 1 })?;
+    let reply = invoke(table, handle, None, &CoreMessage::Describe { id: 1 })?;
     match reply {
         AdapterMessage::Reply {
             result: WireResult::Catalog { catalog },
@@ -1014,7 +1073,7 @@ impl WakeProvider for DylibWakeProvider {
             request,
         };
 
-        match invoke(&self.table, &self.handle, &message) {
+        match invoke(&self.table, &self.handle, None, &message) {
             Ok(AdapterMessage::Reply {
                 result:
                     WireResult::Decision {
@@ -1354,7 +1413,7 @@ impl DecisionChannel {
     }
 
     fn call(&self, message: &CoreMessage) -> Result<AdapterMessage, String> {
-        invoke(&self.table, &self.handle, message)
+        invoke(&self.table, &self.handle, None, message)
     }
 
     fn note_failure(&self, detail: &str) {
@@ -1802,6 +1861,37 @@ struct DylibOutbound {
     connection: String,
     catalog: Arc<[MethodSpec]>,
     seq: u64,
+    timeout: Duration,
+    dead: DeadCell,
+    dead_registry: DeadRegistry,
+}
+
+enum InvokeFailure {
+    Failed(String),
+    Timeout(String),
+}
+
+impl DylibOutbound {
+    fn dead_reason(&self) -> Option<&str> {
+        self.dead.get().map(String::as_str)
+    }
+
+    fn mark_dead(&self, reason: &str) {
+        if self.dead.set(reason.to_owned()).is_ok() {
+            self.dead_registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(self.connection.clone(), reason.to_owned());
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "adapter.dynamic.handle_dead",
+                    connection = self.connection,
+                    reason = reason
+                )
+            );
+        }
+    }
 }
 
 impl Outbound for DylibOutbound {
@@ -1814,18 +1904,31 @@ impl Outbound for DylibOutbound {
             )));
         }
 
+        if let Some(reason) = self.dead_reason() {
+            return Err(OutboundError::Unavailable(reason.to_owned()));
+        }
+
         self.seq += 1;
-        let reply = invoke_with_timeout(
+        let reply = match invoke_with_timeout(
             &self.table,
             &self.handle,
+            &self.dead,
             &CoreMessage::Send {
                 id: self.seq,
                 room: room.clone(),
                 elements: elements.to_vec(),
             },
-            CALL_TIMEOUT,
-        )
-        .map_err(OutboundError::Unavailable)?;
+            self.timeout,
+        ) {
+            Ok(reply) => reply,
+            Err(InvokeFailure::Timeout(reason)) => {
+                self.mark_dead(&reason);
+                return Err(OutboundError::Unavailable(reason));
+            }
+            Err(InvokeFailure::Failed(detail)) => {
+                return Err(OutboundError::Unavailable(detail));
+            }
+        };
 
         match reply {
             AdapterMessage::Reply {
@@ -1861,19 +1964,32 @@ impl Outbound for DylibOutbound {
             )));
         }
 
+        if let Some(reason) = self.dead_reason() {
+            return Err(CallError::Unavailable(reason.to_owned()));
+        }
+
         self.seq += 1;
-        let reply = invoke_with_timeout(
+        let reply = match invoke_with_timeout(
             &self.table,
             &self.handle,
+            &self.dead,
             &CoreMessage::Call {
                 id: self.seq,
                 room: room.clone(),
                 method: method.to_owned(),
                 params: params.clone(),
             },
-            CALL_TIMEOUT,
-        )
-        .map_err(CallError::Unavailable)?;
+            self.timeout,
+        ) {
+            Ok(reply) => reply,
+            Err(InvokeFailure::Timeout(reason)) => {
+                self.mark_dead(&reason);
+                return Err(CallError::Unavailable(reason));
+            }
+            Err(InvokeFailure::Failed(detail)) => {
+                return Err(CallError::Unavailable(detail));
+            }
+        };
 
         match reply {
             AdapterMessage::Reply {
@@ -1901,8 +2017,12 @@ impl Outbound for DylibOutbound {
 fn invoke(
     table: &AdapterV1,
     handle: &Arc<Mutex<AdapterHandle>>,
+    dead: Option<&DeadCell>,
     message: &CoreMessage,
 ) -> Result<AdapterMessage, String> {
+    if let Some(reason) = dead.and_then(|cell| cell.get()) {
+        return Err(reason.clone());
+    }
     let request = CString::new(encode_line(message).map_err(|error| {
         acb_i18n::t!("adapter.dynamic.serialize_request_failed", error = error)
     })?)
@@ -1911,6 +2031,10 @@ fn invoke(
     let guard = handle
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 排队期间可能已被超时标死：拿到锁后必须再检查一次，避免继续调用坏插件。
+    if let Some(reason) = dead.and_then(|cell| cell.get()) {
+        return Err(reason.clone());
+    }
     if !guard.alive {
         return Err(acb_i18n::t!("adapter.dynamic.destroyed"));
     }
@@ -1932,26 +2056,33 @@ fn invoke(
 fn invoke_with_timeout(
     table: &AdapterV1,
     handle: &Arc<Mutex<AdapterHandle>>,
+    dead: &DeadCell,
     message: &CoreMessage,
     timeout: Duration,
-) -> Result<AdapterMessage, String> {
+) -> Result<AdapterMessage, InvokeFailure> {
+    if let Some(reason) = dead.get() {
+        return Err(InvokeFailure::Failed(reason.clone()));
+    }
     let table = *table;
     let handle = Arc::clone(handle);
+    let dead = Arc::clone(dead);
     let message = message.clone();
     let (tx, rx) = mpsc::channel();
     // 插件的 handle 不是线程安全的：整个 invoke 都在工作线程里，调用方只等结果。
+    // 这个线程无法取消；超时后 core 只放弃等待并把句柄标死，线程残留是已知代价。
     thread::spawn(move || {
-        let _ = tx.send(invoke(&table, &handle, &message));
+        let _ = tx.send(invoke(&table, &handle, Some(&dead), &message));
     });
     match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(acb_i18n::t!(
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(detail)) => Err(InvokeFailure::Failed(detail)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(InvokeFailure::Timeout(acb_i18n::t!(
             "adapter.dynamic.call_timeout",
             millis = timeout.as_millis()
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err(acb_i18n::t!("adapter.dynamic.call_thread_gone"))
-        }
+        ))),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(InvokeFailure::Failed(acb_i18n::t!(
+            "adapter.dynamic.call_thread_gone"
+        ))),
     }
 }
 
@@ -2015,7 +2146,7 @@ fn monitor(
     stop.store(true, Ordering::Relaxed);
 
     // 先让插件自己收尾（Shutdown 可能返回空，忽略），再销毁 handle。
-    let _ = invoke(&table, &handle, &CoreMessage::Shutdown);
+    let _ = invoke(&table, &handle, None, &CoreMessage::Shutdown);
     destroy_handle(&table, &handle);
     eprintln!(
         "{}",

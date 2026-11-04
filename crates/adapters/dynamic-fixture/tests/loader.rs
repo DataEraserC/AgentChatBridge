@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use acb_adapter_dynamic::DynamicLoader;
 use acb_kernel::{
-    AdapterHost, AdapterInstance, CallError, Connection, Element, EventQueue, PluginConfig,
+    AdapterHost, AdapterInstance, CallError, Connection, Element, EventQueue, Health, PluginConfig,
     PluginManager, PluginSource, RoomId, Transport,
 };
 use serde_json::json;
@@ -79,6 +79,8 @@ fn dynamic_adapter_loads_and_speaks_the_wire_protocol() {
         .install_loader(&DynamicLoader::new(&[PluginConfig {
             path,
             kind: Some("demo".into()),
+            // 测试里把超时压到 300ms，避免 demo.slow 的 2.5s 阻塞拖慢整套测试。
+            timeout_ms: Some(300),
         }]))
         .expect("能装载动态库");
 
@@ -151,22 +153,82 @@ fn dynamic_adapter_loads_and_speaks_the_wire_protocol() {
         "{unknown:?}"
     );
 
-    // 插件睡过头：调用方必须在 CALL_TIMEOUT 内拿回错误，而不是陪它一起卡住。
+    // 插件睡过头：调用方必须在 300ms 内拿回错误，而不是陪它一起卡住。
     let started = std::time::Instant::now();
     let timeout = outbound
         .call(&room, "demo.slow", &json!({}))
         .expect_err("应当超时");
     assert!(
-        started.elapsed() < Duration::from_millis(2400),
-        "超时控制在 2 秒内，实际 {:?}",
+        started.elapsed() < Duration::from_millis(1000),
+        "超时控制在配置值附近，实际 {:?}",
         started.elapsed()
     );
     assert!(
         matches!(&timeout, CallError::Unavailable(detail) if detail.contains("timed out")),
         "{timeout:?}"
     );
-    // 等插件线程自己睡醒，避免卸载库时它还在执行代码。
-    thread::sleep(Duration::from_millis(800));
+
+    // 句柄已标死：后续调用立即失败，不再排队等卡住的插件。
+    let started = std::time::Instant::now();
+    let dead = outbound
+        .call(&room, "demo.echo", &json!({ "text": "应当不执行" }))
+        .expect_err("死句柄必须立即失败");
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "死句柄不应再等待，实际 {:?}",
+        started.elapsed()
+    );
+    assert!(
+        matches!(&dead, CallError::Unavailable(detail) if detail.contains("dead")),
+        "{dead:?}"
+    );
+
+    // catalog 可见失效；其它内置 provider 不受影响。
+    let catalog = plugins.catalog();
+    let demo = catalog
+        .iter()
+        .find(|info| info.kind.as_deref() == Some("demo"))
+        .expect("目录里仍有动态适配器");
+    assert!(
+        matches!(&demo.health, Health::Unhealthy(detail) if detail.contains("timed out")),
+        "catalog 要显示句柄失效：{:?}",
+        demo.health
+    );
+    assert!(
+        catalog.iter().any(|info| {
+            info.id.to_string() == "acb.wake.default" && info.health == Health::Healthy
+        }),
+        "其它 provider 必须保持健康"
+    );
+
+    // 新句柄 = 重新创建实例：无需重启进程即可恢复。
+    let (events2, _receiver2) = EventQueue::channel();
+    let AdapterInstance {
+        mut outbound,
+        launch: _,
+        manifest: _,
+    } = plugins
+        .create_adapter(&connection(), events2)
+        .expect("新句柄应当能创建");
+    let recovered = outbound
+        .call(&room, "demo.echo", &json!({ "text": "恢复" }))
+        .expect("新句柄应当可用");
+    assert_eq!(recovered.value["text"], "恢复");
+    let catalog = plugins.catalog();
+    assert!(
+        matches!(
+            catalog
+                .iter()
+                .find(|info| info.kind.as_deref() == Some("demo"))
+                .expect("目录里仍有动态适配器")
+                .health,
+            Health::Healthy
+        ),
+        "新句柄创建后 catalog 恢复 Healthy"
+    );
+
+    // 等第一次的慢调用线程自己睡醒，避免卸载库时它还在执行代码。
+    thread::sleep(Duration::from_millis(1000));
 
     shutdown.store(true, Ordering::Relaxed);
     thread::sleep(Duration::from_millis(300));

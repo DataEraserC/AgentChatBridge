@@ -13,7 +13,7 @@
 |------|----------|------|------|
 | Lua（`ACB_LUA_DIR`） | 七种策略扩展点 | 不用编译；脚本在桥启动时加载，改完重启桥生效 | 每次调用 50ms 上限；拿不到 Store/流水；不能写平台适配器 |
 | 外置进程（`kind = "process"`） | 平台适配器 | 任何语言；崩溃隔离；可自动重启 | 只能做适配器；策略判定在 core 锁内，不开放进程载体 |
-| 动态库（`[[plugins]]`） | 平台适配器 + 七种策略 | 进程内、全扩展点、C ABI + JSON wire | 与桥同进程，panic/卡死会带倒桥；不支持 unload |
+| 动态库（`[[plugins]]`） | 平台适配器 + 七种策略 | 进程内、全扩展点、C ABI + JSON wire | 与桥同进程；适配器调用有 `timeout_ms` 并会标死句柄，策略判定仍同步无超时；panic/卡死可能带倒桥；不支持 unload |
 | 内置 native | core 开发者使用 | 无跨进程开销 | 要改仓库代码并重新构建 |
 
 ## 扩展点一览
@@ -390,6 +390,7 @@ keyword = "在吗"
 [[plugins]]
 path = "/绝对路径/到/libdemo_adapter.so"
 kind = "demo"
+timeout_ms = 5000   # 可选：发送/调用超时；超时后该连接句柄标死
 
 # Lua 策略
 [sessions.delivery]

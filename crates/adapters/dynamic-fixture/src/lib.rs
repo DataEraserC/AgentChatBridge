@@ -195,9 +195,10 @@ unsafe extern "C" fn fixture_invoke(
                         detail: "demo fixture 故意失败".into(),
                     },
                 },
-                // 睡过头：测试动态库调用超时。
+                // 睡过头：测试动态库调用超时。1200ms 足够超过测试配置的 300ms 超时，
+                // 又不至于让测试为了等线程睡醒多花几秒。
                 "demo.slow" => {
-                    std::thread::sleep(std::time::Duration::from_millis(2500));
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
                     WireResult::Call {
                         value: json!({ "slow": true }),
                         record: None,

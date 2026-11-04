@@ -48,6 +48,7 @@ fn wake_provider_uses_the_shared_wire() {
         .install_loader(&DynamicLoader::new(&[PluginConfig {
             path: path.to_string_lossy().into_owned(),
             kind: None,
+            timeout_ms: None,
         }]))
         .expect("能装载 wake 插件");
 

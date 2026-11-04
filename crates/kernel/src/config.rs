@@ -340,6 +340,9 @@ pub struct PluginConfig {
     pub path: String,
     /// 期望的适配器 kind。只对平台适配器插件生效；不写就不校验。
     pub kind: Option<String>,
+    /// 动态库单次调用超时（毫秒）。省略或 0 用适配器默认值（5 秒）；
+    /// 只对平台适配器生效：超时后该连接句柄标死，后续调用立即失败。
+    pub timeout_ms: Option<u64>,
 }
 
 /// 目前认识的记忆存储形式。加新形式时在这里登记。
@@ -1199,7 +1202,11 @@ impl Config {
                 .kind
                 .map(|kind| kind.trim().to_owned())
                 .filter(|kind| !kind.is_empty());
-            plugins.push(PluginConfig { path, kind });
+            plugins.push(PluginConfig {
+                path,
+                kind,
+                timeout_ms: raw_plugin.timeout_ms,
+            });
         }
 
         let mut connections: Vec<Connection> = Vec::with_capacity(raw.connections.len());
@@ -2202,6 +2209,8 @@ struct RawPlugin {
     path: String,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2732,13 +2741,14 @@ mod tests {
     #[test]
     fn dynamic_adapter_plugins_are_parsed_and_deduplicated() {
         let text = format!(
-            "{}\n[[plugins]]\npath = \"/tmp/libdemo.so\"\nkind = \"demo\"\n",
+            "{}\n[[plugins]]\npath = \"/tmp/libdemo.so\"\nkind = \"demo\"\ntimeout_ms = 300\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         let config = Config::parse(&text).expect("能解析");
         assert_eq!(config.plugins.len(), 1);
         assert_eq!(config.plugins[0].path, "/tmp/libdemo.so");
         assert_eq!(config.plugins[0].kind.as_deref(), Some("demo"));
+        assert_eq!(config.plugins[0].timeout_ms, Some(300));
 
         let duplicate = format!("{text}\n[[plugins]]\npath = \"/tmp/libdemo.so\"\n");
         assert!(matches!(

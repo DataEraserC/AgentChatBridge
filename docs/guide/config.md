@@ -119,11 +119,16 @@ timeout_ms = 600000
 [[plugins]]
 path = "/绝对路径/libdemo_adapter.so"
 kind = "demo"        # 可选；必须和插件 manifest 的 kind 一致
+timeout_ms = 5000    # 可选；单次发送/调用超时（默认 5000，最小 100，最大 60000）
 
 # 动态库策略 provider（扩展点由插件 manifest 声明）
 [[plugins]]
 path = "/绝对路径/libacb_example_wake.so"
 ```
+
+- `timeout_ms` 只对平台适配器生效。超时后该连接句柄标死：后续发送/调用立即失败，
+  catalog 里显示 `Unhealthy`；重新创建该连接的适配器实例（新句柄）后自动恢复，
+  不需要重启进程。卡住的插件线程无法强制中断，会残留到进程退出。
 
 - Lua 脚本不走 `[[plugins]]`：把环境变量 `ACB_LUA_DIR` 指向脚本目录，每个 `.lua` 文件
   自动成为一个 provider（文件名是 `lua.<文件名>`）。

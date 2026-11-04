@@ -38,6 +38,7 @@ fn load(path: &Path) -> PluginManager {
         .install_loader(&DynamicLoader::new(&[PluginConfig {
             path: path.to_string_lossy().into_owned(),
             kind: None,
+            timeout_ms: None,
         }]))
         .expect("能装载策略插件");
     plugins
