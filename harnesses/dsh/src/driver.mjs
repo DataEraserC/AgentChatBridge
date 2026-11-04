@@ -41,8 +41,16 @@ import {
 import { TOOLS } from "../../shared/tools.mjs"
 import { McpServer } from "./mcp-server.mjs"
 import { McpHttpServer } from "./mcp-http-server.mjs"
-import { DshClient } from "./dsh-client.mjs"
+import { DshClient, DshError } from "./dsh-client.mjs"
 import { t } from "../../shared/i18n.mjs"
+
+/// provider 明确返回模型不存在才算 model_unavailable；transport 失败不算。
+function isModelUnavailable(error) {
+  const code = String(error?.code ?? "")
+    .toLowerCase()
+    .replaceAll("_", "-")
+  return code === "session/model-unavailable" || code === "model-unavailable"
+}
 
 const log = (level, message) => {
   // stdout 是 MCP 通道，一个字都不能碰；诊断全走 stderr。
@@ -466,7 +474,14 @@ class TurnDriver {
         effort: reasoningEffort ? t("dsh.effort_suffix", { effort: reasoningEffort }) : "",
       }))
     } catch (error) {
-      throw new Error(t("dsh.model_unavailable", { provider, modelId, error: error?.message ?? error }))
+      if (isModelUnavailable(error)) {
+        throw new DshError(
+          "model_unavailable",
+          t("dsh.model_unavailable", { provider, modelId, error: error?.message ?? error }),
+        )
+      }
+      // transport / auth / protocol 失败原样上抛：不能把它们都报成「模型不存在」。
+      throw error
     }
   }
 

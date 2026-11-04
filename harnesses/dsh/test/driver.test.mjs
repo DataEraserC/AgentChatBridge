@@ -7,6 +7,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 
 import { BridgeLink } from "../../opencode/plugin/acb-wire.mjs"
+import { DshError } from "../src/dsh-client.mjs"
 import { TurnDriver, callBridge } from "../src/driver.mjs"
 import { FakeBridge, TICKET, delivery } from "../../opencode/test/fake-bridge.mjs"
 
@@ -411,7 +412,7 @@ test("会话模型优先，selectModel 失败让这一轮失败", async (t) => {
   const bridge = await new FakeBridge().start()
   const dsh = new ControllableDsh()
   dsh.selectModel = async () => {
-    throw new Error("provider not found")
+    throw new DshError("session/model-unavailable", "provider not found")
   }
   const link = await connectedLink(bridge)
   t.after(async () => {
@@ -438,6 +439,41 @@ test("会话模型优先，selectModel 失败让这一轮失败", async (t) => {
   const turnEnd = await nextTurnEnd(bridge)
   assert.equal(turnEnd.frame, "turn_end")
   assert.match(turnEnd.error, /unavailable/, "模型不存在要让整轮失败")
+  assert.equal(dsh.prompts.length, 0, "模型没选上就不该投话")
+  await runPromise
+})
+
+test("dsh 不可达不能被报成模型不存在", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  dsh.selectModel = async () => {
+    throw new DshError("unreachable", "cannot reach dsh at http://127.0.0.1:1: ECONNREFUSED")
+  }
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({
+    dsh,
+    log: () => {},
+    model: { provider: "trae", model: "deepseek-v4.1-flash" },
+  })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "new-api-y9000p2025-openai-responses/1Agent2Api/glm-5.3-flash",
+      },
+    }),
+    link,
+  )
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.match(turnEnd.error, /cannot reach dsh/, "transport 失败要保留 unreachable 文案")
+  assert.doesNotMatch(turnEnd.error, /会话模型/, "不能把 transport 失败说成模型不存在")
   assert.equal(dsh.prompts.length, 0, "模型没选上就不该投话")
   await runPromise
 })

@@ -159,6 +159,14 @@ const METHOD_ARG_WRAPPERS = {
   "workspace/delete": "request",
 }
 
+/// 可以安全重放的端点。只读或幂等；prompt/create 这类绝不重发。
+const REPLAYABLE_ENDPOINTS = new Set([
+  "session/list",
+  "session/cancel",
+  "session/selectModel",
+  "workspace/rename",
+])
+
 function endpointOf(method) {
   return method.replace(/\./g, "/")
 }
@@ -198,10 +206,18 @@ export class DshError extends Error {
  *   for await (const event of follow) { ... }
  */
 export class DshClient {
-  constructor({ baseUrl = "http://127.0.0.1:3080", token = "", timeoutMs = 15_000, log = () => {}, secret } = {}) {
+  constructor({
+    baseUrl = "http://127.0.0.1:3080",
+    token = "",
+    timeoutMs = 15_000,
+    retryDelaysMs = [1000, 2000],
+    log = () => {},
+    secret,
+  } = {}) {
     this.baseUrl = String(baseUrl).replace(/\/+$/, "")
     this.launchToken = token
     this.timeoutMs = timeoutMs
+    this.retryDelaysMs = retryDelaysMs
     this.log = log
     this.cookie = null
     // secret 显式传入时用它（测试用）；undefined = 惰性读真实 .credentials.yaml。
@@ -256,7 +272,11 @@ export class DshClient {
     url.pathname = "/"
     url.search = ""
     url.searchParams.set("token", this.launchToken)
-    const res = await httpRequest(url.toString(), { method: "GET", timeoutMs: this.timeoutMs })
+    const res = await httpRequest(url.toString(), {
+      method: "GET",
+      timeoutMs: this.timeoutMs,
+      retryDelaysMs: this.retryDelaysMs,
+    })
     // node:http 里 set-cookie 是数组（可能多个），取第一个。
     const setCookieRaw = res.headers["set-cookie"]
     const setCookie = Array.isArray(setCookieRaw) ? setCookieRaw[0] : setCookieRaw
@@ -288,7 +308,9 @@ export class DshClient {
       method: endpoint,
       payload: wrapArgs(method, payload),
     }
-    const response = await this.#fetchWithAuth(`/api/${endpoint}`, message)
+    // 只对可安全重放的方法重试；prompt/create 这类重发会产生重复副作用，保持单次。
+    const retryDelaysMs = REPLAYABLE_ENDPOINTS.has(endpoint) ? this.retryDelaysMs : []
+    const response = await this.#fetchWithAuth(`/api/${endpoint}`, message, retryDelaysMs)
     const full = await response.json()
     if (!full || full.type !== "server-response" || full.rpcId !== rpcId || !full.result) {
       throw new DshError("protocol", t("dsh.bad_server_response", { endpoint }))
@@ -305,7 +327,7 @@ export class DshClient {
     return full.result.value ?? full.result
   }
 
-  async #fetchWithAuth(path, body) {
+  async #fetchWithAuth(path, body, retryDelaysMs = []) {
     const headers = { "content-type": "application/json" }
     if (this.hasAuth()) {
       const cookie = await this.ensureAuth()
@@ -316,8 +338,10 @@ export class DshClient {
       headers,
       body: JSON.stringify(body),
       timeoutMs: this.timeoutMs,
+      retryDelaysMs,
     })
     // 401 = 鉴权失效（dsh 重启 / 密钥对不上），重铸一次再试。
+    // 这次重试不叠加 transport 退避：鉴权已经换新，再失败就按真实错误上抛。
     if (res.status === 401 && this.hasAuth()) {
       this.invalidateAuth()
       const cookie = await this.ensureAuth()
@@ -514,8 +538,52 @@ export function parseFollowFrame(rawData, streamId) {
 // 用 node:http 替代 fetch（见文件头说明）
 // ---------------------------------------------------------------------------
 
-/** 发一个 HTTP 请求，返回 { status, headers, text() }。 */
-function httpRequest(urlStr, { method = "GET", headers = {}, body, timeoutMs = 15_000 } = {}) {
+/// transport 层可重试的错误码。业务错误/4xx/5xx 不在这里。
+const RETRYABLE_TRANSPORT_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EPIPE",
+])
+
+function isRetryableTransport(error) {
+  return RETRYABLE_TRANSPORT_CODES.has(error?.code)
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 发一个 HTTP 请求，返回 { status, headers, text() }。
+ *
+ * 传入 retryDelaysMs 时只重试 transport 错误（连接拒绝/重置/超时/断管），最多
+ * 1 + 重试延迟数 次；重试耗尽后统一变成 DshError("unreachable")，消息带目标地址与 errno。
+ */
+function httpRequest(
+  urlStr,
+  { method = "GET", headers = {}, body, timeoutMs = 15_000, retryDelaysMs = [] } = {},
+) {
+  let attempt = 0
+  const run = () =>
+    rawHttpRequest(urlStr, { method, headers, body, timeoutMs }).catch((error) => {
+      if (attempt < retryDelaysMs.length && isRetryableTransport(error)) {
+        const delay = retryDelaysMs[attempt]
+        attempt += 1
+        return sleep(delay).then(run)
+      }
+      throw new DshError(
+        "unreachable",
+        t("dsh.unreachable", {
+          url: urlStr,
+          errno: error?.code ?? "transport",
+          error: error?.message ?? String(error),
+        }),
+      )
+    })
+  return run()
+}
+
+function rawHttpRequest(urlStr, { method, headers, body, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlStr)
     const lib = url.protocol === "https:" ? https : http
@@ -536,7 +604,11 @@ function httpRequest(urlStr, { method = "GET", headers = {}, body, timeoutMs = 1
         })
       },
     )
-    req.on("timeout", () => req.destroy(new Error(t("dsh.request_timeout"))))
+    req.on("timeout", () => {
+      const error = new Error(t("dsh.request_timeout"))
+      error.code = "ETIMEDOUT"
+      req.destroy(error)
+    })
     req.on("error", reject)
     if (body !== undefined && body !== null) {
       req.write(typeof body === "string" ? body : JSON.stringify(body))

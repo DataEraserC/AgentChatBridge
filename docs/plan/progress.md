@@ -1026,6 +1026,29 @@
 - 可回退：把 `[queues]` 配置与 `channel_with` / `spawn_with_limit` 换回默认构造即可；
   统计字段可单独移除。
 
+## 2026-11-04 — D：dsh 连接失败放大修复（已实现）
+
+- 做了什么：
+  - `dsh-client.mjs`：`httpRequest` 对 transport 错误（ECONNREFUSED / ECONNRESET /
+    ETIMEDOUT / EPIPE）做有界重试，最多 3 次尝试（首次 + 1s/2s 两次退避）；
+    重试耗尽后统一抛 `DshError("unreachable")`，文案带目标 url 与 errno。
+  - 只对可安全重放的方法开启重试：`session/list`、`session/cancel`、
+    `session/selectModel`、`workspace/rename`；`session/prompt`、`session/create`、
+    `workspace/create` 与未知方法保持单次。
+  - `driver.mjs#pinModel`：只有 provider 明确返回 `session/model-unavailable` 才映射成
+    `dsh.model_unavailable`；transport/auth/protocol/rpc 原样上抛。
+  - 新增 i18n `dsh.unreachable`（en / zh-CN）。
+  - 文档：`06-harness-adapters.md` 增加重试与错误分类；`troubleshooting.md` 增加
+    `dsh.unreachable` 排查行。
+- 测试：ECONNREFUSED 最终错误类型与 url/errno；ECONNRESET 计数 3 次；超时计数 3 次；
+  `session/prompt` 只 1 次；`session/selectModel` 3 次；driver 侧 transport 失败不被
+  报成模型不存在。
+- 偏离：重试只覆盖 transport 层，业务 RPC 错误与 4xx/5xx 不重试；WebSocket `follow`
+  不在本次重试范围。
+- 证据：`harnesses/dsh` 的 `npm test` 40 项全过；`node --check` 两个源文件通过；
+  `cargo test --workspace` 全绿。
+- 可回退：把 `retryDelaysMs` 设为 `[]` 并恢复 `pinModel` 的统一包装即可。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，

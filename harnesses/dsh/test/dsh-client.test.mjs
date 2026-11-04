@@ -4,6 +4,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import http from "node:http"
+import net from "node:net"
 import { createHmac, createHash } from "node:crypto"
 
 import {
@@ -168,6 +169,153 @@ test("session/list 用 args._request 包装（和别的 endpoint 不同）", asy
     assert.ok(req.body.payload.args._request)
   } finally {
     await dsh.stop()
+  }
+})
+
+// 接受连接后立刻断开，模拟 ECONNRESET；记录连接次数用来断言重试次数。
+class ResetServer {
+  constructor() {
+    this.connections = 0
+    this.server = net.createServer((socket) => {
+      this.connections += 1
+      socket.destroy()
+    })
+  }
+
+  async start() {
+    await new Promise((resolve) => this.server.listen(0, "127.0.0.1", resolve))
+    this.port = this.server.address().port
+    return this
+  }
+
+  get baseUrl() {
+    return `http://127.0.0.1:${this.port}`
+  }
+
+  async stop() {
+    await new Promise((resolve) => this.server.close(resolve))
+  }
+}
+
+// 接受请求但永不响应，模拟超时。
+class SilentServer {
+  constructor() {
+    this.requests = 0
+    this.sockets = new Set()
+    this.server = http.createServer((req) => {
+      this.requests += 1
+      req.on("data", () => {})
+    })
+    this.server.on("connection", (socket) => {
+      this.sockets.add(socket)
+      socket.on("close", () => this.sockets.delete(socket))
+    })
+  }
+
+  async start() {
+    await new Promise((resolve) => this.server.listen(0, "127.0.0.1", resolve))
+    this.port = this.server.address().port
+    return this
+  }
+
+  get baseUrl() {
+    return `http://127.0.0.1:${this.port}`
+  }
+
+  async stop() {
+    for (const socket of this.sockets) socket.destroy()
+    await new Promise((resolve) => this.server.close(resolve))
+  }
+}
+
+async function freePort() {
+  const server = net.createServer()
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const port = server.address().port
+  await new Promise((resolve) => server.close(resolve))
+  return port
+}
+
+test("ECONNREFUSED 最终报 dsh.unreachable，带地址与 errno", async () => {
+  const port = await freePort()
+  const client = new DshClient({
+    baseUrl: `http://127.0.0.1:${port}`,
+    secret: null,
+    retryDelaysMs: [10, 20],
+  })
+  await assert.rejects(client.listSessions(), (error) => {
+    assert.equal(error.code, "unreachable")
+    assert.match(error.message, new RegExp(`127\\.0\\.0\\.1:${port}`))
+    assert.match(error.message, /ECONNREFUSED/)
+    return true
+  })
+})
+
+test("ECONNRESET 对可重放方法尝试 3 次", async () => {
+  const server = await new ResetServer().start()
+  try {
+    const client = new DshClient({
+      baseUrl: server.baseUrl,
+      secret: null,
+      retryDelaysMs: [10, 20],
+    })
+    await assert.rejects(client.listSessions(), /cannot reach dsh/)
+    assert.equal(server.connections, 3, "首次 + 2 次重试")
+  } finally {
+    await server.stop()
+  }
+})
+
+test("超时对可重放方法尝试 3 次并报 unreachable", async () => {
+  const server = await new SilentServer().start()
+  try {
+    const client = new DshClient({
+      baseUrl: server.baseUrl,
+      secret: null,
+      timeoutMs: 50,
+      retryDelaysMs: [10, 20],
+    })
+    await assert.rejects(client.listSessions(), (error) => {
+      assert.equal(error.code, "unreachable")
+      assert.match(error.message, /ETIMEDOUT/)
+      return true
+    })
+    assert.equal(server.requests, 3, "首次 + 2 次重试")
+  } finally {
+    await server.stop()
+  }
+})
+
+test("session/prompt 不可重放，只尝试 1 次", async () => {
+  const server = await new ResetServer().start()
+  try {
+    const client = new DshClient({
+      baseUrl: server.baseUrl,
+      secret: null,
+      retryDelaysMs: [10, 20],
+    })
+    await assert.rejects(client.callUnary("session/prompt", {}), /cannot reach dsh/)
+    assert.equal(server.connections, 1)
+  } finally {
+    await server.stop()
+  }
+})
+
+test("session/selectModel 可重放，尝试 3 次", async () => {
+  const server = await new ResetServer().start()
+  try {
+    const client = new DshClient({
+      baseUrl: server.baseUrl,
+      secret: null,
+      retryDelaysMs: [10, 20],
+    })
+    await assert.rejects(
+      client.selectModel("s1", { provider: "trae", model: "m1" }),
+      /cannot reach dsh/,
+    )
+    assert.equal(server.connections, 3)
+  } finally {
+    await server.stop()
   }
 })
 
