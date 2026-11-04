@@ -85,24 +85,52 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
   },
   {
     name: "access_request",
-    description: `申请一张一次性访问票据。群内不能直接越权时用它；申请本身不执行任何平台动作。
-申请会把「目标房间 + 你要做的具体 op」发给 system admin 的私信，由人在私信里批准或拒绝。
+    description: `申请一次性访问票据。一条 item = 单张；多条 = 批量（共享 batch_id，每张仍是独立票据）。
+申请本身不执行任何平台动作；core 会把归一化后的目标/op 发给 system admin 私信，由人在私信里批准或拒绝。
 批准后票据在有效期内可用一次；用后即废，下一轮不会自动带上。
 票据只放宽「能不能碰这个房间」的目标判定：不绕过连接的 allow_destructive，也不授予 plugin 全权。
-同一个会话对同一目标 + 同一组 op 的 pending/active 票据会复用，不会重复发审批消息。
+同一个会话的审批消息会聚合成一条，在本轮结束时发出；冷却期内的申请会被明确拒绝并给出剩余秒数。
 op 列表要具体：send_message，send_message_to，get_history，fetch_records，get_notes，set_note，del_note，
-get_platform_events，wait_message，或 platform_call:<method>（如 platform_call:group.kick）。`,
+get_platform_events，wait_message，或 platform_call:<method>（如 platform_call:group.kick）。
+批量最多 8 条；任一条校验失败整批拒绝。`,
     schema: {
       type: "object",
       properties: {
-        target: { type: "string", description: "目标房间，形如 qq:group/12345" },
-        ops: {
+        items: {
           type: "array",
-          items: { type: "string" },
-          description: "要放行的具体 op，最多 8 个",
+          minItems: 1,
+          maxItems: 8,
+          items: {
+            type: "object",
+            properties: {
+              target: { type: "string", description: "目标房间，形如 qq:group/12345" },
+              ops: {
+                type: "array",
+                items: { type: "string" },
+                description: "要放行的具体 op，最多 8 个",
+              },
+            },
+            required: ["target", "ops"],
+            additionalProperties: false,
+          },
         },
       },
-      required: ["target", "ops"],
+      required: ["items"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "access_ticket_get",
+    description: `只读查询自己发起的票据。id 与 batch_id 必须且只能给一个：
+- id：查单张详情（状态、目标、op、能力、过期时间、审批引用）。
+- batch_id：查整批汇总，逐条列出状态。
+跨会话的 id / batch_id 一律拒绝；不能按 id 枚举别人的动作。`,
+    schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "单张票据 id，形如 tk-..." },
+        batch_id: { type: "string", description: "批次 id，形如 bt-..." },
+      },
       additionalProperties: false,
     },
   },

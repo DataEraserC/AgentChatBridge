@@ -282,35 +282,56 @@ AccessTicket {
 
 **限制与去重**：
 
-- 单轮最多 3 张票据，单会话同时最多 5 张 pending/active。
-- 单张票据最多 8 个 op，每个 op 最长 64 字符。
-- 同一会话 + 同一目标 + 同一组 op 的 pending/active 票据直接复用，不重复发审批消息。
+- 单轮最多 3 个申请组（一个批量算一组），单会话同时最多 8 张 pending/active。
+- 单张票据最多 8 个 op，每个 op 最长 64 字符；单次批量最多 8 条，超限整批拒绝。
+- 同一会话 + 同一目标 + 同一组 op 的 pending/active 单张票据直接复用，不重复发审批消息。
 - 内存里最多保留 200 张票据；live 票据永远保留，终态按创建时间淘汰。
+
+**冷却与聚合**：
+
+```toml
+[tickets]
+request_cooldown_secs = 60   # 同一会话两次「审批私信」之间的最小间隔
+admin_cooldown_secs = 30     # 同一个 system admin 收到两条审批私信的最小间隔
+```
+
+- 冷却期内申请返回明确错误（含剩余秒数），不是静默失败。
+- 同一会话在一个轮次内产生的多张 pending 在**收工时聚合成一条私信**，列出全部 ticket id/nonce；批量申请也走同一套聚合，不另造消息格式。
+- 管理员冷却未过时，聚合消息暂不发送，保持未通知状态，下一次收工再试。
+
+**批量入口**：`access_request { items: [...] }` 是唯一申请工具；`items` 一条 = 单张，多条 = 批量。
+批量仍然生成 N 张独立票据（单动作、单目标、单次使用），共享一个 `batch_id`；`/approve <batch_id>` 一次批准整批，
+底层逐张置 `active`；`/deny <batch_id>` 整批拒绝。批内任一条校验失败或超过 8 条都**整批拒绝**，不做部分受理。
+
+**查询**：`access_ticket_get { id?, batch_id? }` 只读，两个参数互斥；只能查本会话发起的票据。
+未知 id/批次用 `BadRequest`，跨会话用 `ToolNotAllowed`，文案明确「belongs to another session」。
 
 ### 6.3 申请与审批（命令实现）
 
-1. 群里 agent 调用 `access_request`，只给 `target`（单房间）和 `ops`（具体操作）。
-   申请本身不执行任何平台动作；core 从 ops 推导能力集并生成票据。
-2. core 把审批消息发到 **system admin 的私信**：
+1. 群里 agent 调用唯一入口 `access_request { items: [...] }`；一条 item = 单张，多条 = 批量。
+   申请本身不执行任何平台动作；core 从每条 ops 推导能力集并生成独立票据。
+2. core 把审批消息发到 **system admin 的私信**；同一会话的 pending 在收工时聚合成一条：
 
 ```text
-[ACB 授权申请]
-ticket=tk-...
-nonce=...
-目标：qq:group/123
-动作：send_message_to
-能力：room_write
-申请：session=main principal=user place=group turn=...
-有效期：10 分钟
-批准：/approve <id> <nonce>
-拒绝：/deny <id> <nonce>
-撤销：/revoke <id>
+[ACB 授权申请] 待批准 2 项
+批次：bt-...
+1. ticket=tk-... batch=bt-... nonce=... [DESTRUCTIVE]
+   目标：qq:group/123
+   动作：platform_call:group.kick
+   能力：destructive, platform, room_write
+...
+批准整批：/approve <batch_id>
+批准单张：/approve <ticket-id> <nonce>
+拒绝：/deny <batch_id> 或 /deny <ticket-id> <nonce>
+撤销单张：/revoke <ticket-id>
 ```
 
 3. 只有 `[grants.system_admin]` 配置的账号在 **private** 场所发命令才生效：
-   - `/approve <id> <nonce>` → `active`
-   - `/deny <id> <nonce>` → `denied`
-   - `/revoke <id>` → `revoked`
+   - `/approve <id> <nonce>` → 单张 `active`
+   - `/deny <id> <nonce>` → 单张 `denied`
+   - `/approve <batch_id>` → 整批逐张 `active`
+   - `/deny <batch_id>` → 整批逐张 `denied`
+   - `/revoke <id>` → 单张 `revoked`
 4. **防重放**：`nonce` 与票据一起生成，只在 pending 阶段保留；批准/拒绝/撤销后立刻清空。
    同一张票据的批准命令不能重放。nonce 防的是误重放，身份仍由私信账号认证保证。
 5. 审批命令本身入库留痕，但不唤醒管理员会话：审批是 core 动作，不是对话。
@@ -401,8 +422,9 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 1. **配置 + subject/place**：已完成。`[grants]` 解析、轮次快照、启动告警。
 2. **唯一 evaluator**：已完成。core 内置四元组实现；外部实现整体替换；无 provider fail closed。
 3. **接口扩展**：已完成。`AccessRequest` / `ToolAccessContext` 带 subject/place；旧 provider 直接移除。
-4. **票据**：已完成。`access_request` 工具、私信 `/approve` `/deny` `/revoke`、状态机、TTL、去重、内存存储。
-5. **审计**：已完成。system admin 逐次、deny、票据六事件、destructive 拒绝。
+4. **票据**：已完成。统一 `access_request { items }`（单条/批量）、私信 `/approve` `/deny` `/revoke`、
+   批量 `/approve <batch_id>`、状态机、TTL、冷却聚合、`access_ticket_get` 只读查询。
+5. **审计**：已完成。system admin 逐次、deny、票据六事件、批量批准/拒绝汇总行、destructive 拒绝。
 6. **测试**：已完成。场所/主体矩阵、无主体轮次、票据生命周期、单次使用、群内零常驻、fail closed。
 
 ---
@@ -416,3 +438,83 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 - 把 `allow_destructive` 合并进 grant 表。
 - 群内自动提权（即使账号是管理员本人）。
 - 长期/全局票据。
+
+---
+
+## 13. 批准即执行（设计，未实现）
+
+方向已定：**批准由 core 直接执行挂起的动作**，不唤醒模型重发。模型重发的参数可以被改写；目标房间能校验，
+消息正文不能。core 保存的快照才是管理员批准的那一份。
+
+### 13.1 票据升级为「挂起的动作」
+
+- 申请时除 `op + 目标房间` 外，再存一份 **参数快照**（`params_snapshot`），例如 `send_message_to` 的
+  `elements`、`platform_call:<method>` 的规范化 `params`。快照只存内存，随票据终态一起丢弃。
+- 只接受 core 能验证形状的 op；参数先过现有 `MethodSpec` 校验（必填、类型、target 不换房间）。
+- 快照大小设上限（草案 256 KiB），超限拒绝申请；日志和审批私信不打印正文，只打印摘要/长度。
+- **敏感度**：消息正文会在进程内存里驻留最长一个 pending 窗口（10 分钟）。这是可接受的取舍：
+  不落库、不跨进程、不进日志；票据终态立即释放；管理员批准的是确定的那一份内容，而不是让模型在
+  下一轮重新生成一份可能被注入改写的正文。威胁模型里把「进程内存被读」归到宿主失陷，不在授权层解决。
+
+### 13.2 批准 → core 执行
+
+- 单张批准和整批批准都由 core 执行；批量按票据创建顺序**逐条执行**，不要求模型参与。
+- 执行入口复用现有路径：
+  - `send_message` / `send_message_to`：`prepare_send` / `deliver_out`；
+  - `platform_call:<method>`：`prepare_platform_call` + 锁外 execute + `finish_platform_call`。
+- 执行前仍检查 `MethodSpec.risk = Destructive` 的 `allow_destructive`；票据不放宽这个闸门。
+- 票据不授予 `plugin` 能力，不改变会话的常态 grants；执行只使用票据快照里的目标/op/参数。
+- 单条执行结果：`succeeded` / `failed` / `skipped`，附失败原因；批量逐条记录，不因一条失败中止后续。
+
+### 13.3 结果投递：只带指针，不塞正文
+
+- 往原会话流水写一条**来源标记为 system/tool** 的记录，绝不伪装成人类发言：
+  - `sender = system`（或 `tool`），`kind = Event`，`event = ticket_result`；
+  - `at_self = false`、`reply_to_self = false`，不带人类 `role`；
+  - 正文只写：`ticket id`、目标房间、op、执行状态、一句「用 access_ticket_get {id} 查询详情」。
+- 完整结果（平台返回值、错误、执行时间、审计引用）不进流水，只进票据存储/查询接口，避免把大结果或
+  平台原文塞进上下文。
+- 这条记录走 core 的合成事件路径（`skip_route`），不经过 route/receive，不会被当成新的用户指令；
+  唤醒策略可以按 `event=ticket_result` 单独处理。
+
+### 13.4 唤醒策略
+
+- 会话空闲：可唤醒一轮**只为通报结果**，不重新执行动作。
+- 会话正在跑：排队到当前轮之后，**不插队、不打断**。
+- 唤醒轮的 `subject` / `place` 取**原票据 principal/place**（申请时的触发者），不继承管理员身份。
+  管理员批准只产生票据；票据是唯一放行依据，绝不用「管理员私信」给群里那一轮提权。
+- 若原触发者是无主体轮次（`system` / `none`），票据任务本身仍按签发时的 principal 记录，但唤醒轮
+  不因此获得任何人类豁免。
+
+### 13.5 降级
+
+- 票据 `expired` / `revoked` / `used`：不执行，状态 `skipped`；群里发指针通知（若原房间可用），
+  私信管理员发失败原因。
+- 房间已不可用 / 连接已断：不执行；能发群则发 `skipped` 指针，不能发则只私信管理员。
+- 原会话已结束 / 已无订阅者：不唤醒；仍写票据结果，`access_ticket_get` 可查；管理员私信收到原因。
+- 任何降级都**不重试**、不退回「让模型重发」。
+
+### 13.6 与批量 / 冷却聚合的交互
+
+- 聚合后的多条 `/approve <batch_id>`：**逐条执行**，每条独立结果；不做「整批全成功或全失败」的执行语义。
+- `/approve <id> <nonce>` 单张执行；`/approve <batch_id>` 审计一条批量批准汇总 + 每条执行审计。
+- 冷却与聚合仍只作用于**申请**；批准后的执行不受申请冷却影响。
+- `access_ticket_get { batch_id }` 返回整批逐条状态和执行汇总；`{ id }` 返回单张完整结果。
+
+### 13.7 统一查询入口
+
+`access_ticket_get { id?, batch_id? }` 已实现为只读查询（执行字段留到本设计落地时补）：
+
+- `id` 与 `batch_id` 必须且只能给一个；都给或都不给返回 `BadRequest`。
+- 只能查本会话发起的票据；跨会话 `ToolNotAllowed`，文案明确 `belongs to another session`。
+- 查询不消耗票据、不改变状态。
+- 执行落地后增加：`executed_at`、`result`（完整平台返回/发送回执）、`failure_reason`、`audit_ref`；
+  批量再给 `count` 与逐条状态汇总。
+- 不允许按 id 枚举别人的动作；未知 id/批次与跨会话使用不同错误码，方便调用方区分。
+
+### 13.8 为什么不选「唤醒模型重发」
+
+- 模型可以在重发时改写正文；目标房间和 op 能校验，消息内容不能校验，等于管理员批准的内容无法保证。
+- 唤醒模型重发还会把「管理员批准」误当成群里那一轮的提权来源，违反「群内零常驻」。
+- core 执行快照可以保证：批准的是什么，执行的就是什么；票据只放宽目标动作，执行前仍过
+  `allow_destructive`，不碰 plugin 权限。

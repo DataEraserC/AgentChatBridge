@@ -13,8 +13,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use acb_proto::RoomId;
+use serde::Deserialize;
 
 use crate::grants::{GrantCapability, GrantPlace, GrantSubject, truncate_target};
+
+/// `[tickets]`：审批冷却与聚合的节奏。0 = 关闭对应冷却。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TicketsPolicy {
+    /// 同一会话两次「已发出审批消息」之间的最小间隔。
+    pub request_cooldown_secs: u64,
+    /// 同一个 system admin 收到两条审批消息之间的最小间隔。
+    pub admin_cooldown_secs: u64,
+}
+
+impl Default for TicketsPolicy {
+    fn default() -> Self {
+        Self {
+            request_cooldown_secs: 60,
+            admin_cooldown_secs: 30,
+        }
+    }
+}
 
 /// 申请后等管理员批准的默认上限：10 分钟。
 pub const PENDING_TTL_MS: i64 = 10 * 60 * 1000;
@@ -23,7 +43,9 @@ pub const ACTIVE_TTL_MS: i64 = 2 * 60 * 1000;
 /// 一个轮次最多申请几张票据。
 pub const MAX_REQUESTS_PER_TURN: usize = 3;
 /// 一个会话同时最多持有几张（pending + active）。
-pub const MAX_LIVE_PER_SESSION: usize = 5;
+pub const MAX_LIVE_PER_SESSION: usize = 8;
+/// 单次批量申请最多几张票据。
+pub const MAX_ITEMS_PER_BATCH: usize = 8;
 /// 单张票据最多列几个 op。
 pub const MAX_OPS: usize = 8;
 /// 单个 op 的最大长度。
@@ -76,9 +98,12 @@ pub struct AccessTicket {
     pub expires_at: i64,
     pub state: TicketState,
     pub request_turn: String,
+    pub batch_id: Option<String>,
     pub approval_ref: Option<String>,
     pub approver: Option<String>,
     pub used_at: Option<i64>,
+    /// 审批私信是否已经把这张票据列给管理员。同轮多张票据在收工时聚合发送。
+    pub announced: bool,
 }
 
 /// 一次申请的全部输入。
@@ -91,6 +116,7 @@ pub struct TicketRequest {
     pub ops: Vec<String>,
     pub capabilities: BTreeSet<GrantCapability>,
     pub request_turn: String,
+    pub batch_id: Option<String>,
     pub now: i64,
 }
 
@@ -105,11 +131,25 @@ pub struct TicketReply {
     pub duplicate: bool,
 }
 
+/// 批量申请的结果：一个 batch id + N 张独立票据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchReply {
+    pub batch_id: String,
+    pub tickets: Vec<TicketReply>,
+}
+
 /// 进程内的票据簿。所有方法都在 core 的全局锁内调用，不需要额外同步。
 #[derive(Debug, Default)]
 pub struct AccessTickets {
     tickets: HashMap<String, AccessTicket>,
     seq: u64,
+    /// 会话 → 最近一条审批私信时间。冷却按「发过消息」算，而不是按原始申请算：
+    /// 同一轮里连续申请的多张票据仍然可以聚合成一条消息。
+    session_notified_at: HashMap<String, i64>,
+    /// 最近一条发给 system admin 的审批私信时间。
+    admin_notified_at: Option<i64>,
+    #[cfg(test)]
+    audit_log: Vec<String>,
 }
 
 impl AccessTickets {
@@ -164,9 +204,92 @@ impl AccessTickets {
             ));
         }
 
+        Ok(self.insert(request))
+    }
+
+    /// 批量申请：N 张独立票据共享一个 batch id。任何一条校验失败都拒绝整批。
+    pub fn request_batch(
+        &mut self,
+        requests: Vec<TicketRequest>,
+        now: i64,
+    ) -> Result<BatchReply, String> {
+        if requests.is_empty() {
+            return Err("batch must contain at least one item".to_owned());
+        }
+        if requests.len() > MAX_ITEMS_PER_BATCH {
+            return Err(format!(
+                "batch has {} items (max {MAX_ITEMS_PER_BATCH}); whole batch rejected",
+                requests.len()
+            ));
+        }
+        self.sweep(now);
+
+        let session = requests[0].session.clone();
+        let turn = requests[0].request_turn.clone();
+        let mut seen = BTreeSet::new();
+        for request in &requests {
+            let ops = normalize_ops(&request.ops)?;
+            if request.capabilities.is_empty() {
+                return Err("capability set must not be empty".to_owned());
+            }
+            if request.session != session || request.request_turn != turn {
+                return Err("batch items must share session and turn".to_owned());
+            }
+            let key = (request.target.to_string(), ops.join("|"));
+            if !seen.insert(key) {
+                return Err(
+                    "batch contains duplicate target + ops; whole batch rejected".to_owned(),
+                );
+            }
+            if self.tickets.values().any(|ticket| {
+                ticket.state.live()
+                    && ticket.session == request.session
+                    && ticket.target == request.target
+                    && ticket.ops == ops
+                    && ticket.capabilities == request.capabilities
+            }) {
+                return Err("batch item already has a live ticket; whole batch rejected".to_owned());
+            }
+        }
+
+        let groups = self
+            .tickets
+            .values()
+            .filter(|ticket| ticket.state.live() && ticket.request_turn == turn)
+            .map(|ticket| ticket.batch_id.clone().unwrap_or_else(|| ticket.id.clone()))
+            .collect::<BTreeSet<_>>();
+        if groups.len() >= MAX_REQUESTS_PER_TURN {
+            return Err(format!(
+                "turn {turn} already has {} live request groups (max {MAX_REQUESTS_PER_TURN})",
+                groups.len()
+            ));
+        }
+        let session_count = self
+            .tickets
+            .values()
+            .filter(|ticket| ticket.state.live() && ticket.session == session)
+            .count();
+        if session_count + requests.len() > MAX_LIVE_PER_SESSION {
+            return Err(format!(
+                "session {session} would have {} live tickets (max {MAX_LIVE_PER_SESSION}); whole batch rejected",
+                session_count + requests.len()
+            ));
+        }
+
+        let batch_id = format!("bt-{}", random_hex());
+        let mut tickets = Vec::with_capacity(requests.len());
+        for mut request in requests {
+            request.batch_id = Some(batch_id.clone());
+            tickets.push(self.insert(request));
+        }
+        Ok(BatchReply { batch_id, tickets })
+    }
+
+    fn insert(&mut self, request: TicketRequest) -> TicketReply {
         self.seq = self.seq.saturating_add(1);
         let id = format!("tk-{}-{}", random_hex(), self.seq);
         let nonce = random_hex();
+        let ops = normalize_ops(&request.ops).unwrap_or_else(|_| request.ops.clone());
         let ticket = AccessTicket {
             id: id.clone(),
             nonce: nonce.clone(),
@@ -180,9 +303,11 @@ impl AccessTickets {
             expires_at: request.now.saturating_add(PENDING_TTL_MS),
             state: TicketState::PendingApproval,
             request_turn: request.request_turn,
+            batch_id: request.batch_id,
             approval_ref: None,
             approver: None,
             used_at: None,
+            announced: false,
         };
         self.audit("request", &ticket, "requested");
         let reply = TicketReply {
@@ -194,7 +319,174 @@ impl AccessTickets {
         };
         self.tickets.insert(id, ticket);
         self.prune();
-        Ok(reply)
+        reply
+    }
+
+    /// 同一会话距离下次可申请还剩多少毫秒。冷却从「最近一条审批私信」算起；
+    /// 同轮里还没有发出消息的 pending 不会互相阻塞，方便聚合。
+    pub fn session_cooldown_remaining(
+        &self,
+        session: &str,
+        now: i64,
+        cooldown_ms: i64,
+    ) -> Option<i64> {
+        if cooldown_ms <= 0 {
+            return None;
+        }
+        let last = self.session_notified_at.get(session)?;
+        let remaining = cooldown_ms.saturating_sub(now.saturating_sub(*last));
+        (remaining > 0).then_some(remaining)
+    }
+
+    /// 同一个管理员距离可以再收一条审批私信还剩多少毫秒。
+    pub fn admin_cooldown_remaining(&self, now: i64, cooldown_ms: i64) -> Option<i64> {
+        if cooldown_ms <= 0 {
+            return None;
+        }
+        let last = self.admin_notified_at?;
+        let remaining = cooldown_ms.saturating_sub(now.saturating_sub(last));
+        (remaining > 0).then_some(remaining)
+    }
+
+    /// 收集所有还没发给管理员的 pending 票据。调用方发出私信后再 `mark_announced`；
+    /// 发送失败就保持未标记，下一次收工再试。
+    pub fn pending_unannounced(&mut self, now: i64) -> Vec<AccessTicket> {
+        self.sweep(now);
+        let mut pending: Vec<AccessTicket> = self
+            .tickets
+            .values()
+            .filter(|ticket| ticket.state == TicketState::PendingApproval && !ticket.announced)
+            .cloned()
+            .collect();
+        pending.sort_by_key(|ticket| (ticket.created_at, ticket.id.clone()));
+        pending
+    }
+
+    /// 审批私信已发出：标记这些 pending 已通知，并推进会话/管理员冷却。
+    pub fn mark_announced(&mut self, ids: &[String], now: i64) {
+        let mut sessions = BTreeSet::new();
+        for id in ids {
+            if let Some(ticket) = self.tickets.get_mut(id) {
+                if ticket.state == TicketState::PendingApproval {
+                    ticket.announced = true;
+                    sessions.insert(ticket.session.clone());
+                }
+            }
+        }
+        for session in sessions {
+            self.session_notified_at.insert(session, now);
+        }
+        if !ids.is_empty() {
+            self.admin_notified_at = Some(now);
+        }
+    }
+
+    /// 按 batch id 取票据（只读，按创建时间排序）。
+    pub fn for_batch(&self, batch_id: &str) -> Vec<&AccessTicket> {
+        let mut tickets: Vec<&AccessTicket> = self
+            .tickets
+            .values()
+            .filter(|ticket| ticket.batch_id.as_deref() == Some(batch_id))
+            .collect();
+        tickets.sort_by_key(|ticket| (ticket.created_at, ticket.id.clone()));
+        tickets
+    }
+
+    /// 整批批准：逐张 pending → active；任何一张不是 pending 都拒绝整批。
+    pub fn approve_batch(
+        &mut self,
+        batch_id: &str,
+        approval_ref: &str,
+        approver: &str,
+        now: i64,
+    ) -> Result<Vec<TicketReply>, String> {
+        self.sweep(now);
+        let ids: Vec<String> = self
+            .for_batch(batch_id)
+            .into_iter()
+            .map(|ticket| ticket.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Err(format!("unknown batch {batch_id}"));
+        }
+        if ids.iter().any(|id| {
+            self.tickets
+                .get(id)
+                .is_none_or(|ticket| ticket.state != TicketState::PendingApproval)
+        }) {
+            return Err(format!(
+                "batch {batch_id} contains a ticket that is not pending_approval; whole batch rejected"
+            ));
+        }
+        let mut replies = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let ticket = self.tickets.get_mut(id).expect("ids came from the map");
+            ticket.state = TicketState::Active;
+            ticket.expires_at = now.saturating_add(ACTIVE_TTL_MS);
+            ticket.approval_ref = Some(approval_ref.to_owned());
+            ticket.approver = Some(approver.to_owned());
+            ticket.nonce.clear();
+            let snapshot = ticket.snapshot();
+            self.audit("approve", &snapshot, "approved");
+            replies.push(reply(&snapshot, false));
+        }
+        self.audit_batch(
+            "approve",
+            batch_id,
+            "active",
+            ids.len(),
+            approval_ref,
+            "batch approved",
+        );
+        Ok(replies)
+    }
+
+    /// 整批拒绝：逐张 pending → denied；任何一张不是 pending 都拒绝整批。
+    pub fn deny_batch(
+        &mut self,
+        batch_id: &str,
+        approval_ref: &str,
+        approver: &str,
+        now: i64,
+    ) -> Result<Vec<TicketReply>, String> {
+        self.sweep(now);
+        let ids: Vec<String> = self
+            .for_batch(batch_id)
+            .into_iter()
+            .map(|ticket| ticket.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Err(format!("unknown batch {batch_id}"));
+        }
+        if ids.iter().any(|id| {
+            self.tickets
+                .get(id)
+                .is_none_or(|ticket| ticket.state != TicketState::PendingApproval)
+        }) {
+            return Err(format!(
+                "batch {batch_id} contains a ticket that is not pending_approval; whole batch rejected"
+            ));
+        }
+        let mut replies = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let ticket = self.tickets.get_mut(id).expect("ids came from the map");
+            ticket.state = TicketState::Denied;
+            ticket.approval_ref = Some(approval_ref.to_owned());
+            ticket.approver = Some(approver.to_owned());
+            ticket.nonce.clear();
+            let snapshot = ticket.snapshot();
+            self.audit("deny", &snapshot, "denied");
+            replies.push(reply(&snapshot, false));
+        }
+        self.audit_batch(
+            "deny",
+            batch_id,
+            "denied",
+            ids.len(),
+            approval_ref,
+            "batch denied",
+        );
+        Ok(replies)
     }
 
     /// 私信管理员批准。`nonce` 必须与 pending 票据完全一致。
@@ -368,7 +660,7 @@ impl AccessTickets {
         }
     }
 
-    fn audit(&self, event: &str, ticket: &AccessTicket, reason: &str) {
+    fn audit(&mut self, event: &str, ticket: &AccessTicket, reason: &str) {
         let capabilities = ticket
             .capabilities
             .iter()
@@ -376,10 +668,11 @@ impl AccessTickets {
             .collect::<Vec<_>>()
             .join("|");
         let ops = ticket.ops.join("|");
-        eprintln!(
-            "[access-ticket] event={} ticket={} state={} principal={} place={} capability={} target={} ops={} session={} turn={} approval_ref={} reason=\"{}\"",
+        let line = format!(
+            "[access-ticket] event={} ticket={} batch={} state={} principal={} place={} capability={} target={} ops={} session={} turn={} approval_ref={} reason=\"{}\"",
             event,
             ticket.id,
+            ticket.batch_id.as_deref().unwrap_or("-"),
             ticket.state.as_str(),
             ticket.principal.as_str(),
             ticket.place.as_str(),
@@ -391,6 +684,32 @@ impl AccessTickets {
             ticket.approval_ref.as_deref().unwrap_or("-"),
             reason.replace('"', "'"),
         );
+        eprintln!("{line}");
+        #[cfg(test)]
+        self.audit_log.push(line);
+    }
+
+    fn audit_batch(
+        &mut self,
+        event: &str,
+        batch_id: &str,
+        state: &str,
+        count: usize,
+        approval_ref: &str,
+        reason: &str,
+    ) {
+        let line = format!(
+            "[access-ticket] event={} batch={} state={} count={} approval_ref={} reason=\"{}\"",
+            event,
+            batch_id,
+            state,
+            count,
+            approval_ref,
+            reason.replace('"', "'"),
+        );
+        eprintln!("{line}");
+        #[cfg(test)]
+        self.audit_log.push(line);
     }
 }
 
@@ -467,6 +786,7 @@ mod tests {
             ops: ops.iter().map(|op| (*op).to_owned()).collect(),
             capabilities: BTreeSet::from([GrantCapability::RoomWrite]),
             request_turn: "turn-1".to_owned(),
+            batch_id: None,
             now,
         }
     }
@@ -574,6 +894,94 @@ mod tests {
             tickets.get(&expired.id).expect("还在簿上").state,
             TicketState::Expired
         );
+    }
+
+    #[test]
+    fn cooldowns_block_until_the_window_passes() {
+        let mut tickets = AccessTickets::new();
+        let reply = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        let pending = tickets.pending_unannounced(1000);
+        let ids: Vec<String> = pending.iter().map(|ticket| ticket.id.clone()).collect();
+        assert_eq!(ids.len(), 1);
+        tickets.mark_announced(&ids, 1000);
+        assert_eq!(
+            tickets.session_cooldown_remaining("main", 2000, 60_000),
+            Some(59_000)
+        );
+        assert_eq!(
+            tickets.session_cooldown_remaining("main", 61_000, 60_000),
+            None,
+            "窗口过后恢复"
+        );
+        assert_eq!(tickets.admin_cooldown_remaining(2000, 30_000), Some(29_000));
+        assert_eq!(tickets.admin_cooldown_remaining(31_000, 30_000), None);
+        assert_eq!(reply.state, TicketState::PendingApproval);
+    }
+
+    #[test]
+    fn batch_approve_sets_each_ticket_active_and_audits() {
+        let mut tickets = AccessTickets::new();
+        let requests = vec![
+            request(1000, &["send_message_to"]),
+            TicketRequest {
+                target: RoomId::parse("qq:group/998").expect("房间"),
+                ..request(1000, &["get_history"])
+            },
+        ];
+        let batch = tickets.request_batch(requests, 1000).expect("批量申请");
+        assert_eq!(batch.tickets.len(), 2);
+        let ids: Vec<String> = batch
+            .tickets
+            .iter()
+            .map(|ticket| ticket.id.clone())
+            .collect();
+        tickets.pending_unannounced(1000);
+        tickets.mark_announced(&ids, 1000);
+        let replies = tickets
+            .approve_batch(&batch.batch_id, "ref", "system_admin", 2000)
+            .expect("整批批准");
+        assert_eq!(replies.len(), 2);
+        for reply in &replies {
+            assert_eq!(
+                tickets.get(&reply.id).expect("还在簿上").state,
+                TicketState::Active
+            );
+        }
+        let batch_audit = format!("event=approve batch={}", batch.batch_id);
+        assert!(
+            tickets
+                .audit_log
+                .iter()
+                .any(|line| line.contains(&batch_audit)),
+            "整批批准必须留一条 batch 审计：{:?}",
+            tickets.audit_log
+        );
+    }
+
+    #[test]
+    fn batch_rejects_too_many_or_duplicate_items() {
+        let mut tickets = AccessTickets::new();
+        let too_many: Vec<TicketRequest> = (0..=MAX_ITEMS_PER_BATCH)
+            .map(|index| TicketRequest {
+                target: RoomId::parse(&format!("qq:group/{index}")).expect("房间"),
+                ..request(1000, &["get_history"])
+            })
+            .collect();
+        assert!(
+            tickets.request_batch(too_many, 1000).is_err(),
+            "超过 8 条必须整批拒绝"
+        );
+        let duplicate = vec![
+            request(1000, &["send_message_to"]),
+            request(1000, &["send_message_to"]),
+        ];
+        assert!(
+            tickets.request_batch(duplicate, 1000).is_err(),
+            "批内重复目标 + op 必须整批拒绝"
+        );
+        assert_eq!(tickets.len(), 0, "失败不应留下任何票据");
     }
 
     #[test]
