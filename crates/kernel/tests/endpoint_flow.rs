@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use acb_kernel::endpoint::{read_frame, reader_of};
 use acb_kernel::{
-    Bridge, Conn, ControlRegistry, Element, Frame, MemoryStore, Outbound, OutboundError,
-    RecordDraft, RoomId, Sender, Sent, handshake, serve,
+    Bridge, Conn, ControlRegistry, DependencyRegistry, Element, Frame, MemoryStore, Outbound,
+    OutboundError, RecordDraft, RoomId, Sender, Sent, handshake, serve,
 };
 use acb_proto::frame::{PROTOCOL_VERSION, encode};
 use serde_json::json;
@@ -484,6 +484,7 @@ impl TestServer {
                 thread_bridge,
                 thread_shutdown,
                 ControlRegistry::new(),
+                DependencyRegistry::new(),
             )
             .expect("服务能跑");
         });
