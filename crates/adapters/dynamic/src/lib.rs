@@ -883,7 +883,8 @@ impl DylibAdapterFactory {
             let _ = status_cell.set(status.clone());
             status.attempt();
             match dead.get() {
-                Some(reason) => status.disconnected("unavailable", reason),
+                // 句柄已标死是硬失败，不能等连接阈值。
+                Some(reason) => status.failed("unavailable", reason),
                 None => status.connected(),
             }
             monitor(host.shutdown, stop, table, handle, context, connection_id);

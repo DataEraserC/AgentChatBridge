@@ -133,8 +133,10 @@ impl AdapterStatus {
 
     /// 载体加载/初始化或运行明确失败。`class` 沿用适配器现有的错误分类
     /// （如 `unavailable` / `closed` / `internal`），不在这里发明新类。
+    /// 这是硬失败：句柄已经不可用，立即 down，不套用连接失败阈值。
     pub fn failed(&self, class: &str, detail: &str) {
-        self.disconnected(class, detail);
+        self.deps
+            .platform_failed(&self.connection, class, detail, crate::deps::now_millis());
     }
 
     pub fn disconnected(&self, class: &str, detail: &str) {

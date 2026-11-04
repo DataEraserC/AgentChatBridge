@@ -2522,23 +2522,38 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
     let snapshot = deps.snapshot(None);
     let model = dep_entry(&snapshot, "test/model");
     assert_eq!(model["kind"], "model");
-    assert_eq!(model["state"], "down");
+    assert_eq!(model["state"], "unknown", "单次失败只累计");
     assert_eq!(model["lastErrorClass"], "model_unavailable");
 
     // 同一 component/id/class，文本不同：按结构化分类去重，不再发。
+    for text in ["第二次", "第三次"] {
+        bridge
+            .ingest(message("qq:group/123", "10001", text, true))
+            .expect("能记下来");
+        let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+        bridge
+            .end_turn_with_failure(&delivery.ticket, Some("模型网关超时"), Some(&failure))
+            .expect("能收工");
+        bridge.flush_notices();
+    }
+    let snapshot = deps.snapshot(None);
+    let model = dep_entry(&snapshot, "test/model");
+    assert_eq!(model["state"], "down", "同一 class 第 3 次才 down");
+    assert_eq!(
+        sends.lock().expect("没被毒死").len(),
+        1,
+        "结构化分类相同就只发首条"
+    );
+
+    // 已经 down 之后再失败：走 component_down 抑制，不再刷 in-band。
     bridge
-        .ingest(message("qq:group/123", "10001", "第二次", true))
+        .ingest(message("qq:group/123", "10001", "第四次", true))
         .expect("能记下来");
     let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
     bridge
         .end_turn_with_failure(&delivery.ticket, Some("模型网关超时"), Some(&failure))
         .expect("能收工");
     bridge.flush_notices();
-    assert_eq!(
-        sends.lock().expect("没被毒死").len(),
-        1,
-        "结构化分类相同就只发首条"
-    );
     let events = notice_events.lock().expect("没被毒死");
     assert!(
         events.iter().any(|event| matches!(
@@ -2594,13 +2609,15 @@ fn abandoned_turn_does_not_count_as_success() {
         id: Some("test/model".into()),
         class: "model_unavailable".into(),
     };
-    bridge
-        .ingest(message("qq:group/123", "10001", "第一次", true))
-        .expect("能记下来");
-    let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
-    bridge
-        .end_turn_with_failure(&delivery.ticket, Some("模型网关拒绝连接"), Some(&failure))
-        .expect("能收工");
+    for text in ["第一次", "第二次", "第三次"] {
+        bridge
+            .ingest(message("qq:group/123", "10001", text, true))
+            .expect("能记下来");
+        let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+        bridge
+            .end_turn_with_failure(&delivery.ticket, Some("模型网关拒绝连接"), Some(&failure))
+            .expect("能收工");
+    }
     assert_eq!(
         dep_entry(&deps.snapshot(None), "test/model")["state"],
         "down"
