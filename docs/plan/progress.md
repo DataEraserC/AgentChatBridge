@@ -1361,6 +1361,8 @@
 - 证据：`cargo test --workspace` 62 个 suite 全 ok；clippy `-D warnings`、fmt 全绿。
 - 可回退：删除 `ComponentDown` 分支与 `abandon_turn`，恢复 `end_turn(None)` 即可；
   这会把「断线不算成功」的行为退回旧语义。
+- commit：`026230a feat(deps): expose per-dependency health and tighten failure edges`
+  （第①–③步收口合计）。
 
 ## 部署注意事项（nix-config 打包）
 
