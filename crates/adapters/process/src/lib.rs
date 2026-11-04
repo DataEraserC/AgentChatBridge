@@ -343,7 +343,15 @@ fn start_child(
     pending: Pending,
     alive: Arc<AtomicBool>,
     write_failed: Arc<AtomicBool>,
-) -> Result<(Child, SyncSender<Vec<u8>>, Arc<[MethodSpec]>, WireAdapterInfo), String> {
+) -> Result<
+    (
+        Child,
+        SyncSender<Vec<u8>>,
+        Arc<[MethodSpec]>,
+        WireAdapterInfo,
+    ),
+    String,
+> {
     let mut command = Command::new(&config.program);
     command
         .args(&config.args)
@@ -695,7 +703,10 @@ fn wait_for_exit(
         if shared.write_failed.load(Ordering::Relaxed) {
             eprintln!(
                 "{}",
-                acb_i18n::t!("adapter.process.write_stalled_kill", connection = connection)
+                acb_i18n::t!(
+                    "adapter.process.write_stalled_kill",
+                    connection = connection
+                )
             );
             let _ = child.kill();
             let _ = child.wait();

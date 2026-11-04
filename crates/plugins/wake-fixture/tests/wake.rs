@@ -49,6 +49,7 @@ fn wake_provider_uses_the_shared_wire() {
             path: path.to_string_lossy().into_owned(),
             kind: None,
             timeout_ms: None,
+            version: None,
         }]))
         .expect("能装载 wake 插件");
 

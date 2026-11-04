@@ -343,6 +343,8 @@ pub struct PluginConfig {
     /// 动态库单次调用超时（毫秒）。省略或 0 用适配器默认值（5 秒）；
     /// 只对平台适配器生效：超时后该连接句柄标死，后续调用立即失败。
     pub timeout_ms: Option<u64>,
+    /// 给人和 LKG 看的版本标签。不参与加载校验；未写时 LKG 记 `"unknown"`。
+    pub version: Option<String>,
 }
 
 /// 目前认识的记忆存储形式。加新形式时在这里登记。
@@ -1202,10 +1204,15 @@ impl Config {
                 .kind
                 .map(|kind| kind.trim().to_owned())
                 .filter(|kind| !kind.is_empty());
+            let version = raw_plugin
+                .version
+                .map(|version| version.trim().to_owned())
+                .filter(|version| !version.is_empty());
             plugins.push(PluginConfig {
                 path,
                 kind,
                 timeout_ms: raw_plugin.timeout_ms,
+                version,
             });
         }
 
@@ -2211,6 +2218,8 @@ struct RawPlugin {
     kind: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

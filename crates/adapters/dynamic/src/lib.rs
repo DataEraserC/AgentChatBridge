@@ -43,11 +43,11 @@ use acb_kernel::{
     ClockContext, ClockPolicy, ClockProvider, Connection, DefaultTurnErrorProvider,
     DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest, Element, EventQueue,
     ExtensionPoint, Health, LoaderKind, LoaderManifest, ManagerManifest, ManagerPlugin, MethodSpec,
-    Outbound, OutboundError, OutgoingRecord, PLUGIN_API_VERSION, PluginConfig, PluginError,
-    PluginInfo, PluginLifecycle, PluginLoader, PluginManager, PluginMetadata, PluginSource,
-    ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision,
-    ReceivePolicy, ReceiveProvider, ReceiveRequest, RoomId, SendContext, SendHook, Sent,
-    TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest, WakeContext,
+    Outbound, OutboundError, OutgoingRecord, PLUGIN_API_VERSION, PluginArtifact, PluginConfig,
+    PluginError, PluginInfo, PluginLifecycle, PluginLoader, PluginManager, PluginMetadata,
+    PluginSource, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions,
+    ReceiveDecision, ReceivePolicy, ReceiveProvider, ReceiveRequest, RoomId, SendContext, SendHook,
+    Sent, TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest, WakeContext,
     WakeDecision, WakePolicy, WakeProvider, WakeVerdict, default_delivery_plan, validate_manifest,
 };
 use libloading::Library;
@@ -223,14 +223,22 @@ fn take_c_string(table: &AcbPluginV2, pointer: *mut c_char, call: &str) -> Resul
     Ok(text)
 }
 
+#[derive(Clone)]
+struct KnownPlugin {
+    path: PathBuf,
+    version: Option<String>,
+}
+
 /// 动态库 loader：把配置里声明的 `.so` 装进 Root。
 #[derive(Default)]
 pub struct DynamicLoader {
     plugins: Vec<PluginConfig>,
     /// 只登记声明 UNLOAD_SAFE 的 v2 策略插件：provider id -> 库句柄。
     unloadable: Mutex<HashMap<ProviderId, Arc<Library>>>,
-    /// 可卸载策略插件在配置里的路径，用于卸载后重新加载。
-    known: Mutex<HashMap<ProviderId, PathBuf>>,
+    /// 可卸载策略插件在配置里的路径/版本，用于卸载后重新加载。
+    known: Mutex<HashMap<ProviderId, KnownPlugin>>,
+    /// 所有已识别 provider 的产物引用（含不可卸载适配器），LKG 用。
+    artifacts: Mutex<HashMap<ProviderId, PluginArtifact>>,
     /// 已卸载的插件快照；Root 目录据此继续展示「已卸载」。
     unloaded: Mutex<HashMap<ProviderId, PluginInfo>>,
 }
@@ -241,6 +249,7 @@ impl DynamicLoader {
             plugins: plugins.to_vec(),
             unloadable: Mutex::new(HashMap::new()),
             known: Mutex::new(HashMap::new()),
+            artifacts: Mutex::new(HashMap::new()),
             unloaded: Mutex::new(HashMap::new()),
         }
     }
@@ -255,6 +264,7 @@ impl DynamicLoader {
             provider_id,
             library,
             unload_safe,
+            ..
         } = loaded;
         match inner {
             LoadedKind::Adapter(factory) => manager
@@ -295,23 +305,38 @@ impl PluginLoader for DynamicLoader {
 
     fn install(&self, manager: &mut PluginManager) -> Result<(), PluginError> {
         for plugin in &self.plugins {
-            let loaded = LoadedPlugin::load(
-                &plugin.path,
-                plugin.kind.as_deref(),
-                call_timeout(plugin),
-            )
-            .map_err(|detail| {
-                    PluginError::Loader(acb_i18n::t!(
-                        "adapter.dynamic.load_failed",
-                        path = plugin.path,
-                        detail = detail
-                    ))
-                })?;
+            let loaded =
+                LoadedPlugin::load(&plugin.path, plugin.kind.as_deref(), call_timeout(plugin))
+                    .map_err(|detail| {
+                        PluginError::Loader(acb_i18n::t!(
+                            "adapter.dynamic.load_failed",
+                            path = plugin.path,
+                            detail = detail
+                        ))
+                    })?;
+            if let Some(id) = loaded.provider_id.clone() {
+                self.artifacts
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(
+                        id,
+                        PluginArtifact {
+                            path: plugin.path.clone(),
+                            version: plugin.version.clone(),
+                        },
+                    );
+            }
             if let Some((id, library)) = Self::install_loaded(manager, loaded)? {
                 self.known
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(id.clone(), PathBuf::from(&plugin.path));
+                    .insert(
+                        id.clone(),
+                        KnownPlugin {
+                            path: PathBuf::from(&plugin.path),
+                            version: plugin.version.clone(),
+                        },
+                    );
                 self.unloadable
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -369,9 +394,9 @@ impl PluginLoader for DynamicLoader {
     /// 注意：ADR-0030 D3 的“回滚到上一份已加载实现”在当前同路径 reload 下不成立。
     /// 调用方在 reload 前已经 unload，旧库已经 `dlclose`；这里只重新加载路径，
     /// 失败时插件保持 `unloaded` 并留下 `lastError`，不会恢复旧版本。
-    /// 候选预加载/回滚方案见 `docs/plan/native-reload-rollback-options.md`。
+    /// 运行时的 LKG 回滚由 kernel 侧改路径后调用这里完成。
     fn reload(&self, manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
-        let path = self
+        let known = self
             .known
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -392,7 +417,7 @@ impl PluginLoader for DynamicLoader {
             )));
         }
 
-        let path_text = path.to_string_lossy().into_owned();
+        let path_text = known.path.to_string_lossy().into_owned();
         let loaded = LoadedPlugin::load(
             &path_text,
             None,
@@ -433,10 +458,52 @@ impl PluginLoader for DynamicLoader {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id.clone(), library);
+        self.artifacts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                id.clone(),
+                PluginArtifact {
+                    path: path_text,
+                    version: known.version,
+                },
+            );
         self.unloaded
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(id);
+        Ok(())
+    }
+
+    fn artifact(&self, id: &ProviderId) -> Option<PluginArtifact> {
+        self.artifacts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    fn set_artifact_path(&self, id: &ProviderId, path: &str) -> Result<(), PluginError> {
+        let mut artifacts = self
+            .artifacts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(artifact) = artifacts.get_mut(id) else {
+            return Err(PluginError::Loader(acb_i18n::t!(
+                "adapter.dynamic.artifact_unknown",
+                id = id
+            )));
+        };
+        artifact.path = path.to_owned();
+        drop(artifacts);
+        if let Some(known) = self
+            .known
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_mut(id)
+        {
+            known.path = PathBuf::from(path);
+        }
         Ok(())
     }
 }
@@ -455,11 +522,7 @@ enum LoadedKind {
 }
 
 impl LoadedPlugin {
-    fn load(
-        path: &str,
-        expected_kind: Option<&str>,
-        timeout: Duration,
-    ) -> Result<Self, String> {
+    fn load(path: &str, expected_kind: Option<&str>, timeout: Duration) -> Result<Self, String> {
         let library = unsafe { Library::new(path) }
             .map_err(|error| acb_i18n::t!("adapter.dynamic.open_library_failed", error = error))?;
         let (table, unload_safe) = read_abi_table(&library)?;
@@ -480,6 +543,7 @@ impl LoadedPlugin {
                         ));
                     }
                 }
+                let provider_id = ProviderId::parse(manifest.id.as_ref()).ok();
                 Ok(Self {
                     inner: LoadedKind::Adapter(DylibAdapterFactory {
                         _library: library.clone(),
@@ -488,7 +552,7 @@ impl LoadedPlugin {
                         timeout,
                         dead: Arc::new(Mutex::new(HashMap::new())),
                     }),
-                    provider_id: None,
+                    provider_id,
                     library,
                     // 适配器卸载还没实现；即使声明 v2 也按常驻处理。
                     unload_safe: false,

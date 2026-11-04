@@ -1332,6 +1332,13 @@ impl LoaderKind {
     }
 }
 
+/// 可回滚插件的产物引用。LKG 用它记录“这个版本的文件在哪”。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginArtifact {
+    pub path: String,
+    pub version: Option<String>,
+}
+
 pub trait PluginLoader: Send + Sync {
     /// 载体类型、API 版本、它能带来的扩展点。
     fn manifest(&self) -> LoaderManifest;
@@ -1360,6 +1367,19 @@ pub trait PluginLoader: Send + Sync {
     fn reload(&self, _manager: &mut PluginManager, id: &ProviderId) -> Result<(), PluginError> {
         Err(PluginError::Loader(acb_i18n::t!(
             "kernel.plugin.loader_no_reload",
+            id = id
+        )))
+    }
+
+    /// 这个 provider 的产物引用（路径 + 版本）。默认没有；只有可回滚载体覆盖。
+    fn artifact(&self, _id: &ProviderId) -> Option<PluginArtifact> {
+        None
+    }
+
+    /// 改这个 provider 下次重新加载时使用的产物路径。默认不支持。
+    fn set_artifact_path(&self, id: &ProviderId, _path: &str) -> Result<(), PluginError> {
+        Err(PluginError::Loader(acb_i18n::t!(
+            "kernel.plugin.loader_no_artifact",
             id = id
         )))
     }
@@ -1849,6 +1869,26 @@ impl PluginManager {
         Err(last.unwrap_or_else(|| PluginError::Provider {
             id: id.to_string(),
             detail: acb_i18n::t!("kernel.plugin.no_loader_reload", id = id),
+        }))
+    }
+
+    /// 取一个 provider 的产物引用（LKG 登记/回滚用）。
+    pub fn artifact_of(&self, id: &ProviderId) -> Option<PluginArtifact> {
+        self.loaders.iter().find_map(|loader| loader.artifact(id))
+    }
+
+    /// 改一个 provider 下次重载使用的产物路径。只能在安全点调用。
+    pub fn set_artifact_path(&self, id: &ProviderId, path: &str) -> Result<(), PluginError> {
+        let mut last = None;
+        for loader in &self.loaders {
+            match loader.set_artifact_path(id, path) {
+                Ok(()) => return Ok(()),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| PluginError::Provider {
+            id: id.to_string(),
+            detail: acb_i18n::t!("kernel.plugin.no_loader_artifact", id = id),
         }))
     }
 

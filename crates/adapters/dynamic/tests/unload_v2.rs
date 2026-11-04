@@ -97,6 +97,7 @@ fn unload_safe_v2_strategy_is_removed_from_root() {
         path: library.to_str().expect("UTF-8 路径").to_owned(),
         kind: None,
         timeout_ms: None,
+        version: None,
     };
     let loader = Arc::new(DynamicLoader::new(&[config]));
     let mut plugins = PluginManager::with_native_builtins();

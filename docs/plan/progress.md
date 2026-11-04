@@ -960,6 +960,30 @@
 - 证据：纯文档；`cargo test --workspace` 与 clippy 不受影响（D 提交前已全绿）。
 - 可回退：纯文档，按条目回退即可。
 
+## 2026-11-04 — A：插件 LKG 与自动回滚（已实现）
+
+- 做了什么：
+  - 新增 `crates/kernel/src/lkg.rs`：`plugins-lkg.toml`（id / version / digest / path /
+    promoted_at），每个插件保留最近 3 条，临时文件 + rename 原子写，坏文件降级为空历史。
+  - `PluginConfig` 增加可选 `version`；摘要用 64 位 FNV-1a 内容指纹（非签名）。
+  - `PluginLoader` 增加 `artifact` / `set_artifact_path`；`DynamicLoader` 登记所有已识别
+    provider 的产物引用，回滚时改路径后 reload。
+  - `Bridge` 增加 LKG 状态机：启动/reload 成功只进 `candidate`；只有无在途轮次且
+    自加载以来无失败、无边界错误、provider 仍可解析时才提升为 `lkg`；
+    10 分钟内 3 次失败（解析失败、panic、reload 失败、catalog Unhealthy 转换）
+    触发回滚到上一条 LKG，只改运行时路径 + reload，不 rebuild、不重启、不需要 root。
+  - `plugin_catalog()` 暴露 `lkgState` / `lkgReason` / `lkgVersion` / `lkgDigest` /
+    `lkgPromotedAt`；技术日志统一英文 `plugin-lkg: ...`。
+  - 生产 `main` 使用 `Bridge::with_plugins_lkg`，状态文件与 `storage.path` 同目录。
+- 偏离：Spec 中的「有在途轮次不提升」由代码结构保证（`maybe_promote_lkg` 首行检查
+  `active.is_empty()`）；集成测试改为覆盖安全点顺序，未能从外部构造「轮次中途注册候选」。
+  LKG 仅登记 Dynamic + UNLOAD_SAFE v2 可回滚插件；适配器不写文件。
+- 残留：策略 provider 的同步调用仍没有通用超时；catalog Unhealthy 是动态适配器超时的
+  观测入口。重启后按用户配置重新加载，LKG 只恢复历史，不自动改磁盘配置。
+- 证据：`cargo clippy -p acb-kernel -p acb-adapter-dynamic -p acb-bridge --all-targets -D warnings`
+  通过；`cargo test --workspace` 全绿。
+- 可回退：移除 LKG 模块与 Bridge 接线即可回到提交前行为；状态文件可单独删除。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，

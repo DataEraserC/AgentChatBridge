@@ -168,11 +168,7 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
             .into_iter()
             .map(WireTargetSpec::try_into)
             .collect::<Result<Vec<TargetSpec>, String>>()?;
-        let tags = spec
-            .tags
-            .into_iter()
-            .map(Cow::Owned)
-            .collect::<Vec<_>>();
+        let tags = spec.tags.into_iter().map(Cow::Owned).collect::<Vec<_>>();
 
         Ok(MethodSpec {
             name: Cow::Owned(name.to_owned()),
