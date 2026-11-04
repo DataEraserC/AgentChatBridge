@@ -59,16 +59,16 @@ use crate::storage::{
     Cursor, FEEDBACK_CAP, Feedback, FeedbackReply, MIN_KEPT, Note, NoteKey, NoteKind, PrunePlan,
     RecordDraft, StorageError, Store, TopicStatus, unread,
 };
-use crate::tickets::{ACTIVE_TTL_MS, AccessTickets, TicketReply, TicketRequest};
+use crate::tickets::{ACTIVE_TTL_MS, AccessTickets, BatchReply, TicketReply, TicketRequest};
 use crate::tools::{
-    AccessRequestArgs, AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT, DEFAULT_WAIT_TIMEOUT_MS,
-    DelNoteArgs, DescribePluginsArgs, EventsArgs, ExtensionsListArgs, ExtensionsReadArgs,
-    ExtensionsReloadArgs, ExtensionsWriteArgs, FeedbackArgs, FeedbackGetArgs, FeedbackListArgs,
-    FeedbackReplyArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS,
-    MemoryAddArgs, MemoryArgs, MemoryBlameArgs, MemoryCommitArgs, MemoryListArgs, MemoryLogArgs,
-    MemorySearchArgs, MemoryWriteArgs, NotesArgs, PlatformCallArgs, PlatformMethodsArgs,
-    PluginToolCallArgs, PluginToolScope, PluginToolsArgs, RECORD_COLUMNS, SendArgs, SendToArgs,
-    SetNoteArgs, TaskGetArgs, TaskListArgs, WaitMessageArgs, is_known,
+    AccessRequestArgs, AccessTicketGetArgs, AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT,
+    DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs, DescribePluginsArgs, EventsArgs, ExtensionsListArgs,
+    ExtensionsReadArgs, ExtensionsReloadArgs, ExtensionsWriteArgs, FeedbackArgs, FeedbackGetArgs,
+    FeedbackListArgs, FeedbackReplyArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT,
+    MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs, MemoryBlameArgs, MemoryCommitArgs,
+    MemoryListArgs, MemoryLogArgs, MemorySearchArgs, MemoryWriteArgs, NotesArgs, PlatformCallArgs,
+    PlatformMethodsArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs, RECORD_COLUMNS,
+    SendArgs, SendToArgs, SetNoteArgs, TaskGetArgs, TaskListArgs, WaitMessageArgs, is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -2459,7 +2459,21 @@ impl<S: Store> Bridge<S> {
                         Err(reason) => format!("授权命令失败：{reason}"),
                     }
                 }
-                _ => "用法：/approve <ticket-id> <nonce>".to_owned(),
+                (Some(batch_id), None) if batch_id.starts_with("bt-") => {
+                    match self
+                        .access_tickets
+                        .approve_batch(batch_id, &approval_ref, &approver, now)
+                    {
+                        Ok(replies) => format!(
+                            "批次 {} 已整批批准，共 {} 项；每项 {} 分钟内单次可用。",
+                            batch_id,
+                            replies.len(),
+                            ACTIVE_TTL_MS / 60_000
+                        ),
+                        Err(reason) => format!("授权命令失败：{reason}"),
+                    }
+                }
+                _ => "用法：/approve <ticket-id> <nonce> 或 /approve <batch_id>".to_owned(),
             },
             "/deny" => match (parts.next(), parts.next()) {
                 (Some(id), Some(nonce)) => {
@@ -2471,7 +2485,18 @@ impl<S: Store> Bridge<S> {
                         Err(reason) => format!("授权命令失败：{reason}"),
                     }
                 }
-                _ => "用法：/deny <ticket-id> <nonce>".to_owned(),
+                (Some(batch_id), None) if batch_id.starts_with("bt-") => {
+                    match self
+                        .access_tickets
+                        .deny_batch(batch_id, &approval_ref, &approver, now)
+                    {
+                        Ok(replies) => {
+                            format!("批次 {} 已整批拒绝，共 {} 项。", batch_id, replies.len())
+                        }
+                        Err(reason) => format!("授权命令失败：{reason}"),
+                    }
+                }
+                _ => "用法：/deny <ticket-id> <nonce> 或 /deny <batch_id>".to_owned(),
             },
             "/revoke" => match parts.next() {
                 Some(id) => match self.access_tickets.revoke(id, &approver, now) {
@@ -3164,6 +3189,7 @@ impl<S: Store> Bridge<S> {
         self.ended
             .retain(|_, ended| ended.at.elapsed() < TURN_GRACE);
         self.active.remove(&session);
+        self.flush_ticket_approvals(&turn.config, now_millis());
         self.maybe_promote_lkg();
         Ok(())
     }
@@ -3509,6 +3535,10 @@ impl<S: Store> Bridge<S> {
             "access_request" => {
                 let args: AccessRequestArgs = parse(args)?;
                 self.request_access_ticket(ticket, &ctx, args)
+            }
+            "access_ticket_get" => {
+                let args: AccessTicketGetArgs = parse(args)?;
+                self.get_access_ticket(&ctx, args)
             }
             "ack_messages" => {
                 let args: AckArgs = parse(args)?;
@@ -4494,11 +4524,20 @@ impl<S: Store> Bridge<S> {
         ctx: &TurnCtx,
         args: AccessRequestArgs,
     ) -> Result<Value, ToolError> {
-        let target = resolve_room(&args.target)?;
-        if ctx.config.connection(&target.connection).is_none() {
+        if args.items.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::BadRequest,
-                format!("[access_request] unknown connection {}", target.connection),
+                "[access_request] items must not be empty",
+            ));
+        }
+        if args.items.len() > crate::tickets::MAX_ITEMS_PER_BATCH {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "[access_request] batch has {} items (max {}); whole batch rejected",
+                    args.items.len(),
+                    crate::tickets::MAX_ITEMS_PER_BATCH
+                ),
             ));
         }
         let place = GrantsConfig::place_of(&ctx.room, ctx.origin_sender.is_some());
@@ -4513,74 +4552,164 @@ impl<S: Store> Bridge<S> {
                 "[access_request] a turn without a human sender cannot request a ticket",
             ));
         }
-        let ops = crate::tickets::normalize_ops(&args.ops).map_err(|reason| {
-            ToolError::new(ErrorCode::BadRequest, format!("[access_request] {reason}"))
-        })?;
-        let capabilities = self.ticket_capabilities(&target, &ops)?;
-        let Some(admin) = ctx.config.grants.system_admin.as_ref() else {
+        let Some(_admin) = ctx.config.grants.system_admin.as_ref() else {
             return Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
                 "[access_request] no [grants.system_admin] configured; nobody can approve",
             ));
         };
-        let admin_room = RoomId::new(
-            admin.connection.clone(),
-            format!("private/{}", admin.account),
-        )
-        .map_err(|error| {
-            ToolError::new(
-                ErrorCode::Internal,
-                format!("[access_request] bad system admin room: {error}"),
-            )
-        })?;
-
-        let reply = self
-            .access_tickets
-            .request(TicketRequest {
-                principal,
-                place,
-                session: ctx.session.clone(),
-                target: target.clone(),
-                ops: ops.clone(),
-                capabilities: capabilities.clone(),
-                request_turn: ticket.as_str().to_owned(),
-                now: now_millis(),
-            })
-            .map_err(|reason| {
-                ToolError::new(ErrorCode::BadRequest, format!("[access_request] {reason}"))
-            })?;
-
-        if reply.duplicate {
-            return Ok(json!({
-                "ok": true,
-                "ticket": reply.id,
-                "state": reply.state.as_str(),
-                "duplicate": true,
-                "expires_at": reply.expires_at,
-                "note": "an identical ticket already exists; no new approval message was sent",
-            }));
-        }
-
-        let text = approval_text(ctx, ticket, &reply, &target, &ops, &capabilities);
-        if let Err(error) = self.send_admin_text(&admin_room, &text) {
-            let _ = self.access_tickets.revoke(&reply.id, "core", now_millis());
+        let now = now_millis();
+        let cooldown_ms = i64::try_from(ctx.config.tickets.request_cooldown_secs)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1000);
+        if let Some(remaining) =
+            self.access_tickets
+                .session_cooldown_remaining(&ctx.session, now, cooldown_ms)
+        {
             return Err(ToolError::new(
-                ErrorCode::Internal,
-                format!("[access_request] cannot deliver approval message: {error}"),
+                ErrorCode::BadRequest,
+                format!(
+                    "[access_request] cooling down: same session may request again in {}s",
+                    cooldown_seconds(remaining)
+                ),
+            ));
+        }
+        let admin_cooldown_ms = i64::try_from(ctx.config.tickets.admin_cooldown_secs)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1000);
+        if let Some(remaining) = self
+            .access_tickets
+            .admin_cooldown_remaining(now, admin_cooldown_ms)
+        {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "[access_request] admin approval cooldown: retry in {}s",
+                    cooldown_seconds(remaining)
+                ),
             ));
         }
 
+        // 先校验全部条目，再创建：任何一条失败都整批拒绝，不做部分受理。
+        let mut requests = Vec::with_capacity(args.items.len());
+        for (index, item) in args.items.iter().enumerate() {
+            let target = resolve_room(&item.target)
+                .map_err(|error| batch_item_error(index, &error.message))?;
+            if ctx.config.connection(&target.connection).is_none() {
+                return Err(batch_item_error(
+                    index,
+                    &format!("unknown connection {}", target.connection),
+                ));
+            }
+            let ops = crate::tickets::normalize_ops(&item.ops)
+                .map_err(|reason| batch_item_error(index, &reason))?;
+            let capabilities = self
+                .ticket_capabilities(&target, &ops)
+                .map_err(|error| batch_item_error(index, &error.message))?;
+            requests.push(TicketRequest {
+                principal,
+                place,
+                session: ctx.session.clone(),
+                target,
+                ops,
+                capabilities,
+                request_turn: ticket.as_str().to_owned(),
+                batch_id: None,
+                now,
+            });
+        }
+
+        if requests.len() == 1 {
+            let request = requests.remove(0);
+            let reply = self.access_tickets.request(request).map_err(|reason| {
+                ToolError::new(ErrorCode::BadRequest, format!("[access_request] {reason}"))
+            })?;
+            return Ok(json!({
+                "ok": true,
+                "batch_id": serde_json::Value::Null,
+                "tickets": [ticket_reply_json(&reply)],
+                "duplicate": reply.duplicate,
+                "approval_queued": true,
+                "note": "approval messages for this session are aggregated and sent when the turn ends; do not retry the target action until the admin approves",
+            }));
+        }
+
+        let batch: BatchReply =
+            self.access_tickets
+                .request_batch(requests, now)
+                .map_err(|reason| {
+                    ToolError::new(ErrorCode::BadRequest, format!("[access_request] {reason}"))
+                })?;
         Ok(json!({
             "ok": true,
-            "ticket": reply.id,
-            "state": reply.state.as_str(),
-            "duplicate": false,
-            "target": target.to_string(),
-            "ops": ops,
-            "capabilities": capabilities.iter().map(|capability| capability.as_str()).collect::<Vec<_>>(),
-            "expires_at": reply.expires_at,
-            "approval_sent": true,
-            "note": "wait for the system admin to approve in private, then retry the target operation",
+            "batch_id": batch.batch_id,
+            "tickets": batch.tickets.iter().map(ticket_reply_json).collect::<Vec<_>>(),
+            "approval_queued": true,
+            "note": "approval messages for this session are aggregated and sent when the turn ends; approve the whole batch with /approve <batch_id> or each ticket with /approve <id> <nonce>",
+        }))
+    }
+
+    /// 只读查询票据。`id` 与 `batch_id` 互斥，且只能查本会话发起的票据。
+    fn get_access_ticket(
+        &self,
+        ctx: &TurnCtx,
+        args: AccessTicketGetArgs,
+    ) -> Result<Value, ToolError> {
+        let id = args
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let batch_id = args
+            .batch_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let (id, batch_id) = match (id, batch_id) {
+            (Some(id), None) => (Some(id), None),
+            (None, Some(batch_id)) => (None, Some(batch_id)),
+            _ => {
+                return Err(ToolError::new(
+                    ErrorCode::BadRequest,
+                    "[access_ticket_get] give exactly one of id or batch_id",
+                ));
+            }
+        };
+
+        if let Some(id) = id {
+            let ticket = self.access_tickets.get(id).ok_or_else(|| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    format!("[access_ticket_get] unknown ticket {id}"),
+                )
+            })?;
+            if ticket.session != ctx.session {
+                return Err(ToolError::new(
+                    ErrorCode::ToolNotAllowed,
+                    format!("[access_ticket_get] ticket {id} belongs to another session"),
+                ));
+            }
+            return Ok(ticket_json(ticket));
+        }
+
+        let batch_id = batch_id.expect("batch_id checked above");
+        let tickets = self.access_tickets.for_batch(batch_id);
+        if tickets.is_empty() {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                format!("[access_ticket_get] unknown batch {batch_id}"),
+            ));
+        }
+        if tickets.iter().any(|ticket| ticket.session != ctx.session) {
+            return Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                format!("[access_ticket_get] batch {batch_id} belongs to another session"),
+            ));
+        }
+        Ok(json!({
+            "batch_id": batch_id,
+            "count": tickets.len(),
+            "tickets": tickets.iter().map(|ticket| ticket_json(ticket)).collect::<Vec<_>>(),
         }))
     }
 
@@ -4653,6 +4782,49 @@ impl<S: Store> Bridge<S> {
             .send(room, &[Element::text(text)])
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    /// 收工时把本轮/本会话积攒的 pending 票据聚合成一条私信发给 system admin。
+    /// 发送失败就保持未通知状态，下一次收工再试。
+    fn flush_ticket_approvals(&mut self, config: &Config, now: i64) {
+        let pending = self.access_tickets.pending_unannounced(now);
+        if pending.is_empty() {
+            return;
+        }
+        let Some(admin) = config.grants.system_admin.as_ref() else {
+            return;
+        };
+        let admin_room = match RoomId::new(
+            admin.connection.clone(),
+            format!("private/{}", admin.account),
+        ) {
+            Ok(room) => room,
+            Err(error) => {
+                eprintln!("[access-ticket] bad system admin room: {error}");
+                return;
+            }
+        };
+        let admin_cooldown_ms = i64::try_from(config.tickets.admin_cooldown_secs)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1000);
+        if let Some(remaining) = self
+            .access_tickets
+            .admin_cooldown_remaining(now, admin_cooldown_ms)
+        {
+            eprintln!(
+                "[access-ticket] approval message held: admin cooldown {}s",
+                cooldown_seconds(remaining)
+            );
+            return;
+        }
+        let text = approval_batch_text(&pending);
+        match self.send_admin_text(&admin_room, &text) {
+            Ok(()) => {
+                let ids: Vec<String> = pending.iter().map(|ticket| ticket.id.clone()).collect();
+                self.access_tickets.mark_announced(&ids, now);
+            }
+            Err(error) => eprintln!("[access-ticket] approval message failed: {error}"),
+        }
     }
 
     /// 用会话自己的访问策略判定一次访问。
@@ -7399,44 +7571,87 @@ fn resolve_room(text: &str) -> Result<RoomId, ToolError> {
     })
 }
 
+fn cooldown_seconds(millis: i64) -> i64 {
+    millis.saturating_add(999) / 1000
+}
+
+fn batch_item_error(index: usize, detail: &str) -> ToolError {
+    ToolError::new(
+        ErrorCode::BadRequest,
+        format!("[access_request] items[{index}]: {detail}; whole batch rejected"),
+    )
+}
+
+fn ticket_reply_json(reply: &TicketReply) -> Value {
+    json!({
+        "ticket": reply.id,
+        "state": reply.state.as_str(),
+        "expires_at": reply.expires_at,
+        "duplicate": reply.duplicate,
+    })
+}
+
+fn ticket_json(ticket: &crate::tickets::AccessTicket) -> Value {
+    json!({
+        "ticket": ticket.id,
+        "batch_id": ticket.batch_id,
+        "state": ticket.state.as_str(),
+        "target": ticket.target.to_string(),
+        "ops": ticket.ops,
+        "capabilities": ticket.capabilities.iter().map(|capability| capability.as_str()).collect::<Vec<_>>(),
+        "created_at": ticket.created_at,
+        "expires_at": ticket.expires_at,
+        "request_turn": ticket.request_turn,
+        "approval_ref": ticket.approval_ref,
+    })
+}
+
 /// 发给 system admin 的审批消息。只渲染 core 归一化后的目标/op/能力，
 /// 不渲染 agent 的自由文本。
-fn approval_text(
-    ctx: &TurnCtx,
-    ticket: &Ticket,
-    reply: &TicketReply,
-    target: &RoomId,
-    ops: &[String],
-    capabilities: &BTreeSet<GrantCapability>,
-) -> String {
-    let place = GrantsConfig::place_of(&ctx.room, ctx.origin_sender.is_some());
-    let principal =
-        ctx.config
-            .grants
-            .subject_for(&ctx.room.connection, ctx.origin_sender.as_deref(), place);
-    let capabilities = capabilities
+fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
+    let mut text = format!("[ACB 授权申请] 待批准 {} 项\n", pending.len());
+    let mut batches: Vec<&str> = pending
         .iter()
-        .map(|capability| capability.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "[ACB 授权申请]\nticket={}\nnonce={}\n目标：{}\n动作：{}\n能力：{}\n申请：session={} principal={} place={} turn={}\n有效期：{} 分钟\n批准：/approve {} {}\n拒绝：/deny {} {}\n撤销：/revoke {}",
-        reply.id,
-        reply.nonce,
-        target,
-        ops.join(", "),
-        capabilities,
-        ctx.session,
-        principal.as_str(),
-        place.as_str(),
-        ticket.as_str(),
-        crate::tickets::PENDING_TTL_MS / 60_000,
-        reply.id,
-        reply.nonce,
-        reply.id,
-        reply.nonce,
-        reply.id,
-    )
+        .filter_map(|ticket| ticket.batch_id.as_deref())
+        .collect();
+    batches.sort_unstable();
+    batches.dedup();
+    if !batches.is_empty() {
+        text.push_str(&format!("批次：{}\n", batches.join(", ")));
+    }
+    for (index, ticket) in pending.iter().enumerate() {
+        let capabilities = ticket
+            .capabilities
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let destructive = if ticket.capabilities.contains(&GrantCapability::Destructive) {
+            " [DESTRUCTIVE]"
+        } else {
+            ""
+        };
+        text.push_str(&format!(
+            "{}. ticket={} batch={} nonce={}{}\n   目标：{}\n   动作：{}\n   能力：{}\n   申请：session={} principal={} place={} turn={}\n",
+            index + 1,
+            ticket.id,
+            ticket.batch_id.as_deref().unwrap_or("-"),
+            ticket.nonce,
+            destructive,
+            ticket.target,
+            ticket.ops.join(", "),
+            capabilities,
+            ticket.session,
+            ticket.principal.as_str(),
+            ticket.place.as_str(),
+            ticket.request_turn,
+        ));
+    }
+    text.push_str("批准整批：/approve <batch_id>\n");
+    text.push_str("批准单张：/approve <ticket-id> <nonce>\n");
+    text.push_str("拒绝：/deny <batch_id> 或 /deny <ticket-id> <nonce>\n");
+    text.push_str("撤销单张：/revoke <ticket-id>");
+    text
 }
 
 /// 校验/归一列名，返回按文档顺序排好的列名列表。

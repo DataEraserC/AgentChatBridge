@@ -224,9 +224,10 @@ capability = ["room_read", "room_write", "connection_read"]
   的 `rooms` / `origins`）已移除；配置里再出现会**直接启动失败**，错误会明确指向
   `[grants]`，不会静默忽略。
 - 授予只改变**工具能碰到哪里**，不改变唤醒：没订阅的房间不会因为它来消息就开轮。
-- 群内临时越权用 `access_request` 申请一次性票据：`target` 是单房间，`ops` 是具体操作；
-  审批消息发到 system admin 私信，管理员用 `/approve <id> <nonce>`、`/deny <id> <nonce>`
-  或 `/revoke <id>` 处理。票据 2 分钟内单次可用，重启后全部失效。
+- 群内临时越权用 `access_request { items }`：一条 = 单张，多条 = 批量（每张独立票据、共享 batch_id）；
+  审批消息发到 system admin 私信，管理员用 `/approve <id> <nonce>`、`/deny <id> <nonce>`、
+  `/approve <batch_id>` 或 `/revoke <id>` 处理。票据 2 分钟内单次可用，重启后全部失效。
+  `[tickets]` 可配申请冷却与管理员消息冷却（默认 60s / 30s）。`access_ticket_get` 只能查本会话的票据。
 - 破坏性操作仍由连接的 `allow_destructive` 单独把关，授权/票据都不能顶替它。
 - 外部 provider 只能落在**配置里存在的连接**上——连接本身没配登录账号，发不出去。
 

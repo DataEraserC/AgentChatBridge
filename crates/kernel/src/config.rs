@@ -82,6 +82,8 @@ pub struct Config {
     pub queues: QueueConfig,
     /// 访问授权规则。空配置 = 只有订阅边界。
     pub grants: crate::grants::GrantsConfig,
+    /// 一次性票据的申请冷却与审批聚合节奏。
+    pub tickets: crate::tickets::TicketsPolicy,
     /// 依赖表的失败阈值与观察窗口。
     pub deps: DepsConfig,
     /// 插件 LKG 的失败阈值与观察窗口。
@@ -1297,6 +1299,8 @@ impl Config {
             None => crate::grants::GrantsConfig::default(),
         };
 
+        let tickets = raw.tickets.unwrap_or_default();
+
         let deps = match raw.deps {
             Some(raw) => DepsConfig {
                 failure_threshold: deps_limit(
@@ -1795,6 +1799,7 @@ impl Config {
             retention,
             queues,
             grants,
+            tickets,
             deps,
             lkg,
             provider_calls,
@@ -2460,6 +2465,8 @@ struct RawConfig {
     queues: Option<RawQueue>,
     #[serde(default)]
     grants: Option<crate::grants::GrantsConfig>,
+    #[serde(default)]
+    tickets: Option<crate::tickets::TicketsPolicy>,
     deps: Option<RawDeps>,
     lkg: Option<RawLkg>,
     provider_calls: Option<RawProviderCalls>,
@@ -2858,6 +2865,21 @@ mod tests {
 
         let canonical = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("旧写法");
         assert_eq!(canonical.connections[0].kind, "onebot11");
+    }
+
+    #[test]
+    fn tickets_policy_defaults_and_overrides() {
+        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        assert_eq!(config.tickets.request_cooldown_secs, 60);
+        assert_eq!(config.tickets.admin_cooldown_secs, 30);
+
+        let text = format!(
+            "{}\n[tickets]\nrequest_cooldown_secs = 5\nadmin_cooldown_secs = 2",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&text).expect("覆盖值能解析");
+        assert_eq!(config.tickets.request_cooldown_secs, 5);
+        assert_eq!(config.tickets.admin_cooldown_secs, 2);
     }
 
     const ONE_CONNECTION: &str = r#"

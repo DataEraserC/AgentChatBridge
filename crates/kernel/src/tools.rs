@@ -14,8 +14,10 @@ use serde::Deserialize;
 pub const TOOL_NAMES: &[&str] = &[
     "send_message",
     "send_message_to",
-    // 一次性票据：群内申请，私信管理员批准，单目标房间 + 具体 op 列表。
+    // 一次性票据：群内申请（单条 = 单张，多条 = 批量），私信管理员批准。
     "access_request",
+    // 只读查询自己发起的票据：按 id 查单张，按 batch_id 查整批。
+    "access_ticket_get",
     "ack_messages",
     "get_history",
     "fetch_records",
@@ -91,14 +93,29 @@ pub struct SendToArgs {
     pub to: String,
 }
 
-/// 申请一张一次性访问票据。申请本身不执行任何平台动作。
+/// 申请一张或多张一次性访问票据。申请本身不执行任何平台动作。
 #[derive(Debug, Deserialize)]
 pub struct AccessRequestArgs {
+    /// 一条 = 单张票据；多条 = 批量（共享 batch_id，每张仍是独立票据）。
+    pub items: Vec<AccessRequestItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AccessRequestItem {
     /// 目标房间，形如 `qq:group/123`；一张票据只覆盖这一个房间。
     pub target: String,
     /// 要放行的具体操作。形如 `send_message_to`、`get_history`、
     /// `platform_call:group.kick`；不接受模糊的「整个房间」。
     pub ops: Vec<String>,
+}
+
+/// 只读查询票据。`id` 与 `batch_id` 必须且只能给一个。
+#[derive(Debug, Default, Deserialize)]
+pub struct AccessTicketGetArgs {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub batch_id: Option<String>,
 }
 
 /// 确认这批消息处理完了。
