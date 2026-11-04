@@ -67,9 +67,7 @@ impl QueueStats {
 
     pub(crate) fn enqueued(&self) {
         let depth = self.inner.depth.fetch_add(1, Ordering::SeqCst) + 1;
-        self.inner
-            .high_watermark
-            .fetch_max(depth, Ordering::SeqCst);
+        self.inner.high_watermark.fetch_max(depth, Ordering::SeqCst);
         let threshold = self.warn_threshold().max(1);
         if depth >= threshold && !self.inner.warned.swap(true, Ordering::SeqCst) {
             eprintln!(
