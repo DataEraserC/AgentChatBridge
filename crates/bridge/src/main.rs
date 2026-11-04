@@ -19,8 +19,8 @@ use acb_adapter_dynamic::DynamicLoader;
 use acb_adapter_onebot11::OneBotAdapterFactory;
 use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::{
-    AdapterHost, AdapterInstance, Bridge, Config, ControlRegistry, EventQueue, FileRelay,
-    Outbounds, PluginManager, RouteWorker, SqliteStore, drain_events, serve,
+    AdapterHost, AdapterInstance, Bridge, Config, ControlRegistry, DependencyRegistry, EventQueue,
+    FileRelay, Outbounds, PluginManager, RouteWorker, SqliteStore, drain_events, serve,
 };
 use acb_plugin_lua::LuaLoader;
 use acb_plugin_process_tools::ProcessToolLoader;
@@ -89,6 +89,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(&options.config)?;
     let config = Config::parse(&text)?;
     print_summary(&config, &options.config);
+
+    // 依赖状态表：只读缓存，锁独立于 Bridge。第①步只登记 harness。
+    let deps = DependencyRegistry::from_config(&config);
 
     // 有些配置是用户故意这么写的（两个会话订同一个房间）。不拦，但要说清楚它意味着什么，
     // 并且停三秒——刚启动时人还在看屏幕。
@@ -228,8 +231,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let bridge = Arc::clone(&bridge);
             let shutdown = Arc::clone(&shutdown);
             let controls = controls.clone();
+            let endpoint_deps = deps.clone();
             std::thread::spawn(move || {
-                if let Err(error) = serve(listener, bridge, shutdown, controls) {
+                if let Err(error) = serve(listener, bridge, shutdown, controls, endpoint_deps) {
                     eprintln!(
                         "{}",
                         acb_i18n::t!("bridge.main.endpoint_stopped", error = error)
@@ -255,6 +259,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 options.config.clone(),
                 inbound_stats.clone(),
                 route_worker.clone(),
+                deps.clone(),
             ));
             let shutdown = Arc::clone(&shutdown);
             std::thread::spawn(move || {

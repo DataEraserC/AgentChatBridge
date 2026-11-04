@@ -14,7 +14,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use acb_kernel::{Bridge, ControlRegistry, QueueStats, RouteWorker, Store};
+use acb_kernel::{Bridge, ControlRegistry, DependencyRegistry, QueueStats, RouteWorker, Store};
 use acb_proto::Frame;
 use serde_json::json;
 
@@ -72,6 +72,8 @@ pub struct Console<S: Store> {
     inbound_stats: QueueStats,
     /// 路由动作 worker（拿队列统计与 busy 数）。
     route_worker: RouteWorker,
+    /// 依赖状态表（只读缓存）。
+    deps: DependencyRegistry,
 }
 
 impl<S: Store + Send + 'static> Console<S> {
@@ -82,6 +84,7 @@ impl<S: Store + Send + 'static> Console<S> {
         config_path: String,
         inbound_stats: QueueStats,
         route_worker: RouteWorker,
+        deps: DependencyRegistry,
     ) -> Self {
         Self {
             bridge,
@@ -90,6 +93,7 @@ impl<S: Store + Send + 'static> Console<S> {
             config_path,
             inbound_stats,
             route_worker,
+            deps,
         }
     }
 
@@ -238,7 +242,15 @@ impl<S: Store + Send + 'static> Console<S> {
                     );
                 }
                 let bridge = lock(&self.bridge);
-                (200, bridge.drain_snapshot().to_string())
+                let mut snapshot = bridge.drain_snapshot();
+                if let serde_json::Value::Object(fields) = &mut snapshot {
+                    fields.insert("dependencies".into(), self.deps.summary());
+                }
+                (200, snapshot.to_string())
+            }
+            ("GET", "/api/dependencies") => {
+                let since = query_param(query, "since").and_then(|value| value.parse::<u64>().ok());
+                (200, self.deps.snapshot(since).to_string())
             }
             ("GET", "/api/status") => (200, self.status()),
             ("GET", "/api/sessions") => (200, self.sessions()),

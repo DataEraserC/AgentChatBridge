@@ -22,6 +22,7 @@ use acb_proto::frame::{decode, encode};
 use acb_proto::{Delivery, Frame, LogLevel, Ticket};
 use thiserror::Error;
 
+use crate::deps::DependencyRegistry;
 use crate::engine::{Bridge, BridgeError, ToolCallStart};
 use crate::storage::Store;
 
@@ -391,6 +392,7 @@ pub fn run_connection<S: Store>(
     bridge: &Mutex<Bridge<S>>,
     mut stream: TcpStream,
     controls: &ControlRegistry,
+    deps: &DependencyRegistry,
 ) -> Result<(), EndpointError> {
     let _ = stream.set_nodelay(true);
     // 一个句柄读写到底，不复制 fd：读和写在同一个线程里本来就是串行的，
@@ -398,7 +400,7 @@ pub fn run_connection<S: Store>(
     let mut buffer: Vec<u8> = Vec::new();
 
     // 握手：第一帧必须是 hello。
-    let sessions = {
+    let (sessions, harness) = {
         let line = match read_line(&mut stream, &mut buffer, HANDSHAKE_TIMEOUT)? {
             Incoming::Line(line) => line,
             Incoming::Idle => {
@@ -414,8 +416,17 @@ pub fn run_connection<S: Store>(
         };
         let frame = decode(&line).map_err(|error| EndpointError::Protocol(error.to_string()))?;
         let guard = lock(bridge);
-        handshake(&guard, frame)?
+        let sessions = handshake(&guard, frame)?;
+        // 握手已经校验过「这些会话都属于这个 harness」，取第一个会话反查 harness id。
+        let harness = sessions
+            .first()
+            .and_then(|session| guard.config().session(session))
+            .map(|session| session.harness.clone());
+        (sessions, harness)
     };
+    if let Some(harness) = &harness {
+        deps.harness_connected(harness, now_millis());
+    }
     // 把这条连接代表会话的已落盘映射带上，让 harness 跨重启复用旧会话（ADR-0018）。
     let maps = {
         let guard = lock(bridge);
@@ -627,6 +638,13 @@ pub fn run_connection<S: Store>(
 
     // 断连就注销控制指令通道，别让控制台往死通道上推。
     controls.unregister(session.sessions());
+    if let Some(harness) = &harness {
+        let detail = match &outcome {
+            Ok(()) => "connection closed".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        deps.harness_disconnected(harness, &detail, now_millis());
+    }
 
     // 无论怎么结束，都要把没跑完的轮次放掉。
     let queued = {
@@ -667,6 +685,7 @@ pub fn serve<S: Store + Send + 'static>(
     bridge: Arc<Mutex<Bridge<S>>>,
     shutdown: Arc<AtomicBool>,
     controls: ControlRegistry,
+    deps: DependencyRegistry,
 ) -> Result<(), EndpointError> {
     listener.set_nonblocking(true)?;
     while !shutdown.load(Ordering::SeqCst) {
@@ -676,9 +695,10 @@ pub fn serve<S: Store + Send + 'static>(
                 stream.set_nonblocking(false)?;
                 let bridge = Arc::clone(&bridge);
                 let controls = controls.clone();
+                let deps = deps.clone();
                 std::thread::spawn(move || {
                     // 一条连接坏了不影响别的连接，但要说清楚为什么坏的。
-                    if let Err(error) = run_connection(&bridge, stream, &controls) {
+                    if let Err(error) = run_connection(&bridge, stream, &controls, &deps) {
                         eprintln!(
                             "{}",
                             acb_i18n::t!("kernel.endpoint.connection_ended", error = error)
@@ -700,6 +720,13 @@ pub fn serve<S: Store + Send + 'static>(
         }
     }
     Ok(())
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// 桥的锁。被毒死（别的线程 panic）也接着用——桥的状态没有「半条」这种中间态。

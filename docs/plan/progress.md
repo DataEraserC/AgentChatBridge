@@ -1063,6 +1063,25 @@
 - 证据：`cargo test -p acb-kernel` 全绿；clippy / fmt 待提交前统一跑。
 - 可回退：删掉 `[lkg]` 配置接线即可回到常量默认值。
 
+## 2026-11-04 — connectivity 第①步：core 依赖表 + harness 存在性
+
+- 做了什么：
+  - 新增 `crates/kernel/src/deps.rs`：独立锁的 `DependencyRegistry`，三态
+    `unknown/up/down`，字段 `since / lastOkAt / lastAttemptAt / neverConnected /
+    lastError / lastErrorClass / attempts`；最近 200 条迁移环。
+  - endpoint 握手成功后更新 harness `up`，连接结束更新 `down`（class=closed）；
+    只在状态变化时写一条 `[deps] transition=...` 日志。
+  - `/healthz` 增加 `dependencies` 计数汇总；新增 `/api/dependencies?since=<seq>`
+    返回完整依赖表与迁移历史。
+  - 主程序启动时按 `[[harnesses]]` 登记初始 `unknown`。
+- 偏离/边界：
+  - 文档里的 30s 启动宽限期定时器未做；初始就是 `unknown`，等事件驱动。
+  - 配置热重载后不裁剪依赖表；第①步只登记启动时配置。
+  - “未配置”不是运行时状态：handshake 已拒绝未知 harness，不进入表。
+- 证据：`cargo test --workspace`、clippy、fmt 全绿；deps 单元测试覆盖
+  unknown→up→down→up 与 since 查询。
+- 可回退：删除 deps 模块与两个接口接线即可，不影响 turn 通道。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
