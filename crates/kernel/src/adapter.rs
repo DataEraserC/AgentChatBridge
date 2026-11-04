@@ -160,6 +160,12 @@ impl AdapterStatus {
         self.deps
             .platform_version(&self.connection, version, crate::deps::now_millis());
     }
+
+    /// 心跳：只证明这条连接此刻还活着，刷新 `lastOkAt`；不改变 up/down 判定。
+    pub fn heartbeat(&self) {
+        self.deps
+            .platform_heartbeat(&self.connection, crate::deps::now_millis());
+    }
 }
 
 impl std::fmt::Debug for AdapterHost {

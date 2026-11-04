@@ -1499,6 +1499,47 @@
 - 未决/风险：没有真实的 SnowLuma 实例可联调；`app_name` / 版本格式按官方文档字段解析，
   实际命名差异会落 `unknown`，不会阻塞连接。
 
+## 2026-11-05 — 批次 2：事件通道与平台健康
+
+- 任务编号：adapter-snowluma 批次 2
+- 做了什么：
+  - `crates/adapters/onebot-snowluma/src/event.rs`：`meta_event` 分流；
+    `meta_event_type = heartbeat` → 新增 `Parsed::Heartbeat`，其它 meta（lifecycle）仍
+    `Ignored`。心跳不解析未文档化的 `status.online` / `good` 字段。
+  - `crates/adapters/onebot-snowluma/src/link.rs`：`Parsed::Heartbeat` →
+    `ctx.status.heartbeat()`；`bot_status` / `bot_offline` 继续走 `Parsed::AccountStatus` →
+    `ctx.status.account(...)`，不产生房间记录。
+  - `crates/kernel/src/adapter.rs`：新增 `AdapterStatus::heartbeat()`。
+  - `crates/kernel/src/deps.rs`：新增 `DependencyRegistry::platform_heartbeat`，只在
+    `state = Up` 时刷新 `lastOkAt`，不改变 up/down；`bot_status` 离线走既有失败阈值，
+    上线走 `mark_up` 并触发 `NoticeEvent::DependencyEdge`，由既有 notifier 消费
+    （恢复通知不再另写一套）。
+  - `message_sent` 继续整体忽略，覆盖 `reportSelfMessage = true` 的重复风险。
+- 新增 op：**0 个**。批次 2 全是事件分流与健康上报，没有需要暴露的平台动作；
+  `account.status` / `account.version` 已在 catalog 中。没有新增 `PlatformTag`，
+  没有第二张 op→risk 表。
+- 按文档判断不做：
+  - `group_upload` / `essence` / `notify.*` 的字段解析：SnowLuma 文档未成文，不猜字段，
+    保留 `[类型]（未解析事件）` + Opaque 显式降级，并记入功能域 #20 缺口。
+  - `meta_event` 的 `status.online` / `good`：字段未成文，不解析；心跳只当存活信号。
+  - `lifecycle`：不写流水、不驱动状态，保持忽略。
+- 证据：
+  - adapter：`heartbeats_are_liveness_only_and_never_records`（连续 10 条心跳均为
+    Heartbeat，lifecycle 为 Ignored）、`bot_status_is_an_account_signal_not_a_private_room`
+    （online / offline / bot_offline 三种状态都不产生房间）、
+    `own_message_echoes_are_not_recorded_again`、
+    `unrecognized_notices_keep_the_raw_event_in_an_opaque_element`。
+  - deps：`platform_heartbeat_refreshes_only_up_entries`（down 后心跳不拉回 up、不刷新
+    lastOkAt）、`account_status_edges_down_and_back_up_with_a_notice`（up→down→up 三条边沿，
+    恢复走既有 DependencyEdge）。
+  - `cargo test --workspace`、clippy `-D warnings`、dsh/opencode 测试、`node --check` 全绿。
+- 能力状态：功能域计数仍是 **3 完全 / 12 部分 / 8 未实现**；#20 事件类型仍为「部分」，
+  但缺口从「`bot_status` 污染私聊房间、心跳不更新健康」缩小为「`group_upload` / `essence` /
+  `notify.*` 字段未成文，只能显式降级」。平台依赖条目现在会同时反映连接与账号上下线。
+- 未决/风险：没有真实 SnowLuma 实例抓包，`bot_offline` 到底是 `notice_type` 还是
+  `sub_type` 仍按现有兼容写法处理（两种都落到「离线」）；真实字段差异只影响摘要文案，
+  不影响「不写房间」。
+
 
 
 ## 部署注意事项（nix-config 打包）
