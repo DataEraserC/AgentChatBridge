@@ -217,9 +217,11 @@ Lua 的 `turn_error` 收到 `decide(request, options)`；动态库的 `turn_erro
 | `post_type=message`，`message_type=private` | 一条消息，房间 `qq:private/<号>`（同理） | |
 | `post_type=notice`，`notice_type=notify`，`sub_type=poke` | 平台事件 `poke`，tags `["poke", "notice"]`，payload 原始事件，正文「[拍了拍我]」，`body=false` | 拍的是我则标记「冲我来」；`body=false` 表示它只是触发、没有正文，唤醒策略可以据此延迟开轮 |
 | `post_type=notice`，`notice_type=group_recall` / `friend_recall` | 平台事件，tags `["notice", notice_type, "recall"]`，`target_platform_id` 指向被撤回的消息 | 事件本身声明为 `suppressed`：只进流水备查，不进未读/投递、不唤醒；同时给原消息追加 `target_labels: ["recall"]` |
+| `post_type=notice`，`notice_type=bot_status` / `bot_offline` | **不记**，写平台依赖条目的账号状态 | 不伪装成 `private/<self_id>`；离线按失败阈值迁移，恢复发一条依赖边沿通知 |
 | 其它 `notice` | 平台事件（事件类型就是 `notice_type`），tags `["notice", notice_type]` | 进退群、禁言等，正文是一句人话，原始事件进 payload |
 | `post_type=request` | 平台事件 `request_<类型>`，tags `["request", request_type]` | 加好友、加群邀请 |
-| `post_type=meta_event` | **不记** | 心跳每几秒一次，记下来只会把流水撑爆 |
+| `post_type=meta_event`，`meta_event_type=heartbeat` | **不记**，只刷新平台依赖条目的 `lastOkAt` | 心跳每几秒一次；不写流水、不唤醒，也不把已 `down` 的条目拉回 `up` |
+| `post_type=meta_event`，其它 | **不记** | 生命周期等，不写流水 |
 | `post_type=message_sent` | **不记** | 自己发出消息的回执，桥在发送时已经记过 |
 
 消息、拍一拍、其它事件走的是同一条路（ADR-0005）：都变成一条记录，交给桥决定要不要

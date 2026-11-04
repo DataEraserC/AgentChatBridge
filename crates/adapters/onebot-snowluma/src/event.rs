@@ -23,6 +23,8 @@ pub enum Parsed {
     /// 账号上下线。它是连接级信号，不是房间内容；不能伪装成 `private/<self_id>`
     /// 的私聊消息，否则会凭空造出一个房间并可能触发订阅唤醒。
     AccountStatus { online: bool, detail: String },
+    /// 心跳：只刷新平台依赖条目的存活时间，不进流水、不唤醒。
+    Heartbeat,
     /// 不记，说明原因（只进日志）。
     Ignored(String),
 }
@@ -55,8 +57,14 @@ pub fn parse(connection: &str, event: &Value, admin_qqs: &[String]) -> Result<Pa
         // 自己发出去的消息回执。桥在发送时已经记过流水了，再记一遍会重复。
         Some("message_sent") => Ok(Parsed::Ignored("自己消息的回执".into())),
         Some("notice") => notice(connection, event, &self_id, at, admin_qqs),
-        // 心跳每几秒一次，进流水只会把记录撑爆。
-        Some("meta_event") => Ok(Parsed::Ignored("心跳/生命周期".into())),
+        // 心跳只刷新依赖条目的 last_ok；字段文档不完整，不解析 online/good。
+        Some("meta_event") => {
+            if event.get("meta_event_type").and_then(Value::as_str) == Some("heartbeat") {
+                Ok(Parsed::Heartbeat)
+            } else {
+                Ok(Parsed::Ignored("心跳/生命周期".into()))
+            }
+        }
         Some("request") => request(connection, event, at, admin_qqs),
         other => {
             let name = match other {
@@ -704,13 +712,31 @@ mod tests {
     }
 
     #[test]
-    fn heartbeats_are_not_recorded() {
-        let event =
-            json!({"post_type": "meta_event", "meta_event_type": "heartbeat", "self_id": 999});
-        assert_eq!(
-            parse("qq", &event, &[]).expect("能解析"),
-            Parsed::Ignored("心跳/生命周期".into())
-        );
+    fn heartbeats_are_liveness_only_and_never_records() {
+        let event = json!({
+            "post_type": "meta_event",
+            "meta_event_type": "heartbeat",
+            "self_id": 999,
+            "status": {"online": true, "good": true}
+        });
+        for _ in 0..10 {
+            assert_eq!(
+                parse("qq", &event, &[]).expect("能解析"),
+                Parsed::Heartbeat,
+                "心跳只做存活刷新，不进流水"
+            );
+        }
+
+        let lifecycle = json!({
+            "post_type": "meta_event",
+            "meta_event_type": "lifecycle",
+            "sub_type": "connect",
+            "self_id": 999,
+        });
+        assert!(matches!(
+            parse("qq", &lifecycle, &[]).expect("能解析"),
+            Parsed::Ignored(_)
+        ));
     }
 
     #[test]

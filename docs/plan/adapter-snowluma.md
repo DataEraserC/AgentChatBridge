@@ -117,9 +117,9 @@
 - **鉴权**：`Authorization: Bearer`，地址里的 `?access_token=` 原样保留（[link.rs](../../crates/adapters/onebot11/src/link.rs#L94-L149)）。
 - **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、合并转发发送与读取。
 - **平台方法**：`catalog.rs` 的 `ROUTES` 共 50 个层级 op，映射 53 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
-- **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略；`meta_event` 直接忽略；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot11/src/event.rs#L115-L200)、[notice 摘要](../../crates/adapters/onebot11/src/event.rs#L324-L345)）。
+- **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略（`reportSelfMessage = true` 时不重复记账）；`meta_event/heartbeat` 只刷新平台依赖条目的 `lastOkAt`，生命周期忽略；`bot_status` / `bot_offline` 走账号状态，不再写进私聊房间；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot-snowluma/src/event.rs#L55-L200)）。
 - **账号**：连上后另起线程调 `get_login_info` 核对 `account`，并调 `get_version_info` / `get_status` 采集三层版本与在线状态（[link.rs](../../crates/adapters/onebot-snowluma/src/link.rs)）。
-- **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 额外写进 `accountOnline` / `accountGood`，版本信息写进 `version`。
+- **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 写进 `accountOnline` / `accountGood`；`bot_status` 的上下线按失败阈值迁移依赖状态，心跳只刷新 `lastOkAt`。版本信息写进 `version`。
 
 ---
 
@@ -181,6 +181,10 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | `meta_event` | SDK `onMetaEvent` | 心跳/生命周期；没有字段页 |
 | 其他 notice（`group_upload`、`essence`、`notify.*` 等） | **未成文** | 只能按 OneBot v11 推断，需实机抓包确认 |
 
+适配器现状（批次 2）：`bot_status` / `bot_offline` 走账号状态，`meta_event/heartbeat` 只刷新
+平台依赖条目的 `lastOkAt`，`message_sent` 忽略。`group_upload` / `essence` / `notify.*`
+仍按「未成文」处理：不猜字段，统一降级为 `[类型]（未解析事件）` + Opaque 原载荷。
+
 ### 2.4 连接与鉴权的实际形态
 
 - **正向**：机器人连 SnowLuma 的 HTTP `:3000` 或 WS `:3001`；Docker 同网络用服务名 `snowluma`，宿主机用 `127.0.0.1`。
@@ -220,7 +224,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **部分** | 只有 `set_msg_emoji_like`；缺读取/用户列表/群回应/自定义表情/系统表情 |
 | 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **部分** | `get_record` / `get_image` 有；缺语音转写、OCR、AI 语音、音乐签名、`get_file` |
 | 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 启动已调用 `get_login_info` / `get_status` / `get_version_info`；三层版本 + 兼容下限进依赖元数据。仍缺 `can_send_*`、资料设置、在线状态设置 |
-| 20 | 事件类型 | message / message_sent / notice / request / meta | **部分** | 有分流；notice 只解析 6 类 + poke；`bot_status` 会被当成 `private/<self_id>` 的未知通知记录；心跳直接忽略，不更新健康 |
+| 20 | 事件类型 | message / message_sent / notice / request / meta | **部分** | 有分流；notice 只解析 6 类 + poke；`bot_status` / `bot_offline` 已走账号状态并驱动依赖健康，心跳只刷新 `lastOkAt`，`message_sent` 已忽略。仍缺 `group_upload`、`essence`、`notify.*` 的字段解析（SnowLuma 未成文），未知 notice 保留 Opaque |
 | 21 | 群相册 | 9 | **未实现** | 无 |
 | 22 | QQ 空间 | 10（中文）/ 26（英文） | **未实现** | 无 |
 | 23 | 收藏/闪传/其他扩展 | 115 个 extended 里的大部分 | **未实现** | 无；部分上游本身是占位/未实现 |
@@ -229,17 +233,21 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **计数**：25 项中 2 项不适用；适用 23 项 = 已实现 3 + 部分 12 + 未实现 8。
 批次 1 完成后计数不变：第 19 项仍是「部分」，但缺口从「启动不调用版本/状态」缩小为
-「缺能力查询、资料设置、在线状态设置」。其余域不变。
+「缺能力查询、资料设置、在线状态设置」。批次 2 完成后计数仍不变：第 20 项仍是「部分」，
+但缺口从「`bot_status` 污染私聊房间、心跳不更新健康」缩小为「`group_upload` / `essence` /
+`notify.*` 的字段未成文，只能显式降级」。其余域不变。
 
 **动作级覆盖**：
 - 现有 `ROUTES` 50 个层级 op / 53 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。这是「完整实现 SnowLuma 能力」的主要工作量。
 
-**最容易造成实际事故的三个缺口**：
-1. `bot_status` 被当成私聊房间事件写入（`private/<self_id>`），既污染流水，也可能触发订阅唤醒。
-2. 账号在线/断线不进入平台依赖健康，`/healthz` 只能看到桥到 SnowLuma 的 WS 是否断，看不到 QQ 账号是否掉线。
-3. `get_version_info` 不采集，排障时无法回答「对面到底是 SnowLuma 还是 NapCat、什么版本」。
+**曾经最容易造成实际事故的三个缺口，已由批次 1 / 2 收口**：
+1. `bot_status` 不再写成 `private/<self_id>`，改走账号状态（批次 2）。
+2. 账号上下线进入平台依赖健康，`/healthz` 能看到 `accountOnline` / `accountGood`（批次 1 / 2）。
+3. `get_version_info` 已采集三层版本并写进依赖元数据（批次 1）。
+
+现在的主要风险转为动作覆盖面：未列入 catalog 的 SnowLuma 动作 agent 调不到，见批次 3 / 4 / 7。
 
 ---
 
@@ -462,7 +470,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **前置**：批次 0 的展示名可选；功能上不依赖改名。
 
-### 批次 2：事件通道与平台健康
+### 批次 2：事件通道与平台健康（已完成，2026-11-05）
 
 **能力范围**
 - `bot_status`（`online` / `offline` / `bot_offline`）不再写进私聊房间；映射到平台依赖条目的 `up/down`。
@@ -472,17 +480,31 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - 恢复时发一条通知（沿用 connectivity-notices 的故障窗口设计，不在本批改协议）。
 
 **涉及文件**
-- `crates/adapters/onebot11/src/event.rs`
-- `crates/adapters/onebot11/src/link.rs`（状态上报）
-- `crates/adapters/onebot11/src/factory.rs`（manifest `events` / `event_tags`）
-- `crates/kernel/src/deps.rs`、`crates/bridge/src/console.rs`
-- `crates/i18n/locales/{zh-CN,en}.json`
+- `crates/adapters/onebot-snowluma/src/event.rs`
+- `crates/adapters/onebot-snowluma/src/link.rs`（状态上报）
+- `crates/kernel/src/adapter.rs`、`crates/kernel/src/deps.rs`
+- 测试：`crates/kernel/src/deps.rs`
 
 **验证方式**
 - fixture 覆盖 `bot_status` 三种状态：不产生房间记录；依赖条目从 `up` 到 `down` 再恢复。
 - 心跳连续 10 条不写流水。
 - `message_sent` 与桥自己的发送记录不重复。
 - 未知 notice 仍带 Opaque 原载荷。
+
+**实际落地**
+- `bot_status` / `bot_offline` → `Parsed::AccountStatus` → `AdapterStatus::account`；不产生房间记录。
+  离线按现有失败阈值迁移（不因单条事件立刻打断），上线立即 `up`，并发出
+  `NoticeEvent::DependencyEdge`，由既有 notifier 消费，不新增协议。
+- `meta_event/heartbeat` → `Parsed::Heartbeat` → `AdapterStatus::heartbeat` →
+  `DependencyRegistry::platform_heartbeat`；只在 `state = Up` 时刷新 `lastOkAt`，
+  不会把已 `down` 的条目拉回 `up`。`lifecycle` 忽略。心跳字段未成文，不解析
+  `online` / `good`。
+- `message_sent` 继续忽略，测试覆盖 `reportSelfMessage = true` 的重复风险。
+- `group_upload` / `essence` / `notify.*` 的字段在 SnowLuma 文档中未成文，按「记缺口」
+  处理：不猜字段、不加摘要，保留 `[类型]（未解析事件）` + Opaque 的显式降级。
+- **新增 op：0**。本批全部是事件分流与健康上报，不需要新的平台动作；`account.status` /
+  `account.version` 已在批次 1 之前的 catalog 中。没有新增 `PlatformTag`，没有第二张
+  op→risk 表。
 
 **前置**：批次 1（元数据字段存在后更好复用）。
 
@@ -639,9 +661,10 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 ### 7.3 行为与安全风险
 
-13. **`bot_status` 当前会写进 `private/<self_id>`**：这是现有实现的具体缺陷，不是文档问题。批次 2 必须修，否则账号上下线会污染流水。
-14. **账号在线 ≠ 桥连得上**：WS 断开会报 `down`；QQ 账号掉线但 WS 还在时，当前实现仍显示 `up`。要靠 `bot_status` / `get_status` 补齐。
-15. **`reportSelfMessage = true` 的重复风险**：桥自己发送时已经记账；如果 SnowLuma 上报 `message_sent` 而适配器没忽略，会重复。现有实现忽略 `message_sent`，要保留并加测试。
+13. **`bot_status` 不再写进 `private/<self_id>`**：批次 2 已改为账号状态，`bot_offline` 同理。
+14. **账号在线 ≠ 桥连得上**：WS 断开报 `down`；账号掉线由 `bot_status` / `get_status` 写进
+    `accountOnline`，依赖条目按失败阈值迁移，不会因单条通知误报。
+15. **`reportSelfMessage = true` 的重复风险**：`message_sent` 仍忽略，并有测试守护。
 16. **HTTP 上报没有签名**：如果批次 5 实现接收端，必须自己加 token/网络隔离，不能假设 SnowLuma 会签名。
 17. **token 出现在 URL query**：`?access_token=` 会进日志/代理日志；文档要提醒，生产优先用 Bearer 头。
 18. **有符号 message_id**：SnowLuma 明确负值有效；现有代码按字符串保留（`id_of` / `platform_id`），不要为了「看起来像数字」取绝对值。

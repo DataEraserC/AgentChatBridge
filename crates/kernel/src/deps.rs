@@ -476,6 +476,27 @@ impl DependencyRegistry {
         }
     }
 
+    /// 心跳只刷新「最近一次活着」；不改变状态。
+    ///
+    /// 连接已经断开/账号被 bot_status 标成离线时，心跳不能把它强行拉回 `up`；
+    /// 只有当前就是 `up` 的条目才更新 `last_ok_at`。
+    pub fn platform_heartbeat(&self, id: &str, now: i64) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, DependencyKind::Platform, id, now);
+        let key = Key {
+            kind: DependencyKind::Platform,
+            id: id.to_owned(),
+        };
+        if let Some(entry) = inner.entries.get_mut(&key) {
+            if entry.state == State::Up {
+                entry.last_ok_at = Some(now);
+            }
+        }
+    }
+
     fn clear_account_observation(&self, kind: DependencyKind, id: &str) {
         let mut inner = self
             .inner
@@ -1557,6 +1578,52 @@ mod tests {
     }
 
     #[test]
+    fn account_status_edges_down_and_back_up_with_a_notice() {
+        let registry = DependencyRegistry::from_config(&platform_config());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        registry.set_notice_sink(Arc::new(RecordingSink(Arc::clone(&events))));
+
+        let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
+        status.attempt();
+        status.connected();
+        status.account(true, Some(true), "bot_status/online");
+        for _ in 0..2 {
+            status.account(false, None, "bot_status/offline");
+        }
+        assert_eq!(
+            entry(&registry.snapshot(None), "qq")["state"],
+            "up",
+            "账号离线仍按失败阈值，单条不立刻打断"
+        );
+
+        status.account(false, None, "bot_status/offline");
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "down");
+        assert_eq!(qq["lastErrorClass"], "account_offline");
+
+        status.account(true, Some(true), "bot_status/online");
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "up");
+        assert_eq!(qq["accountOnline"], true);
+
+        let events = events.lock().expect("没被毒死");
+        let edges: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|event| match event {
+                NoticeEvent::DependencyEdge { kind, from, to, .. } if kind == "platform" => {
+                    Some((from.as_str(), to.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            edges,
+            vec![("unknown", "up"), ("up", "down"), ("down", "up")],
+            "恢复要写一条 down→up 边沿，供带外通知消费"
+        );
+    }
+
+    #[test]
     fn platform_version_records_three_layers_and_unknown_slots() {
         let registry = DependencyRegistry::from_config(&platform_config());
         registry.platform_version(
@@ -1606,6 +1673,29 @@ mod tests {
         assert_eq!(qq["version"]["impl"]["name"], "unknown");
         assert_eq!(qq["version"]["impl"]["version"], "unknown");
         assert_eq!(qq["version"]["adapter"]["compat"]["state"], "unknown");
+    }
+
+    #[test]
+    fn platform_heartbeat_refreshes_only_up_entries() {
+        let registry = DependencyRegistry::from_config(&platform_config());
+        registry.platform_connected("qq", 100);
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "up");
+        assert_eq!(qq["lastOkAt"], 100);
+
+        registry.platform_heartbeat("qq", 200);
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "up");
+        assert_eq!(qq["lastOkAt"], 200);
+
+        registry.platform_failed("qq", "test", "down", 300);
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "down");
+
+        registry.platform_heartbeat("qq", 400);
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "down", "心跳不能把已标记离线的条目拉回 up");
+        assert_eq!(qq["lastOkAt"], 200, "down 时不刷新 lastOkAt");
     }
 
     #[test]

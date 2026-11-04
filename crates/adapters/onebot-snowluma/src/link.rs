@@ -320,6 +320,7 @@ fn submit_event(ctx: &PumpContext<'_>, value: &Value) {
                 )
             );
         }
+        Ok(Parsed::Heartbeat) => ctx.status.heartbeat(),
         Ok(Parsed::Record(draft)) => {
             if let Err(error) = ctx.events.submit(draft) {
                 eprintln!(
