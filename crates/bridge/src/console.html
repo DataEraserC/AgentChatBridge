@@ -36,6 +36,9 @@
   .pill.unloadable { background:#22303f; color:var(--accent); }
   .pill.pending { background:#3a342b; color:var(--warn); }
   .pill.unloaded { background:#2b2d3a; color:var(--dim); }
+  .pill.dep-up { background:#223a2e; color:var(--ok); }
+  .pill.dep-down { background:#3a2b2b; color:var(--err); }
+  .pill.dep-unknown { background:#2b2d3a; color:var(--dim); }
   .ok { color:var(--ok); }
   button.act { background:var(--accent); border:none; color:#fff; border-radius:6px; padding:4px 12px; cursor:pointer; font-size:13px; }
   button.act.danger { background:var(--err); }
@@ -84,7 +87,15 @@
   <button data-tab="config">配置</button>
 </nav>
 <main>
-  <section id="tab-status" class="active"><div class="card"><h2>概览</h2><div class="stat" id="status"></div><p class="muted" id="status-note"></p></div></section>
+  <section id="tab-status" class="active">
+    <div class="card"><h2>概览</h2><div class="stat" id="status"></div><p class="muted" id="status-note"></p></div>
+    <div class="card">
+      <h2><span data-i18n="console.deps.title">依赖健康</span><button class="mini" onclick="loadStatus()" style="float:right" data-i18n="console.deps.refresh">刷新</button></h2>
+      <p class="muted" data-i18n="console.deps.intro">逐依赖展示 harness、平台连接与模型状态；接口失败时保留上次数据并标注过期。</p>
+      <p id="deps-note"></p>
+      <div id="dependencies"><p class="muted">…</p></div>
+    </div>
+  </section>
   <section id="tab-sessions"><div id="sessions"></div></section>
   <section id="tab-feedback"><div class="card"><h2>agent 反馈</h2><div id="feedback"></div></div></section>
   <section id="tab-plugins"><div class="card">
@@ -139,15 +150,111 @@ async function loadI18n() {
 }
 
 async function loadStatus() {
-  const s = await api("/api/status");
-  $("#status").innerHTML = [
-    ["连接", s.connections], ["会话", s.sessions], ["harness", s.harnesses],
-    ["忙着的会话", s.busy_sessions], ["排队轮次", s.queued_turns],
-    ["配置版本", s.config_version],
-  ].map(([k, v]) => `<div><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("");
-  $("#status-note").innerHTML = s.staged_config
-    ? '<span class="err">有一份暂存的新配置，下一次收消息/开轮时自动生效</span>（去「配置」页可放弃暂存）'
-    : "配置按轮次边界热重载（ADR-0009）：在「配置」页编辑保存后，下一次收消息/开轮自动生效。";
+  try {
+    const s = await api("/api/status");
+    $("#status").innerHTML = [
+      ["连接", s.connections], ["会话", s.sessions], ["harness", s.harnesses],
+      ["忙着的会话", s.busy_sessions], ["排队轮次", s.queued_turns],
+      ["配置版本", s.config_version],
+    ].map(([k, v]) => `<div><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("");
+    $("#status-note").innerHTML = s.staged_config
+      ? '<span class="err">有一份暂存的新配置，下一次收消息/开轮时自动生效</span>（去「配置」页可放弃暂存）'
+      : "配置按轮次边界热重载（ADR-0009）：在「配置」页编辑保存后，下一次收消息/开轮自动生效。";
+  } catch (e) {
+    $("#status-note").innerHTML = '<span class="err">' + esc(t("console.deps.statusError", { error: e.message })) + "</span>";
+  }
+  await loadDependencies();
+}
+
+// ---------------------------------------------------------------------------
+// 依赖健康：/api/dependencies 的逐依赖视图。
+// 状态映射单独成函数，up/down/unknown 用不同 class；失败时保留上次成功数据。
+// ---------------------------------------------------------------------------
+let depsCache = null;
+let depsCacheAt = 0;
+
+function depStateClass(state) {
+  if (state === "up") return "dep-up";
+  if (state === "down") return "dep-down";
+  return "dep-unknown";
+}
+
+function depLabel(prefix, value) {
+  const key = prefix + value;
+  const text = t(key);
+  return text === key ? value : text;
+}
+
+function depTime(ms) {
+  return ms ? new Date(ms).toLocaleString() : t("console.deps.never");
+}
+
+function depBool(value) {
+  return value ? t("console.deps.yes") : t("console.deps.no");
+}
+
+function renderDependencies(data, stale, error) {
+  const box = $("#dependencies");
+  const note = $("#deps-note");
+  if (!box || !note) return;
+  const items = (data && data.dependencies) || [];
+  if (stale) {
+    note.className = "banner";
+    note.textContent = t("console.deps.stale", {
+      time: depsCacheAt ? new Date(depsCacheAt).toLocaleString() : t("console.deps.never"),
+      error,
+    });
+  } else {
+    note.className = "muted";
+    note.textContent = "";
+  }
+  if (!items.length) {
+    box.innerHTML = `<p class="empty">${esc(t("console.deps.empty"))}</p>`;
+    return;
+  }
+  const rows = items.map((dep) => {
+    const err = dep.lastError || "";
+    const cls = dep.lastErrorClass || "";
+    const errorCell = (err || cls)
+      ? `<td class="wrap">${esc(err || t("console.deps.none"))}${cls ? `<br><span class="muted">${esc(t("console.deps.class"))}: ${esc(cls)}</span>` : ""}</td>`
+      : `<td class="muted">${esc(t("console.deps.none"))}</td>`;
+    return `<tr>
+      <td class="wrap"><code>${esc(dep.id)}</code></td>
+      <td>${esc(depLabel("console.deps.kind.", dep.kind))}</td>
+      <td><span class="pill ${depStateClass(dep.state)}">${esc(depLabel("console.deps.state.", dep.state))}</span></td>
+      <td>${esc(depTime(dep.since))}</td>
+      <td>${esc(dep.lastOkAt ? depTime(dep.lastOkAt) : t("console.deps.never"))}</td>
+      <td>${esc(dep.attempts ?? 0)}</td>
+      ${errorCell}
+      <td>${esc(depBool(dep.configured))} / ${esc(depBool(dep.expected))}</td>
+    </tr>`;
+  }).join("");
+  box.innerHTML = `<table>
+    <tr><th>${esc(t("console.deps.col.id"))}</th><th>${esc(t("console.deps.col.kind"))}</th>
+    <th>${esc(t("console.deps.col.state"))}</th><th>${esc(t("console.deps.col.since"))}</th>
+    <th>${esc(t("console.deps.col.lastOkAt"))}</th><th>${esc(t("console.deps.col.attempts"))}</th>
+    <th>${esc(t("console.deps.col.lastError"))}</th><th>${esc(t("console.deps.col.scope"))}</th></tr>${rows}</table>`;
+}
+
+async function loadDependencies() {
+  try {
+    const data = await api("/api/dependencies");
+    depsCache = data;
+    depsCacheAt = Date.now();
+    renderDependencies(data, false, "");
+  } catch (e) {
+    if (depsCache) {
+      renderDependencies(depsCache, true, e.message);
+    } else {
+      const note = $("#deps-note");
+      const box = $("#dependencies");
+      if (note) {
+        note.className = "err";
+        note.textContent = t("console.deps.error", { error: e.message });
+      }
+      if (box) box.innerHTML = `<p class="empty">${esc(t("console.deps.empty"))}</p>`;
+    }
+  }
 }
 
 async function loadSessions() {
