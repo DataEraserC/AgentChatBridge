@@ -392,6 +392,7 @@
   "kernel.config.empty_tool_plugin_command": "tool plugin {id} has an empty command",
   "kernel.config.bad_tool_plugin_timeout": "tool plugin {id} timeout {timeout_ms} ms is out of range",
   "kernel.config.bad_queue_limit": "queue {field} capacity must be greater than zero (got {value})",
+  "kernel.config.bad_lkg_config": "lkg {field} must be greater than zero (got {value})",
   "kernel.config.duplicate_plugin_path": "duplicate dynamic plugin path: {path}",
   "kernel.config.duplicate_room": "session {session} subscribes to room {room} more than once",
   "kernel.config.duplicate_session": "duplicate session id: {session}",

@@ -31,10 +31,10 @@ pub use adapter::{
 pub use config::{
     AccessPolicy, ClockPolicy, Config, Connection, ConsoleConfig, DEFAULT_MAX_AGE_DAYS,
     DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH, DEFAULT_WORKTREES_ROOT, DeliveryPolicy,
-    EndpointConfig, Harness, KNOWN_MEMORY_KINDS, Memory, OutboundPolicy, Persona, PluginConfig,
-    QueueConfig, ReceivePolicy, RetentionConfig, RoutePolicy, Session, StorageConfig, Subscription,
-    ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision,
-    WakeInput, WakePolicy, WakeVerdict,
+    EndpointConfig, Harness, KNOWN_MEMORY_KINDS, LkgConfig, Memory, OutboundPolicy, Persona,
+    PluginConfig, QueueConfig, ReceivePolicy, RetentionConfig, RoutePolicy, Session, StorageConfig,
+    Subscription, ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy,
+    WakeDecision, WakeInput, WakePolicy, WakeVerdict,
 };
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
 pub use engine::{Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned, TaskRecord, TaskStatus};

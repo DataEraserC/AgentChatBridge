@@ -205,6 +205,52 @@ token 文件供 systemd 侧 curl。
 **边界**：插件回滚不负责数据回滚。插件写过的外部文件/任务产物不在 LKG 范围内；
 需要的话由插件自己按 manifest 声明快照策略。
 
+### 3.2.1 运行时 LKG（core 当前实现）
+
+当前实现不走外部 supervisor，也不写 `last-good.json`；状态由 bridge 自己持有：
+
+- 文件：`state/plugins-lkg.toml`（与 `storage.path` 同目录），记录
+  `id / version / digest / path / promoted_at`，每个插件保留最近 3 条。
+- 配置：
+
+```toml
+[lkg]
+max_failures = 3     # 默认 3
+window_secs = 600    # 默认 600（10 分钟）
+```
+
+**什么算一次失败**（当前只统计这些已接线的点）：
+
+1. 引擎解析 provider 失败（receive / wake / access / delivery / clock /
+   turn_error / route）；
+2. route provider panic、tool provider panic；
+3. 轮次边界 reload 失败；
+4. catalog 从 `Healthy` 变成 `Unhealthy` 的那一次迁移——覆盖动态适配器调用超时 /
+   句柄标死，以及 manager 实例化失败后 catalog 报的 Unhealthy。
+
+**不算失败**：
+
+- 启动时动态库装载失败——那是启动失败，bridge 直接不启动，不会进入 LKG 计数；
+- 单次成功调用不会减计数，也不会清零；当前没有“成功一次就清零”的语义。
+
+**计数清零**：只在以下成功点清空该 provider 的失败队列：
+
+- 候选登记（启动加载成功 / reload 成功）；
+- 成功提升为 LKG；
+- 成功回滚。
+
+其余时间失败按滑动窗口裁剪：超过 `window_secs` 的旧失败在下一次失败时被移除。
+因此实际语义是「窗口内累计达到 `max_failures`」，不是严格“连续 N 次”，
+尽管旧文案用了“连续”二字。
+
+**回滚后**：
+
+- 失败的新候选被卸下并**丢弃**，不会自动再试；
+- 上一条 LKG 被 reload，状态显示 `rolledBack`；下一个无在途轮次的安全点会尝试
+  重新提升它，除了“等到安全点”之外没有额外冷却；
+- 若回滚本身失败（没有上一条 LKG、set_artifact_path 失败、reload 失败），
+  状态停在 `rolledBack`，失败队列保留，不会再自动重试，需人工 reload。
+
 ## 4. 与 ADR-0029 / 0030 的关系
 
 - **轮次边界**（ADR-0029 D4）：排空不改变「轮次边界替换快照」的语义；`Draining`

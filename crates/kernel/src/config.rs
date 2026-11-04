@@ -80,6 +80,8 @@ pub struct Config {
     pub retention: RetentionConfig,
     /// 入站/路由动作队列容量。两个队列默认都有界；0 在解析期拒绝。
     pub queues: QueueConfig,
+    /// 插件 LKG 的失败阈值与观察窗口。
+    pub lkg: LkgConfig,
     /// 记忆 worktree 的根目录。每个「会话 × 记忆」checkout 到这下面。
     pub worktrees_root: String,
     /// 会话**没配自己的 `on_turn_error`** 时的默认失败通知动作列表。
@@ -349,6 +351,27 @@ pub struct PluginConfig {
     pub timeout_ms: Option<u64>,
     /// 给人和 LKG 看的版本标签。不参与加载校验；未写时 LKG 记 `"unknown"`。
     pub version: Option<String>,
+}
+
+/// 插件 LKG 默认失败次数。
+pub const DEFAULT_LKG_MAX_FAILURES: u64 = 3;
+/// 插件 LKG 默认观察窗口（秒）。
+pub const DEFAULT_LKG_WINDOW_SECS: u64 = 600;
+
+/// 插件 LKG 失败阈值配置。`[lkg]` 省略时行为与旧默认完全一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LkgConfig {
+    pub max_failures: u64,
+    pub window_secs: u64,
+}
+
+impl Default for LkgConfig {
+    fn default() -> Self {
+        Self {
+            max_failures: DEFAULT_LKG_MAX_FAILURES,
+            window_secs: DEFAULT_LKG_WINDOW_SECS,
+        }
+    }
 }
 
 /// 入站队列默认容量。
@@ -1032,6 +1055,8 @@ pub enum ConfigError {
     BadToolPluginTimeout { id: String, timeout_ms: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_queue_limit", field = field, value = value))]
     BadQueueLimit { field: String, value: u64 },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_lkg_config", field = field, value = value))]
+    BadLkgConfig { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_receive_provider", connection = connection, provider = provider, detail = detail))]
     BadReceiveProvider {
         connection: String,
@@ -1168,6 +1193,18 @@ impl Config {
                 QueueConfig { inbound, route }
             }
             None => QueueConfig::default(),
+        };
+
+        let lkg = match raw.lkg {
+            Some(raw) => LkgConfig {
+                max_failures: lkg_limit(
+                    "max_failures",
+                    raw.max_failures,
+                    DEFAULT_LKG_MAX_FAILURES,
+                )?,
+                window_secs: lkg_limit("window_secs", raw.window_secs, DEFAULT_LKG_WINDOW_SECS)?,
+            },
+            None => LkgConfig::default(),
         };
 
         let worktrees_root = match raw.worktrees_root {
@@ -1572,6 +1609,7 @@ impl Config {
             storage,
             retention,
             queues,
+            lkg,
             worktrees_root,
             default_on_turn_error,
             delivery_limit: raw.delivery_limit.unwrap_or(DEFAULT_DELIVERY_LIMIT),
@@ -2140,6 +2178,20 @@ fn check_not_blank(value: &str, field: &'static str) -> Result<(), &'static str>
     Ok(())
 }
 
+/// LKG 阈值：省略用默认值，0 拒绝。
+fn lkg_limit(field: &str, value: Option<u64>, default: u64) -> Result<u64, ConfigError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    if value == 0 {
+        return Err(ConfigError::BadLkgConfig {
+            field: field.to_owned(),
+            value,
+        });
+    }
+    Ok(value)
+}
+
 /// 队列容量：省略用默认值，0 拒绝。
 fn queue_limit(field: &str, value: Option<u64>, default: usize) -> Result<usize, ConfigError> {
     let Some(value) = value else {
@@ -2223,6 +2275,7 @@ struct RawConfig {
     storage: Option<RawStorage>,
     retention: Option<RawRetention>,
     queues: Option<RawQueue>,
+    lkg: Option<RawLkg>,
     worktrees_root: Option<String>,
     /// 会话没配 `on_turn_error` 时的默认动作列表（默认空 = 只记日志）。
     #[serde(default)]
@@ -2349,6 +2402,14 @@ struct RawPlugin {
     timeout_ms: Option<u64>,
     #[serde(default)]
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawLkg {
+    #[serde(default)]
+    max_failures: Option<u64>,
+    #[serde(default)]
+    window_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2892,6 +2953,32 @@ mod tests {
         );
         let config = Config::parse(&config_with(&text, ONE_SESSION)).expect("config 层不拦");
         assert_eq!(config.connections[0].transport, Transport::WsServer);
+    }
+
+    #[test]
+    fn lkg_thresholds_default_and_validate() {
+        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        assert_eq!(config.lkg.max_failures, DEFAULT_LKG_MAX_FAILURES);
+        assert_eq!(config.lkg.window_secs, DEFAULT_LKG_WINDOW_SECS);
+
+        let text = format!(
+            "{}\n[lkg]\nmax_failures = 5\nwindow_secs = 60\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&text).expect("能解析");
+        assert_eq!(config.lkg.max_failures, 5);
+        assert_eq!(config.lkg.window_secs, 60);
+
+        for field in ["max_failures", "window_secs"] {
+            let text = format!(
+                "{}\n[lkg]\n{field} = 0\n",
+                config_with(ONE_CONNECTION, ONE_SESSION)
+            );
+            assert!(matches!(
+                Config::parse(&text),
+                Err(ConfigError::BadLkgConfig { .. })
+            ));
+        }
     }
 
     #[test]
