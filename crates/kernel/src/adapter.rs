@@ -141,6 +141,23 @@ impl AdapterStatus {
         self.deps
             .platform_disconnected(&self.connection, class, detail, crate::deps::now_millis());
     }
+
+    /// 账号在线状态。和连接状态分开：连接通着不代表账号在线。
+    pub fn account(&self, online: bool, good: Option<bool>, detail: &str) {
+        self.deps.platform_account(
+            &self.connection,
+            online,
+            good,
+            detail,
+            crate::deps::now_millis(),
+        );
+    }
+
+    /// 三层版本信息：协议 / 实现 / 适配器。取不到的字段由调用方留 `None`。
+    pub fn version(&self, version: crate::deps::PlatformVersionInfo) {
+        self.deps
+            .platform_version(&self.connection, version, crate::deps::now_millis());
+    }
 }
 
 impl std::fmt::Debug for AdapterHost {

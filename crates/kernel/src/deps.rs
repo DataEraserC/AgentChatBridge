@@ -41,6 +41,24 @@ struct Key {
     id: String,
 }
 
+/// 平台的三层版本信息。三层不压成一个字符串：协议决定语义，实现决定排障对象，
+/// 适配器版本决定「我们自己的哪一版在说话」。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlatformVersionInfo {
+    /// 协议种类，如 `onebot11`。
+    pub protocol_kind: String,
+    /// 协议族名，如 `OneBot`。
+    pub protocol_name: String,
+    /// 平台自报的协议版本；取不到为 `None`。
+    pub protocol_version: Option<String>,
+    /// 平台实现名，如 `snowluma`；取不到为 `None`。
+    pub implementation_name: Option<String>,
+    /// 平台实现版本；取不到为 `None`。
+    pub implementation_version: Option<String>,
+    /// 适配器 crate 版本。
+    pub adapter_version: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Unknown,
@@ -72,6 +90,13 @@ struct Entry {
     open_connections: u64,
     last_error: Option<String>,
     last_class: Option<String>,
+    /// 账号是否在线。`None` = 没观测到，不猜。
+    account_online: Option<bool>,
+    /// `get_status.good`。`None` = 没观测到。
+    account_good: Option<bool>,
+    /// 三层版本信息。`None` = 还没采集。
+    version: Option<PlatformVersionInfo>,
+    version_observed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +268,10 @@ impl DependencyRegistry {
                 open_connections: 0,
                 last_error: None,
                 last_class: None,
+                account_online: None,
+                account_good: None,
+                version: None,
+                version_observed_at: None,
             });
         }
         for connection in &config.connections {
@@ -262,6 +291,10 @@ impl DependencyRegistry {
                 open_connections: 0,
                 last_error: None,
                 last_class: None,
+                account_online: None,
+                account_good: None,
+                version: None,
+                version_observed_at: None,
             });
         }
         // model 不在启动时预登记：没有轮次就没有观测，预先挂一堆 unknown 只会
@@ -335,12 +368,80 @@ impl DependencyRegistry {
 
     /// 平台适配器上报连接成功（第②步使用）。
     pub fn platform_connected(&self, id: &str, now: i64) {
+        self.clear_account_observation(DependencyKind::Platform, id);
         self.mark_up(DependencyKind::Platform, id, now);
     }
 
     /// 平台适配器上报断开（第②步使用）。
     pub fn platform_disconnected(&self, id: &str, class: &str, detail: &str, now: i64) {
+        self.clear_account_observation(DependencyKind::Platform, id);
         self.mark_down(DependencyKind::Platform, id, class, detail, now);
+    }
+
+    /// 账号在线状态。连接建立不等于账号在线：SnowLuma 能在 WS 还通着的时候
+    /// 推送 `bot_status offline`，所以这条信号单独上报。
+    pub fn platform_account(
+        &self,
+        id: &str,
+        online: bool,
+        good: Option<bool>,
+        detail: &str,
+        now: i64,
+    ) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, DependencyKind::Platform, id, now);
+        let key = Key {
+            kind: DependencyKind::Platform,
+            id: id.to_owned(),
+        };
+        if let Some(entry) = inner.entries.get_mut(&key) {
+            entry.account_online = Some(online);
+            entry.account_good = good;
+        }
+        let notice = if online {
+            mark_up_locked(&mut inner, &key, now)
+        } else {
+            mark_down_locked(&mut inner, &key, "account_offline", detail, now)
+        };
+        drop(inner);
+        if let Some(event) = notice {
+            self.emit(event);
+        }
+    }
+
+    /// 记录三层版本信息。取不到的值保持 `None`，序列化时统一显示 `unknown`。
+    pub fn platform_version(&self, id: &str, version: PlatformVersionInfo, now: i64) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, DependencyKind::Platform, id, now);
+        let key = Key {
+            kind: DependencyKind::Platform,
+            id: id.to_owned(),
+        };
+        if let Some(entry) = inner.entries.get_mut(&key) {
+            entry.version = Some(version);
+            entry.version_observed_at = Some(now);
+        }
+    }
+
+    fn clear_account_observation(&self, kind: DependencyKind, id: &str) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = Key {
+            kind,
+            id: id.to_owned(),
+        };
+        if let Some(entry) = inner.entries.get_mut(&key) {
+            entry.account_online = None;
+            entry.account_good = None;
+        }
     }
 
     /// harness 明确报告后端失败：把它记成 down，class 用 harness 给的分类。
@@ -555,6 +656,10 @@ fn upsert(inner: &mut Inner, kind: DependencyKind, id: &str, now: i64) {
         open_connections: 0,
         last_error: None,
         last_class: None,
+        account_online: None,
+        account_good: None,
+        version: None,
+        version_observed_at: None,
     });
 }
 
@@ -697,6 +802,38 @@ fn entry_json(entry: &Entry) -> Value {
         "lastError": entry.last_error,
         "lastErrorClass": entry.last_class,
         "attempts": entry.attempts,
+        "accountOnline": entry.account_online,
+        "accountGood": entry.account_good,
+        "version": entry.version.as_ref().map(version_json),
+        "versionObservedAt": entry.version_observed_at,
+    })
+}
+
+fn version_json(version: &PlatformVersionInfo) -> Value {
+    let source = if version.protocol_version.is_some()
+        || version.implementation_name.is_some()
+        || version.implementation_version.is_some()
+    {
+        "get_version_info"
+    } else {
+        "unknown"
+    };
+    json!({
+        "protocol": {
+            "kind": version.protocol_kind,
+            "name": version.protocol_name,
+            "version": version.protocol_version.as_deref().unwrap_or("unknown"),
+            "source": source,
+        },
+        "impl": {
+            "name": version.implementation_name.as_deref().unwrap_or("unknown"),
+            "version": version.implementation_version.as_deref().unwrap_or("unknown"),
+            "source": source,
+        },
+        "adapter": {
+            "version": version.adapter_version,
+            "source": "crate",
+        },
     })
 }
 
@@ -1255,6 +1392,74 @@ mod tests {
         assert_eq!(healthz_dependencies["items"].as_array().unwrap().len(), 3);
         assert_eq!(dependencies["dependencies"].as_array().unwrap().len(), 3);
         assert_eq!(dependencies["transitions"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn platform_account_is_separate_from_connection_state() {
+        let registry = DependencyRegistry::from_config(&platform_config());
+        let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
+        status.attempt();
+        status.connected();
+        assert_eq!(
+            entry(&registry.snapshot(None), "qq")["accountOnline"],
+            Value::Null
+        );
+
+        status.account(true, Some(true), "get_status");
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "up");
+        assert_eq!(qq["accountOnline"], true);
+        assert_eq!(qq["accountGood"], true);
+
+        status.account(false, None, "bot_status/offline");
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["accountOnline"], false);
+        assert_eq!(qq["lastErrorClass"], "account_offline");
+        assert_eq!(qq["lastError"], "bot_status/offline");
+    }
+
+    #[test]
+    fn platform_version_records_three_layers_and_unknown_slots() {
+        let registry = DependencyRegistry::from_config(&platform_config());
+        registry.platform_version(
+            "qq",
+            PlatformVersionInfo {
+                protocol_kind: "onebot11".to_owned(),
+                protocol_name: "OneBot".to_owned(),
+                protocol_version: Some("v11".to_owned()),
+                implementation_name: Some("snowluma".to_owned()),
+                implementation_version: Some("2.4.0".to_owned()),
+                adapter_version: "0.1.0".to_owned(),
+            },
+            100,
+        );
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["version"]["protocol"]["kind"], "onebot11");
+        assert_eq!(qq["version"]["protocol"]["version"], "v11");
+        assert_eq!(qq["version"]["protocol"]["source"], "get_version_info");
+        assert_eq!(qq["version"]["impl"]["name"], "snowluma");
+        assert_eq!(qq["version"]["impl"]["version"], "2.4.0");
+        assert_eq!(qq["version"]["adapter"]["version"], "0.1.0");
+        assert_eq!(qq["version"]["adapter"]["source"], "crate");
+        assert_eq!(qq["versionObservedAt"], 100);
+
+        registry.platform_version(
+            "qq",
+            PlatformVersionInfo {
+                protocol_kind: "onebot11".to_owned(),
+                protocol_name: "OneBot".to_owned(),
+                protocol_version: None,
+                implementation_name: None,
+                implementation_version: None,
+                adapter_version: "0.1.0".to_owned(),
+            },
+            200,
+        );
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["version"]["protocol"]["version"], "unknown");
+        assert_eq!(qq["version"]["protocol"]["source"], "unknown");
+        assert_eq!(qq["version"]["impl"]["name"], "unknown");
+        assert_eq!(qq["version"]["impl"]["version"], "unknown");
     }
 
     #[test]

@@ -170,13 +170,27 @@ fn endpoint_of(url: &str) -> Result<String, LinkError> {
     }
 }
 
+/// 一条连接喂事件时需要的一组只读上下文。
+struct PumpContext<'a> {
+    events: &'a EventQueue,
+    connection: &'a str,
+    admin_qqs: &'a [String],
+    status: &'a AdapterStatus,
+}
+
+/// 昵称补查线程要带着走的一组 owned 上下文。
+struct PokeContext {
+    events: EventQueue,
+    connection: String,
+    admin_qqs: Vec<String>,
+    status: AdapterStatus,
+}
+
 /// 一条连接的主循环：写动作、喂事件、读回包。连不上或断了就返回。
-pub fn pump(
+fn pump(
     mut ws: Ws,
     actions: Receiver<Action>,
-    events: &EventQueue,
-    connection: &str,
-    admin_qqs: &[String],
+    ctx: PumpContext<'_>,
     slot: &LinkSlot,
     shutdown: &AtomicBool,
 ) -> Result<(), LinkError> {
@@ -207,14 +221,7 @@ pub fn pump(
         // 2. 读一帧。事件由 handle_text 丢进 core 的入站队列。
         match ws.read() {
             Ok(Message::Text(text)) => {
-                handle_text(
-                    text.as_str(),
-                    events,
-                    connection,
-                    admin_qqs,
-                    slot,
-                    &mut waiting,
-                );
+                handle_text(text.as_str(), &ctx, slot, &mut waiting);
             }
             // tungstenite 收到 ping 会自动回 pong，这里只兜一手。
             Ok(Message::Ping(payload)) => {
@@ -252,16 +259,17 @@ fn is_timeout(error: &std::io::Error) -> bool {
 
 fn handle_text(
     text: &str,
-    events: &EventQueue,
-    connection: &str,
-    admin_qqs: &[String],
+    ctx: &PumpContext<'_>,
     slot: &LinkSlot,
     waiting: &mut HashMap<String, Sender<Result<Value, LinkError>>>,
 ) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         eprintln!(
             "{}",
-            acb_i18n::t!("adapter.onebot11.non_json_content", connection = connection)
+            acb_i18n::t!(
+                "adapter.onebot11.non_json_content",
+                connection = ctx.connection
+            )
         );
         return;
     };
@@ -280,28 +288,42 @@ fn handle_text(
         spawn_poke_lookup(
             value,
             slot.clone(),
-            connection.to_owned(),
-            admin_qqs.to_vec(),
-            events.clone(),
+            PokeContext {
+                events: ctx.events.clone(),
+                connection: ctx.connection.to_owned(),
+                admin_qqs: ctx.admin_qqs.to_vec(),
+                status: ctx.status.clone(),
+            },
             group,
             user,
         );
         return;
     }
 
-    submit_event(events, connection, &value, admin_qqs);
+    submit_event(ctx, &value);
 }
 
 /// 解析并提交一条事件。正常路径和昵称补查线程都走这里。
-fn submit_event(events: &EventQueue, connection: &str, value: &Value, admin_qqs: &[String]) {
-    match event::parse(connection, value, admin_qqs) {
+fn submit_event(ctx: &PumpContext<'_>, value: &Value) {
+    match event::parse(ctx.connection, value, ctx.admin_qqs) {
+        Ok(Parsed::AccountStatus { online, detail }) => {
+            ctx.status.account(online, None, &detail);
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "adapter.onebot11.account_status",
+                    connection = ctx.connection,
+                    status = detail
+                )
+            );
+        }
         Ok(Parsed::Record(draft)) => {
-            if let Err(error) = events.submit(draft) {
+            if let Err(error) = ctx.events.submit(draft) {
                 eprintln!(
                     "{}",
                     acb_i18n::t!(
                         "adapter.onebot11.inbound_queue_rejected",
-                        connection = connection,
+                        connection = ctx.connection,
                         reason = error
                     )
                 );
@@ -314,7 +336,7 @@ fn submit_event(events: &EventQueue, connection: &str, value: &Value, admin_qqs:
                     "{}",
                     acb_i18n::t!(
                         "adapter.onebot11.ignored_event",
-                        connection = connection,
+                        connection = ctx.connection,
                         reason = reason
                     )
                 );
@@ -324,7 +346,7 @@ fn submit_event(events: &EventQueue, connection: &str, value: &Value, admin_qqs:
             "{}",
             acb_i18n::t!(
                 "adapter.onebot11.event_parse_failed",
-                connection = connection,
+                connection = ctx.connection,
                 error = error
             )
         ),
@@ -332,19 +354,11 @@ fn submit_event(events: &EventQueue, connection: &str, value: &Value, admin_qqs:
 }
 
 /// 查一次群成员资料，把 `sender` 注入原事件后再入库；查不到就沿用号码。
-fn spawn_poke_lookup(
-    raw: Value,
-    slot: LinkSlot,
-    connection: String,
-    admin_qqs: Vec<String>,
-    events: EventQueue,
-    group: String,
-    user: String,
-) {
+fn spawn_poke_lookup(raw: Value, slot: LinkSlot, ctx: PokeContext, group: String, user: String) {
     std::thread::spawn(move || {
         let mut enriched = raw.clone();
-        if let Ok(room) = RoomId::new(&connection, format!("group/{group}")) {
-            let mut outbound = OneBotOutbound::new(slot, &connection);
+        if let Ok(room) = RoomId::new(&ctx.connection, format!("group/{group}")) {
+            let mut outbound = OneBotOutbound::new(slot, &ctx.connection);
             let params = json!({
                 "group_id": number_value(&group),
                 "user_id": number_value(&user),
@@ -371,14 +385,20 @@ fn spawn_poke_lookup(
                     "{}",
                     acb_i18n::t!(
                         "adapter.onebot11.nickname_lookup_failed",
-                        connection = connection,
+                        connection = ctx.connection,
                         user = user,
                         error = error
                     )
                 ),
             }
         }
-        submit_event(&events, &connection, &enriched, &admin_qqs);
+        let pump_ctx = PumpContext {
+            events: &ctx.events,
+            connection: &ctx.connection,
+            admin_qqs: &ctx.admin_qqs,
+            status: &ctx.status,
+        };
+        submit_event(&pump_ctx, &enriched);
     });
 }
 
@@ -430,10 +450,17 @@ pub fn supervise(
                     let sender = sender.clone();
                     let account = account.clone();
                     let id = id.clone();
-                    std::thread::spawn(move || probe_login(&sender, &account, &id));
+                    let status = status.clone();
+                    std::thread::spawn(move || probe_identity(&sender, &account, &id, &status));
                 }
 
-                let outcome = pump(ws, actions, &events, &id, &admin_qqs, &slot, &shutdown);
+                let ctx = PumpContext {
+                    events: &events,
+                    connection: &id,
+                    admin_qqs: &admin_qqs,
+                    status: &status,
+                };
+                let outcome = pump(ws, actions, ctx, &slot, &shutdown);
                 slot.clear();
                 if shutdown.load(Ordering::Relaxed) {
                     status.disconnected("closed", "adapter shutdown");
@@ -483,18 +510,18 @@ pub fn supervise(
     }
 }
 
-/// 问一下对面登录的是哪个号，顺手检查订阅里配的发送账号对不对。
-fn probe_login(sender: &Sender<Action>, configured: &str, connection: &str) {
-    let (reply_tx, reply_rx) = mpsc::channel();
-    let request = Action {
-        body: serde_json::json!({"action": "get_login_info", "params": {}, "echo": "acb-probe"}),
-        reply: reply_tx,
-    };
-    if sender.send(request).is_err() {
-        return;
-    }
-
-    let Ok(Ok(value)) = reply_rx.recv_timeout(Duration::from_secs(5)) else {
+/// 连上之后问三件事：登录账号、协议/实现版本、账号在线状态。
+///
+/// 三件事都是「取不到不影响收发」：拿不到就记 `unknown`，不阻塞连接、不猜。
+fn probe_identity(
+    sender: &Sender<Action>,
+    configured: &str,
+    connection: &str,
+    status: &AdapterStatus,
+) {
+    if let Some(value) = ask(sender, "get_login_info") {
+        check_login(&value, configured, connection);
+    } else {
         eprintln!(
             "{}",
             acb_i18n::t!(
@@ -502,9 +529,93 @@ fn probe_login(sender: &Sender<Action>, configured: &str, connection: &str) {
                 connection = connection
             )
         );
-        return;
-    };
+    }
 
+    let mut version = acb_kernel::PlatformVersionInfo {
+        protocol_kind: "onebot11".to_owned(),
+        protocol_name: "OneBot".to_owned(),
+        protocol_version: None,
+        implementation_name: None,
+        implementation_version: None,
+        adapter_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+    if let Some(value) = ask(sender, "get_version_info") {
+        let data = value.get("data").unwrap_or(&Value::Null);
+        version.protocol_version = text_field(data, "protocol_version");
+        version.implementation_name = text_field(data, "app_name");
+        version.implementation_version = text_field(data, "app_version");
+    } else {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.version_probe_timeout",
+                connection = connection
+            )
+        );
+    }
+    eprintln!(
+        "{}",
+        acb_i18n::t!(
+            "adapter.onebot11.version_info",
+            connection = connection,
+            protocol = version.protocol_version.as_deref().unwrap_or("unknown"),
+            implementation = version.implementation_name.as_deref().unwrap_or("unknown"),
+            implementation_version = version
+                .implementation_version
+                .as_deref()
+                .unwrap_or("unknown"),
+            adapter = version.adapter_version
+        )
+    );
+    status.version(version);
+
+    if let Some(value) = ask(sender, "get_status") {
+        let data = value.get("data").unwrap_or(&Value::Null);
+        if let Some(online) = data.get("online").and_then(Value::as_bool) {
+            let good = data.get("good").and_then(Value::as_bool);
+            status.account(online, good, "get_status");
+        }
+    } else {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.status_probe_timeout",
+                connection = connection
+            )
+        );
+    }
+}
+
+/// 发一个动作并等回包。超时/连接断开都算「没问到」。
+fn ask(sender: &Sender<Action>, action: &str) -> Option<Value> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let request = Action {
+        body: json!({
+            "action": action,
+            "params": {},
+            "echo": format!("acb-probe-{action}"),
+        }),
+        reply: reply_tx,
+    };
+    if sender.send(request).is_err() {
+        return None;
+    }
+    match reply_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn text_field(data: &Value, key: &str) -> Option<String> {
+    data.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// 账号核对：对面登录的号必须和配置一致，否则自己的话会被当成别人说的。
+fn check_login(value: &Value, configured: &str, connection: &str) {
     let self_id = match value.get("data").and_then(|data| data.get("user_id")) {
         Some(Value::Number(number)) => number.to_string(),
         Some(Value::String(text)) => text.clone(),
@@ -610,6 +721,22 @@ mod tests {
             Err(LinkError::BadUrl(_))
         ));
         assert!(matches!(endpoint_of("http://x"), Err(LinkError::BadUrl(_))));
+    }
+
+    #[test]
+    fn version_fields_are_read_only_when_non_empty() {
+        let data = json!({
+            "protocol_version": "v11",
+            "app_name": "snowluma",
+            "app_version": "  ",
+        });
+        assert_eq!(
+            text_field(&data, "protocol_version").as_deref(),
+            Some("v11")
+        );
+        assert_eq!(text_field(&data, "app_name").as_deref(), Some("snowluma"));
+        assert_eq!(text_field(&data, "app_version"), None);
+        assert_eq!(text_field(&data, "missing"), None);
     }
 
     #[test]
