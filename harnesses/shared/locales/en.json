@@ -40,6 +40,7 @@
   "dsh.tool_call_end": "tool call {tool} finished at {at} after {elapsed} ms: ticket {ticket}{error}",
   "dsh.turn_failed": "turn failed: {error}",
   "dsh.turn_start": "turn start {ticket}: {room}, {count} record(s), model {model}",
+  "dsh.unreachable": "cannot reach dsh at {url}: {errno} ({error})",
   "dsh.turn_timeout_interrupt": "turn exceeded {seconds}s without finishing ({session}); interrupting the dsh session",
   "dsh.unknown_command": "unknown command {command}",
   "dsh.unknown_control": "unknown control command: {command}",

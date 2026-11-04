@@ -34,6 +34,7 @@ ss -tln | grep -E "7700|3080|3100|3131|4097"
 
 | 报错 | 原因 | 处理 |
 |---|---|---|
+| `cannot reach dsh at http://...: ECONNREFUSED / ETIMEDOUT`（`dsh.unreachable`） | dsh 没在监听、地址写错或网络不可达；驱动已按 1s/2s 重试 3 次仍失败 | 先确认 dsh 进程与 `DSH_BASE_URL`，看 errno 对不对；**不要**按“模型不存在”去改模型配置 |
 | `session/create 失败（session/conflict）：belongs to ...` | dsh 里已有同 id 会话但工作目录不同（比如改过 `ACB_CWD`） | 驱动会自动换新 id 重试，可忽略；要归组的话在控制台断开重置一次映射 |
 | `session.create accepts workspaceId or cwd, not both` | 旧版驱动的 bug（两个参数同时传） | 升级驱动后重启 |
 | `fetch failed`（发图时） | 平台（OneBot 实现的容器）去下载图片 URL 失败：`public_base` 填了平台访问不到的地址 | 按[文件中继配置](./config#文件中继发图发文件的关键)核对 `public_base`，用验证命令从容器里 curl 一次 |

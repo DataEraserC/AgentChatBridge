@@ -40,6 +40,7 @@
   "dsh.tool_call_end": "工具 {tool} 于 {at} 结束，用时 {elapsed} 毫秒：票 {ticket}{error}",
   "dsh.turn_failed": "这一轮失败了：{error}",
   "dsh.turn_start": "开轮 {ticket}：{room}，{count} 条，模型 {model}",
+  "dsh.unreachable": "无法连接 dsh：{url}，{errno}（{error}）",
   "dsh.turn_timeout_interrupt": "本轮超过 {seconds}s 没结束（{session}），主动打断 dsh 会话",
   "dsh.unknown_command": "不认识的指令 {command}",
   "dsh.unknown_control": "不认识的 control 指令：{command}",

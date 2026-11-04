@@ -486,6 +486,30 @@ dsh 跟 opencode 是**完全不同的接入方式**：opencode 走插件（进�
      node 版本都能跑（比全局 fetch/WebSocket 更健壮）。
    - **测试要用系统 node 跑**（`/etc/profiles/per-user/nixos/bin/node --test`）。
 
+### 连接失败重试与错误分类（2026-11-04）
+
+dsh 驱动对 **transport 层**失败做有界重试，最多 3 次尝试（首次 + 2 次重试），
+间隔 1s、2s；只重试 `ECONNREFUSED` / `ECONNRESET` / `ETIMEDOUT` / `EPIPE`。
+HTTP 4xx/5xx 和业务 RPC 错误不重试。
+
+只对可安全重放的方法开启重试：
+
+| 方法 | 可重放 | 理由 |
+|---|---|---|
+| `session/list` | 是 | 只读 |
+| `session/cancel` | 是 | 取消幂等 |
+| `session/selectModel` | 是 | 设置同一模型幂等 |
+| `workspace/rename` | 是 | 设置标题幂等 |
+| `session/prompt` | 否 | 重发会重复提问 |
+| `session/create` | 否 | 可能重复建会话 |
+
+错误分类：
+
+- transport 失败 → `DshError("unreachable")`，文案 `dsh.unreachable`，带目标 `url` 与
+  `ECONNREFUSED` / `ETIMEDOUT` 等 errno。
+- 只有 provider 明确返回 `session/model-unavailable` 才 → `dsh.model_unavailable`。
+- auth / protocol / rpc 错误原样上抛，不再统一包装成“模型不存在”。
+
 ### 模型有时用 XML 格式发调用，多参数会被吞（2026-10-31 实测）
 
 dsh 的模型适配器（trae / deepseek-v4.1-flash）有三种写法：标准 JSON 参数、XML 风格
