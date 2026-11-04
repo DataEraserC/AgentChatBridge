@@ -84,6 +84,29 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
     },
   },
   {
+    name: "access_request",
+    description: `申请一张一次性访问票据。群内不能直接越权时用它；申请本身不执行任何平台动作。
+申请会把「目标房间 + 你要做的具体 op」发给 system admin 的私信，由人在私信里批准或拒绝。
+批准后票据在有效期内可用一次；用后即废，下一轮不会自动带上。
+票据只放宽「能不能碰这个房间」的目标判定：不绕过连接的 allow_destructive，也不授予 plugin 全权。
+同一个会话对同一目标 + 同一组 op 的 pending/active 票据会复用，不会重复发审批消息。
+op 列表要具体：send_message，send_message_to，get_history，fetch_records，get_notes，set_note，del_note，
+get_platform_events，wait_message，或 platform_call:<method>（如 platform_call:group.kick）。`,
+    schema: {
+      type: "object",
+      properties: {
+        target: { type: "string", description: "目标房间，形如 qq:group/12345" },
+        ops: {
+          type: "array",
+          items: { type: "string" },
+          description: "要放行的具体 op，最多 8 个",
+        },
+      },
+      required: ["target", "ops"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "ack_messages",
     description: `确认这批记录处理完了，水位才会往前推。ids 就是投递记录前面的编号。
 本轮通过 get_history / fetch_records / get_platform_events 读到过的编号也可以确认（包括没投递的）。

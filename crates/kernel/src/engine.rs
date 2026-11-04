@@ -59,15 +59,16 @@ use crate::storage::{
     Cursor, FEEDBACK_CAP, Feedback, FeedbackReply, MIN_KEPT, Note, NoteKey, NoteKind, PrunePlan,
     RecordDraft, StorageError, Store, TopicStatus, unread,
 };
+use crate::tickets::{ACTIVE_TTL_MS, AccessTickets, TicketReply, TicketRequest};
 use crate::tools::{
-    AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT, DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs,
-    DescribePluginsArgs, EventsArgs, ExtensionsListArgs, ExtensionsReadArgs, ExtensionsReloadArgs,
-    ExtensionsWriteArgs, FeedbackArgs, FeedbackGetArgs, FeedbackListArgs, FeedbackReplyArgs,
-    FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs,
-    MemoryBlameArgs, MemoryCommitArgs, MemoryListArgs, MemoryLogArgs, MemorySearchArgs,
-    MemoryWriteArgs, NotesArgs, PlatformCallArgs, PlatformMethodsArgs, PluginToolCallArgs,
-    PluginToolScope, PluginToolsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs,
-    TaskGetArgs, TaskListArgs, WaitMessageArgs, is_known,
+    AccessRequestArgs, AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT, DEFAULT_WAIT_TIMEOUT_MS,
+    DelNoteArgs, DescribePluginsArgs, EventsArgs, ExtensionsListArgs, ExtensionsReadArgs,
+    ExtensionsReloadArgs, ExtensionsWriteArgs, FeedbackArgs, FeedbackGetArgs, FeedbackListArgs,
+    FeedbackReplyArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS,
+    MemoryAddArgs, MemoryArgs, MemoryBlameArgs, MemoryCommitArgs, MemoryListArgs, MemoryLogArgs,
+    MemorySearchArgs, MemoryWriteArgs, NotesArgs, PlatformCallArgs, PlatformMethodsArgs,
+    PluginToolCallArgs, PluginToolScope, PluginToolsArgs, RECORD_COLUMNS, SendArgs, SendToArgs,
+    SetNoteArgs, TaskGetArgs, TaskListArgs, WaitMessageArgs, is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -497,6 +498,8 @@ pub struct Bridge<S: Store> {
     active: HashMap<String, ActiveTurn>,
     /// 票 → 会话。票是开轮时签发的，收工作废。
     by_ticket: HashMap<Ticket, String>,
+    /// 一次性访问票据簿。只活在本进程；重启后 pending/active 全部失效。
+    access_tickets: AccessTickets,
     /// 刚收工的轮次。留 [`TURN_GRACE`]：补确认、写反馈还要用到票上的会话与房间。
     ended: HashMap<Ticket, EndedTurn>,
     ticket_seq: u64,
@@ -716,6 +719,7 @@ impl<S: Store> Bridge<S> {
             pending: VecDeque::new(),
             active: HashMap::new(),
             by_ticket: HashMap::new(),
+            access_tickets: AccessTickets::new(),
             ended: HashMap::new(),
             ticket_seq: 0,
             ticket_prefix: ticket_prefix(),
@@ -1968,6 +1972,16 @@ impl<S: Store> Bridge<S> {
         // 保证投递批次组装时用的配置和开轮后工具查询看到的一致。
         self.apply_staged_config();
         let room = draft.room.clone();
+        // 私信管理员的票据命令是 core 自带入口：不依赖订阅、不进 route、不叫醒 agent。
+        let command = command_text(&draft.elements);
+        let account = self.config.account_of_room(&room);
+        let from_self = !account.is_empty() && draft.sender.id == account;
+        if !from_self && !self.draining {
+            if let Some(result) = self.handle_access_command(&draft, &room, &command)? {
+                return Ok(result);
+            }
+        }
+
         let subscribers = Self::subscribers_of(&self.config, &room);
 
         if subscribers.is_empty() {
@@ -1977,17 +1991,14 @@ impl<S: Store> Bridge<S> {
         // 入站记录先给路由插件看：命令、链接、任务可以在入库前被代码接管。
         // 路由只看 Text 段，避免把「@机器人 + /stop」里的 @ 拼进命令。
         let text = flatten_text(&draft.elements);
-        let command = command_text(&draft.elements);
         let platform = self
             .config
             .connection(&room.connection)
             .map(|connection| connection.platform.clone())
             .unwrap_or_else(|| "unknown".to_owned());
-        let account = self.config.account_of_room(&room);
         let reply_to_self = self.quotes_own_message(&draft, &account)?;
         // 平台把自己说的话回传回来：可以记流水，但绝不能再触发路由命令/链接，
         // 否则 bot 自己发的 /send 会被再执行一次。
-        let from_self = !account.is_empty() && draft.sender.id == account;
         let mut draft = draft.with_reply_to_self(reply_to_self);
         let sessions: Vec<String> = subscribers
             .iter()
@@ -2398,6 +2409,86 @@ impl<S: Store> Bridge<S> {
                 woke,
             })
         }
+    }
+
+    /// 处理私信里的票据命令。匹配不到就返回 `None`，让正常入站流程继续。
+    ///
+    /// 命令本身入库（审计留痕），但不唤醒管理员会话：审批是 core 动作，不是对话。
+    fn handle_access_command(
+        &mut self,
+        draft: &RecordDraft,
+        room: &RoomId,
+        command: &str,
+    ) -> Result<Option<Ingest>, BridgeError> {
+        let mut parts = command.split_whitespace();
+        let Some(head) = parts.next() else {
+            return Ok(None);
+        };
+        let verb = head.split('@').next().unwrap_or("").to_ascii_lowercase();
+        if !matches!(verb.as_str(), "/approve" | "/deny" | "/revoke") {
+            return Ok(None);
+        }
+        // 只认私信里的 system admin；群聊、控制台和其他账号都不行。
+        let Some(admin) = self.config.grants.system_admin.as_ref() else {
+            return Ok(None);
+        };
+        if room.connection != admin.connection
+            || room.path.first().map(String::as_str) != Some("private")
+            || room.path.get(1).map(String::as_str) != Some(admin.account.as_str())
+            || draft.sender.id != admin.account
+        {
+            return Ok(None);
+        }
+
+        let record = self.store.append(draft.clone())?;
+        let approval_ref = format!("{}#{}", room, record.id);
+        let approver = format!("{}:{}", room.connection, draft.sender.id);
+        let now = now_millis();
+        let confirmation = match verb.as_str() {
+            "/approve" => match (parts.next(), parts.next()) {
+                (Some(id), Some(nonce)) => {
+                    match self
+                        .access_tickets
+                        .approve(id, nonce, &approval_ref, &approver, now)
+                    {
+                        Ok(reply) => format!(
+                            "票据 {} 已批准：{} 分钟内可用一次。",
+                            reply.id,
+                            ACTIVE_TTL_MS / 60_000
+                        ),
+                        Err(reason) => format!("授权命令失败：{reason}"),
+                    }
+                }
+                _ => "用法：/approve <ticket-id> <nonce>".to_owned(),
+            },
+            "/deny" => match (parts.next(), parts.next()) {
+                (Some(id), Some(nonce)) => {
+                    match self
+                        .access_tickets
+                        .deny(id, nonce, &approval_ref, &approver, now)
+                    {
+                        Ok(reply) => format!("票据 {} 已拒绝。", reply.id),
+                        Err(reason) => format!("授权命令失败：{reason}"),
+                    }
+                }
+                _ => "用法：/deny <ticket-id> <nonce>".to_owned(),
+            },
+            "/revoke" => match parts.next() {
+                Some(id) => match self.access_tickets.revoke(id, &approver, now) {
+                    Ok(reply) => format!("票据 {} 已撤销。", reply.id),
+                    Err(reason) => format!("撤销失败：{reason}"),
+                },
+                None => "用法：/revoke <ticket-id>".to_owned(),
+            },
+            _ => unreachable!("verb already matched"),
+        };
+        if let Err(error) = self.send_admin_text(room, &confirmation) {
+            eprintln!("[access-ticket] confirmation failed: {error}");
+        }
+        Ok(Some(Ingest::Handled {
+            stored: Some(record.id),
+            woke: Vec::new(),
+        }))
     }
 
     /// 执行一个路由动作。打断和状态清理在这里立即做；发送/任务只做准备，
@@ -3386,7 +3477,7 @@ impl<S: Store> Bridge<S> {
             "send_message" => {
                 let args: SendArgs = parse(args)?;
                 // 当前房间也要复检：不能假设「轮次开在这里」就等于 access 永远允许。
-                self.ensure_can_send(&turn_config, &turn_session, &room, &room)?;
+                self.ensure_can_send(&turn_config, &turn_session, &room, &room, "send_message")?;
                 self.deliver_out(
                     turn_config.clone(),
                     &turn_session,
@@ -3399,7 +3490,13 @@ impl<S: Store> Bridge<S> {
             "send_message_to" => {
                 let args: SendToArgs = parse(args)?;
                 let target = resolve_room(&args.to)?;
-                self.ensure_can_send(&turn_config, &turn_session, &target, &room)?;
+                self.ensure_can_send(
+                    &turn_config,
+                    &turn_session,
+                    &target,
+                    &room,
+                    "send_message_to",
+                )?;
                 self.deliver_out(
                     turn_config.clone(),
                     &turn_session,
@@ -3407,6 +3504,11 @@ impl<S: Store> Bridge<S> {
                     SendOrigin::Message,
                     args.elements.0,
                 )
+            }
+            // 申请一张一次性票据：只在当前房间申请，目标可以是未订阅房间。
+            "access_request" => {
+                let args: AccessRequestArgs = parse(args)?;
+                self.request_access_ticket(ticket, &ctx, args)
             }
             "ack_messages" => {
                 let args: AckArgs = parse(args)?;
@@ -3735,7 +3837,13 @@ impl<S: Store> Bridge<S> {
             "send_message" => {
                 let args: SendArgs = parse(args)?;
                 let ctx = self.turn_ctx(ticket, tool)?;
-                self.ensure_can_send(&ctx.config, &ctx.session, &ctx.room, &ctx.room)?;
+                self.ensure_can_send(
+                    &ctx.config,
+                    &ctx.session,
+                    &ctx.room,
+                    &ctx.room,
+                    "send_message",
+                )?;
                 let prepared = self.prepare_send(
                     ctx.config.clone(),
                     &ctx.session,
@@ -3749,7 +3857,13 @@ impl<S: Store> Bridge<S> {
                 let args: SendToArgs = parse(args)?;
                 let target = resolve_room(&args.to)?;
                 let ctx = self.turn_ctx(ticket, tool)?;
-                self.ensure_can_send(&ctx.config, &ctx.session, &target, &ctx.room)?;
+                self.ensure_can_send(
+                    &ctx.config,
+                    &ctx.session,
+                    &target,
+                    &ctx.room,
+                    "send_message_to",
+                )?;
                 let prepared = self.prepare_send(
                     ctx.config.clone(),
                     &ctx.session,
@@ -3783,7 +3897,7 @@ impl<S: Store> Bridge<S> {
                     ));
                 }
                 let sessions = std::slice::from_ref(&ctx.session);
-                self.ensure_readable(&ctx.config, sessions, &room, &ctx.room)?;
+                self.ensure_readable(&ctx.config, sessions, &room, &ctx.room, "wait_message")?;
 
                 let cursor = Cursor::new(ctx.session.clone(), room.clone());
                 let watermark = self.store.watermark(&cursor).map_err(internal)?;
@@ -3870,7 +3984,8 @@ impl<S: Store> Bridge<S> {
                 } else {
                     AccessAction::Send
                 };
-                self.ensure_room_access(&ctx.config, sessions, action, &room, &ctx.room)?;
+                let op = format!("platform_call:{}", spec.name);
+                self.ensure_room_access(&ctx.config, sessions, action, &room, &ctx.room, &op)?;
             }
             Scope::Connection => {
                 self.ensure_connection_readable(&ctx.config, sessions, &room.connection, &ctx.room)?
@@ -4372,10 +4487,179 @@ impl<S: Store> Bridge<S> {
             .collect()
     }
 
+    /// 群内向 system admin 申请一张一次性票据。申请本身不执行任何平台动作。
+    fn request_access_ticket(
+        &mut self,
+        ticket: &Ticket,
+        ctx: &TurnCtx,
+        args: AccessRequestArgs,
+    ) -> Result<Value, ToolError> {
+        let target = resolve_room(&args.target)?;
+        if ctx.config.connection(&target.connection).is_none() {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                format!("[access_request] unknown connection {}", target.connection),
+            ));
+        }
+        let place = GrantsConfig::place_of(&ctx.room, ctx.origin_sender.is_some());
+        let principal = ctx.config.grants.subject_for(
+            &ctx.room.connection,
+            ctx.origin_sender.as_deref(),
+            place,
+        );
+        if principal == GrantSubject::System {
+            return Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                "[access_request] a turn without a human sender cannot request a ticket",
+            ));
+        }
+        let ops = crate::tickets::normalize_ops(&args.ops).map_err(|reason| {
+            ToolError::new(ErrorCode::BadRequest, format!("[access_request] {reason}"))
+        })?;
+        let capabilities = self.ticket_capabilities(&target, &ops)?;
+        let Some(admin) = ctx.config.grants.system_admin.as_ref() else {
+            return Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                "[access_request] no [grants.system_admin] configured; nobody can approve",
+            ));
+        };
+        let admin_room = RoomId::new(
+            admin.connection.clone(),
+            format!("private/{}", admin.account),
+        )
+        .map_err(|error| {
+            ToolError::new(
+                ErrorCode::Internal,
+                format!("[access_request] bad system admin room: {error}"),
+            )
+        })?;
+
+        let reply = self
+            .access_tickets
+            .request(TicketRequest {
+                principal,
+                place,
+                session: ctx.session.clone(),
+                target: target.clone(),
+                ops: ops.clone(),
+                capabilities: capabilities.clone(),
+                request_turn: ticket.as_str().to_owned(),
+                now: now_millis(),
+            })
+            .map_err(|reason| {
+                ToolError::new(ErrorCode::BadRequest, format!("[access_request] {reason}"))
+            })?;
+
+        if reply.duplicate {
+            return Ok(json!({
+                "ok": true,
+                "ticket": reply.id,
+                "state": reply.state.as_str(),
+                "duplicate": true,
+                "expires_at": reply.expires_at,
+                "note": "an identical ticket already exists; no new approval message was sent",
+            }));
+        }
+
+        let text = approval_text(ctx, ticket, &reply, &target, &ops, &capabilities);
+        if let Err(error) = self.send_admin_text(&admin_room, &text) {
+            let _ = self.access_tickets.revoke(&reply.id, "core", now_millis());
+            return Err(ToolError::new(
+                ErrorCode::Internal,
+                format!("[access_request] cannot deliver approval message: {error}"),
+            ));
+        }
+
+        Ok(json!({
+            "ok": true,
+            "ticket": reply.id,
+            "state": reply.state.as_str(),
+            "duplicate": false,
+            "target": target.to_string(),
+            "ops": ops,
+            "capabilities": capabilities.iter().map(|capability| capability.as_str()).collect::<Vec<_>>(),
+            "expires_at": reply.expires_at,
+            "approval_sent": true,
+            "note": "wait for the system admin to approve in private, then retry the target operation",
+        }))
+    }
+
+    /// 从 op 列表推导票据能力集。平台方法必须能在目标连接的目录里查到。
+    fn ticket_capabilities(
+        &self,
+        target: &RoomId,
+        ops: &[String],
+    ) -> Result<BTreeSet<GrantCapability>, ToolError> {
+        let mut capabilities = BTreeSet::new();
+        for op in ops {
+            match op.as_str() {
+                "send_message" | "send_message_to" => {
+                    capabilities.insert(GrantCapability::RoomWrite);
+                }
+                "get_history"
+                | "fetch_records"
+                | "get_notes"
+                | "set_note"
+                | "del_note"
+                | "get_platform_events"
+                | "wait_message" => {
+                    capabilities.insert(GrantCapability::RoomRead);
+                }
+                other if other.starts_with("platform_call:") => {
+                    let method = &other["platform_call:".len()..];
+                    let methods = self.outbound.catalog(&target.connection);
+                    let Some(spec) = methods.iter().find(|spec| spec.name.as_ref() == method)
+                    else {
+                        return Err(ToolError::new(
+                            ErrorCode::BadRequest,
+                            format!(
+                                "[access_request] unknown platform method {method} on connection {}",
+                                target.connection
+                            ),
+                        ));
+                    };
+                    capabilities.insert(GrantCapability::Platform);
+                    if spec.risk == Risk::Destructive {
+                        capabilities.insert(GrantCapability::Destructive);
+                    }
+                    // platform_call 之前先过房间访问检查，所以票据还必须带上
+                    // 这次平台动作对应的房间读/写能力。
+                    if spec.effect == Effect::Read {
+                        capabilities.insert(GrantCapability::RoomRead);
+                    } else {
+                        capabilities.insert(GrantCapability::RoomWrite);
+                    }
+                }
+                other => {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        format!(
+                            "[access_request] unsupported op {other}; \
+                             use send_message_to, get_history, platform_call:<method>, ..."
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(capabilities)
+    }
+
+    fn send_admin_text(&self, room: &RoomId, text: &str) -> Result<(), String> {
+        let outbound = self
+            .outbound
+            .handle_for(&room.connection)
+            .ok_or_else(|| format!("no outbound connection {}", room.connection))?;
+        outbound
+            .send(room, &[Element::text(text)])
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     /// 用会话自己的访问策略判定一次访问。
     ///
     /// provider 只回答允许/拒绝；拒绝的形状（错误码、文案）由 core 统一组织。
     /// `sessions` 取并集：任何一个会话被允许就算通过（工具面目前只传当前会话一个）。
+    #[allow(clippy::too_many_arguments)]
     fn check_access(
         &mut self,
         config: &Config,
@@ -4384,6 +4668,7 @@ impl<S: Store> Bridge<S> {
         room: Option<&RoomId>,
         connection: &str,
         origin: Option<&RoomId>,
+        op: Option<&str>,
     ) -> Result<(), ToolError> {
         let mut denied = Vec::new();
         for id in sessions {
@@ -4409,7 +4694,7 @@ impl<S: Store> Bridge<S> {
                 None => GrantTarget::Connection(connection),
             };
 
-            let (allowed, basis) = if built_in {
+            let (mut allowed, mut basis, decision) = if built_in {
                 let query = grants::GrantQuery {
                     subject,
                     place,
@@ -4418,10 +4703,7 @@ impl<S: Store> Bridge<S> {
                     subscriptions: &subscriptions,
                 };
                 let decision = grants::evaluate_access(&config.grants, &query);
-                if decision.should_audit() {
-                    self.audit_grant(id, subject, place, capability, target, &decision);
-                }
-                (decision.allow, decision.basis)
+                (decision.allow, decision.basis.clone(), Some(decision))
             } else {
                 let provider = match self
                     .plugins
@@ -4496,8 +4778,35 @@ impl<S: Store> Bridge<S> {
                 } else {
                     provider.check(&session.access, &request) == AccessDecision::Allow
                 };
-                (allowed, "external".to_owned())
+                (allowed, "external".to_owned(), None)
             };
+
+            // 票据只放宽房间目标；连接级请求没有票据。命中即消费（用后即废）。
+            let mut ticket_used = false;
+            if !allowed
+                && let (Some(target_room), Some(op)) = (room, op)
+                && matches!(action, AccessAction::Read | AccessAction::Send)
+                && let Some(ticket_id) =
+                    self.access_tickets
+                        .authorize(id, target_room, capability, op, now_millis())
+            {
+                allowed = true;
+                basis = format!("ticket:{ticket_id}");
+                ticket_used = true;
+            }
+
+            if let Some(decision) = &decision {
+                if decision.should_audit() && !ticket_used {
+                    self.audit_grant(id, subject, place, capability, target, decision);
+                }
+            } else if !allowed {
+                let denial = GrantDecision {
+                    allow: false,
+                    basis: basis.clone(),
+                    reason: "external access provider denied".to_owned(),
+                };
+                self.audit_grant(id, subject, place, capability, target, &denial);
+            }
 
             if allowed {
                 return Ok(());
@@ -4590,6 +4899,7 @@ impl<S: Store> Bridge<S> {
         action: AccessAction,
         room: &RoomId,
         origin: &RoomId,
+        op: &str,
     ) -> Result<(), ToolError> {
         self.check_access(
             config,
@@ -4598,6 +4908,7 @@ impl<S: Store> Bridge<S> {
             Some(room),
             &room.connection,
             Some(origin),
+            Some(op),
         )
     }
 
@@ -4608,8 +4919,9 @@ impl<S: Store> Bridge<S> {
         sessions: &[String],
         room: &RoomId,
         origin: &RoomId,
+        op: &str,
     ) -> Result<(), ToolError> {
-        self.ensure_room_access(config, sessions, AccessAction::Read, room, origin)
+        self.ensure_room_access(config, sessions, AccessAction::Read, room, origin, op)
     }
 
     /// 当前会话能不能往这个房间发。`send_message_to` 的边界。
@@ -4619,9 +4931,10 @@ impl<S: Store> Bridge<S> {
         session: &str,
         room: &RoomId,
         origin: &RoomId,
+        op: &str,
     ) -> Result<(), ToolError> {
         let sessions = [session.to_owned()];
-        self.ensure_room_access(config, &sessions, AccessAction::Send, room, origin)
+        self.ensure_room_access(config, &sessions, AccessAction::Send, room, origin, op)
     }
 
     /// 连接级权限：访问策略决定这条连接上有没有可用的房间。
@@ -4642,6 +4955,7 @@ impl<S: Store> Bridge<S> {
             None,
             connection,
             Some(origin),
+            None,
         )
     }
 
@@ -4657,7 +4971,7 @@ impl<S: Store> Bridge<S> {
         match scope {
             PluginToolScope::Room { room } => {
                 let target = resolve_room(&room)?;
-                self.ensure_can_send(config, session, &target, origin)
+                self.ensure_can_send(config, session, &target, origin, "plugin_tool_call")
             }
             PluginToolScope::Connection { connection } => {
                 if !config
@@ -5699,7 +6013,7 @@ impl<S: Store> Bridge<S> {
         args: HistoryArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room, turn_room)?;
+        self.ensure_readable(config, sessions, &room, turn_room, "get_history")?;
 
         let columns = column_set(args.columns.as_deref())?;
 
@@ -5770,7 +6084,7 @@ impl<S: Store> Bridge<S> {
         args: FetchRecordsArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room, turn_room)?;
+        self.ensure_readable(config, sessions, &room, turn_room, "fetch_records")?;
 
         if args.ids.is_empty() {
             return Err(ToolError::new(
@@ -5855,7 +6169,7 @@ impl<S: Store> Bridge<S> {
         args: NotesArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room, turn_room)?;
+        self.ensure_readable(config, sessions, &room, turn_room, "get_notes")?;
 
         let kind = match args.kind.as_deref() {
             Some(text) => Some(parse_note_kind(text)?),
@@ -5884,7 +6198,7 @@ impl<S: Store> Bridge<S> {
         args: SetNoteArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room, turn_room)?;
+        self.ensure_readable(config, sessions, &room, turn_room, "set_note")?;
 
         let kind = match args.kind.as_deref() {
             Some(text) => parse_note_kind(text)?,
@@ -5935,7 +6249,7 @@ impl<S: Store> Bridge<S> {
         args: DelNoteArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room, turn_room)?;
+        self.ensure_readable(config, sessions, &room, turn_room, "del_note")?;
 
         let kind = match args.kind.as_deref() {
             Some(text) => parse_note_kind(text)?,
@@ -5955,7 +6269,7 @@ impl<S: Store> Bridge<S> {
         args: EventsArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room, turn_room)?;
+        self.ensure_readable(config, sessions, &room, turn_room, "get_platform_events")?;
 
         let limit = args.limit.unwrap_or(DEFAULT_HISTORY).min(MAX_PAGE_LIMIT);
         let offset = args.offset.unwrap_or(0);
@@ -7083,6 +7397,46 @@ fn resolve_room(text: &str) -> Result<RoomId, ToolError> {
             acb_i18n::t!("kernel.engine.resolve_room", room = text, error = error),
         )
     })
+}
+
+/// 发给 system admin 的审批消息。只渲染 core 归一化后的目标/op/能力，
+/// 不渲染 agent 的自由文本。
+fn approval_text(
+    ctx: &TurnCtx,
+    ticket: &Ticket,
+    reply: &TicketReply,
+    target: &RoomId,
+    ops: &[String],
+    capabilities: &BTreeSet<GrantCapability>,
+) -> String {
+    let place = GrantsConfig::place_of(&ctx.room, ctx.origin_sender.is_some());
+    let principal =
+        ctx.config
+            .grants
+            .subject_for(&ctx.room.connection, ctx.origin_sender.as_deref(), place);
+    let capabilities = capabilities
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "[ACB 授权申请]\nticket={}\nnonce={}\n目标：{}\n动作：{}\n能力：{}\n申请：session={} principal={} place={} turn={}\n有效期：{} 分钟\n批准：/approve {} {}\n拒绝：/deny {} {}\n撤销：/revoke {}",
+        reply.id,
+        reply.nonce,
+        target,
+        ops.join(", "),
+        capabilities,
+        ctx.session,
+        principal.as_str(),
+        place.as_str(),
+        ticket.as_str(),
+        crate::tickets::PENDING_TTL_MS / 60_000,
+        reply.id,
+        reply.nonce,
+        reply.id,
+        reply.nonce,
+        reply.id,
+    )
 }
 
 /// 校验/归一列名，返回按文档顺序排好的列名列表。

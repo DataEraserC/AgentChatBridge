@@ -247,39 +247,77 @@ capability = ["room_read", "room_write", "connection_read", "platform", "destruc
 - `destructive` 能力仍受 `allow_destructive` 叠加限制。
 - 群内没有常态授予行；`place=group` 的 bot/system admin 自动落回普通 room access。
 
-### 6.2 一次性票据
+### 6.2 一次性票据（已实现）
 
 ```text
-Ticket {
-  id,
-  turn_id,          // 绑定申请/使用的那一轮
-  target_room,      // 单目标房间
-  ops: [op_id],     // 具体 op 列表，不是"房间全权限"
+AccessTicket {
+  id,                // tk-<random>-<seq>
+  nonce,             // 仅 pending_approval 阶段有效，任何迁移后清空
+  principal,         // 申请时的 subject（user / bot_admin / ...）
+  place,             // 申请时的场所（private / group / ...）
+  session,           // 票据只属于这个会话
+  target_room,       // 单目标房间，不覆盖连接或全局
+  ops: [op_id],      // 具体 op，例如 send_message_to / platform_call:group.kick
+  capabilities,      // 由 ops 推导：room_read / room_write / platform / destructive
+  created_at,
   expires_at,
-  used: bool,
-  revoked: bool,
+  state,             // pending_approval / active / used / expired / revoked / denied
+  request_turn,      // 申请轮次，只用于审计溯源，不是使用范围
+  approval_ref,      // 批准/拒绝命令的记录标识：<room>#<record-id>
 }
 ```
 
-- **绑定本轮**：票据只在申请它的那一轮有效；出轮即废。
-- **单目标房间**：一张票据只覆盖一个目标房间，不覆盖整个连接、不覆盖全局。
-- **具体 op 列表**：只允许列表内的 op；不是"这个房间能做的所有事"。
-- **过期时间**：默认短 TTL（草案 300 秒），到点即废。
-- **用后即废**：一次成功执行后票据失效；多步操作需要重新申请，或拆成多张票据。
-- **可人工撤销**：私信或控制台可撤销未使用的票据。
-- **不跨轮继承**：下一轮不会自动带上上一轮的票据。
+- **票据是会话级，不是轮次级**：批准需要人等，若把票据钉死在申请轮，
+  审批回来时轮次往往已经结束。`request_turn` 只用于审计；票据有效期内由同一会话使用。
+- **单目标房间**：一张票据只覆盖一个房间；连接级访问（好友列表等）不走票据。
+- **具体 op 列表**：只放行列出的 op；`platform_call` 必须写成 `platform_call:<method>`。
+- **用后即废**：命中一次 `ensure_room_access` 就置 `used`。即使随后被
+  `allow_destructive` 拒绝，也不退回票据（fail closed）。
+- **过期**：pending 10 分钟；批准后 active 5 分钟。到点即 `expired`。
+- **可撤销**：私信管理员可以 `/revoke <id>`，立刻置 `revoked`。
+- **只放宽房间目标**：票据不绕过 `allow_destructive`，不授予 `plugin` 全权，
+  也不改变连接级或订阅边界之外的其它闸门。
+- **内存存储**：票据只活在本进程。重启后 pending/active 全部失效，不落库、
+  不重新发审批消息——过期授权不能因为重启复活。
 
-**粒度取舍**：按 op 列表 + 单目标房间是最小可用粒度，滥用时影响面被限制在"一个房间、一组明确 op、一次使用"。代价是审批可能变多；不建议放宽成"按房间全权限"或"全局票据"，那会让一次误批准等于长期授权。
+**限制与去重**：
 
-### 6.3 申请与审批
+- 单轮最多 3 张票据，单会话同时最多 5 张 pending/active。
+- 单张票据最多 8 个 op，每个 op 最长 64 字符。
+- 同一会话 + 同一目标 + 同一组 op 的 pending/active 票据直接复用，不重复发审批消息。
+- 内存里最多保留 200 张票据；live 票据永远保留，终态按创建时间淘汰。
 
-1. 群里 agent 只能提出申请：说明动作、目标房间、op 列表、期望 TTL。申请本身不执行任何平台动作。
-2. core 把申请送到 **system admin 的私信**；审批必须在私信里完成，群聊消息不能批准。
-3. 批准后生成票据：绑定申请轮次 + 目标房间 + op 列表 + TTL。
-4. 群里 agent 在同一轮内使用票据；用后即废。
-5. 审计四条记录：申请、批准、使用、超时/撤销。
+### 6.3 申请与审批（命令实现）
 
-未来工具名（草案，不实现）：`access.request`、`access.approve`、`access.revoke`。它们不是新的权限入口，只是票据生命周期操作。
+1. 群里 agent 调用 `access_request`，只给 `target`（单房间）和 `ops`（具体操作）。
+   申请本身不执行任何平台动作；core 从 ops 推导能力集并生成票据。
+2. core 把审批消息发到 **system admin 的私信**：
+
+```text
+[ACB 授权申请]
+ticket=tk-...
+nonce=...
+目标：qq:group/123
+动作：send_message_to
+能力：room_write
+申请：session=main principal=user place=group turn=...
+有效期：10 分钟
+批准：/approve <id> <nonce>
+拒绝：/deny <id> <nonce>
+撤销：/revoke <id>
+```
+
+3. 只有 `[grants.system_admin]` 配置的账号在 **private** 场所发命令才生效：
+   - `/approve <id> <nonce>` → `active`
+   - `/deny <id> <nonce>` → `denied`
+   - `/revoke <id>` → `revoked`
+4. **防重放**：`nonce` 与票据一起生成，只在 pending 阶段保留；批准/拒绝/撤销后立刻清空。
+   同一张票据的批准命令不能重放。nonce 防的是误重放，身份仍由私信账号认证保证。
+5. 审批命令本身入库留痕，但不唤醒管理员会话：审批是 core 动作，不是对话。
+6. 群聊里的同名账号、群消息、控制台当前都不能审批；控制台操作员身份留待后续。
+
+**审计事件**：`request` / `approve` / `deny` / `use` / `expire` / `revoke`，每条都带
+ticket id、state、principal、place、capability、target、ops、session、turn、approval_ref。
 
 ---
 
@@ -350,7 +388,7 @@ Ticket {
 ## 10. 风险与未知
 
 1. **旧策略已移除**：`all_rooms` / `privileged_origins` / `elevated_in_rooms` 从 schema 删除，旧配置在启动期直接失败；无主体轮次因此不存在"继承旧豁免"的问题。
-2. **票据与轮次生命周期**：如果审批耗时超过本轮，票据随轮次作废；需要明确"申请后是否保持本轮等待"。当前设计是保持本轮等待、超时即失败。
+2. **票据与轮次生命周期**：票据改为会话级而不是绑定申请轮——审批需要人等，绑定轮次会让批准回来时票据已死。代价是批准后同一会话的有效期内还能用一次；用 5 分钟 TTL + 单目标 + 单次使用限制影响面。
 3. **多 op 票据**：一次使用即废，意味着多步操作要多次申请；这是安全取舍，不是遗漏。
 4. **外部 evaluator**：第三方 RBAC 必须自行实现 place/subject 规则；core 只能在接口层要求，无法证明其内部正确。
 5. **系统管理员配置**：只有一条，避免多个全局管理员扩大攻击面；如果未来需要多人，必须新增显式审批设计。
@@ -358,14 +396,14 @@ Ticket {
 
 ---
 
-## 11. 阶段二实施拆分（待批准，不在本次实现）
+## 11. 阶段二实施进度
 
-1. **配置 + subject/place**：`[grants]` 解析、轮次快照、启动告警。
-2. **唯一 evaluator**：core 内置四元组实现；外部实现整体替换；无 provider fail closed。
-3. **接口扩展**：`AccessRequest` / `ToolAccessContext` 增加 subject/place；旧 provider 直接移除，不做 subject=none 的兼容。
-4. **票据**：申请/批准/使用/过期/撤销，绑定 turn + target + ops + TTL。
-5. **审计**：system admin 逐次、票据四事件、destructive 拒绝。
-6. **测试**：三档 × 四场所矩阵、无主体轮次、票据生命周期、群内零常驻、destructive 叠加、fail closed。
+1. **配置 + subject/place**：已完成。`[grants]` 解析、轮次快照、启动告警。
+2. **唯一 evaluator**：已完成。core 内置四元组实现；外部实现整体替换；无 provider fail closed。
+3. **接口扩展**：已完成。`AccessRequest` / `ToolAccessContext` 带 subject/place；旧 provider 直接移除。
+4. **票据**：已完成。`access_request` 工具、私信 `/approve` `/deny` `/revoke`、状态机、TTL、去重、内存存储。
+5. **审计**：已完成。system admin 逐次、deny、票据六事件、destructive 拒绝。
+6. **测试**：已完成。场所/主体矩阵、无主体轮次、票据生命周期、单次使用、群内零常驻、fail closed。
 
 ---
 
