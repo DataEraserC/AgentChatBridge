@@ -468,9 +468,12 @@ class TurnDriver {
   }
 
   /**
-   * `session.wait` 只表示「这一轮结束了」，模型/网关失败（429 额度、鉴权、模型不可用等）
-   * 也会正常 resolve。这里再查一次会话状态，把失败按轮次失败报给桥，避免桥把
-   * 「没有回复」当成成功（之前的 429 就是这样被吞掉的）。
+   * `session.wait` 只表示「这一轮结束了」，模型/网关失败也会正常 resolve。
+   * 这里再查一次会话状态，把失败按轮次失败报给桥，避免桥把「没有回复」当成成功。
+   *
+   * v2 的 `setup(ctx)` 只暴露 `tool` / `session` / `storage` / `app`，没有
+   * `session.error` 订阅入口；插件拿不到上游 body。提示只陈述失败结果并指向
+   * opencode server 日志，不猜测额度、鉴权或模型不可用。
    */
   async #assertTurnSucceeded(sessionID) {
     let session

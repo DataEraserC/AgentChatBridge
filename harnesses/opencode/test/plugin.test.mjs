@@ -267,7 +267,7 @@ test("会话记录的目录不存在就直接新建，不浪费一次失败", as
   assert.equal(host.prompts.at(-1).sessionID, host.created[1].id)
 })
 
-test("模型/网关失败（如 429）要作为轮次失败上报，不能当成功", async (t) => {
+test("模型/网关失败（如 429）要作为轮次失败上报，并给出中性原因", async (t) => {
   const { bridge, host } = await boot(t)
 
   await openTurn(bridge, host)
@@ -279,7 +279,18 @@ test("模型/网关失败（如 429）要作为轮次失败上报，不能当成
   assert.equal(frame.frame, "turn_end")
   assert.equal(frame.ticket, TICKET)
   assert.ok(frame.error, "失败必须带 error，桥才能走失败通知")
-  assert.match(frame.error, /failed|429|quota|outcome/i)
+  assert.match(frame.error, /outcome "failed"/i)
+  assert.match(frame.error, /opencode server (log|日志)/i)
+  assert.doesNotMatch(
+    frame.error,
+    /quota|auth|unavailable model|额度 429|鉴权|模型不可用/i,
+    "提示不能列举常见原因，也不能让分类器把枚举当成证据",
+  )
+  assert.equal(
+    frame.failure,
+    undefined,
+    "去掉枚举后不应再误判为 rate_limited / 其它结构化类别",
+  )
 })
 
 test("工具调用转发给桥，结果原样交回模型", async (t) => {
