@@ -78,6 +78,8 @@ pub struct Config {
     pub storage: StorageConfig,
     /// 流水保留：旧记录什么时候可以删。
     pub retention: RetentionConfig,
+    /// 入站/路由动作队列容量。两个队列默认都有界；0 在解析期拒绝。
+    pub queues: QueueConfig,
     /// 记忆 worktree 的根目录。每个「会话 × 记忆」checkout 到这下面。
     pub worktrees_root: String,
     /// 会话**没配自己的 `on_turn_error`** 时的默认失败通知动作列表。
@@ -347,6 +349,27 @@ pub struct PluginConfig {
     pub timeout_ms: Option<u64>,
     /// 给人和 LKG 看的版本标签。不参与加载校验；未写时 LKG 记 `"unknown"`。
     pub version: Option<String>,
+}
+
+/// 入站队列默认容量。
+pub const DEFAULT_INBOUND_QUEUE: usize = 4096;
+/// 路由动作队列默认容量。
+pub const DEFAULT_ROUTE_QUEUE: usize = 1024;
+
+/// 队列容量配置。`[queues]` 省略时用默认值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueConfig {
+    pub inbound: usize,
+    pub route: usize,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            inbound: DEFAULT_INBOUND_QUEUE,
+            route: DEFAULT_ROUTE_QUEUE,
+        }
+    }
 }
 
 /// 外置进程工具插件的默认单次调用超时（毫秒）。
@@ -1007,6 +1030,8 @@ pub enum ConfigError {
     EmptyToolPluginCommand { id: String },
     #[error("{}", acb_i18n::t!("kernel.config.bad_tool_plugin_timeout", id = id, timeout_ms = timeout_ms))]
     BadToolPluginTimeout { id: String, timeout_ms: u64 },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_queue_limit", field = field, value = value))]
+    BadQueueLimit { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_receive_provider", connection = connection, provider = provider, detail = detail))]
     BadReceiveProvider {
         connection: String,
@@ -1134,6 +1159,15 @@ impl Config {
                 max_age_days: raw.max_age_days.unwrap_or(DEFAULT_MAX_AGE_DAYS),
             },
             None => RetentionConfig::default(),
+        };
+
+        let queues = match raw.queues {
+            Some(raw) => {
+                let inbound = queue_limit("inbound", raw.inbound, DEFAULT_INBOUND_QUEUE)?;
+                let route = queue_limit("route", raw.route, DEFAULT_ROUTE_QUEUE)?;
+                QueueConfig { inbound, route }
+            }
+            None => QueueConfig::default(),
         };
 
         let worktrees_root = match raw.worktrees_root {
@@ -1537,6 +1571,7 @@ impl Config {
             tool_plugins,
             storage,
             retention,
+            queues,
             worktrees_root,
             default_on_turn_error,
             delivery_limit: raw.delivery_limit.unwrap_or(DEFAULT_DELIVERY_LIMIT),
@@ -2105,6 +2140,23 @@ fn check_not_blank(value: &str, field: &'static str) -> Result<(), &'static str>
     Ok(())
 }
 
+/// 队列容量：省略用默认值，0 拒绝。
+fn queue_limit(field: &str, value: Option<u64>, default: usize) -> Result<usize, ConfigError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    if value == 0 {
+        return Err(ConfigError::BadQueueLimit {
+            field: field.to_owned(),
+            value,
+        });
+    }
+    usize::try_from(value).map_err(|_| ConfigError::BadQueueLimit {
+        field: field.to_owned(),
+        value,
+    })
+}
+
 /// 把 TOML 里的失败通知动作字符串列表解析成 [`TurnErrorAction`]。
 ///
 /// 每条是 `log` 或 `send:<连接>:<段/段>`（房间写法同订阅，如 `send:qq:group/123`）。
@@ -2170,6 +2222,7 @@ struct RawConfig {
     tool_plugins: Vec<RawToolPlugin>,
     storage: Option<RawStorage>,
     retention: Option<RawRetention>,
+    queues: Option<RawQueue>,
     worktrees_root: Option<String>,
     /// 会话没配 `on_turn_error` 时的默认动作列表（默认空 = 只记日志）。
     #[serde(default)]
@@ -2296,6 +2349,14 @@ struct RawPlugin {
     timeout_ms: Option<u64>,
     #[serde(default)]
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawQueue {
+    #[serde(default)]
+    inbound: Option<u64>,
+    #[serde(default)]
+    route: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2831,6 +2892,32 @@ mod tests {
         );
         let config = Config::parse(&config_with(&text, ONE_SESSION)).expect("config 层不拦");
         assert_eq!(config.connections[0].transport, Transport::WsServer);
+    }
+
+    #[test]
+    fn queues_default_and_reject_zero() {
+        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        assert_eq!(config.queues.inbound, DEFAULT_INBOUND_QUEUE);
+        assert_eq!(config.queues.route, DEFAULT_ROUTE_QUEUE);
+
+        let text = format!(
+            "{}\n[queues]\ninbound = 64\nroute = 16\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&text).expect("能解析");
+        assert_eq!(config.queues.inbound, 64);
+        assert_eq!(config.queues.route, 16);
+
+        for field in ["inbound", "route"] {
+            let text = format!(
+                "{}\n[queues]\n{field} = 0\n",
+                config_with(ONE_CONNECTION, ONE_SESSION)
+            );
+            assert!(matches!(
+                Config::parse(&text),
+                Err(ConfigError::BadQueueLimit { .. })
+            ));
+        }
     }
 
     #[test]

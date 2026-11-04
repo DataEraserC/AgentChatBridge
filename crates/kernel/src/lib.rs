@@ -32,13 +32,15 @@ pub use config::{
     AccessPolicy, ClockPolicy, Config, Connection, ConsoleConfig, DEFAULT_MAX_AGE_DAYS,
     DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH, DEFAULT_WORKTREES_ROOT, DeliveryPolicy,
     EndpointConfig, Harness, KNOWN_MEMORY_KINDS, Memory, OutboundPolicy, Persona, PluginConfig,
-    ReceivePolicy, RetentionConfig, RoutePolicy, Session, StorageConfig, Subscription,
+    QueueConfig, ReceivePolicy, RetentionConfig, RoutePolicy, Session, StorageConfig, Subscription,
     ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision,
     WakeInput, WakePolicy, WakeVerdict,
 };
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
 pub use engine::{Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned, TaskRecord, TaskStatus};
-pub use event_queue::{EventQueue, EventReceiver, drain_events};
+pub use event_queue::{
+    EventQueue, EventReceiver, QueueSnapshot, QueueStats, SubmitError, drain_events,
+};
 pub use lkg::{LkgEntry, LkgInfo, LkgState, PluginLkg};
 pub use outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, Outbounds, OutgoingKind,

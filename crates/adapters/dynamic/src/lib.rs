@@ -2229,12 +2229,13 @@ unsafe extern "C" fn submit_event(ctx: *mut c_void, message_json: *const c_char)
             .into_owned();
         match decode_line::<AdapterMessage>(&text) {
             Ok(AdapterMessage::Event { record }) => {
-                if !context.events.submit(record.into()) {
+                if let Err(error) = context.events.submit(record.into()) {
                     eprintln!(
                         "{}",
                         acb_i18n::t!(
-                            "adapter.dynamic.inbound_queue_closed",
-                            connection = context.connection
+                            "adapter.dynamic.inbound_queue_rejected",
+                            connection = context.connection,
+                            reason = error
                         )
                     );
                 }

@@ -14,9 +14,36 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use acb_kernel::{Bridge, ControlRegistry, Store};
+use acb_kernel::{Bridge, ControlRegistry, QueueStats, RouteWorker, Store};
 use acb_proto::Frame;
 use serde_json::json;
+
+/// `/api/status` 的队列视图。入站与路由共用同一套字段，路由额外带 busy。
+fn queue_status(
+    inbound: &acb_kernel::QueueSnapshot,
+    route: &acb_kernel::QueueSnapshot,
+    busy: usize,
+) -> serde_json::Value {
+    json!({
+        "inbound": {
+            "depth": inbound.depth,
+            "capacity": inbound.capacity,
+            "highWatermark": inbound.high_watermark,
+            "warnPercent": inbound.warn_percent,
+            "rejected": inbound.rejected,
+            "warned": inbound.warned,
+        },
+        "route": {
+            "depth": route.depth,
+            "capacity": route.capacity,
+            "busy": busy,
+            "highWatermark": route.high_watermark,
+            "warnPercent": route.warn_percent,
+            "rejected": route.rejected,
+            "warned": route.warned,
+        },
+    })
+}
 
 /// 管理页。单文件、零外部依赖：改页面就是改这个 HTML，编译时嵌进二进制。
 const CONSOLE_HTML: &str = include_str!("console.html");
@@ -41,6 +68,10 @@ pub struct Console<S: Store> {
     token: String,
     /// 配置文件路径：编辑写回要落到这个文件（ADR-0009）。
     config_path: String,
+    /// 入站队列统计。
+    inbound_stats: QueueStats,
+    /// 路由动作 worker（拿队列统计与 busy 数）。
+    route_worker: RouteWorker,
 }
 
 impl<S: Store + Send + 'static> Console<S> {
@@ -49,12 +80,16 @@ impl<S: Store + Send + 'static> Console<S> {
         controls: ControlRegistry,
         token: String,
         config_path: String,
+        inbound_stats: QueueStats,
+        route_worker: RouteWorker,
     ) -> Self {
         Self {
             bridge,
             controls,
             token,
             config_path,
+            inbound_stats,
+            route_worker,
         }
     }
 
@@ -349,6 +384,8 @@ impl<S: Store + Send + 'static> Console<S> {
     fn status(&self) -> String {
         let bridge = lock(&self.bridge);
         let config = bridge.config();
+        let inbound = self.inbound_stats.snapshot();
+        let route = self.route_worker.stats().snapshot();
         json!({
             "connections": config.connections.len(),
             "sessions": config.sessions.len(),
@@ -357,6 +394,7 @@ impl<S: Store + Send + 'static> Console<S> {
             "queued_turns": bridge.queued_turns(),
             "config_version": bridge.config_version(),
             "staged_config": bridge.has_staged_config(),
+            "queues": queue_status(&inbound, &route, self.route_worker.busy()),
         })
         .to_string()
     }
@@ -1144,6 +1182,19 @@ mod tests {
         // keywords 不是密钥——别因为含 key 字样就误伤。
         assert!(!is_sensitive_key("keywords"));
         assert!(!is_sensitive_key("url"));
+    }
+
+    #[test]
+    fn status_includes_queue_depths_and_rejections() {
+        let inbound = QueueStats::new("inbound", 4096).snapshot();
+        let route = QueueStats::new("route", 1024).snapshot();
+        let value = queue_status(&inbound, &route, 2);
+        assert_eq!(value["inbound"]["capacity"], 4096);
+        assert_eq!(value["inbound"]["depth"], 0);
+        assert_eq!(value["inbound"]["warnPercent"], 80);
+        assert_eq!(value["route"]["capacity"], 1024);
+        assert_eq!(value["route"]["busy"], 2);
+        assert_eq!(value["route"]["rejected"], 0);
     }
 
     #[test]

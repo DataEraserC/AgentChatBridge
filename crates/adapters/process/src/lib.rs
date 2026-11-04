@@ -635,12 +635,13 @@ fn spawn_reader(
                     );
                 }
                 AdapterMessage::Event { record } => {
-                    if !events.submit(record.into()) {
+                    if let Err(error) = events.submit(record.into()) {
                         eprintln!(
                             "{}",
                             acb_i18n::t!(
-                                "adapter.process.inbound_queue_closed",
-                                connection = connection
+                                "adapter.process.inbound_queue_rejected",
+                                connection = connection,
+                                reason = error
                             )
                         );
                     }
