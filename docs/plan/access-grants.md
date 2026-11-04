@@ -178,8 +178,9 @@ max_ops = 8
 
 ### 5.2 评估顺序
 
-1. **解析主体与场所**：由 core 从本轮触发记录生成 `(subject, place)`，不接受 agent 传参。
-2. **唯一 evaluator**：`evaluate(subject, place, scope, capability, target)`：
+1. **tool_access 兼容否决层**：只做工具级 deny；它不是第二套授权实现，不能 Allow 覆盖 core。
+2. **唯一 evaluator**：core 先从本轮触发记录解析 `(subject, place)`，再调用
+   `evaluate(subject, place, scope, capability, target)`：
    - `subject=system_admin` + `place=private|console` → 任意目标允许；
    - `subject=bot_admin` + `place=private` → 仅已订阅目标；
    - `subject=none` / 其他，或 `place=group` 且没有票据 → 走现有 room access；
