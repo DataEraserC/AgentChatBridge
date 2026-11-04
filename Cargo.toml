@@ -15,6 +15,7 @@ members = [
     "crates/plugins/wake-fixture",
     "crates/notifier-process",
     "crates/extensions",
+    "crates/supervisor-policy",
     "crates/bridge",
 ]
 

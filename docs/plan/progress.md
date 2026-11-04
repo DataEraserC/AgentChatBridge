@@ -1397,6 +1397,27 @@
 - 未做：dynamic 在启动期 dlopen/manifest/实例化失败时桥仍按原语义退出，在线健康
   页不可见；没有网络探测或心跳。
 
+## 2026-11-04 — Supervisor 内置策略引擎（纯计算层）
+
+- 新增独立 crate `crates/supervisor-policy`（`acb-supervisor-policy`），只依赖 serde；
+  不接入 supervisor、不做进程监管、不做策略错误计数。
+- 公开 API：`decide(&PolicyConfig, &Snapshot) -> Decision`；`DecisionKind`
+  = `fail/hold/rollback`，附 `reason_code`、`reason`、`hold` 的 `delay_ms`。
+- 输入快照包含 `observed_at_ms`、`startup_at_ms`/`grace_elapsed`、连续失败、
+  最近失败记录（时间+类别）、连续不健康探测/起点、LKG、连续 hold 次数；时间全部
+  来自快照，模块内无 I/O、无时钟、无随机。
+- 规则：panic 类一次即动、启动宽限、健康持续不健康、连续失败、窗口累计、默认
+  hold；无 LKG 时 rollback 降级为 fail；hold 退避按
+  1s/2s/4s/8s/30s 阶梯取 `consecutive_holds`。
+- 配置键：`startup_grace_secs`、`consecutive_failures`、`window_failures`、
+  `window_secs`、`panic_classes`、`panic_rollback`、`provider_parse_uses_window`、
+  `unhealthy_secs`、`unhealthy_probes`、`restart_backoff_secs`；全部可缺省。
+- 测试：`crates/supervisor-policy/tests/decision_table.rs` 5 项，表驱动覆盖 11 个
+  规则场景 + 退避阶梯 + 确定性 + 默认值；`cargo test --workspace` 65 个 suite
+  全 ok；clippy `-D warnings`、fmt 全绿。
+- 明确没做：systemd 单元、supervisor 接入、外部进程/WASM 策略载体、策略错误连续
+  3 次升级（调用方职责，代码内有注释）。
+
 - 2026-11-04 — 决策索引：supervisor 平台无关、Nix profile 回滚、测试矩阵、回滚判据、反馈/工单、记忆管家、扩展工厂 → [supervision-packaging-issues.md](supervision-packaging-issues.md)
 
 ## 部署注意事项（nix-config 打包）
