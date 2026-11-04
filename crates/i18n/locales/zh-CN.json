@@ -709,6 +709,8 @@
   "kernel.plugin.observer_timeout": "观察者 {id} 未按时返回，已跳过这条记录：{error}",
   "kernel.plugin.provider_timeout": "provider {id} 的 {call} 超过 {ms} ms 未返回，已放弃本次调用",
   "kernel.plugin.provider_busy": "provider {id} 的上一次 {call} 仍未返回，拒绝排队",
+  "kernel.plugin.provider_stuck": "provider {id} 已判定卡死（上一代 {call} 超时未返回）；后续调用直接失败，卸载或重载后才能启用新执行器",
+  "kernel.plugin.provider_dead": "provider {id} 已判定死亡（{detail}）；{call} 不再执行，需要人工重启桥进程",
   "kernel.plugin.provider_executor_stopped": "provider {id} 的调用线程已停止：{detail}",
   "kernel.plugin.provider_panicked": "provider 调用 panic：{panic}",
   "kernel.plugin.provider_no_summary": "provider {provider} 没有声明 summary（agent 需要知道它是干什么的）",
