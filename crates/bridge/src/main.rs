@@ -156,7 +156,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     plugins.register_adapter(Arc::new(ProcessAdapterFactory))?;
 
     // 入站队列：适配器只往里丢记录，core 的 drain 线程统一 ingest。
-    let (events, event_rx) = EventQueue::channel();
+    let (events, event_rx, inbound_stats) = EventQueue::channel_with(config.queues);
 
     // 每条连接先占一个发送口，桥建好之后再起守护线程去连。
     // 适配器由 Root 按 kind 实例化；main 不再知道 onebot11 的构造细节。
@@ -197,7 +197,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let controls = ControlRegistry::new();
 
     // 路由动作的后台执行者：发送/任务在锁外跑，不挡入站队列。
-    let route_worker = RouteWorker::spawn(Arc::clone(&bridge), Arc::clone(&shutdown));
+    let route_worker = RouteWorker::spawn_with_limit(
+        Arc::clone(&bridge),
+        Arc::clone(&shutdown),
+        config.queues.route,
+    );
 
     // core 的入站 drain 线程：所有适配器的事件都从这里进流水，顺序由队列保证。
     {
@@ -249,6 +253,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 controls,
                 console.token.clone(),
                 options.config.clone(),
+                inbound_stats.clone(),
+                route_worker.clone(),
             ));
             let shutdown = Arc::clone(&shutdown);
             std::thread::spawn(move || {

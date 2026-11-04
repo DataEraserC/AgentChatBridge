@@ -296,12 +296,13 @@ fn handle_text(
 fn submit_event(events: &EventQueue, connection: &str, value: &Value, admin_qqs: &[String]) {
     match event::parse(connection, value, admin_qqs) {
         Ok(Parsed::Record(draft)) => {
-            if !events.submit(draft) {
+            if let Err(error) = events.submit(draft) {
                 eprintln!(
                     "{}",
                     acb_i18n::t!(
-                        "adapter.onebot11.inbound_queue_closed",
-                        connection = connection
+                        "adapter.onebot11.inbound_queue_rejected",
+                        connection = connection,
+                        reason = error
                     )
                 );
             }

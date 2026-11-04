@@ -3,44 +3,203 @@
 //! 适配器只把平台事件翻译成 `RecordDraft` 丢进队列；由 core 侧的 drain 线程
 //! 统一 `ingest`。适配器不再直接拿 `Bridge` 的锁，也不再有 `try_lock` + backlog。
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::Frame;
+use crate::config::QueueConfig;
 use crate::endpoint::ControlRegistry;
 use crate::engine::Bridge;
 use crate::route_worker::RouteWorker;
 use crate::storage::{RecordDraft, Store};
 
+/// 队列使用率到多少时打一次 warning。固定 80%，不配置。
+const QUEUE_WARN_PERCENT: usize = 80;
+
+/// 队列的运行时统计。入站与路由动作共用。
+#[derive(Clone, Default)]
+pub struct QueueStats {
+    inner: Arc<QueueStatsInner>,
+}
+
+#[derive(Default)]
+struct QueueStatsInner {
+    label: &'static str,
+    capacity: usize,
+    depth: AtomicUsize,
+    high_watermark: AtomicUsize,
+    rejected: AtomicU64,
+    warned: AtomicBool,
+}
+
+/// 一次快照，控制台/测试用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueSnapshot {
+    pub label: &'static str,
+    pub capacity: usize,
+    pub depth: usize,
+    pub high_watermark: usize,
+    pub rejected: u64,
+    pub warn_percent: usize,
+    pub warned: bool,
+}
+
+impl QueueStats {
+    pub fn new(label: &'static str, capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(QueueStatsInner {
+                label,
+                capacity,
+                ..QueueStatsInner::default()
+            }),
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity
+    }
+
+    fn warn_threshold(&self) -> usize {
+        self.inner.capacity.saturating_mul(QUEUE_WARN_PERCENT) / 100
+    }
+
+    pub(crate) fn enqueued(&self) {
+        let depth = self.inner.depth.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inner
+            .high_watermark
+            .fetch_max(depth, Ordering::SeqCst);
+        let threshold = self.warn_threshold().max(1);
+        if depth >= threshold && !self.inner.warned.swap(true, Ordering::SeqCst) {
+            eprintln!(
+                "queue: {} reached {}% depth={} capacity={}",
+                self.inner.label, QUEUE_WARN_PERCENT, depth, self.inner.capacity
+            );
+        }
+    }
+
+    pub(crate) fn dequeued(&self) {
+        let depth = self
+            .inner
+            .depth
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        if depth < self.warn_threshold() {
+            self.inner.warned.store(false, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn rejected(&self) {
+        self.inner.rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> QueueSnapshot {
+        QueueSnapshot {
+            label: self.inner.label,
+            capacity: self.inner.capacity,
+            depth: self.inner.depth.load(Ordering::SeqCst),
+            high_watermark: self.inner.high_watermark.load(Ordering::SeqCst),
+            rejected: self.inner.rejected.load(Ordering::Relaxed),
+            warn_percent: QUEUE_WARN_PERCENT,
+            warned: self.inner.warned.load(Ordering::SeqCst),
+        }
+    }
+}
+
 /// 入站队列的写端。可克隆，给每条适配器连接一个。
 #[derive(Clone)]
 pub struct EventQueue {
-    tx: Sender<RecordDraft>,
+    tx: SyncSender<RecordDraft>,
+    stats: QueueStats,
 }
 
 /// 入站队列的读端，只有 core 的 drain 线程持有。
 pub struct EventReceiver {
     rx: Receiver<RecordDraft>,
+    stats: QueueStats,
+}
+
+/// 入站被拒的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitError {
+    Full,
+    Closed,
+}
+
+impl SubmitError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 impl EventReceiver {
     /// 等一条事件。测试和 conformance 用；core 的 drain 线程走同一个队列。
     pub fn recv_timeout(&self, timeout: Duration) -> Result<RecordDraft, RecvTimeoutError> {
-        self.rx.recv_timeout(timeout)
+        match self.rx.recv_timeout(timeout) {
+            Ok(draft) => {
+                self.stats.dequeued();
+                Ok(draft)
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
 impl EventQueue {
+    /// 默认容量（测试/嵌入式用）。生产 main 用 `channel_with`。
     pub fn channel() -> (EventQueue, EventReceiver) {
-        let (tx, rx) = channel();
-        (EventQueue { tx }, EventReceiver { rx })
+        let (queue, receiver, _) = Self::channel_with(QueueConfig::default());
+        (queue, receiver)
     }
 
-    /// 适配器线程调用。队列无界，不阻塞平台读循环；接收端没了就返回 false。
-    pub fn submit(&self, draft: RecordDraft) -> bool {
-        self.tx.send(draft).is_ok()
+    pub fn channel_with(config: QueueConfig) -> (EventQueue, EventReceiver, QueueStats) {
+        let stats = QueueStats::new("inbound", config.inbound);
+        let (tx, rx) = sync_channel(config.inbound);
+        (
+            EventQueue {
+                tx,
+                stats: stats.clone(),
+            },
+            EventReceiver {
+                rx,
+                stats: stats.clone(),
+            },
+            stats,
+        )
+    }
+
+    /// 适配器线程调用。队列有界，绝不阻塞平台读循环；满/接收端没了返回明确错误。
+    pub fn submit(&self, draft: RecordDraft) -> Result<(), SubmitError> {
+        match self.tx.try_send(draft) {
+            Ok(()) => {
+                self.stats.enqueued();
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => {
+                self.stats.rejected();
+                let snapshot = self.stats.snapshot();
+                eprintln!(
+                    "queue: inbound full capacity={} rejected={}",
+                    snapshot.capacity, snapshot.rejected
+                );
+                Err(SubmitError::Full)
+            }
+            Err(TrySendError::Disconnected(_)) => Err(SubmitError::Closed),
+        }
+    }
+
+    pub fn stats(&self) -> QueueStats {
+        self.stats.clone()
     }
 }
 
@@ -57,7 +216,7 @@ pub fn drain_events<S: Store + Send + 'static>(
     worker: RouteWorker,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
-        match events.rx.recv_timeout(Duration::from_millis(50)) {
+        match events.recv_timeout(Duration::from_millis(50)) {
             Ok(draft) => {
                 let (result, interrupts, actions) = {
                     let mut guard = bridge
@@ -130,15 +289,13 @@ mod tests {
     #[test]
     fn queue_preserves_submission_order() {
         let (queue, receiver) = EventQueue::channel();
-        queue.submit(draft("一"));
-        queue.submit(draft("二"));
+        queue.submit(draft("一")).expect("有空间");
+        queue.submit(draft("二")).expect("有空间");
 
         let first = receiver
-            .rx
             .recv_timeout(Duration::from_secs(1))
             .expect("第一条");
         let second = receiver
-            .rx
             .recv_timeout(Duration::from_secs(1))
             .expect("第二条");
         assert!(matches!(&first.elements[0], Element::Text { text } if text == "一"));
@@ -146,10 +303,42 @@ mod tests {
     }
 
     #[test]
-    fn submit_after_receiver_drop_is_false() {
+    fn submit_after_receiver_drop_is_closed() {
         let (queue, receiver) = EventQueue::channel();
         drop(receiver);
-        assert!(!queue.submit(draft("没人收")));
+        assert_eq!(queue.submit(draft("没人收")), Err(SubmitError::Closed));
+    }
+
+    #[test]
+    fn queue_rejects_when_full_and_counts() {
+        let (queue, _receiver, stats) = EventQueue::channel_with(QueueConfig {
+            inbound: 2,
+            route: 1,
+        });
+        assert!(queue.submit(draft("一")).is_ok());
+        assert!(queue.submit(draft("二")).is_ok());
+        assert_eq!(queue.submit(draft("三")), Err(SubmitError::Full));
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.capacity, 2);
+        assert_eq!(snapshot.rejected, 1);
+        assert_eq!(snapshot.depth, 2);
+    }
+
+    #[test]
+    fn warning_resets_after_draining_below_threshold() {
+        let (queue, receiver, stats) = EventQueue::channel_with(QueueConfig {
+            inbound: 10,
+            route: 1,
+        });
+        for index in 0..8 {
+            queue.submit(draft(&format!("{index}"))).expect("有空间");
+        }
+        assert!(stats.snapshot().warned, "跨过 80% 应打 warning");
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("取一条");
+        assert!(!stats.snapshot().warned, "降到线下后允许再次 warning");
+        assert_eq!(stats.snapshot().depth, 7);
     }
 
     #[test]
@@ -233,7 +422,7 @@ mod tests {
             })
         };
 
-        queue.submit(draft("在吗"));
+        queue.submit(draft("在吗")).expect("有空间");
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut got_turn = false;
         while Instant::now() < deadline && !got_turn {

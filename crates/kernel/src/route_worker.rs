@@ -4,11 +4,13 @@
 //! 这个线程不持有 core 的全局锁；只在准备发送和结算回执时短暂回锁。
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::config::DEFAULT_ROUTE_QUEUE;
 use crate::engine::{Bridge, PreparedRouteAction, PreparedTask};
+use crate::event_queue::QueueStats;
 use crate::outbound::OutboundError;
 use crate::storage::Store;
 use crate::task;
@@ -16,37 +18,71 @@ use crate::task;
 /// 给 drain 线程用的句柄：把准备好的动作丢进后台队列。
 #[derive(Clone)]
 pub struct RouteWorker {
-    tx: Sender<PreparedRouteAction>,
+    tx: SyncSender<PreparedRouteAction>,
     /// 已排进队列 + 正在执行的动作数。排空时据此等待后台发送/任务收尾。
     busy: Arc<AtomicUsize>,
+    stats: QueueStats,
 }
 
 impl RouteWorker {
+    /// 默认路由容量（测试用）。
     pub fn spawn<S: Store + Send + 'static>(
         bridge: Arc<Mutex<Bridge<S>>>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
-        let (tx, rx) = channel();
-        let busy = Arc::new(AtomicUsize::new(0));
-        let worker_busy = Arc::clone(&busy);
-        std::thread::spawn(move || run_loop(bridge, rx, shutdown, worker_busy));
-        Self { tx, busy }
+        Self::spawn_with_limit(bridge, shutdown, DEFAULT_ROUTE_QUEUE)
     }
 
+    pub fn spawn_with_limit<S: Store + Send + 'static>(
+        bridge: Arc<Mutex<Bridge<S>>>,
+        shutdown: Arc<AtomicBool>,
+        capacity: usize,
+    ) -> Self {
+        let (tx, rx) = sync_channel(capacity);
+        let busy = Arc::new(AtomicUsize::new(0));
+        let stats = QueueStats::new("route", capacity);
+        let worker_busy = Arc::clone(&busy);
+        let worker_stats = stats.clone();
+        std::thread::spawn(move || run_loop(bridge, rx, shutdown, worker_busy, worker_stats));
+        Self { tx, busy, stats }
+    }
+
+    /// 有界入队：满时拒绝该动作并计数，绝不阻塞 drain 线程。
     pub(crate) fn enqueue(&self, actions: Vec<PreparedRouteAction>) {
+        let mut rejected = 0usize;
         for action in actions {
             self.busy.fetch_add(1, Ordering::SeqCst);
-            if self.tx.send(action).is_err() {
-                self.busy.fetch_sub(1, Ordering::SeqCst);
-                eprintln!("{}", acb_i18n::t!("kernel.route_worker.stopped"));
-                break;
+            match self.tx.try_send(action) {
+                Ok(()) => self.stats.enqueued(),
+                Err(TrySendError::Full(_)) => {
+                    self.busy.fetch_sub(1, Ordering::SeqCst);
+                    self.stats.rejected();
+                    rejected = rejected.saturating_add(1);
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    self.busy.fetch_sub(1, Ordering::SeqCst);
+                    rejected = rejected.saturating_add(1);
+                    eprintln!("{}", acb_i18n::t!("kernel.route_worker.stopped"));
+                    break;
+                }
             }
+        }
+        if rejected > 0 {
+            eprintln!(
+                "queue: route full capacity={} rejected={} (batch rejected={rejected})",
+                self.stats.capacity(),
+                self.stats.snapshot().rejected
+            );
         }
     }
 
     /// 队列里 + 正在执行的动作数。排空判定用。
     pub fn busy(&self) -> usize {
         self.busy.load(Ordering::SeqCst)
+    }
+
+    pub fn stats(&self) -> QueueStats {
+        self.stats.clone()
     }
 }
 
@@ -55,10 +91,12 @@ fn run_loop<S: Store + Send + 'static>(
     rx: Receiver<PreparedRouteAction>,
     shutdown: Arc<AtomicBool>,
     busy: Arc<AtomicUsize>,
+    stats: QueueStats,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(action) => {
+                stats.dequeued();
                 run_action(&bridge, action);
                 busy.fetch_sub(1, Ordering::SeqCst);
             }
@@ -264,4 +302,41 @@ fn lock<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>) -> std::sync::MutexGuard<'_, B
     bridge
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acb_proto::RoomId;
+
+    fn task(id: &str, config: Arc<crate::config::Config>) -> PreparedRouteAction {
+        PreparedRouteAction::Task(PreparedTask {
+            task_id: id.to_owned(),
+            room: RoomId::parse("qq:group/1").expect("房间合法"),
+            session: "main".to_owned(),
+            config,
+            handler: "noop".to_owned(),
+            params: serde_json::json!({}),
+        })
+    }
+
+    #[test]
+    fn full_route_queue_rejects_without_inflating_busy() {
+        let config = Arc::new(crate::config::Config::parse("").expect("空配置合法"));
+        let (tx, _rx) = sync_channel(1);
+        let worker = RouteWorker {
+            tx,
+            busy: Arc::new(AtomicUsize::new(0)),
+            stats: QueueStats::new("route", 1),
+        };
+        worker.enqueue(vec![task("a", Arc::clone(&config))]);
+        assert_eq!(worker.busy(), 1);
+        assert_eq!(worker.stats().snapshot().depth, 1);
+
+        worker.enqueue(vec![task("b", config)]);
+        let snapshot = worker.stats().snapshot();
+        assert_eq!(worker.busy(), 1, "被拒绝的动作不算 busy");
+        assert_eq!(snapshot.rejected, 1);
+        assert_eq!(snapshot.depth, 1);
+    }
 }

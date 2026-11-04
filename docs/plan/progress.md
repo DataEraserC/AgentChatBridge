@@ -1005,6 +1005,27 @@
   通过；`cargo test --workspace` 全绿。
 - 可回退：移除 `[[tool_plugins]]` 接线与 crate 即可；示例与文档可单独删。
 
+## 2026-11-04 — C：入站/路由队列上限（已实现）
+
+- 做了什么：
+  - `Config` 新增 `[queues]`：`inbound` 默认 4096、`route` 默认 1024；0 在解析期拒绝。
+  - `EventQueue` 从无界 `channel` 改为有界 `sync_channel` + `try_send`；`submit` 返回
+    `Full` / `Closed` 明确错误，拒绝计数并打英文日志；新增 depth / highWatermark /
+    rejected / 80% 单次 warning 的 `QueueStats`。
+  - `RouteWorker` 同样有界；满时拒绝该动作并计数，不阻塞 drain 线程、不 drop 已排队项；
+    `busy` 只统计成功入队+执行中的动作。
+  - `/api/status` 增加 `queues.inbound` / `queues.route`（深度、容量、水位、拒绝数、
+    warning 水位、route busy）。
+  - core 不因拒绝自动向房间发提示；只写日志与计数。
+- 测试：配置默认/显式/0 拒绝；入站满拒绝与计数、80% warning 回落、顺序保持；
+  路由满拒绝且 busy 不膨胀；status 队列字段。
+- 偏离：路由队列的 warning 水位按「已排队深度」计算，`busy` 单独展示；不做
+  drop_oldest、不做阻塞写、不做跨进程/持久化队列。
+- 证据：`cargo clippy --workspace --all-targets -D warnings` 通过；
+  `cargo test --workspace` 全绿。
+- 可回退：把 `[queues]` 配置与 `channel_with` / `spawn_with_limit` 换回默认构造即可；
+  统计字段可单独移除。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
