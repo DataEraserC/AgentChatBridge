@@ -213,14 +213,12 @@ token = "换成你自己的一长串随机字符"
 # 回退到全局 default_on_turn_error。
 on_turn_error = []
 
-# 访问策略（可选）：默认只认本会话的订阅。
+# 访问策略（可选）：默认由内置 [grants] 评估器判定；只有接入外部 access provider
+# 时才需要写这个表。
+# 旧的三把钥匙 all_rooms / elevated_in_rooms / privileged_origins 已移除：
+# 配置里再出现会直接启动失败，请改用下面的 [grants] 规则。
 # [sessions.access]
-# provider = "acb.access.subscribed"
-# 其它内置：all_rooms（整个会话豁免）/ elevated_in_rooms（rooms = [...] 额外开房间）/
-# privileged_origins（origins = [...]：从这些房间触发的轮次可访问任意房间）。
-# [sessions.access]
-# provider = "acb.access.privileged_origins"
-# origins = ["qq:private/123456"]
+# provider = "vendor.access"
 
 # 投递批次选择（ADR-0026 Phase 4）。不写就是内置「最旧一小段 + 最新一批」。
 # [sessions.delivery]
@@ -276,19 +274,39 @@ poke = false          # 旧语法糖，等价于 ignore_event_tags = ["poke"]：
 ignore_speakers = ["987654321"]
 
 # 访问授权（可选）。不写 [grants] = 只有订阅边界。
-# 规则是叠加在订阅边界之上的常态授予；destructive 仍由 allow_destructive 单独把关。
-# [grants.bot_admin]
-# accounts = [{ connection = "qq", account = "10001" }]  # 入口限私信
+# 规则是叠加在订阅边界之上的常态授予；destructive 仍由 allow_destructive 单独把关，
+# platform / plugin 也必须在规则里显式列出，不会因为范围写大了就自动获得。
 #
-# [grants.system_admin]
-# connection = "qq"
-# account = "10002"                                      # 私信/控制台常驻；群里不自动提权
+# 典型写法 1：订阅内读写（把规则钉在已订阅目标上）
+# [[grants.rules]]
+# subject = "user"
+# place = "group"
+# scope = "subscribed"
+# capability = ["room_read", "room_write", "connection_read"]
+#
+# 典型写法 2：私信管理员（账号在私信里可以任意目标，群里不自动提权）
+# [grants.bot_admin]
+# accounts = [{ connection = "qq", account = "10001" }]
 #
 # [[grants.rules]]
-# subject = "system_admin"      # system / system_admin / bot_admin / user
-# place = "private"             # private / group / console / none
-# scope = "any"                 # any / subscribed / room / connection
-# capability = ["room_read", "room_write", "connection_read", "platform", "destructive", "plugin"]
+# subject = "bot_admin"
+# place = "private"
+# scope = "any"
+# capability = ["room_read", "room_write", "connection_read", "plugin"]
+#
+# 典型写法 3：系统管理员（私信/控制台常驻，群内同账号不提权）
+# [grants.system_admin]
+# connection = "qq"
+# account = "10002"
+#
+# [[grants.rules]]
+# subject = "system_admin"
+# place = "private"
+# scope = "any"
+# capability = ["room_read", "room_write", "connection_read"]
+#
+# 能力：room_read / room_write / connection_read / platform / destructive / plugin。
+# 场所：private / group / console / none；范围：any / subscribed / room / connection。
 #
 # scope = "room" / "connection" 时必须给 target = "qq:group/123" / "qq"。
 # 未知字段或未知枚举会在启动解析期报错，不会静默忽略。

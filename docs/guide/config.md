@@ -205,24 +205,27 @@ provider = "acb.clock.off"   # 默认：不开例行检查
 
 ### 访问策略：能不能去订阅外的房间
 
-默认只能读写自己订阅的房间。要放宽，给会话加一段（ADR-0026）：
+默认只能读写自己订阅的房间。要放宽，用 `[grants]` 规则（设计见 [access-grants](../plan/access-grants.md)）：
 
 ```toml
-[sessions.access]
-provider = "acb.access.subscribed"   # 默认：只认订阅
-# provider = "acb.access.all_rooms"        # 整个会话豁免：任何已配连接的房间都能碰
-# provider = "acb.access.elevated_in_rooms" # 指定房间豁免（用下面的 rooms）
-# rooms = ["qq:group/123"]                  # 只有 elevated 用；这些房间不用订阅也能读写
-# provider = "acb.access.privileged_origins" # 按来源房间提权（用下面的 origins）
-# origins = ["qq:private/123"]               # 从这些房间触发的轮次可访问任意房间；其它来源按订阅
+[grants.system_admin]
+connection = "qq"
+account = "10002"
+
+[[grants.rules]]
+subject = "system_admin"
+place = "private"
+scope = "any"
+capability = ["room_read", "room_write", "connection_read"]
 ```
 
-- 豁免只改变**工具能碰到哪里**，不改变唤醒：没订阅的房间不会因为它来消息就开轮。
-- `room` 是这次要访问的**目标**房间；策略还能看到本轮是从哪个房间触发的
-  （Lua / 动态库里的 `origin_room`）。内置的 `privileged_origins` 用 `origins` 列出来源；
-  其它内置策略只看目标房间，不区分来源。
-- 破坏性操作仍由连接的 `allow_destructive` 单独把关，访问策略不能顶替它。
-- `all_rooms` 也只能落在**配置里存在的连接**上——连接本身没配登录账号，发不出去。
+- `[sessions.access]` 只用于接入外部 access provider；不写就由内置 `[grants]` 评估器判定。
+- 旧键 `all_rooms` / `elevated_in_rooms` / `privileged_origins`（以及 `[sessions.access]`
+  的 `rooms` / `origins`）已移除；配置里再出现会**直接启动失败**，错误会明确指向
+  `[grants]`，不会静默忽略。
+- 授予只改变**工具能碰到哪里**，不改变唤醒：没订阅的房间不会因为它来消息就开轮。
+- 破坏性操作仍由连接的 `allow_destructive` 单独把关，授权不能顶替它。
+- 外部 provider 只能落在**配置里存在的连接**上——连接本身没配登录账号，发不出去。
 
 ### 投递、发送钩子与失败通知
 

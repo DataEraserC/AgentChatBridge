@@ -90,23 +90,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(&options.config)?;
     let config = Config::parse(&text)?;
     print_summary(&config, &options.config);
-    for session in &config.sessions {
-        if matches!(
-            session.access.provider.to_string().as_str(),
-            "acb.access.all_rooms"
-                | "acb.access.elevated_in_rooms"
-                | "acb.access.privileged_origins"
-        ) {
-            eprintln!(
-                "{}",
-                acb_i18n::t!(
-                    "bridge.main.deprecated_access_provider",
-                    session = session.id,
-                    provider = session.access.provider
-                )
-            );
-        }
-    }
     if let Some(admin) = &config.grants.system_admin {
         eprintln!(
             "{}",

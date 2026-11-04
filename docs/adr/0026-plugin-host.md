@@ -94,8 +94,9 @@ ManagerPlugin 本身也要被某个 Loader 实例化，但**不能由它自己�
 
 - **Phase 1**：RootManager + NativeLoader + 内置 wake provider；`wake.provider` 可替换，默认行为不变。
 - **Phase 2d（2026-11-01）**：AccessPolicy 扩展点落地。
-  - 会话配置新增 `[sessions.access]`：`provider` + `rooms`；不写就是 `acb.access.subscribed`，行为与原来写死的「只能碰自己订阅的房间」完全一致。
-  - 内置三个 provider：`acb.access.subscribed`（默认）、`acb.access.all_rooms`（整个会话豁免）、`acb.access.elevated_in_rooms`（`rooms` 里列出的房间不用订阅也能读写）。
+  - 会话配置新增 `[sessions.access]`：`provider`；当时不写就是 `acb.access.subscribed`，行为与原来写死的「只能碰自己订阅的房间」完全一致。
+  - 当时的内置 provider：`acb.access.subscribed`（默认）、`acb.access.all_rooms`（整个会话豁免）、`acb.access.elevated_in_rooms`（`rooms` 里列出的房间不用订阅也能读写）。
+  - **已废弃（2026-11-05）**：`acb.access.all_rooms` / `acb.access.elevated_in_rooms` / `acb.access.privileged_origins` 与 `[sessions.access].rooms` / `.origins` 全部移除；内置判定改为 core 直接执行的 `[grants]` 评估器，旧配置启动即报错。见 [access-grants](../plan/access-grants.md)。
   - **策略只回答 allow/deny**；参数、目标、破坏性、记账仍由 core 统一执行。破坏性操作继续由连接的 `allow_destructive` 单独把关，两个维度不互相顶替。
   - 读取/发送/平台调用都走同一个 `AccessRequest`（会话、连接、房间、动作、会话自己的订阅）；连接级请求 `room = None`。
   - 未知 access provider 在启动时拒绝；树外 ManagerPlugin 可以注册 access provider，返回错类型会被 Root 拒绝。

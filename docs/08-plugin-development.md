@@ -314,9 +314,9 @@ return {
 
 access 的 `request` 字段：`session`、`connection`、`room`（这次要访问的目标房间；
 连接级请求为 `nil`）、`origin_room`（当前轮次是从哪个房间触发的）、`action`
-（`read` / `send` / `connection`）、`subscriptions`（本会话订阅的房间）。内置的
-`acb.access.privileged_origins` 会按 `origin_room` 提权；其它内置 access 策略不读它。
-Lua / 动态库也可以拿它做自己的「按来源房间授权」。
+（`read` / `send` / `connection`）、`subscriptions`（本会话订阅的房间）。外部 access
+provider 可以按 `origin_room` 做自己的「按来源房间授权」；内置判定由
+`[grants]` 评估器直接执行，不经过这里。
 
 其它扩展点收到的字段：
 

@@ -1,8 +1,11 @@
 //! 访问授权的内置实现：四元组 + 目标。
 //!
-//! 这一层只做**授权叠加**：命中配置里的常态授予或兼容层映射时给出 `allow`；
-//! 没命中时退回现有的订阅边界。它不是第二套房间策略，也不替代
+//! 这一层只做**授权叠加**：命中配置里的常态授予时给出 `allow`；没命中时退回
+//! 现有的订阅边界。它不是第二套房间策略，也不替代
 //! `MethodSpec.risk = Destructive` + `allow_destructive` 闸门。
+//!
+//! 不做旧 provider 的兼容翻译：没有用户需要平滑迁移，多一层翻译只会让旧配置
+//! 悄悄多出权限。旧键留在配置里会在启动期直接报错。
 //!
 //! 票据/审批流不在本模块：阶段二单独实现。
 
@@ -10,7 +13,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
-use crate::{AccessPolicy, RoomId};
+use crate::RoomId;
 
 /// 授权主体。`System` 表示没有人类触发者的轮次（clock/自发唤醒）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -264,14 +267,11 @@ impl GrantTarget<'_> {
 /// 一次授权评估的全部输入。把参数收成一个结构，避免 evaluator 接口继续膨胀。
 #[derive(Debug, Clone, Copy)]
 pub struct GrantQuery<'a> {
-    pub provider: &'a str,
-    pub policy: &'a AccessPolicy,
     pub subject: GrantSubject,
     pub place: GrantPlace,
     pub capability: GrantCapability,
     pub target: GrantTarget<'a>,
     pub subscriptions: &'a [RoomId],
-    pub origin: Option<&'a RoomId>,
 }
 
 /// 评估结果。`basis` 非 `base:` 时调用方应写审计日志。
@@ -318,22 +318,13 @@ impl fmt::Display for GrantDecision {
 
 /// 房间/连接访问评估。调用方已经排除了外部 provider。
 pub fn evaluate_access(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDecision {
-    if let Some(decision) = evaluate_rules(grants, query) {
-        return decision;
-    }
-    if let Some(decision) = evaluate_compat(query) {
-        return decision;
-    }
-    base_access(query)
+    evaluate_rules(grants, query).unwrap_or_else(|| base_access(query))
 }
 
 /// 平台动作的额外能力检查（`platform` / `destructive`）。
-/// 返回 `None` = 没有命中任何授予/兼容层，沿用已通过的基础访问。
+/// 返回 `None` = 没有任何授予，沿用已通过的基础访问。
 pub fn evaluate_platform(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Option<GrantDecision> {
-    if let Some(decision) = evaluate_rules(grants, query) {
-        return Some(decision);
-    }
-    evaluate_compat(query)
+    evaluate_rules(grants, query)
 }
 
 /// 插件工具能力检查。普通主体沿用基础放行；管理员主体若配置了匹配规则，
@@ -344,9 +335,6 @@ pub fn evaluate_tool(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDeci
         GrantSubject::SystemAdmin | GrantSubject::BotAdmin
     ) {
         if let Some(decision) = evaluate_rules(grants, query) {
-            return decision;
-        }
-        if let Some(decision) = evaluate_compat(query) {
             return decision;
         }
         return GrantDecision::deny(
@@ -388,42 +376,6 @@ fn evaluate_rules(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Option<Grant
         ));
     }
     denied.map(|(index, reason)| GrantDecision::deny(format!("rule:{index}"), reason))
-}
-
-fn evaluate_compat(query: &GrantQuery<'_>) -> Option<GrantDecision> {
-    let policy = query.policy;
-    if query.provider == crate::plugin::ALL_ROOMS_ACCESS_PROVIDER {
-        return Some(GrantDecision::allow(
-            "compat:all_rooms",
-            "legacy all_rooms grants any target",
-        ));
-    }
-    if query.provider == crate::plugin::ELEVATED_ACCESS_PROVIDER {
-        let allowed = match query.target {
-            GrantTarget::Room(room) => policy.rooms.iter().any(|listed| listed == room),
-            GrantTarget::Connection(connection) => policy
-                .rooms
-                .iter()
-                .any(|listed| listed.connection == connection),
-        };
-        if allowed {
-            return Some(GrantDecision::allow(
-                "compat:elevated_in_rooms",
-                "legacy elevated_in_rooms grants listed targets",
-            ));
-        }
-    }
-    if query.provider == crate::plugin::PRIVILEGED_ORIGINS_ACCESS_PROVIDER
-        && query
-            .origin
-            .is_some_and(|origin| policy.origins.iter().any(|listed| listed == origin))
-    {
-        return Some(GrantDecision::allow(
-            "compat:privileged_origins",
-            "legacy privileged_origins grants any target from a listed origin",
-        ));
-    }
-    None
 }
 
 fn base_access(query: &GrantQuery<'_>) -> GrantDecision {
@@ -487,55 +439,41 @@ impl GrantRule {
 mod tests {
     use super::*;
 
-    #[allow(clippy::too_many_arguments)]
     fn eval_access(
         grants: &GrantsConfig,
-        provider: &str,
-        policy: &AccessPolicy,
         subject: GrantSubject,
         place: GrantPlace,
         capability: GrantCapability,
         target: GrantTarget<'_>,
         subscriptions: &[RoomId],
-        origin: Option<&RoomId>,
     ) -> GrantDecision {
         evaluate_access(
             grants,
             &GrantQuery {
-                provider,
-                policy,
                 subject,
                 place,
                 capability,
                 target,
                 subscriptions,
-                origin,
             },
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn eval_tool(
         grants: &GrantsConfig,
-        provider: &str,
-        policy: &AccessPolicy,
         subject: GrantSubject,
         place: GrantPlace,
         target: GrantTarget<'_>,
         subscriptions: &[RoomId],
-        origin: Option<&RoomId>,
     ) -> GrantDecision {
         evaluate_tool(
             grants,
             &GrantQuery {
-                provider,
-                policy,
                 subject,
                 place,
                 capability: GrantCapability::Plugin,
                 target,
                 subscriptions,
-                origin,
             },
         )
     }
@@ -569,31 +507,24 @@ mod tests {
         let grants = GrantsConfig::default();
         let inside = RoomId::parse("qq:group/1").expect("房间");
         let outside = RoomId::parse("qq:group/2").expect("房间");
-        let policy = AccessPolicy::default();
         let decision = eval_access(
             &grants,
-            "acb.access.grants",
-            &policy,
             GrantSubject::User,
             GrantPlace::Group,
             GrantCapability::RoomRead,
             GrantTarget::Room(&inside),
             std::slice::from_ref(&inside),
-            Some(&inside),
         );
         assert!(decision.allow);
         assert!(!decision.audited(), "普通订阅评估不审计");
 
         let decision = eval_access(
             &grants,
-            "acb.access.grants",
-            &policy,
             GrantSubject::User,
             GrantPlace::Group,
             GrantCapability::RoomRead,
             GrantTarget::Room(&outside),
             std::slice::from_ref(&inside),
-            Some(&inside),
         );
         assert!(!decision.allow);
         assert!(!decision.audited());
@@ -611,14 +542,11 @@ mod tests {
         )]);
         let decision = eval_access(
             &grants,
-            "acb.access.grants",
-            &AccessPolicy::default(),
             GrantSubject::BotAdmin,
             GrantPlace::Private,
             GrantCapability::RoomWrite,
             GrantTarget::Room(&inside),
             std::slice::from_ref(&inside),
-            Some(&inside),
         );
         assert!(decision.allow);
         assert_eq!(decision.basis, "rule:0");
@@ -626,14 +554,11 @@ mod tests {
 
         let decision = eval_access(
             &grants,
-            "acb.access.grants",
-            &AccessPolicy::default(),
             GrantSubject::BotAdmin,
             GrantPlace::Private,
             GrantCapability::RoomRead,
             GrantTarget::Room(&inside),
             std::slice::from_ref(&inside),
-            Some(&inside),
         );
         assert!(!decision.allow, "同一规则缺能力要拒绝");
         assert_eq!(decision.basis, "rule:0");
@@ -669,14 +594,11 @@ mod tests {
         let inside = RoomId::parse("qq:group/1").expect("房间");
         let decision = eval_access(
             &grants,
-            "acb.access.grants",
-            &AccessPolicy::default(),
             GrantSubject::BotAdmin,
             GrantPlace::Group,
             GrantCapability::RoomWrite,
             GrantTarget::Room(&inside),
             std::slice::from_ref(&inside),
-            Some(&inside),
         );
         assert!(decision.allow, "群聊里没有 bot_admin 规则时退回订阅边界");
         assert!(!decision.audited());
@@ -693,14 +615,11 @@ mod tests {
         );
         let decision = eval_access(
             &grants,
-            "acb.access.grants",
-            &AccessPolicy::default(),
             GrantSubject::System,
             GrantPlace::None,
             GrantCapability::RoomRead,
             GrantTarget::Room(&outside),
             std::slice::from_ref(&inside),
-            Some(&inside),
         );
         assert!(!decision.allow, "无主体轮次不继承任何人类豁免");
         assert!(!decision.audited());
@@ -712,55 +631,13 @@ mod tests {
         let grants = GrantsConfig::default();
         let decision = eval_tool(
             &grants,
-            "acb.access.grants",
-            &AccessPolicy::default(),
             GrantSubject::BotAdmin,
             GrantPlace::Private,
             GrantTarget::Room(&inside),
             std::slice::from_ref(&inside),
-            Some(&inside),
         );
         assert!(!decision.allow);
         assert_eq!(decision.basis, "admin:no_plugin_grant");
         assert!(decision.audited());
-    }
-
-    #[test]
-    fn compat_maps_legacy_providers_to_system() {
-        let inside = RoomId::parse("qq:group/1").expect("房间");
-        let outside = RoomId::parse("qq:group/2").expect("房间");
-        let policy = AccessPolicy::default();
-        let decision = eval_access(
-            &GrantsConfig::default(),
-            "acb.access.all_rooms",
-            &policy,
-            GrantSubject::System,
-            GrantPlace::None,
-            GrantCapability::RoomRead,
-            GrantTarget::Room(&outside),
-            std::slice::from_ref(&inside),
-            Some(&inside),
-        );
-        assert!(decision.allow);
-        assert_eq!(decision.basis, "compat:all_rooms");
-        assert!(decision.audited());
-
-        let elevated = AccessPolicy {
-            rooms: vec![outside.clone()],
-            ..AccessPolicy::default()
-        };
-        let decision = eval_access(
-            &GrantsConfig::default(),
-            "acb.access.elevated_in_rooms",
-            &elevated,
-            GrantSubject::System,
-            GrantPlace::None,
-            GrantCapability::RoomRead,
-            GrantTarget::Room(&outside),
-            std::slice::from_ref(&inside),
-            Some(&inside),
-        );
-        assert!(decision.allow);
-        assert_eq!(decision.basis, "compat:elevated_in_rooms");
     }
 }

@@ -96,7 +96,7 @@
 
 ### 3.3 其余
 
-- 保持现有 room access：订阅内允许，订阅外拒绝；`elevated_in_rooms` / `privileged_origins` / `all_rooms` 等现有策略继续按各自语义工作（但见 5.3 无主体轮次）。
+- 保持现有 room access：订阅内允许，订阅外拒绝；旧的非订阅豁免策略已全部移除，见 5.4。
 - 不新增隐式能力。
 - 群内普通成员/管理员账号只有正常 room access，没有常驻提权。
 
@@ -127,7 +127,8 @@ evaluate(subject, place, scope, capability, target) -> allow/deny + reason
 ```
 
 - 内置实现是四元组评估器；第三方可以整体替换成 RBAC、外接策略、数据库驱动策略。
-- **同一时刻只生效一个实现**。配置了外部实现，就不并行运行内置实现；内置实现与外部实现不能同时给出判据（否则审计无法回答"是谁批准的"）。
+- **「唯一实现」的粒度**：每一次判定只有一个实现给出结论；同一个会话内只有一个实现（内置或某个外部 provider），不能并行运行两套判据。不同会话可以各自配置不同的外部 provider——这是会话级配置差异，不是同一请求出现两套判据。
+- 内置 grants evaluator **不是** `PluginManager` 注册对象：它由 core 直接执行，`describe_plugins` 里只是 `plugin_info_json` 的元数据分支，用于让控制台展示"这个会话当前用哪套判据"。不要把它当成可安装/可替换的普通插件。
 - 插件缺席或加载失败 → 用内置实现并 fail closed；不要出现"没有 provider 所以放行"。
 - 现有 `AccessProvider` / `ToolAccessProvider` 在阶段二收敛为**调用适配器**：授权结论只由唯一 evaluator 产生；`ToolAccessProvider` 若保留，只能做非授权的工具过滤/否决，不能成为第二套授权来源。
 
@@ -201,26 +202,31 @@ capability = ["room_read", "room_write", "connection_read", "platform", "destruc
 ### 5.3 无主体轮次
 
 - `subject = system`、`place = none`：定时任务、时钟唤醒、没有人类发送者的自发轮次。
-- 不继承 bot admin / system admin，也不继承 `all_rooms` / `elevated_in_rooms` / `privileged_origins` 等非订阅豁免。
+- 不继承 bot admin / system admin，也不继承任何非订阅豁免（旧三键已移除）。
 - 不继承任何票据；票据绑定本轮，无主体轮次不会持有票据。
 - 仍保留订阅内的正常访问；`send_message` 当前房间复检、`plugin_tool_call` scope 检查都继续执行。
 - 这样避免"定时任务在特权房间跑一次，就获得全局权限"。
 
-### 5.4 旧 access provider 的兼容映射
+### 5.4 不做兼容：旧键移除即启动失败
 
-旧配置继续可用，但统一映射成 `system` 主体的常态授予，并在启动时打印弃用提示：
+决定**不保留** `acb.access.all_rooms` / `acb.access.elevated_in_rooms` / `acb.access.privileged_origins` 的兼容映射。
 
-| 旧 provider | 映射 |
-|---|---|
-| `acb.access.all_rooms` | `system` + `place=none` + `scope=any`，所有能力 |
-| `acb.access.elevated_in_rooms` | `system` + 每个 `access.rooms` 房间一条授予；连接能力按该连接是否有列出房间 |
-| `acb.access.privileged_origins` | `system` + 仅当 `origin` 在 `access.origins` 时 `scope=any`，所有能力 |
-| `acb.access.subscribed` | 不生成授予，直接走订阅边界 |
+理由：
 
-**「群内零常驻」的边界**：它约束的是**人类主体**在群场所被自动提权；不约束运维显式写入的 `[grants]` 或旧 provider 兼容映射。也就是说：
+- 目前没有现存用户需要平滑迁移；为不存在的用户维护翻译层，只会长期增加攻击面。
+- 旧三键的语义（整个会话豁免 / 房间列表 / 来源提权）无法无损映射到四元组 + 目标；任何近似映射都可能**悄悄放大权限**，尤其 `destructive` / `plugin`。
+- 旧语义从未明确这三键与 `platform` / `destructive` / `plugin` 的关系；保留映射等于把这段模糊边界制度化。
+
+具体做法：
+
+- 三个 provider 值从配置 schema 移除；配置里再出现时启动期直接报错，文案明确指向 `[grants]`。
+- `[sessions.access].rooms` / `.origins` 一并移除；该表开启 `deny_unknown_fields`，旧键不再被静默忽略。
+- 不存在 `compat:*` 审计分支：所有放行只能来自 `[grants]` 规则或订阅边界。
+
+**「群内零常驻」的边界**：它约束的是**人类主体**在群场所被自动提权，不约束运维显式写入的 `[grants]`：
 
 - 群里发言的 system admin 账号不会自动获得任何授予；
-- 运维显式写的 `[grants]` 规则（包括 `subject=system` 或旧的 `all_rooms` 兼容映射）仍然生效；
+- 运维显式写的 `[grants]` 规则（包括 `subject=system`）仍然生效；
 - 唯一需要人类在私信批准的是**临时票据**（阶段二），不是常态配置。
 
 ---
@@ -297,11 +303,12 @@ Ticket {
 
 不能复用 `is_admin` 字段，否则会把群管理员误当成系统管理员。
 
-### 7.3 唯一 evaluator 的注册点
+### 7.3 内置 evaluator 的注册点
 
-- `PluginManager::with_native_builtins()` 目前只注册 4 个 access provider，没有 tool_access 默认 provider。
-- 阶段二应注册 core 默认 `acb.access.default`，并把"无 provider → 放行"改为"无 provider → 拒绝"。
-- 配置了外部 evaluator 时，不并行运行内置 evaluator；启动期校验只允许一个。
+- 内置 grants evaluator **不是** `PluginManager` 注册对象：`PluginManager::with_native_builtins()` 只注册订阅边界 provider（`acb.access.subscribed`）；`acb.access.grants` 由 core 直接执行。
+- `describe_plugins` 里给 `acb.access.grants` 的是 `plugin_info_json` 元数据分支，只用于控制台展示"当前会话用哪套判据"，不代表它是可安装/可替换的普通插件。
+- 同一个会话配置了外部 evaluator 时，只用外部实现判定；内置 evaluator 不参与同一请求。不同会话可以各自配置不同外部 provider。
+- 启动期校验外部 provider 必须可解析；缺失或实例化失败 fail closed。`ToolAccess` 同时只允许一个实现，缺失实现同样 fail closed。
 
 ---
 
@@ -340,7 +347,7 @@ Ticket {
 
 ## 10. 风险与未知
 
-1. **现有策略的兼容性**：`all_rooms` / `privileged_origins` / `elevated_in_rooms` 都是非订阅豁免；无主体轮次必须不生效，阶段二需要把这些策略纳入 place/subject 门控，或明确重定义。
+1. **旧策略已移除**：`all_rooms` / `privileged_origins` / `elevated_in_rooms` 从 schema 删除，旧配置在启动期直接失败；无主体轮次因此不存在"继承旧豁免"的问题。
 2. **票据与轮次生命周期**：如果审批耗时超过本轮，票据随轮次作废；需要明确"申请后是否保持本轮等待"。当前设计是保持本轮等待、超时即失败。
 3. **多 op 票据**：一次使用即废，意味着多步操作要多次申请；这是安全取舍，不是遗漏。
 4. **外部 evaluator**：第三方 RBAC 必须自行实现 place/subject 规则；core 只能在接口层要求，无法证明其内部正确。
@@ -351,9 +358,9 @@ Ticket {
 
 ## 11. 阶段二实施拆分（待批准，不在本次实现）
 
-1. **配置 + subject/place**：`[access]` 解析、轮次快照、启动告警。
+1. **配置 + subject/place**：`[grants]` 解析、轮次快照、启动告警。
 2. **唯一 evaluator**：core 内置四元组实现；外部实现整体替换；无 provider fail closed。
-3. **接口扩展**：`AccessRequest` / `ToolAccessContext` 增加 subject/place；旧 provider 兼容为 subject=none。
+3. **接口扩展**：`AccessRequest` / `ToolAccessContext` 增加 subject/place；旧 provider 直接移除，不做 subject=none 的兼容。
 4. **票据**：申请/批准/使用/过期/撤销，绑定 turn + target + ops + TTL。
 5. **审计**：system admin 逐次、票据四事件、destructive 拒绝。
 6. **测试**：三档 × 四场所矩阵、无主体轮次、票据生命周期、群内零常驻、destructive 叠加、fail closed。
