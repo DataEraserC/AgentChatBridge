@@ -439,6 +439,11 @@ test("会话模型优先，selectModel 失败让这一轮失败", async (t) => {
   const turnEnd = await nextTurnEnd(bridge)
   assert.equal(turnEnd.frame, "turn_end")
   assert.match(turnEnd.error, /unavailable/, "模型不存在要让整轮失败")
+  assert.deepEqual(
+    turnEnd.failure,
+    { component: "model", class: "model_unconfigured" },
+    "selectModel 对照 catalog 失败要标成模型未配置",
+  )
   assert.equal(dsh.prompts.length, 0, "模型没选上就不该投话")
   await runPromise
 })
@@ -474,6 +479,11 @@ test("dsh 不可达不能被报成模型不存在", async (t) => {
   const turnEnd = await nextTurnEnd(bridge)
   assert.match(turnEnd.error, /cannot reach dsh/, "transport 失败要保留 unreachable 文案")
   assert.doesNotMatch(turnEnd.error, /会话模型/, "不能把 transport 失败说成模型不存在")
+  assert.deepEqual(
+    turnEnd.failure,
+    { component: "backend", class: "unreachable" },
+    "dsh 不可达归到后端，不归到模型",
+  )
   assert.equal(dsh.prompts.length, 0, "模型没选上就不该投话")
   await runPromise
 })

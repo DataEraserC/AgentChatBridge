@@ -16,7 +16,7 @@ pub use element::{Element, parse_elements};
 pub use error::{DecodeError, ProtoError};
 pub use frame::{
     Delivery, ErrorCode, Frame, LogLevel, MemoryInfo, Omitted, PersonaInfo, PromptFragment,
-    SessionInfo, SessionMapRef, ToolError, TurnReason,
+    SessionInfo, SessionMapRef, ToolError, TurnFailure, TurnReason,
 };
 pub use record::{QuoteRef, Record, RecordKind, Sender, SenderRole};
 pub use room::RoomId;

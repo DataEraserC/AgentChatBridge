@@ -291,6 +291,7 @@ fn session_answers_ping_and_ends_turns() {
             Frame::TurnEnd {
                 ticket: delivery.ticket.clone(),
                 error: None,
+                failure: None,
             },
         )
         .expect("能收工");
@@ -384,6 +385,7 @@ fn one_connection_runs_two_sessions_in_parallel() {
         Frame::TurnEnd {
             ticket: main_ticket,
             error: None,
+            failure: None,
         },
     )
     .expect("main 能收工");
@@ -395,6 +397,7 @@ fn one_connection_runs_two_sessions_in_parallel() {
         Frame::TurnEnd {
             ticket: group2_ticket,
             error: None,
+            failure: None,
         },
     )
     .expect("group2 能收工");
@@ -447,6 +450,7 @@ fn one_connection_takes_only_one_turn_per_session_at_a_time() {
         Frame::TurnEnd {
             ticket: first.ticket.clone(),
             error: None,
+            failure: None,
         },
     )
     .expect("能收工");
@@ -584,6 +588,7 @@ fn a_real_connection_carries_a_whole_turn() {
         &Frame::TurnEnd {
             ticket: ticket.clone(),
             error: None,
+            failure: None,
         },
     );
 
@@ -702,6 +707,7 @@ fn wait_message_waits_outside_the_core_lock() {
         &Frame::TurnEnd {
             ticket: ticket.clone(),
             error: None,
+            failure: None,
         },
     );
 
@@ -767,6 +773,7 @@ fn wait_message_times_out_without_new_records() {
         &Frame::TurnEnd {
             ticket: ticket.clone(),
             error: None,
+            failure: None,
         },
     );
     drop(reader);
@@ -861,6 +868,7 @@ fn redelivery_hint_rides_on_note_not_on_content() {
         &Frame::TurnEnd {
             ticket: first.ticket,
             error: None,
+            failure: None,
         },
     );
 

@@ -21,7 +21,10 @@ use crate::ticket::Ticket;
 /// 5：`delivery` 增加可选 `wake_reason`，让 agent 知道「这次为什么醒」。
 /// 6：事件记录带 `tags` / `payload` / `summary`——平台事件不再只有一个类型名，
 ///    agent 和唤醒策略都能看到跨平台语义标签（`RecordKind::Event` 扩字段）。
-pub const PROTOCOL_VERSION: u32 = 6;
+/// 7：`turn_end` 增加可选结构化 `failure`，harness 可以标注失败属于模型还是后端，
+///    以及 `model_unavailable` / `model_unconfigured` / `auth_failed` 等分类。
+///    字段可选，v6 harness 不带 `failure` 时走原有文本去重路径。
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// 单帧上限：1 MiB。超了直接断连，不做截断。
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -202,6 +205,19 @@ impl ToolError {
     }
 }
 
+/// harness 对一轮失败的结构化分类。全部可选：旧 harness 不带就只走 `error` 文本。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnFailure {
+    /// 失败属于哪个组件：`model` 或 `backend`。core 不认识的值按无结构化信息处理。
+    pub component: String,
+    /// 具体 id：模型引用或 harness id；空 = 由 core 按会话配置补默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 失败分类：`model_unavailable` / `model_unconfigured` / `auth_failed` /
+    /// `rate_limited` / `internal` 等。core 原样存进依赖表。
+    pub class: String,
+}
+
 /// 一帧。
 ///
 /// `TurnStart` 比其它变体大（约 432B），但帧是短命协议对象；为省一次堆分配给
@@ -235,6 +251,9 @@ pub enum Frame {
         ticket: Ticket,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// v7 可选：失败的结构化分类。v6 harness 不带这个字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<TurnFailure>,
     },
     /// harness → 桥：调用工具。
     ToolCall {
@@ -304,9 +323,9 @@ impl Frame {
     }
 }
 
-/// 协议版本是否兼容。现在只认完全相等。
+/// 协议版本是否兼容。v7 增加的是可选字段，旧 v6 harness 仍然可用。
 pub fn version_compatible(version: u32) -> bool {
-    version == PROTOCOL_VERSION
+    version == PROTOCOL_VERSION || version == 6
 }
 
 /// 编码成一帧（含行尾换行）。
@@ -418,6 +437,16 @@ mod tests {
             Frame::TurnEnd {
                 ticket: Ticket::new("t-1").expect("合法"),
                 error: None,
+                failure: None,
+            },
+            Frame::TurnEnd {
+                ticket: Ticket::new("t-1").expect("合法"),
+                error: Some("模型网关不可用".into()),
+                failure: Some(TurnFailure {
+                    component: "model".into(),
+                    id: Some("openai/gpt-4".into()),
+                    class: "model_unavailable".into(),
+                }),
             },
             Frame::ToolCall {
                 id: "c-1".into(),
@@ -536,9 +565,20 @@ mod tests {
     }
 
     #[test]
-    fn version_must_match_exactly() {
+    fn version_accepts_v6_during_transition() {
         assert!(version_compatible(PROTOCOL_VERSION));
+        assert!(version_compatible(6), "v6 harness 仍要能连上新桥");
         assert!(!version_compatible(PROTOCOL_VERSION + 1));
+    }
+
+    #[test]
+    fn v6_turn_end_decodes_without_failure() {
+        let back = decode(r#"{"frame":"turn_end","ticket":"t-1","error":"boom"}"#)
+            .expect("旧 harness 的帧要能解");
+        match back {
+            Frame::TurnEnd { failure, .. } => assert!(failure.is_none()),
+            other => panic!("应当解成 turn_end，实际是 {}", other.kind()),
+        }
     }
 
     #[test]

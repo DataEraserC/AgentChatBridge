@@ -9,7 +9,7 @@ import net from "node:net"
 import { t } from "../../shared/i18n.mjs"
 
 /// 协议版本。和 `acb_proto::frame::PROTOCOL_VERSION` 必须一致。
-export const PROTOCOL_VERSION = 6
+export const PROTOCOL_VERSION = 7
 
 const MAX_FRAME_BYTES = 1024 * 1024
 const HANDSHAKE_TIMEOUT_MS = 10_000
@@ -164,10 +164,18 @@ export class BridgeLink {
     return promise
   }
 
-  /** 本轮收工。`error` 非空表示这轮出错了（桥只记日志，不影响水位）。 */
-  endTurn(ticket = this.ticket, error = null) {
+  /**
+   * 本轮收工。`error` 非空表示这轮出错了（桥只记日志，不影响水位）。
+   * `failure` 是 v7 可选的结构化分类（`{ component, id?, class }`），用于桥侧依赖表。
+   */
+  endTurn(ticket = this.ticket, error = null, failure = null) {
     if (!ticket) return
-    this.#write({ frame: "turn_end", ticket, ...(error ? { error } : {}) })
+    this.#write({
+      frame: "turn_end",
+      ticket,
+      ...(error ? { error } : {}),
+      ...(failure ? { failure } : {}),
+    })
     this.log(
       error ? "warn" : "info",
       t("opencode.turn_end_log", {

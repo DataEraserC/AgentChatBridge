@@ -223,7 +223,11 @@ impl Conn {
                 };
                 Ok(vec![reply])
             }
-            Frame::TurnEnd { ticket, error } => {
+            Frame::TurnEnd {
+                ticket,
+                error,
+                failure,
+            } => {
                 // 找到这张票对应的会话，把它从「在跑」里摘掉。
                 let owned = self
                     .tickets
@@ -236,7 +240,7 @@ impl Conn {
                     }]);
                 };
                 self.tickets.remove(&session);
-                bridge.end_turn(&ticket, error.as_deref())?;
+                bridge.end_turn_with_failure(&ticket, error.as_deref(), failure.as_ref())?;
                 let mut replies = Vec::new();
                 if let Some(error) = error {
                     replies.push(Frame::Log {

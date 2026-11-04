@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use acb_proto::element::flatten_text;
 use acb_proto::{
     Delivery, Element, ErrorCode, MemoryInfo, PersonaInfo, PromptFragment, QuoteRef, Record,
-    RecordKind, RoomId, Sender, SessionInfo, Ticket, ToolError, TurnReason,
+    RecordKind, RoomId, Sender, SessionInfo, Ticket, ToolError, TurnFailure, TurnReason,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -553,12 +553,49 @@ struct TurnFailureNotice {
     session: String,
     room: RoomId,
     fingerprint: u64,
+    /// v7 harness 给出的结构化分类；没有就是 None，按指纹去重。
+    component: Option<String>,
+    component_id: Option<String>,
+    class: Option<String>,
     at: i64,
 }
 
 enum TurnFailureSuppressed {
     Duplicate,
     RoomLimit,
+}
+
+/// 会话的模型依赖 id：显式 `session.model` 优先，否则归到 harness 默认模型。
+fn model_id_for(config: &Config, session: &str) -> Option<String> {
+    let session = config.session(session)?;
+    Some(
+        session
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("model:{}/default", session.harness)),
+    )
+}
+
+/// 结构化失败对应的依赖 id：harness 给了就用，否则按 component 补默认值。
+fn component_id_for(config: &Config, session: &str, failure: &TurnFailure) -> Option<String> {
+    if let Some(id) = failure
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return Some(id.to_owned());
+    }
+    match failure.component.as_str() {
+        "model" => model_id_for(config, session),
+        "backend" => config
+            .session(session)
+            .map(|session| session.harness.clone()),
+        _ => None,
+    }
 }
 
 /// 原始错误文本的稳定指纹（64 位 FNV-1a）。只做去重，不解析语义；
@@ -2688,7 +2725,14 @@ impl<S: Store> Bridge<S> {
     ///
     /// `error` 非空表示 harness 报告这轮失败了。这时按配置的 `on_turn_error` 动作
     /// 列表顺序执行（记日志 / 发到指定房间），让失败信息能被看见，而不是只吞进日志。
-    pub fn end_turn(&mut self, ticket: &Ticket, error: Option<&str>) -> Result<(), BridgeError> {
+    ///
+    /// `failure` 是 v7 harness 给出的结构化分类；没有就走原来的文本指纹路径。
+    pub fn end_turn_with_failure(
+        &mut self,
+        ticket: &Ticket,
+        error: Option<&str>,
+        failure: Option<&TurnFailure>,
+    ) -> Result<(), BridgeError> {
         // 先把这一轮的信息取出来（room + session），remove 之前要用它做失败通知。
         let turn = self.active.get(
             self.by_ticket
@@ -2727,8 +2771,28 @@ impl<S: Store> Bridge<S> {
                 );
             } else {
                 let now = now_millis();
+                // 结构化失败先落到依赖表；这一步不影响是否发 in-band 通知。
+                if let Some(failure) = failure {
+                    self.note_structured_failure(&turn.config, &turn.session, failure, error, now);
+                }
                 let fingerprint = turn_error_fingerprint(error);
-                match self.turn_failure_suppressed(&turn.session, &turn.room, fingerprint, now) {
+                let structured = failure.map(|failure| {
+                    (
+                        failure.component.as_str(),
+                        component_id_for(&turn.config, &turn.session, failure),
+                        failure.class.as_str(),
+                    )
+                });
+                let structured_key = structured
+                    .as_ref()
+                    .map(|(component, id, class)| (*component, id.as_deref(), *class));
+                match self.turn_failure_suppressed(
+                    &turn.session,
+                    &turn.room,
+                    fingerprint,
+                    structured_key,
+                    now,
+                ) {
                     Some(reason) => {
                         let key = match reason {
                             TurnFailureSuppressed::Duplicate => {
@@ -2753,7 +2817,13 @@ impl<S: Store> Bridge<S> {
                         let sent =
                             self.notify_turn_error(&turn.config, &turn.session, &turn.room, error);
                         if sent > 0 {
-                            self.record_turn_failure(&turn.session, &turn.room, fingerprint, now);
+                            self.record_turn_failure(
+                                &turn.session,
+                                &turn.room,
+                                fingerprint,
+                                structured_key,
+                                now,
+                            );
                         }
                     }
                 }
@@ -2761,6 +2831,7 @@ impl<S: Store> Bridge<S> {
         } else {
             // 这一轮恢复正常：清掉这个 (session, room) 的历史失败，下一次故障重新通知。
             self.clear_turn_failures(&turn.session, &turn.room);
+            self.note_turn_success(&turn.config, &turn.session, now_millis());
         }
 
         let Some(session) = self.by_ticket.remove(ticket) else {
@@ -2785,6 +2856,11 @@ impl<S: Store> Bridge<S> {
         self.active.remove(&session);
         self.maybe_promote_lkg();
         Ok(())
+    }
+
+    /// 不带结构化分类的收工入口（旧 harness/测试用）。
+    pub fn end_turn(&mut self, ticket: &Ticket, error: Option<&str>) -> Result<(), BridgeError> {
+        self.end_turn_with_failure(ticket, error, None)
     }
 
     /// 取出排队等发的失败通知。endpoint 放下全局锁后执行它们，再回来结算。
@@ -2826,13 +2902,24 @@ impl<S: Store> Bridge<S> {
         session: &str,
         room: &RoomId,
         fingerprint: u64,
+        structured: Option<(&str, Option<&str>, &str)>,
         now: i64,
     ) -> Option<TurnFailureSuppressed> {
         let cutoff = now.saturating_sub(TURN_FAILURE_WINDOW_MS);
         self.turn_failures.retain(|item| item.at >= cutoff);
-        if self.turn_failures.iter().any(|item| {
-            item.session == session && item.room == *room && item.fingerprint == fingerprint
-        }) {
+        let duplicate = match structured {
+            Some((component, id, class)) => self.turn_failures.iter().any(|item| {
+                item.session == session
+                    && item.room == *room
+                    && item.component.as_deref() == Some(component)
+                    && item.component_id.as_deref() == id
+                    && item.class.as_deref() == Some(class)
+            }),
+            None => self.turn_failures.iter().any(|item| {
+                item.session == session && item.room == *room && item.fingerprint == fingerprint
+            }),
+        };
+        if duplicate {
             return Some(TurnFailureSuppressed::Duplicate);
         }
         if self
@@ -2847,11 +2934,21 @@ impl<S: Store> Bridge<S> {
         None
     }
 
-    fn record_turn_failure(&mut self, session: &str, room: &RoomId, fingerprint: u64, now: i64) {
+    fn record_turn_failure(
+        &mut self,
+        session: &str,
+        room: &RoomId,
+        fingerprint: u64,
+        structured: Option<(&str, Option<&str>, &str)>,
+        now: i64,
+    ) {
         self.turn_failures.push_back(TurnFailureNotice {
             session: session.to_owned(),
             room: room.clone(),
             fingerprint,
+            component: structured.map(|(component, _, _)| component.to_owned()),
+            component_id: structured.and_then(|(_, id, _)| id).map(ToOwned::to_owned),
+            class: structured.map(|(_, _, class)| class.to_owned()),
             at: now,
         });
         while self.turn_failures.len() > TURN_FAILURE_KEEP {
@@ -2863,6 +2960,37 @@ impl<S: Store> Bridge<S> {
     fn clear_turn_failures(&mut self, session: &str, room: &RoomId) {
         self.turn_failures
             .retain(|item| item.session != session || item.room != *room);
+    }
+
+    /// 把 harness 的结构化分类写进依赖表。未知 component 原样忽略。
+    fn note_structured_failure(
+        &self,
+        config: &Config,
+        session: &str,
+        failure: &TurnFailure,
+        detail: &str,
+        now: i64,
+    ) {
+        let Some(id) = component_id_for(config, session, failure) else {
+            return;
+        };
+        match failure.component.as_str() {
+            "model" => self.deps.model_down(&id, &failure.class, detail, now),
+            "backend" => self
+                .deps
+                .harness_turn_down(&id, &failure.class, detail, now),
+            _ => {}
+        }
+    }
+
+    /// 一轮成功：把会话的模型与 harness 标记为可用（并对齐 lastOkAt）。
+    fn note_turn_success(&self, config: &Config, session: &str, now: i64) {
+        if let Some(model) = model_id_for(config, session) {
+            self.deps.model_up(&model, now);
+        }
+        if let Some(session) = config.session(session) {
+            self.deps.harness_connected(&session.harness, now);
+        }
     }
 
     /// 交给会话的失败通知 provider 选动作，再按顺序执行。默认 provider 保持原行为：
