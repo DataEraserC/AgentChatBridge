@@ -33,7 +33,7 @@
 | harness 适配器（opencode v2） | **真机整轮验过**（2026-10-29 19:26，最后一轮 10 秒回话）：真 QQ 发消息 → 桥开轮 → 模型收到 → `execute` 里调 `send_message` 回话 → `ack_messages` 推水位。当前常驻方案是 `opencode2 serve`（不再靠 `run` 反复踢）；协议层 28 个测试 + 插件逻辑 11 个 |
 | harness 适配器（DSH） | 已写：进程外驱动 + 内置 MCP server，工具名 `mcp__acb__*`；协议层真机验过，模型真回话待配模型。见 [docs/06](docs/06-harness-adapters.md) |
 | harness 适配器（Trae / Codex…） | 没写，判断方法见 [docs/06](docs/06-harness-adapters.md) |
-| QQ 适配器（OneBot 11） | 可用：群与私聊收发、拍一拍、撤回标记、其它平台事件，断线自动重连 |
+| QQ 适配器（OneBot SnowLuma / OneBot 11） | 可用：群与私聊收发、拍一拍、撤回标记、其它平台事件，断线自动重连 |
 | 插件宿主（Lua / 动态库 / 外置进程） | 可用：Lua 与动态库能替换七种策略（wake/access/delivery/send/turn_error/clock/receive）；外置进程与动态库能接入新平台；见 [docs/08](docs/08-plugin-development.md) |
 | Discord / KOOK / Telegram | 没写 |
 | 存储 | 可用：SQLite 落盘，重启接着上次的账做（编号、水位、笔记、投递次数、撤回标记都在）；旧流水按条数/天数自动清理，只削读过的 |

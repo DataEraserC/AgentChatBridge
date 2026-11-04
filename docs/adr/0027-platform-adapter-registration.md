@@ -87,7 +87,7 @@ InboundEvent:
   - `poke.send` 在群里 `user_id` 是“拍谁”（成员目标），`group_id` 才是房间目标；私聊里 `user_id` 由房间推导。之前 `call_payload` 对“同时有 group/private 目标”的路由处理是错的。
   - `message.send_forward` 现在按房间推导 `group_id`/`user_id`，并拒绝在群里指定 `user_id` 把目标换成私聊。
 - **Phase 2b 已落地（target 部分）**：`MethodSpec` 增加 `targets: &[TargetSpec]`；`TargetSpec` 区分 `Room` / `Member`，并声明房间路径类型。kernel 的 `platform_call` 在 `check_params` 之后调用 `check_target_params`，即使适配器自己没检查，core 也会拒绝在 `params` 里换房间目标。OneBot 的 targets 由 `ROUTES` 推导，避免方法表和路由表各抄一份。
-- **Phase 2c-1 已落地**：`AdapterManifest` + `AdapterFactory` + `AdapterRegistry`；`main.rs` 不再知道 `OneBotOutbound` / `LinkSlot` / `supervise` 怎么拼，只注册 `OneBotAdapterFactory`，按连接 `kind` 取 `AdapterInstance`。连接线程仍由适配器自己的 `launch` 启动，core 不持有 socket。
+- **Phase 2c-1 已落地**：`AdapterManifest` + `AdapterFactory` + `AdapterRegistry`；`main.rs` 不再知道 `OneBotSnowLumaOutbound` / `LinkSlot` / `supervise` 怎么拼，只注册 `OneBotSnowLumaAdapterFactory`，按连接 `kind` 取 `AdapterInstance`。连接线程仍由适配器自己的 `launch` 启动，core 不持有 socket。
 - **Phase 2c-2 已落地**：`Outbounds` 提供可克隆的 `OutboundHandle`；endpoint 把 `send_message` / `send_message_to` / `platform_call` 拆成“锁内 prepare / 锁外 execute / 锁内 finish”。入站事件走 `EventQueue`，适配器只提交 `RecordDraft`，core 的 `drain_events` 线程统一 `ingest`；适配器侧不再 `try_lock`。
 - **Phase 2c-3 已落地**：`MethodSpec` 增加 `effect`（read/write/send/delete）与 `record`（none/message/event）；OneBot 的 effect/record 由风险、标签和方法名推导，不维护第二份手写表。
 - **`Outbound::call` 返回 `CallOutcome`**：适配器把发送类方法（发消息、合并转发、群公告）**实际发出去的内容**翻译成 `OutgoingRecord`，core 不认识平台消息段。`finish_platform_call` 成功后写流水并对**所有订阅者** ack，修掉「用 `platform_call` 发的消息在自己水位上留洞、导致积压反复重投」的问题。

@@ -32,19 +32,19 @@
 
 | 项目 | 当前值 | 位置 |
 |---|---|---|
-| crate 目录 | `crates/adapters/onebot11` | workspace 成员 |
-| package 名 | `acb-adapter-onebot11` | [Cargo.toml](../../crates/adapters/onebot11/Cargo.toml) |
-| Rust 工厂类型 | `OneBotAdapterFactory` | [factory.rs](../../crates/adapters/onebot11/src/factory.rs#L76) |
-| 出站类型 | `OneBotOutbound` | [outbound.rs](../../crates/adapters/onebot11/src/outbound.rs#L32) |
-| manifest `id` | `acb.adapter.onebot11` | [factory.rs](../../crates/adapters/onebot11/src/factory.rs#L51) |
-| manifest `kind` | `onebot11` | [factory.rs](../../crates/adapters/onebot11/src/factory.rs#L53) |
-| manifest `platform` | `qq` | [factory.rs](../../crates/adapters/onebot11/src/factory.rs#L52) |
-| manifest 标题 | `OneBot 11` | [factory.rs](../../crates/adapters/onebot11/src/factory.rs#L64) |
-| 配置 `kind` | `onebot11` | [config.example.toml](../../config.example.toml#L108) |
+| crate 目录 | `crates/adapters/onebot-snowluma` | workspace 成员 |
+| package 名 | `acb-adapter-onebot-snowluma` | [Cargo.toml](../../crates/adapters/onebot-snowluma/Cargo.toml) |
+| Rust 工厂类型 | `OneBotSnowLumaAdapterFactory` | [factory.rs](../../crates/adapters/onebot-snowluma/src/factory.rs#L76) |
+| 出站类型 | `OneBotSnowLumaOutbound` | [outbound.rs](../../crates/adapters/onebot-snowluma/src/outbound.rs#L32) |
+| manifest `id` | `acb.adapter.onebot11` | [factory.rs](../../crates/adapters/onebot-snowluma/src/factory.rs#L51) |
+| manifest `kind` | `onebot11` | [factory.rs](../../crates/adapters/onebot-snowluma/src/factory.rs#L53) |
+| manifest `platform` | `qq` | [factory.rs](../../crates/adapters/onebot-snowluma/src/factory.rs#L52) |
+| manifest 标题 | `OneBot SnowLuma` | [factory.rs](../../crates/adapters/onebot-snowluma/src/factory.rs#L64) |
+| 配置 `kind` | `onebot11`（规范值）/ `onebot-snowluma`（等价别名） | [config.example.toml](../../config.example.toml#L108) |
 | 配置 `platform` | `qq` | [config.example.toml](../../config.example.toml#L107) |
 | 连接 id | `qq` / `qq2` | [config.example.toml](../../config.example.toml#L106-L148) |
-| transport | `ws-client` | [lib.rs](../../crates/adapters/onebot11/src/lib.rs) |
-| 房间写法 | `<连接>:group/<群号>`、`<连接>:private/<号码>` | [lib.rs](../../crates/adapters/onebot11/src/lib.rs) |
+| transport | `ws-client` | [lib.rs](../../crates/adapters/onebot-snowluma/src/lib.rs) |
+| 房间写法 | `<连接>:group/<群号>`、`<连接>:private/<号码>` | [lib.rs](../../crates/adapters/onebot-snowluma/src/lib.rs) |
 | 依赖表里的平台 id | **连接 id**（`qq`），不是 adapter kind | [deps.rs](../../crates/kernel/src/deps.rs#L248-L252) |
 
 关键事实：`/healthz` 和 `/api/dependencies` 里的 `platform` 条目 id 来自 `Connection.id`（[deps.rs](../../crates/kernel/src/deps.rs#L248-L252)），与适配器名无关。改名不会自动改这个 id；也不应该改。
@@ -55,10 +55,10 @@
 
 | 落点 | 说明 |
 |---|---|
-| `crates/adapters/onebot11/` | 8 个源文件：`catalog.rs`、`event.rs`、`factory.rs`、`forward.rs`、`lib.rs`、`link.rs`、`outbound.rs`、`segment.rs` |
+| `crates/adapters/onebot-snowluma/` | 8 个源文件：`catalog.rs`、`event.rs`、`factory.rs`、`forward.rs`、`lib.rs`、`link.rs`、`outbound.rs`、`segment.rs` |
 | 根 `Cargo.toml:8` | workspace 成员路径 |
-| `crates/bridge/Cargo.toml:17` | 依赖 `acb-adapter-onebot11` |
-| `crates/bridge/src/main.rs:19,181` | `use acb_adapter_onebot11::OneBotAdapterFactory;`，并 `register_adapter` |
+| `crates/bridge/Cargo.toml:17` | 依赖 `acb-adapter-onebot-snowluma` |
+| `crates/bridge/src/main.rs:19,191` | `use acb_adapter_onebot_snowluma::OneBotSnowLumaAdapterFactory;`，并 `register_adapter` |
 | `crates/kernel/src/adapter.rs:63-67` | manifest 文档示例直接写 `acb.adapter.onebot11` / `onebot11` |
 | `crates/kernel/src/config.rs:293,302` | 配置字段注释写「内置 `onebot11`」和「OneBot 实现」 |
 | `crates/bridge/src/console.html:756` | 新建连接表单默认值 `value="onebot11"` |
@@ -398,7 +398,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 落地时的兼容规则：
 - 配置：`kind = "onebot11"` 继续有效；`kind = "onebot-snowluma"` 解析到同一个工厂。二者都接受，文档把 `onebot11` 标为「兼容写法」。
-- provider id：继续用 `acb.adapter.onebot11`；manifest 显示名改为 `OneBot 11 · SnowLuma`。
+- provider id：继续用 `acb.adapter.onebot11`；manifest 显示名改为 `OneBot SnowLuma`。
 - 连接 id / 房间前缀：完全不动。
 - i18n key：继续用 `adapter.onebot11.*`；只改文案 value。改 key 没有用户收益，反而容易漏翻译。
 - 迁移：不写自动迁移脚本。旧配置不需要迁移；新配置可以用别名。
@@ -410,7 +410,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 原则：每批能独立交付、独立验证；批与批之间尽量不共享未完成的抽象。批次 0 只是改名，不改行为；批次 1 之后才开始加能力。
 
-### 批次 0：改名与别名（无行为变化）
+### 批次 0：改名与别名（已完成，2026-11-05）
 
 **能力范围**
 - crate / 类型 / 显示名改为 `onebot-snowluma`。
@@ -419,7 +419,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **涉及文件**
 - `Cargo.toml`、`crates/bridge/Cargo.toml`、`crates/bridge/src/main.rs`
-- `crates/adapters/onebot11/` 目录与 `factory.rs`、`lib.rs`、`outbound.rs`
+- `crates/adapters/onebot-snowluma/` 目录与 `factory.rs`、`lib.rs`、`outbound.rs`
 - `crates/kernel/src/adapter.rs`、`config.rs`、`plugin.rs`（别名解析与文档示例）
 - `crates/i18n/locales/{zh-CN,en}.json`（只改 value）
 - `docs/05-adapters.md`、`docs/guide/config.md`、`docs/03-architecture.md`、`docs/02-glossary.md`

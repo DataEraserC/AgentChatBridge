@@ -125,7 +125,7 @@ crates/
   kernel/                核心：订阅、唤醒、流水、水位、笔记、回合调度、工具面、接入点
     src/storage.rs         存储接口 + 内存实现
     src/storage/sqlite.rs  落盘实现（正式跑用这个）
-  adapters/onebot11/     OneBot 11 适配器（QQ 群与私聊）
+  adapters/onebot-snowluma/  OneBot SnowLuma 适配器（QQ 群与私聊）
   adapters/process/      外置进程载体（stdin/stdout JSON，崩溃隔离）
   adapters/dynamic/      动态库载体（libloading，进程内）
   plugins/lua/           Lua manager/loader：每文件一个 provider

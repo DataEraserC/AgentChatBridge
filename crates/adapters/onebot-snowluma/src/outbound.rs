@@ -29,7 +29,7 @@ pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(45);
 // 平台方法表在 `catalog.rs`：那里的每一行都是「人也做得到的事」。
 
 /// OneBot 出站通道。一条连接一个。
-pub struct OneBotOutbound {
+pub struct OneBotSnowLumaOutbound {
     slot: LinkSlot,
     /// 这条连接的连接名，别的连接发过来直接拒。
     connection: String,
@@ -38,7 +38,7 @@ pub struct OneBotOutbound {
     seq: u64,
 }
 
-impl OneBotOutbound {
+impl OneBotSnowLumaOutbound {
     pub fn new(slot: LinkSlot, connection: impl Into<String>) -> Self {
         Self {
             slot,
@@ -84,7 +84,7 @@ impl OneBotOutbound {
     }
 }
 
-impl Outbound for OneBotOutbound {
+impl Outbound for OneBotSnowLumaOutbound {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         if room.connection != self.connection {
             return Err(OutboundError::Unavailable(acb_i18n::t!(
@@ -163,7 +163,7 @@ impl Outbound for OneBotOutbound {
     }
 }
 
-impl OneBotOutbound {
+impl OneBotSnowLumaOutbound {
     /// 展开一条合并转发：按 `depth` / `max_nodes` 递归取，摊平成带路径的节点表。
     ///
     /// 递归放在适配器里，是因为「一次只给一层」是平台的规矩，不该让模型替我们跑循环。
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn uploads_get_a_longer_timeout_and_timeouts_say_result_is_unknown() {
-        let outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         assert_eq!(outbound.send_timeout(&[Element::text("hi")]), SEND_TIMEOUT);
         assert_eq!(
             outbound.send_timeout(&[Element::Image {
@@ -685,7 +685,7 @@ mod tests {
             UPLOAD_TIMEOUT
         );
 
-        let detail = OneBotOutbound::timeout_detail(UPLOAD_TIMEOUT);
+        let detail = OneBotSnowLumaOutbound::timeout_detail(UPLOAD_TIMEOUT);
         assert!(detail.contains("45 seconds"), "{detail}");
         assert!(detail.contains("may already have executed"), "{detail}");
         assert!(detail.contains("Do not resend blindly"), "{detail}");
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn sending_before_the_connection_is_up_is_refused() {
-        let mut outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let mut outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let room = RoomId::new("qq", "group/456").expect("合法");
 
         let error = outbound
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn a_room_on_another_connection_is_refused() {
-        let mut outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let mut outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let room = RoomId::new("qq2", "group/123").expect("合法");
 
         let error = outbound
@@ -756,7 +756,7 @@ mod tests {
     /// 目录要按「人能做的事」铺开，不是只挑安全的。风险靠分级 + 配置开关管，不靠删。
     #[test]
     fn catalog_covers_read_write_and_destructive() {
-        let outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let methods = outbound.catalog("qq");
         assert!(methods.len() >= 40, "能力面太窄：只有 {} 个", methods.len());
 
@@ -783,7 +783,7 @@ mod tests {
     /// 每个声明的方法都得有对应的平台动作，否则声明了也调不动；反过来路由也不许悬空。
     #[test]
     fn declared_methods_and_routes_match() {
-        let outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         for method in outbound.catalog("qq").iter() {
             assert!(
                 ROUTES
@@ -842,7 +842,7 @@ mod tests {
     /// 目录里不许出现重复方法名——否则 platform_call 会静默用第一条。
     #[test]
     fn method_names_are_unique() {
-        let outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let mut seen = std::collections::HashSet::new();
         for method in outbound.catalog("qq").iter() {
             assert!(
@@ -856,7 +856,7 @@ mod tests {
     /// 「人在群里能做的」这一类必须都在：发言、看图、查成员、踢人、禁言、改名片。
     #[test]
     fn catalog_covers_what_a_person_can_do_in_a_group() {
-        let outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let methods = outbound.catalog("qq");
         let names: Vec<&str> = methods.iter().map(|m| m.name.as_ref()).collect();
         for expected in [
@@ -883,7 +883,7 @@ mod tests {
     /// 「号上的事」和「房间里的事」要分清：前者不该逼模型先编一个群号出来。
     #[test]
     fn account_level_methods_are_connection_scoped() {
-        let outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         for method in outbound.catalog("qq").iter() {
             let account_level = matches!(
                 method.name.as_ref(),
@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn calling_before_the_connection_is_up_is_refused() {
-        let mut outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let mut outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let room = RoomId::new("qq", "group/456").expect("合法");
         let error = outbound
             .call(&room, "message.forward_content", &json!({"id": "x"}))
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn a_call_for_another_connection_is_refused() {
-        let mut outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let mut outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let room = RoomId::new("qq2", "group/123").expect("合法");
         let error = outbound
             .call(&room, "message.get", &json!({"message_id": "1"}))
@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn an_undeclared_method_is_unknown() {
-        let mut outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let mut outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let room = RoomId::new("qq", "group/123").expect("合法");
         let error = outbound
             .call(&room, "group.transfer_owner", &json!({}))
@@ -975,7 +975,7 @@ mod tests {
     /// 合并转发不给 id：先说清楚要什么，别拿着空参数去平台上撞。
     #[test]
     fn forward_content_without_an_id_is_a_param_error() {
-        let mut outbound = OneBotOutbound::new(LinkSlot::new(), "qq");
+        let mut outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let room = RoomId::new("qq", "group/1").expect("合法");
         let error = outbound
             .call(&room, "message.forward_content", &json!({}))

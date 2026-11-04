@@ -1908,6 +1908,15 @@ impl Config {
     }
 }
 
+/// 适配器 `kind` 的规范值。`onebot-snowluma` 是 `onebot11` 的别名；
+/// 解析后统一落回 `onebot11`，避免改变持久化标识。
+fn canonical_adapter_kind(kind: &str) -> &str {
+    match kind {
+        "onebot-snowluma" => "onebot11",
+        other => other,
+    }
+}
+
 fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
     let id = raw.id.trim().to_owned();
     if id.is_empty() {
@@ -1920,7 +1929,9 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
     }
 
     // 适配器种类由注册表在启动时校验：外置/动态适配器可以是任意 namespace.name。
-    let kind = raw.kind.trim().to_owned();
+    // `onebot-snowluma` 只是 `onebot11` 的显示别名；内部一律落回规范值，
+    // 避免 provider id、LKG 与旧配置的持久化标识失配。
+    let kind = canonical_adapter_kind(raw.kind.trim()).to_owned();
     if kind.is_empty() {
         return Err(ConfigError::EmptyConnectionKind { connection: id });
     }
@@ -2837,6 +2848,16 @@ mod tests {
             super::escape_toml_string("a\"b\\c\n\t"),
             "a\\\"b\\\\c\\n\\t"
         );
+    }
+
+    #[test]
+    fn onebot_snowluma_kind_is_a_canonical_alias() {
+        let alias = ONE_CONNECTION.replace("kind = \"onebot11\"", "kind = \"onebot-snowluma\"");
+        let config = Config::parse(&config_with(&alias, ONE_SESSION)).expect("别名能解析");
+        assert_eq!(config.connections[0].kind, "onebot11");
+
+        let canonical = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("旧写法");
+        assert_eq!(canonical.connections[0].kind, "onebot11");
     }
 
     const ONE_CONNECTION: &str = r#"
