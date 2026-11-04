@@ -145,35 +145,43 @@ evaluate(subject, place, scope, capability, target) -> allow/deny + reason
 ### 5.1 TOML 草案
 
 ```toml
-[access]
-
-# 唯一授权实现：默认内置；外部实现整体替换，不和内置并行。
-[access.policy]
-provider = "acb.access.default"
+[grants]
 
 # 机器人管理员：入口限私信；范围仅限该会话已订阅的目标。
-[access.bot_admin]
+[grants.bot_admin]
 accounts = [
   { connection = "qq", account = "10001" },
 ]
 
 # 系统管理员：只能一条；私信/控制台常驻；群聊不自动提权。
-[access.system_admin]
+[grants.system_admin]
 connection = "qq"
 account = "10002"
 
-# 一次性票据（阶段二实装）
-[access.tickets]
-enabled = true
-default_ttl_secs = 300
-max_ops = 8
+# 常态授予规则：四元组 + 目标。
+[[grants.rules]]
+subject = "bot_admin"
+place = "private"
+scope = "subscribed"          # any / subscribed / room / connection
+capability = ["room_read", "room_write", "plugin"]
+
+[[grants.rules]]
+subject = "system_admin"
+place = "private"
+scope = "any"
+capability = ["room_read", "room_write", "connection_read", "platform", "destructive", "plugin"]
 ```
+
+`[grants.tickets]` 等票据配置在阶段二再加；当前解析器不认识它，写了会按未知字段启动失败。
 
 约束：
 
 - `bot_admin.accounts` 可多条，但每条必须带 `connection` 和 `account`。
 - `system_admin` 只允许一条；重复配置在解析期拒绝。
-- `access.policy` 只允许一个 provider；配置两个实现直接启动失败。
+- `scope = "room"` / `"connection"` 必须给 `target`；`any` / `subscribed` 不许给 `target`。
+- `capability` 不能为空、不能重复，值域是封闭枚举。
+- `[grants]` 省略 = 只有订阅边界；未知字段/未知枚举在启动解析期直接报错。
+- 外部 evaluator 通过 `[sessions.access] provider = "..."` 整体替换；此时该会话不跑内置 grants。
 - 不把 system admin 自动加进 `connections[].admin_qqs`；两者语义不同。
 
 ### 5.2 评估顺序
@@ -183,7 +191,7 @@ max_ops = 8
    `evaluate(subject, place, scope, capability, target)`：
    - `subject=system_admin` + `place=private|console` → 任意目标允许；
    - `subject=bot_admin` + `place=private` → 仅已订阅目标；
-   - `subject=none` / 其他，或 `place=group` 且没有票据 → 走现有 room access；
+   - `subject=system` / `place=none`、其他主体，或 `place=group` 且没有票据 → 走现有 room access；
    - 票据：命中本轮 + 单目标房间 + op 列表 + 未过期 → 允许该 op。
 3. **destructive**：`MethodSpec.risk == Destructive` → 查连接 `allow_destructive`；未放行则拒绝。
 4. **平台 I/O**。
@@ -192,11 +200,28 @@ max_ops = 8
 
 ### 5.3 无主体轮次
 
-- `subject = none`、`place = none`：定时任务、时钟唤醒、没有人类发送者的自发轮次。
+- `subject = system`、`place = none`：定时任务、时钟唤醒、没有人类发送者的自发轮次。
 - 不继承 bot admin / system admin，也不继承 `all_rooms` / `elevated_in_rooms` / `privileged_origins` 等非订阅豁免。
 - 不继承任何票据；票据绑定本轮，无主体轮次不会持有票据。
 - 仍保留订阅内的正常访问；`send_message` 当前房间复检、`plugin_tool_call` scope 检查都继续执行。
 - 这样避免"定时任务在特权房间跑一次，就获得全局权限"。
+
+### 5.4 旧 access provider 的兼容映射
+
+旧配置继续可用，但统一映射成 `system` 主体的常态授予，并在启动时打印弃用提示：
+
+| 旧 provider | 映射 |
+|---|---|
+| `acb.access.all_rooms` | `system` + `place=none` + `scope=any`，所有能力 |
+| `acb.access.elevated_in_rooms` | `system` + 每个 `access.rooms` 房间一条授予；连接能力按该连接是否有列出房间 |
+| `acb.access.privileged_origins` | `system` + 仅当 `origin` 在 `access.origins` 时 `scope=any`，所有能力 |
+| `acb.access.subscribed` | 不生成授予，直接走订阅边界 |
+
+**「群内零常驻」的边界**：它约束的是**人类主体**在群场所被自动提权；不约束运维显式写入的 `[grants]` 或旧 provider 兼容映射。也就是说：
+
+- 群里发言的 system admin 账号不会自动获得任何授予；
+- 运维显式写的 `[grants]` 规则（包括 `subject=system` 或旧的 `all_rooms` 兼容映射）仍然生效；
+- 唯一需要人类在私信批准的是**临时票据**（阶段二），不是常态配置。
 
 ---
 

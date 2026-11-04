@@ -80,6 +80,8 @@ pub struct Config {
     pub retention: RetentionConfig,
     /// 入站/路由动作队列容量。两个队列默认都有界；0 在解析期拒绝。
     pub queues: QueueConfig,
+    /// 访问授权规则。空配置 = 只有订阅边界。
+    pub grants: crate::grants::GrantsConfig,
     /// 依赖表的失败阈值与观察窗口。
     pub deps: DepsConfig,
     /// 插件 LKG 的失败阈值与观察窗口。
@@ -1157,6 +1159,8 @@ pub enum ConfigError {
     BadToolPluginTimeout { id: String, timeout_ms: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_queue_limit", field = field, value = value))]
     BadQueueLimit { field: String, value: u64 },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_grant_config", detail = detail))]
+    BadGrantConfig { detail: String },
     #[error("{}", acb_i18n::t!("kernel.config.bad_deps_config", field = field, value = value))]
     BadDepsConfig { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_lkg_config", field = field, value = value))]
@@ -1303,6 +1307,16 @@ impl Config {
                 QueueConfig { inbound, route }
             }
             None => QueueConfig::default(),
+        };
+
+        let grants = match raw.grants {
+            Some(grants) => {
+                grants
+                    .validate()
+                    .map_err(|detail| ConfigError::BadGrantConfig { detail })?;
+                grants
+            }
+            None => crate::grants::GrantsConfig::default(),
         };
 
         let deps = match raw.deps {
@@ -1802,6 +1816,7 @@ impl Config {
             storage,
             retention,
             queues,
+            grants,
             deps,
             lkg,
             provider_calls,
@@ -2126,7 +2141,7 @@ fn build_access(
             provider: text.to_owned(),
             detail: error.to_string(),
         })?,
-        None => ProviderId::builtin_access(),
+        None => ProviderId::builtin_grants_access(),
     };
 
     let mut rooms = Vec::new();
@@ -2498,6 +2513,8 @@ struct RawConfig {
     storage: Option<RawStorage>,
     retention: Option<RawRetention>,
     queues: Option<RawQueue>,
+    #[serde(default)]
+    grants: Option<crate::grants::GrantsConfig>,
     deps: Option<RawDeps>,
     lkg: Option<RawLkg>,
     provider_calls: Option<RawProviderCalls>,
@@ -3027,10 +3044,10 @@ mod tests {
     }
 
     #[test]
-    fn access_defaults_to_the_builtin_subscribed_provider() {
+    fn access_defaults_to_the_builtin_grants_evaluator() {
         let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         let access = &config.sessions[0].access;
-        assert_eq!(access.provider, ProviderId::builtin_access());
+        assert_eq!(access.provider, ProviderId::builtin_grants_access());
         assert!(access.rooms.is_empty());
         assert!(access.origins.is_empty());
     }
@@ -3216,6 +3233,42 @@ mod tests {
         );
         let config = Config::parse(&config_with(&text, ONE_SESSION)).expect("config 层不拦");
         assert_eq!(config.connections[0].transport, Transport::WsServer);
+    }
+
+    #[test]
+    fn grants_parse_and_reject_unknown_fields() {
+        let text = format!(
+            "{}\n[grants]\n[grants.bot_admin]\naccounts = [{{ connection = \"qq\", account = \"10001\" }}]\n[grants.system_admin]\nconnection = \"qq\"\naccount = \"10002\"\n[[grants.rules]]\nsubject = \"bot_admin\"\nplace = \"private\"\nscope = \"subscribed\"\ncapability = [\"room_read\", \"room_write\", \"plugin\"]\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&text).expect("合法 grants");
+        assert_eq!(config.grants.rules.len(), 1);
+        assert!(config.grants.bot_admin.is_some());
+        assert!(config.grants.system_admin.is_some());
+
+        let unknown = format!(
+            "{}\n[grants]\ntypo_field = \"x\"\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        assert!(
+            Config::parse(&unknown).is_err(),
+            "未知字段必须启动失败，不能静默忽略"
+        );
+
+        let bad_target = format!(
+            "{}\n[[grants.rules]]\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ntarget = \"qq:group/1\"\ncapability = [\"room_read\"]\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        assert!(matches!(
+            Config::parse(&bad_target),
+            Err(ConfigError::BadGrantConfig { .. })
+        ));
+
+        let bad_capability = format!(
+            "{}\n[[grants.rules]]\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ncapability = [\"root\"]\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        assert!(Config::parse(&bad_capability).is_err(), "能力枚举必须封闭");
     }
 
     #[test]

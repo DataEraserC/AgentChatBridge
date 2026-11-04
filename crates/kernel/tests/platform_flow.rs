@@ -405,13 +405,10 @@ fn describe_plugins_shows_effective_session_providers() {
         .expect("能查插件目录");
     assert_eq!(session["scope"], "session");
     assert_eq!(session["session"], "main");
-    assert_eq!(
-        session["providers"]["access"]["id"],
-        "acb.access.subscribed"
-    );
+    assert_eq!(session["providers"]["access"]["id"], "acb.access.grants");
     assert_eq!(
         session["providers"]["access"]["metadata"]["title"],
-        "只访问订阅房间"
+        "授权规则"
     );
     assert_eq!(
         session["providers"]["delivery"]["id"],

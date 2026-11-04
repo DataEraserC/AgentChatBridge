@@ -84,6 +84,10 @@ impl ToolProvider for EchoTool {
 }
 
 fn bridge() -> Arc<Mutex<Bridge<MemoryStore>>> {
+    bridge_with(config())
+}
+
+fn bridge_with(text: String) -> Arc<Mutex<Bridge<MemoryStore>>> {
     let mut plugins = PluginManager::with_native_builtins();
     plugins
         .register_tools(
@@ -97,11 +101,34 @@ fn bridge() -> Arc<Mutex<Bridge<MemoryStore>>> {
         )
         .expect("注册插件工具");
     Arc::new(Mutex::new(Bridge::with_plugins(
-        Config::parse(&config()).expect("配置合法"),
+        Config::parse(&text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,
     )))
+}
+
+/// 私信里的 bot admin；`with_plugin` 决定规则里有没有 plugin 能力。
+fn bot_admin_config(with_plugin: bool) -> String {
+    let capability = if with_plugin {
+        r#"["room_read", "room_write", "plugin"]"#
+    } else {
+        r#"["room_read", "room_write"]"#
+    };
+    format!(
+        r#"{}
+
+[grants.bot_admin]
+accounts = [{{ connection = "qq", account = "10001" }}]
+
+[[grants.rules]]
+subject = "bot_admin"
+place = "private"
+scope = "subscribed"
+capability = {capability}
+"#,
+        config().replace("room = \"group/1\"", "room = \"private/10001\"")
+    )
 }
 
 fn lock(
@@ -242,6 +269,63 @@ fn plugin_tool_call_requires_an_explicit_scope() {
         )
         .expect("连接作用域应通过");
     assert_eq!(connection["args"]["x"], 1);
+}
+
+#[test]
+fn bot_admin_plugin_capability_is_fail_closed_without_a_grant() {
+    fn turn(bridge: &Arc<Mutex<Bridge<MemoryStore>>>) -> acb_kernel::Ticket {
+        lock(bridge)
+            .ingest(RecordDraft::message(
+                RoomId::parse("qq:private/10001").expect("房间"),
+                Sender {
+                    id: "10001".into(),
+                    name: "admin".into(),
+                    role: None,
+                },
+                1,
+                vec![Element::text("批一下")],
+                true,
+            ))
+            .expect("入库");
+        lock(bridge)
+            .poll_turn()
+            .expect("能开轮")
+            .expect("有活")
+            .ticket
+    }
+
+    let bridge = bridge_with(bot_admin_config(true));
+    let ticket = turn(&bridge);
+    let called = lock(&bridge)
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "plugin_tool_call",
+            json!({
+                "tool": "echo_context",
+                "arguments": {"x": 1},
+                "scope": {"kind": "room", "room": "qq:private/10001"},
+            }),
+        )
+        .expect("bot admin 有 plugin 能力时放行");
+    assert_eq!(called["session"], "main");
+
+    let bridge = bridge_with(bot_admin_config(false));
+    let ticket = turn(&bridge);
+    let denied = lock(&bridge).tool_call(
+        &ticket,
+        &["main".to_owned()],
+        "plugin_tool_call",
+        json!({
+            "tool": "echo_context",
+            "arguments": {"x": 1},
+            "scope": {"kind": "room", "room": "qq:private/10001"},
+        }),
+    );
+    assert_eq!(
+        denied.expect_err("没有 plugin 授予必须 fail closed").code,
+        acb_kernel::ErrorCode::ToolNotAllowed
+    );
 }
 
 #[test]
