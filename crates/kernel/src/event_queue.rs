@@ -66,7 +66,11 @@ impl QueueStats {
     }
 
     pub(crate) fn enqueued(&self) {
-        let depth = self.inner.depth.fetch_add(1, Ordering::SeqCst) + 1;
+        let depth = self
+            .inner
+            .depth
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
         self.inner.high_watermark.fetch_max(depth, Ordering::SeqCst);
         let threshold = self.warn_threshold().max(1);
         if depth >= threshold && !self.inner.warned.swap(true, Ordering::SeqCst) {
@@ -78,11 +82,16 @@ impl QueueStats {
     }
 
     pub(crate) fn dequeued(&self) {
+        // 计数与入队/出队不是同一个原子操作：接收端可能先出队再看到发送端的计数。
+        // 计数器绝不能被减到 0 以下，否则下一次 enqueued 会溢出。
         let depth = self
             .inner
             .depth
-            .fetch_sub(1, Ordering::SeqCst)
-            .saturating_sub(1);
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |depth| {
+                depth.checked_sub(1)
+            })
+            .map(|previous| previous - 1)
+            .unwrap_or(0);
         if depth < self.warn_threshold() {
             self.inner.warned.store(false, Ordering::SeqCst);
         }
@@ -178,12 +187,12 @@ impl EventQueue {
 
     /// 适配器线程调用。队列有界，绝不阻塞平台读循环；满/接收端没了返回明确错误。
     pub fn submit(&self, draft: RecordDraft) -> Result<(), SubmitError> {
+        // 先计数再入队：接收端可能立刻取走，不能让它先看到 0 再减。
+        self.stats.enqueued();
         match self.tx.try_send(draft) {
-            Ok(()) => {
-                self.stats.enqueued();
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
+                self.stats.dequeued();
                 self.stats.rejected();
                 let snapshot = self.stats.snapshot();
                 eprintln!(
@@ -192,7 +201,10 @@ impl EventQueue {
                 );
                 Err(SubmitError::Full)
             }
-            Err(TrySendError::Disconnected(_)) => Err(SubmitError::Closed),
+            Err(TrySendError::Disconnected(_)) => {
+                self.stats.dequeued();
+                Err(SubmitError::Closed)
+            }
         }
     }
 
