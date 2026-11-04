@@ -183,8 +183,8 @@ const CODE_MODE_HINT = [
   "  先想清楚要发什么，再一次调用，别先用原生工具名硬调。",
   "",
   "  平台特有的能力（读合并转发正文、查群成员、发图、审批入群）从目录查，别自己猜：",
-  '  `await tools.platform_methods({ query: "图片" })` 看有哪些方法、参数怎么填，',
-  '  再 `await tools.platform_call({ method: "message.send_image", params: {...} })`。',
+  '  `await tools.platform_call({ query: "图片" })` 看有哪些 op、参数怎么填，',
+  '  再 `await tools.platform_call({ op: "msg.send", params: {...} })`。',
   "  别用 fetch 直接连桥或聊天平台的端口：那样绕过了订阅校验和水位，发出的消息",
   "  不进归档，下一轮你对这段对话就失忆了。）",
 ].join("\n")

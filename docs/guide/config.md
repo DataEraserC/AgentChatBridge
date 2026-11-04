@@ -57,7 +57,7 @@ allow_destructive = false  # 见下
 
 - `account` 一定要填对：agent 自己发的消息不计入未读，靠的就是它。
 - `allow_destructive` 默认 `false`（踢人/禁言/撤回别人消息这些破坏性操作模型调不到）。
-  想让 agent 真能管理群就写 `true`，或者只放行几个：`allow_destructive = ["group.kick"]`。
+  想让 agent 真能管理群就写 `true`，或者只放行几个：`allow_destructive = ["member.kick"]`。
 - 同一个平台第二个号：再复制一段，`id` 换名（如 `qq2`）。同一个群在两个号眼里是两个房间，各记各的账。
 
 ### 接收策略：消息进不进流水

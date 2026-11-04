@@ -145,7 +145,7 @@
 | `get_notes` | 几 KB | notes 数 × 单条 | **是**（笔记数） | 无分页 |
 | `set_note` / `del_note` | < 300 B | < 500 B | 否 | — |
 | `get_platform_events` | 20 条 ≈ 几 KB | 200 条 | **是** | `limit` ≤ 200 |
-| `platform_methods` | 摘要 ≈ 几 KB | 全量方法 × 连接数，可达几十 KB | **是**（连接 × 方法） | `connection` 过滤；无条数上限 |
+| `platform_call`（列目录模式） | 摘要 ≈ 几 KB | 全量 op × 连接数，可达几十 KB | **是**（连接 × op） | `connection` 过滤；无条数上限 |
 | `platform_call` | 平台相关，通常 KB 级 | 500 条 × 单条 | **是** | `limit` ≤ 500，有 offset |
 | `describe_plugins` | session 范围 < 2 KB | global 全插件目录，插件数 × 元数据 | **是**（插件数） | `extension` 过滤；无分页 |
 | `extensions_list` | 模块数 × 元数据，几 KB | **无上限**（模块多/描述长） | **是**（模块数） | 无分页、无摘要模式 |
@@ -183,7 +183,7 @@
 | `fetch_records` 限制 ids 数量并提示分批 | 防止一次拉全房间 | agent 需分批；错误信息要教它怎么分 | 单次 ids 数、返回字节 |
 | `memory_read` 加 head/tail/offset 或 64 KiB 截断提示 | 防大文件塞爆 | 多一次调用；截断会丢上下文 | 文件大小 vs 调用次数 |
 | `memory_git_log` 加上限 | 防无限提交历史 | 翻历史要分页 | limit 与返回字节 |
-| `platform_methods` 默认摘要、详情要求 `connection` | 连接/方法多时下降 | 多一次调用 | 连接数 × 方法数 |
+| `platform_call` 列目录默认摘要、详情要求 `connection` | 连接/op 多时下降 | 多一次调用 | 连接数 × op 数 |
 | `get_history` 默认列已有精简，但单条文本仍无上限 | 可加单条字节预算 | 截断会改变事实，需明确标注 | 单条最大字节 |
 | 工具按需注册（lazy tool exposure） | 省工具描述常驻成本 | 可发现性明显下降，agent 可能不知道能力存在 | 每轮工具描述字节 + 漏用率 |
 
@@ -218,19 +218,26 @@ Pack 拆分（用于分层设计，不默认启用）：
 | describe_plugins | 1 | 405 |
 | 全部 | 36 | 9,058 |
 
+> 注：以上是 2026-11-04 的**两工具基线**（`platform_call` + `platform_methods`）。
+> 2026-11-05 改成单入口后，平台入口 schema 为 3,922 bytes，`platform_methods` 已移除。
+
 ### 6.6 已实施与实验设计
 
 **已实施（纯冗余/阈值触发，无语义变化）**
 
 1. **删除每条记录的 `columns` 映射**：列定义只保留响应顶层 `columns` 数组。20 条记录
    固定省约 890 tokens；`get_history` / `fetch_records` 调用方仍能从顶层知道取了哪些列。
-2. **目录/列表阈值索引**：`LIST_INDEX_BYTES = 4096`。超过阈值时自动降级：
-   - `platform_methods` 默认清单 → name + 短 summary + risk（tags 省略、summary 截到 80 字）；
+2. **平台能力单入口**：移除 `platform_methods`，`platform_call` 一个工具同时承担执行与目录
+   （给 `op` 执行，不给 `op` 按 `path` / 封闭 `tags` 查）。52 个 method 收敛为 50 个层级 op，
+   平台入口 schema 从 6,747 bytes 降到 3,922 bytes，工具数少一个。详见
+   [adapter-snowluma.md](adapter-snowluma.md#99-实装结果2026-11-05)。
+3. **目录/列表阈值索引**：`LIST_INDEX_BYTES = 4096`。超过阈值时自动降级：
+   - `platform_call` 目录默认清单 → op + 短 summary + risk（tags 省略、summary 截到 80 字）；
    - `feedback_list` → 去掉 body/suggestion/replies，保留标题、状态、回复数；
    - `task_list` → 去掉 result/error，保留 id/status/handler；
    - `get_platform_events` → 去掉 payload/elements，保留 id/at/sender/event/tags/summary。
    响应顶层加 `indexed: true` 与 `detail_hint`，详情走 `feedback_get` / `task_get` /
-   `fetch_records` 或带 `group/tag/query` 的 `platform_methods`。阈值以下保持全文，
+   `fetch_records` 或带 `path/tags/query` 的 `platform_call` 目录模式。阈值以下保持全文，
    不默认拆成两步。阈值取值依据：一次额外调用的成本（~9k 工具定义 + 历史）通常高于
    4 KiB 全文，只有超过 4 KiB 才值得换一次调用。
 

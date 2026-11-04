@@ -189,8 +189,8 @@ test("投递里要把平台能力指给模型看，并说清绕过桥的代价",
   await openTurn(bridge, host)
 
   const text = host.prompts[0].text
-  assert.match(text, /tools\.platform_methods/, "不指路，模型不知道有这本事，转头自己去 fetch")
-  assert.match(text, /tools\.platform_call/, "光给目录不够，得给调用口")
+  assert.match(text, /tools\.platform_call/, "不指路，模型不知道有这本事，转头自己去 fetch")
+  assert.match(text, /query/, "目录要告诉它按关键词/路径查")
   assert.match(text, /fetch/, "要明说别用 fetch 直连端口")
   assert.match(text, /水位|归档/, "光说「不许」没用，得说清绕过去之后消息不归档、下一轮就失忆")
 

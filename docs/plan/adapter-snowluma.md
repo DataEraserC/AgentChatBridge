@@ -667,13 +667,13 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 ---
 
-## 9. `platform_call` 单入口设计（待实现）
+## 9. `platform_call` 单入口设计（已实现，实装偏差见 9.9）
 
-> 状态：设计，未实现。目标是把 SnowLuma 的 200 级 action 目录塞进 agent 的能力面，同时不把工具表撑爆、不让权限护栏只依赖容易漏写的标签。
+> 状态：已实现（2026-11-05）；第 9.2–9.8 节保留设计原稿，实装差异见 9.9。
 
 ### 9.1 为什么不能把 200 个 action 平铺成 tool
 
-当前 agent 看到的是 `platform_methods`（发现）+ `platform_call`（执行）两个工具，而不是 52 个独立工具。这个方向必须保留；如果每个 action 变成一个 tool：
+实现前 agent 看到的是 `platform_methods`（发现）+ `platform_call`（执行）两个工具，而不是 52 个独立工具。这个方向必须保留；如果每个 action 变成一个 tool：
 
 - 每个 tool 至少要有名称、一句描述、参数 JSON schema、枚举/范围说明。按保守估算，简单 op 约 80–150 tokens，带多参数/示例的 op 约 200–400 tokens。
 - SnowLuma 中文页 200 个 action、英文页 219 个，取中位数按 150 tokens/op 估算，仅工具定义就是 **30k tokens 量级**；如果描述带示例，接近 **60k–80k**。这还没算模型在几十个相似工具里做选择的注意力成本。
@@ -849,3 +849,28 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - 迁移：旧 method 与规范 op 双解析；旧 method 下线后调用得到明确的 `deprecated`/`unknown_op` 错误。
 
 以上均为**待实现**；本文件只记录设计。
+
+### 9.9 实装结果（2026-11-05）
+
+- **单工具，不是两个工具**：`platform_call` 同时承担执行与发现。给 `op` = 执行；
+  不给 `op` = 列目录（`path` 前缀、`tags` 封闭枚举 AND、`query` 关键词、`all` 连接摘要）。
+  MCP 工具名不允许点号，`platform_call.list` 不能作为真实工具名；合并成一个工具位更省上下文。
+- **op 命名**：按照第 9.3 节的层级思路落成短路径（`msg.send`、`msg.history`、`member.list`、
+  `member.kick`、`group.mute`、`group.file.list`…）。原 52 个 method 收敛为 50 个 op：
+  `message.send_group` / `message.send_private` 合并成 `msg.send`，
+  `message.history_group` / `message.history_private` 合并成 `msg.history`，按房间选 OneBot 动作。
+- **策略表**：每个 op 的 `MethodSpec.risk` 是显式值（read / write / destructive），
+  不从 tag 推导；不在 catalog 的 op 一律 `unknown_op` 拒绝。`destructive` 仍由
+  `allow_destructive` 第二道闸门控制。`requires_admin` 只是展示标签；core 目前不猜群管理员身份，
+  平台侧权限不足会拒绝。
+- **tag**：`MethodSpec.tags` 改为封闭枚举 `PlatformTag`（30 个固定值），wire 入口未知 tag 直接拒绝。
+  catalog 自动补 `read/write/destructive`、`room/connection`、`idempotent`，再保留作者声明的用途标签。
+- **不做兼容层**：旧 method 名直接删除，不保留别名；短别名（send/kick 等）也未实现。
+  目录、路由、测试、harness schema 一次改齐。
+- **票据**：`access_request` 的 `platform_call:<op>` 与普通 `platform_call` 共用
+  `find_platform_op` + `assemble_platform_call`；批准即执行的路径不另起校验。
+- **证据**：adapter `every_op_is_hierarchical_tagged_and_routed`、
+  `unified_send_and_history_dispatch_by_room`；kernel `unknown_op_suggests_a_direct_neighbour`、
+  `destructive_method_is_refused_by_default`、`ticket_and_normal_call_share_unknown_op_rejection`；
+  `platform_call` schema 从 6,747 bytes（两工具）降到 3,922 bytes（单工具）。
+

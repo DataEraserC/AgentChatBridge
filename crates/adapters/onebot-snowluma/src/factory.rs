@@ -18,7 +18,7 @@ static CAPABILITIES: &[AdapterCapability] = &[
     AdapterCapability::ReceiveEvents,
     AdapterCapability::Send,
     AdapterCapability::Catalog,
-    // 真实实现：message.recall（delete_msg）、At 元素、image/record/video/file 段。
+    // 真实实现：msg.recall（delete_msg）、At 元素、image/record/video/file 段。
     // 编辑消息当前协议不支持，不声明。
     AdapterCapability::Recall,
     AdapterCapability::Mention,

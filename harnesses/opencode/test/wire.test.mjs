@@ -449,15 +449,15 @@ test("内容元素都摊得开，平台内容原样摊给模型", () => {
   assert.match(text, /"id":"abc123"/)
   // 还要带上「可以怎么取」：只给一个 id，模型不知道自己能查（ADR-0020）。
   assert.match(text, /可调 platform_call/)
-  assert.match(text, /message\.forward_content/)
+  assert.match(text, /msg\.forward/)
 })
 
-test("不认识的平台内容也会指向能力目录，不让模型瞎猜方法名", () => {
+test("不认识的平台内容也会指向能力目录，不让模型瞎猜 op", () => {
   const text = renderElements([
     { type: "opaque", platform: "kook", payload: { type: "card", data: {} } },
   ])
-  assert.match(text, /platform_methods/)
-  // 没声明对应方法的类型，不该瞎编一个 get_content 出来。
+  assert.match(text, /platform_call/)
+  // 没声明对应 op 的类型，不该瞎编一个 get_content 出来。
   assert.doesNotMatch(text, /get_content/)
 })
 

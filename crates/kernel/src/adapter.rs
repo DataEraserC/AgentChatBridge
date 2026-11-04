@@ -34,7 +34,7 @@ pub enum AdapterCapability {
     Send,
     /// 能声明平台方法目录并调用。
     Catalog,
-    /// 能撤回/删除已发消息（方法目录里的 `message.recall`）。
+    /// 能撤回/删除已发消息（方法目录里的 `msg.recall`）。
     Recall,
     /// 能 @ 指定成员（内容元素 `At`）。
     Mention,

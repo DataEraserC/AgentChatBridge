@@ -43,7 +43,8 @@ use crate::memory::{
 };
 use crate::outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, OutboundHandle, Outbounds,
-    OutgoingKind, OutgoingRecord, RecordMode, Risk, Scope, Sent, TargetRole, expand_query,
+    OutgoingKind, OutgoingRecord, PlatformTag, RecordMode, Risk, Scope, Sent, TargetRole,
+    expand_query,
 };
 use crate::plugin::{
     AccessAction, AccessDecision, AccessRequest, Capability, ClockContext, DEFAULT_ACCESS_PROVIDER,
@@ -69,8 +70,9 @@ use crate::tools::{
     FeedbackListArgs, FeedbackReplyArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT,
     MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs, MemoryBlameArgs, MemoryCommitArgs,
     MemoryListArgs, MemoryLogArgs, MemorySearchArgs, MemoryWriteArgs, NotesArgs, PlatformCallArgs,
-    PlatformMethodsArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs, RECORD_COLUMNS,
-    SendArgs, SendToArgs, SetNoteArgs, TaskGetArgs, TaskListArgs, WaitMessageArgs, is_known,
+    PlatformListArgs, PlatformToolArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs,
+    RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, TaskGetArgs, TaskListArgs, WaitMessageArgs,
+    is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -3590,14 +3592,20 @@ impl<S: Store> Bridge<S> {
                 let args: EventsArgs = parse(args)?;
                 self.events(ticket, &turn_config, sessions, &room, args)
             }
-            // 平台能力：core 不认识任何一个方法名，只做校验和转交（ADR-0020）。
-            "platform_methods" => {
-                let args: PlatformMethodsArgs = parse(args)?;
-                self.platform_methods(&turn_config, sessions, &room, args)
-            }
+            // 平台能力：单入口。给 op 执行；不给 op 按层级/标签列目录。
             "platform_call" => {
-                let args: PlatformCallArgs = parse(args)?;
-                self.platform_call(ticket, args)
+                let args: PlatformToolArgs = parse(args)?;
+                match args.op.as_deref() {
+                    None => {
+                        let list = platform_list_args(args)?;
+                        self.platform_list(&turn_config, sessions, &room, list)
+                    }
+                    Some(op) if op.trim().is_empty() => Err(empty_platform_op()),
+                    Some(_) => {
+                        let call = platform_call_args(args)?;
+                        self.platform_call(ticket, call)
+                    }
+                }
             }
             "describe_plugins" => {
                 let args: DescribePluginsArgs = parse(args)?;
@@ -3918,10 +3926,27 @@ impl<S: Store> Bridge<S> {
                 Ok(ToolCallStart::Send(prepared))
             }
             "platform_call" => {
-                let args: PlatformCallArgs = parse(args)?;
-                Ok(ToolCallStart::Platform(
-                    self.prepare_platform_call(ticket, args)?,
-                ))
+                let args: PlatformToolArgs = parse(args)?;
+                match args.op.as_deref() {
+                    None => {
+                        let ctx = self.turn_ctx(ticket, tool)?;
+                        let sessions = std::slice::from_ref(&ctx.session);
+                        let list = platform_list_args(args)?;
+                        Ok(ToolCallStart::Done(self.platform_list(
+                            &ctx.config,
+                            sessions,
+                            &ctx.room,
+                            list,
+                        )?))
+                    }
+                    Some(op) if op.trim().is_empty() => Err(empty_platform_op()),
+                    Some(_) => {
+                        let call = platform_call_args(args)?;
+                        Ok(ToolCallStart::Platform(
+                            self.prepare_platform_call(ticket, call)?,
+                        ))
+                    }
+                }
             }
             "wait_message" => {
                 let args: WaitMessageArgs = parse(args)?;
@@ -3993,32 +4018,7 @@ impl<S: Store> Bridge<S> {
         if methods.is_empty() {
             return Err(no_catalog(&room.connection));
         }
-        let Some(spec) = methods
-            .iter()
-            .find(|method| method.name.as_ref() == args.method.as_str())
-        else {
-            let hint = match methods
-                .iter()
-                .find(|method| method.group() == group_of_name(&args.method))
-            {
-                Some(near) => acb_i18n::t!(
-                    "kernel.engine.unknown_method_did_you_mean",
-                    name = near.name
-                ),
-                None => acb_i18n::t!(
-                    "kernel.engine.unknown_method_supports",
-                    methods = method_names(&methods)
-                ),
-            };
-            return Err(ToolError::new(
-                ErrorCode::BadRequest,
-                acb_i18n::t!(
-                    "kernel.engine.unknown_method",
-                    method = args.method,
-                    hint = hint
-                ),
-            ));
-        };
+        let spec = find_platform_op(&methods, &args.op)?;
 
         match spec.scope {
             Scope::Room => {
@@ -4770,22 +4770,17 @@ impl<S: Store> Bridge<S> {
                 parse::<SendArgs>(params.clone()).map_err(|error| error.message)?;
                 continue;
             }
-            let Some(method) = op.strip_prefix("platform_call:") else {
+            let Some(op_name) = op.strip_prefix("platform_call:") else {
                 continue;
             };
             let Some(params) = params else {
                 return Err(format!("{op} requires params"));
             };
             let methods = self.outbound.catalog(&target.connection);
-            let Some(spec) = methods.iter().find(|spec| spec.name.as_ref() == method) else {
-                return Err(format!(
-                    "unknown platform method {method} on connection {}",
-                    target.connection
-                ));
-            };
+            let spec = find_platform_op(&methods, op_name).map_err(|error| error.message)?;
             if spec.scope != Scope::Room {
                 return Err(format!(
-                    "{method} is connection-scope; tickets can only carry room actions"
+                    "{op_name} is connection-scope; tickets can only carry room actions"
                 ));
             }
             check_params(spec, params).map_err(|error| error.message)?;
@@ -4816,18 +4811,9 @@ impl<S: Store> Bridge<S> {
                     capabilities.insert(GrantCapability::RoomRead);
                 }
                 other if other.starts_with("platform_call:") => {
-                    let method = &other["platform_call:".len()..];
+                    let op_name = &other["platform_call:".len()..];
                     let methods = self.outbound.catalog(&target.connection);
-                    let Some(spec) = methods.iter().find(|spec| spec.name.as_ref() == method)
-                    else {
-                        return Err(ToolError::new(
-                            ErrorCode::BadRequest,
-                            format!(
-                                "[access_request] unknown platform method {method} on connection {}",
-                                target.connection
-                            ),
-                        ));
-                    };
+                    let spec = find_platform_op(&methods, op_name)?;
                     capabilities.insert(GrantCapability::Platform);
                     if spec.risk == Risk::Destructive {
                         capabilities.insert(GrantCapability::Destructive);
@@ -5055,16 +5041,9 @@ impl<S: Store> Bridge<S> {
             );
         };
         let methods = self.outbound.catalog(&ticket.target.connection);
-        let Some(spec) = methods
-            .iter()
-            .find(|spec| spec.name.as_ref() == method)
-            .cloned()
-        else {
-            return (
-                "failed",
-                None,
-                Some(format!("unknown platform method {method}")),
-            );
+        let spec = match find_platform_op(&methods, method) {
+            Ok(spec) => spec.clone(),
+            Err(error) => return ("failed", None, Some(error.message)),
         };
         if spec.scope != Scope::Room {
             return (
@@ -5077,7 +5056,7 @@ impl<S: Store> Bridge<S> {
         }
         let args = PlatformCallArgs {
             room: Some(ticket.target.to_string()),
-            method: method.to_owned(),
+            op: method.to_owned(),
             params: params.clone(),
             ..Default::default()
         };
@@ -6946,33 +6925,34 @@ impl<S: Store> Bridge<S> {
     /// 平台能力目录（ADR-0020）。
     ///
     /// 两个维度、两档披露：
-    /// - 名字里点号前那段是**归属**，跟平台 API 的命名空间对齐；`tags` 是**用途**，跨归属。
-    /// - 不给任何条件 = 逐条清单（名字 + 一句话 + 标签），够模型决定调哪个。
-    /// - 给了 `group` / `tag` / `query` = 交集里的方法连**参数表**一起给，这时候模型是在准备调。
+    /// - op 是层级名（`msg.send` / `group.file.list`）；`tags` 是封闭枚举的跨类属性。
+    /// - 不给任何条件 = 逐条清单（op + path + 一句话 + 标签），够模型决定调哪个。
+    /// - 给了 `path` / `tags` / `query` = 交集里的 op 连**参数表**一起给，这时候模型是在准备调。
     ///
-    /// 为什么清单不砍成「只有组名」：多一次往返就是多一整轮推理和几秒延迟，
-    /// 而一张清单在四五十个方法时也就一千来 token，只花在模型主动查的那一轮。
-    fn platform_methods(
+    /// 为什么清单不砍成「只有 path」：多一次往返就是多一整轮推理和几秒延迟，
+    /// 而一张清单在五十个 op 时也就一千来 token，只花在模型主动查的那一轮。
+    fn platform_list(
         &mut self,
         config: &Config,
         sessions: &[String],
         turn_room: &RoomId,
-        args: PlatformMethodsArgs,
+        args: PlatformListArgs,
     ) -> Result<Value, ToolError> {
         let requested_connection = clean(args.connection.as_deref()).map(str::to_owned);
 
         // all=true：多平台会话先看每条连接的摘要，避免模型只看见当前房间那个平台。
-        if args.all.unwrap_or(false) {
+        if args.all {
             if requested_connection.is_some()
                 || clean(args.room.as_deref()).is_some()
-                || clean(args.group.as_deref()).is_some()
-                || clean(args.tag.as_deref()).is_some()
+                || clean(args.path.as_deref()).is_some()
+                || !args.tags.is_empty()
                 || clean(args.query.as_deref()).is_some()
             {
                 return Err(ToolError::new(
                     ErrorCode::BadRequest,
-                    "[bad_params] all=true only returns a connection summary; do not also pass room / \
-                     connection / group / tag / query. To expand a connection, query it separately.",
+                    "[bad_params] all=true only returns a connection summary; do not also pass \
+                     room / connection / path / tags / query. To expand a connection, query it \
+                     separately.",
                 ));
             }
             return self.connection_summaries(config, sessions, turn_room);
@@ -7043,12 +7023,12 @@ impl<S: Store> Bridge<S> {
         }
         let platform = Self::platform_of(config, &connection).to_owned();
 
-        let group = clean(args.group.as_deref());
-        let tag = clean(args.tag.as_deref());
+        let path = clean(args.path.as_deref());
+        let tag_filter = args.tags;
         let query = clean(args.query.as_deref());
 
         // 没设条件：清单。不带参数表——那样就等于把整张表倒出来。
-        if group.is_none() && tag.is_none() && query.is_none() {
+        if path.is_none() && tag_filter.is_empty() && query.is_none() {
             let list: Vec<Value> = methods.iter().map(describe_brief).collect();
             let mut response = json!({
                 "room": room_text,
@@ -7056,32 +7036,32 @@ impl<S: Store> Bridge<S> {
                 "platform": platform,
                 "total": methods.len(),
                 "returned": list.len(),
-                "methods": list,
+                "ops": list,
                 "tags": tags_of(&methods),
-                "hint": "名字里点号前那段是归属（跟平台 API 命名空间对齐）；tags 是用途，跨归属。\
-                         要某个方法的参数表，再调一次并给 group / tag / query，三者可叠加。\
-                         scope=connection 的方法跟房间无关（好友列表、账号资料这类），调它不用给 room。",
+                "hint": "op 是层级名（如 msg.send、member.list、group.mute）；path 是父路径（如 group.file）。\
+                         要某个 op 的参数表，再调一次并给 path / tags / query，三者可叠加。\
+                         scope=connection 的 op 跟房间无关（好友列表、账号资料这类），调它不用给 room。",
             });
             maybe_index_list(
                 &mut response,
-                "methods",
-                "indexed=true: tags omitted and summaries shortened. Call platform_methods with group / tag / query for full details.",
+                "ops",
+                "indexed=true: tags omitted and summaries shortened. Call platform_call with path / tags / query for full details.",
                 method_index,
             );
             return Ok(response);
         }
 
-        // 缩了范围：命中的方法连参数表一起给。
+        // 缩了范围：命中的 op 连参数表一起给。
         let terms = query.map(expand_query).unwrap_or_default();
         let hits: Vec<&MethodSpec> = methods
             .iter()
-            .filter(|method| group.is_none_or(|group| method.group() == group))
-            .filter(|method| tag.is_none_or(|tag| method.has_tag(tag)))
+            .filter(|method| path.is_none_or(|path| method.in_path(path)))
+            .filter(|method| tag_filter.iter().all(|tag| method.has_tag(*tag)))
             .filter(|method| terms.is_empty() || terms.iter().any(|term| method.matches(term)))
             .collect();
 
         if hits.is_empty() {
-            return Err(no_match(&methods, group, tag, query));
+            return Err(no_match(&methods, path, &tag_filter, query));
         }
 
         Ok(json!({
@@ -7090,7 +7070,7 @@ impl<S: Store> Bridge<S> {
             "platform": platform,
             "total": methods.len(),
             "matched": hits.len(),
-            "methods": hits.iter().map(|method| describe_method(method)).collect::<Vec<_>>(),
+            "ops": hits.iter().map(|method| describe_method(method)).collect::<Vec<_>>(),
             "hint": "每条都带一个 example：照它把 params 里的号/内容换掉，就能直接喂给 platform_call。",
         }))
     }
@@ -8132,7 +8112,8 @@ fn maybe_index_list(response: &mut Value, key: &str, hint: &str, compact: fn(&Va
 
 fn method_index(item: &Value) -> Value {
     let mut out = json!({
-        "name": item["name"],
+        "op": item["op"],
+        "path": item["path"],
         "summary": truncate_chars(item["summary"].as_str().unwrap_or(""), 80),
         "risk": item["risk"],
     });
@@ -8536,12 +8517,130 @@ fn clean(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|text| !text.is_empty())
 }
 
+fn empty_platform_op() -> ToolError {
+    ToolError::new(
+        ErrorCode::BadRequest,
+        "[bad_params] op must not be empty; omit op entirely to list the platform directory.",
+    )
+}
+
+/// 执行档：只接受执行字段。列目录字段在这里出现就是混用，明确拒绝。
+fn platform_call_args(args: PlatformToolArgs) -> Result<PlatformCallArgs, ToolError> {
+    if args.all
+        || args.connection.is_some()
+        || clean(args.path.as_deref()).is_some()
+        || !args.tags.is_empty()
+        || clean(args.query.as_deref()).is_some()
+    {
+        return Err(ToolError::new(
+            ErrorCode::BadRequest,
+            "[bad_params] connection / path / tags / query / all are listing-only; \
+             remove them when calling with op, or omit op to list the directory.",
+        ));
+    }
+    Ok(PlatformCallArgs {
+        room: args.room,
+        op: args.op.unwrap_or_default(),
+        params: args.params,
+        limit: args.limit,
+        offset: args.offset,
+        query: args.shape,
+    })
+}
+
+/// 目录档：只接受查询字段。执行字段在这里出现就是混用，明确拒绝。
+fn platform_list_args(args: PlatformToolArgs) -> Result<PlatformListArgs, ToolError> {
+    if !args.params.is_null()
+        || args.limit.is_some()
+        || args.offset.is_some()
+        || !args.shape.filter.is_empty()
+        || args.shape.fields.is_some()
+        || args.shape.order_by.is_some()
+        || args.shape.group_by.is_some()
+    {
+        return Err(ToolError::new(
+            ErrorCode::BadRequest,
+            "[bad_params] params / limit / offset / where / fields / order_by / group_by are \
+             execution-only; give op to execute, or omit them to list the directory.",
+        ));
+    }
+
+    let mut tags = Vec::new();
+    for tag in args.tags {
+        let parsed = PlatformTag::parse(&tag).ok_or_else(|| {
+            ToolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "[bad_params] unknown tag {tag}; valid tags: {}",
+                    PlatformTag::ALL
+                        .iter()
+                        .map(|tag| tag.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                ),
+            )
+        })?;
+        if !tags.contains(&parsed) {
+            tags.push(parsed);
+        }
+    }
+
+    Ok(PlatformListArgs {
+        room: args.room,
+        connection: args.connection,
+        path: args.path,
+        tags,
+        query: args.query,
+        all: args.all,
+    })
+}
+
+/// 唯一的 op 解析入口：普通调用、票据申请、票据执行都走这里，未知 op 一律拒绝。
+fn find_platform_op<'a>(methods: &'a [MethodSpec], op: &str) -> Result<&'a MethodSpec, ToolError> {
+    let op = op.trim();
+    if op.is_empty() {
+        return Err(empty_platform_op());
+    }
+    methods
+        .iter()
+        .find(|method| method.name.as_ref() == op)
+        .ok_or_else(|| platform_op_error(methods, op))
+}
+
+fn platform_op_error(methods: &[MethodSpec], op: &str) -> ToolError {
+    let mut candidates: Vec<&MethodSpec> = methods
+        .iter()
+        .filter(|method| method.group() == group_of_name(op))
+        .take(5)
+        .collect();
+    if candidates.is_empty() {
+        candidates = methods.iter().take(5).collect();
+    }
+    let hint = if candidates.is_empty() {
+        "omit op to list the platform directory.".to_owned()
+    } else {
+        format!(
+            "did you mean: {}? omit op, or pass path/tags, to list the full directory.",
+            candidates
+                .iter()
+                .map(|method| method.name.as_ref())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        )
+    };
+    ToolError::new(
+        ErrorCode::BadRequest,
+        format!("[unknown_op] no such op: {op}; {hint}"),
+    )
+}
+
 /// 清单档的一条：够模型判断「这是我要的」，但不带参数表。
 fn describe_brief(spec: &MethodSpec) -> Value {
     let mut item = json!({
-        "name": spec.name,
+        "op": spec.name,
+        "path": spec.path(),
         "summary": spec.summary,
-        "tags": spec.tags,
+        "tags": spec.tags.iter().map(|tag| tag.as_str()).collect::<Vec<_>>(),
         "risk": spec.risk.as_str(),
     });
     // 房间级是默认，不写；只有「跟房间无关」的那些才标一下，
@@ -8558,9 +8657,10 @@ fn describe_brief(spec: &MethodSpec) -> Value {
 /// 一次调用；翻译错就要多试一轮，而试错正是反馈里最多的摩擦。
 fn describe_method(spec: &MethodSpec) -> Value {
     json!({
-        "name": spec.name,
+        "op": spec.name,
+        "path": spec.path(),
         "summary": spec.summary,
-        "tags": spec.tags,
+        "tags": spec.tags.iter().map(|tag| tag.as_str()).collect::<Vec<_>>(),
         "risk": spec.risk.as_str(),
         "effect": spec.effect.as_str(),
         "scope": spec.scope.as_str(),
@@ -8570,13 +8670,12 @@ fn describe_method(spec: &MethodSpec) -> Value {
 }
 
 /// 这台连接用到的标签，按首次出现的顺序。
-fn tag_names<'a>(methods: &'a [MethodSpec]) -> Vec<&'a str> {
-    let mut names: Vec<&'a str> = Vec::new();
+fn tag_names(methods: &[MethodSpec]) -> Vec<PlatformTag> {
+    let mut names: Vec<PlatformTag> = Vec::new();
     for method in methods {
         for tag in method.tags.iter() {
-            let tag = tag.as_ref();
-            if !names.contains(&tag) {
-                names.push(tag);
+            if !names.contains(tag) {
+                names.push(*tag);
             }
         }
     }
@@ -8589,7 +8688,7 @@ fn tags_of(methods: &[MethodSpec]) -> Vec<Value> {
         .into_iter()
         .map(|tag| {
             json!({
-                "tag": tag,
+                "tag": tag.as_str(),
                 "count": methods.iter().filter(|method| method.has_tag(tag)).count(),
             })
         })
@@ -8601,16 +8700,22 @@ fn tags_of(methods: &[MethodSpec]) -> Vec<Value> {
 /// 这类错只有一种正确写法——带上可选项，让模型一轮就改对，而不是换个词再试三次。
 fn no_match(
     methods: &[MethodSpec],
-    group: Option<&str>,
-    tag: Option<&str>,
+    path: Option<&str>,
+    tags: &[PlatformTag],
     query: Option<&str>,
 ) -> ToolError {
     let mut given = Vec::new();
-    if let Some(group) = group {
-        given.push(format!("group={group}"));
+    if let Some(path) = path {
+        given.push(format!("path={path}"));
     }
-    if let Some(tag) = tag {
-        given.push(format!("tag={tag}"));
+    if !tags.is_empty() {
+        given.push(format!(
+            "tags=[{}]",
+            tags.iter()
+                .map(|tag| tag.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
     }
     if let Some(query) = query {
         given.push(format!("query={query}"));
@@ -8624,7 +8729,11 @@ fn no_match(
     if !known_tags.is_empty() {
         hint.push_str(&acb_i18n::t!(
             "kernel.engine.no_match_tags",
-            tags = known_tags.join(" / ")
+            tags = known_tags
+                .iter()
+                .map(|tag| tag.as_str())
+                .collect::<Vec<_>>()
+                .join(" / ")
         ));
     }
 
@@ -8636,14 +8745,6 @@ fn no_match(
             hint = hint
         ),
     )
-}
-
-fn method_names(methods: &[MethodSpec]) -> String {
-    methods
-        .iter()
-        .map(|method| method.name.as_ref())
-        .collect::<Vec<_>>()
-        .join(" / ")
 }
 
 /// 有哪些分组，按声明顺序（不是字母序）：适配器写得顺，模型看得也顺。
@@ -8775,7 +8876,7 @@ fn check_params(spec: &MethodSpec, params: &Value) -> Result<(), ToolError> {
 /// `MethodSpec.targets` 由适配器声明（ADR-0027）。core 不认识平台词，只做两件事：
 /// - 当前房间类型匹配的 `Room` 目标：参数给了就必须等于房间 id；
 /// - 其它房间类型的 `Room` 目标：给了就拒绝——除非同一参数在当前房间类型里
-///   被声明成 `Member`（如 `poke.send` 在群里的 `user_id` 是“拍谁”）。
+///   被声明成 `Member`（如 `msg.poke` 在群里的 `user_id` 是“拍谁”）。
 fn check_target_params(spec: &MethodSpec, room: &RoomId, params: &Value) -> Result<(), ToolError> {
     let Some(given) = params.as_object() else {
         // check_params 已经处理过非对象；这里只兜底。
@@ -8805,7 +8906,7 @@ fn check_target_params(spec: &MethodSpec, room: &RoomId, params: &Value) -> Resu
         }
 
         // 这个参数指向另一种房间。只有“同一参数在当前房间类型里是成员目标”
-        // 的情况可以放过（poke.send 群里的 user_id）。
+        // 的情况可以放过（msg.poke 群里的 user_id）。
         let is_member_here = spec.targets.iter().any(|other| {
             other.role == TargetRole::Member
                 && other.param.as_ref() == target.param.as_ref()

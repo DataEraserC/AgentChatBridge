@@ -3142,7 +3142,7 @@ mod tests {
         let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         let policy = &config.connections[0].allow_destructive;
         assert_eq!(*policy, DestructivePolicy::None);
-        assert!(!policy.allows("group.kick"));
+        assert!(!policy.allows("member.kick"));
     }
 
     #[test]
@@ -3161,16 +3161,19 @@ mod tests {
 
         let all = with("allow_destructive = true");
         assert_eq!(all, DestructivePolicy::All);
-        assert!(all.allows("group.kick"));
-        assert!(all.allows("message.recall"));
+        assert!(all.allows("member.kick"));
+        assert!(all.allows("msg.recall"));
 
         let none = with("allow_destructive = false");
-        assert!(!none.allows("group.kick"));
+        assert!(!none.allows("member.kick"));
 
-        let some = with("allow_destructive = [\"group.kick\"]");
-        assert_eq!(some, DestructivePolicy::Only(vec!["group.kick".to_owned()]));
-        assert!(some.allows("group.kick"));
-        assert!(!some.allows("group.ban"), "没列出来的不许");
+        let some = with("allow_destructive = [\"member.kick\"]");
+        assert_eq!(
+            some,
+            DestructivePolicy::Only(vec!["member.kick".to_owned()])
+        );
+        assert!(some.allows("member.kick"));
+        assert!(!some.allows("group.mute"), "没列出来的不许");
 
         // `["*"]` 是「全开」的简写。
         let star = with("allow_destructive = [\"*\"]");
@@ -3178,7 +3181,7 @@ mod tests {
 
         // 空数组等于没开，不能因为「写了这一行」就放开。
         let empty = with("allow_destructive = []");
-        assert!(!empty.allows("group.kick"));
+        assert!(!empty.allows("member.kick"));
     }
 
     /// 连接方式不再由 config 写死：manifest 在启动时决定支不支持。

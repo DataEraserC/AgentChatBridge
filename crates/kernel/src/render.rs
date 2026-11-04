@@ -321,7 +321,7 @@ mod tests {
     fn big_lists_are_paged_with_a_total() {
         let members: Vec<Value> = (0..2000).map(|i| json!({ "id": i, "name": "x" })).collect();
         let value = json!({ "data": members, "retcode": 0 });
-        let out = fit("group.get_member_list", value, &dir());
+        let out = fit("member.list", value, &dir());
 
         assert_eq!(out["_page"]["total"], 2000, "总数一定要给，哪怕是截的");
         assert_eq!(out["_page"]["has_more"], true);

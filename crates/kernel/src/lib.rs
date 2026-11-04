@@ -54,7 +54,8 @@ pub use lkg::{LkgEntry, LkgInfo, LkgState, PluginLkg};
 pub use notice::{NoticeEvent, NoticeSink};
 pub use outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, Outbounds, OutgoingKind,
-    OutgoingRecord, ParamSpec, ParamType, RecordMode, Risk, Scope, Sent, TargetRole, TargetSpec,
+    OutgoingRecord, ParamSpec, ParamType, PlatformTag, RecordMode, Risk, Scope, Sent, TargetRole,
+    TargetSpec,
 };
 pub use plugin::{
     AcceptAllReceiveProvider, AccessAction, AccessDecision, AccessProvider, AccessRequest,

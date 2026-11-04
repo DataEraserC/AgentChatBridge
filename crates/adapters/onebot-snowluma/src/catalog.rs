@@ -15,7 +15,8 @@
 use std::sync::OnceLock;
 
 use acb_kernel::{
-    Effect, MethodSpec, ParamSpec, ParamType, RecordMode, Risk, Scope, TargetSpec, outbound::tags,
+    Effect, MethodSpec, ParamSpec, ParamType, PlatformTag, RecordMode, Risk, Scope, TargetSpec,
+    outbound::tags,
 };
 
 // ── 参数写法 ──────────────────────────────────────────────────────────────
@@ -78,18 +79,14 @@ fn any(name: &'static str, desc: &'static str) -> ParamSpec {
 fn m(
     name: &'static str,
     summary: &'static str,
-    tags: &[&'static str],
+    tags: &[PlatformTag],
     risk: Risk,
     params: &[ParamSpec],
 ) -> MethodSpec {
     MethodSpec {
         name: name.into(),
         summary: summary.into(),
-        tags: tags
-            .iter()
-            .map(|tag| std::borrow::Cow::Borrowed(*tag))
-            .collect::<Vec<_>>()
-            .into(),
+        tags: tags.to_vec().into(),
         risk,
         scope: Scope::Room,
         params: params.to_vec().into(),
@@ -107,18 +104,14 @@ fn m(
 fn cm(
     name: &'static str,
     summary: &'static str,
-    tags: &[&'static str],
+    tags: &[PlatformTag],
     risk: Risk,
     params: &[ParamSpec],
 ) -> MethodSpec {
     MethodSpec {
         name: name.into(),
         summary: summary.into(),
-        tags: tags
-            .iter()
-            .map(|tag| std::borrow::Cow::Borrowed(*tag))
-            .collect::<Vec<_>>()
-            .into(),
+        tags: tags.to_vec().into(),
         risk,
         scope: Scope::Connection,
         params: params.to_vec().into(),
@@ -131,9 +124,10 @@ fn cm(
 
 // ── 方法表 ────────────────────────────────────────────────────────────────
 //
-// 命名是 `归属.动作`：归属跟 OneBot 的命名空间对齐（message / group / friend / account…），
-// 方便模型看到消息里的 `{"type":"forward"}` 就联想到 `message.forward_content`；
-// tags 是跨归属的用途标记，模型按需求找入口时靠它（`tag=image` 一次捞齐发图、取图、改群头像）。
+// op 是层级名（`msg.send`、`group.file.list`、`member.kick`）；同一个顶层路径下的动作成组。
+// 每条 op 的 `risk` 在这里显式写出——这是 catalog 的唯一 op→risk 表，不从 tag 推导；
+// 不在 `methods()` 里的 op，core 查目录时就拒绝（fail closed）。
+// tags 是封闭枚举 `PlatformTag` 的跨类属性：作者写用途，`catalog()` 再补风险/作用范围标签。
 
 fn methods() -> Vec<MethodSpec> {
     vec![
@@ -188,7 +182,7 @@ fn methods() -> Vec<MethodSpec> {
         cm(
             "friend.delete",
             "删好友。删掉之后对方从列表里消失",
-            &[tags::FRIEND, tags::ADMIN],
+            &[tags::FRIEND, tags::REQUIRES_ADMIN],
             Risk::Destructive,
             &[req("user_id", "要删的 QQ 号")],
         ),
@@ -201,14 +195,14 @@ fn methods() -> Vec<MethodSpec> {
             &[],
         ),
         m(
-            "group.get_info",
+            "group.info",
             "查一个群的资料：群名、人数上限、当前人数、群主",
             &[tags::GROUP],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
         ),
         m(
-            "group.get_member_info",
+            "member.info",
             "查一个群成员的昵称、群名片、角色（群主/管理员/成员）、入群时间",
             &[tags::MEMBER, tags::GROUP],
             Risk::Read,
@@ -218,14 +212,14 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.get_member_list",
+            "member.list",
             "列出群成员。大群会很长，慎用",
             &[tags::MEMBER, tags::GROUP],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
         ),
         m(
-            "group.get_honor",
+            "group.honor",
             "群荣誉：龙王、群聊之火、活跃天数榜之类。type 可填 all/talkative/performer/legend",
             &[tags::GROUP, tags::MEMBER],
             Risk::Read,
@@ -235,56 +229,56 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.get_system_msg",
+            "group.system_msg",
             "群系统消息：谁申请加群、谁被邀请进群、哪些还没处理（含处理用的 flag）",
             &[tags::GROUP, tags::APPROVE],
             Risk::Read,
             &[],
         ),
         m(
-            "group.get_notice",
+            "group.notice.get",
             "读群公告：内容、发布者、发布时间",
             &[tags::GROUP, tags::MESSAGE],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
         ),
         m(
-            "group.files",
+            "group.file.list",
             "列出群文件的根目录：文件名、大小、file_id、busid（下载要这后两个）",
             &[tags::GROUP, tags::FILE],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
         ),
         m(
-            "group.files_in_folder",
+            "group.file.folder",
             "列出群文件某个文件夹里的东西",
             &[tags::GROUP, tags::FILE],
             Risk::Read,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
-                req("folder_id", "文件夹 id，从 group.files 拿"),
+                req("folder_id", "文件夹 id，从 group.file.list 拿"),
             ],
         ),
         m(
-            "group.file_url",
+            "group.file.url",
             "拿群文件的下载地址（会过期，要用的时候现取）",
             &[tags::GROUP, tags::FILE, tags::DOWNLOAD],
             Risk::Read,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
                 req("file_id", "文件 id"),
-                num("busid", "业务 id，通常 102；从 group.files 拿"),
+                num("busid", "业务 id，通常 102；从 group.file.list 拿"),
             ],
         ),
         m(
-            "group.file_system_info",
+            "group.file.info",
             "群文件系统概况：文件总数、已用空间",
             &[tags::GROUP, tags::FILE],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
         ),
         m(
-            "group.essence_list",
+            "group.essence.list",
             "群精华消息列表",
             &[tags::GROUP, tags::MESSAGE],
             Risk::Read,
@@ -293,15 +287,15 @@ fn methods() -> Vec<MethodSpec> {
         m(
             "group.at_all_remain",
             "还剩几次 @全体成员 能用（问的是这台号自己）",
-            &[tags::GROUP, tags::ADMIN],
+            &[tags::GROUP, tags::REQUIRES_ADMIN],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
         ),
         // ── 群：写 ──
         m(
-            "group.send_notice",
+            "group.notice.send",
             "发群公告。全群都会看到，属于管理员操作",
-            &[tags::GROUP, tags::SEND, tags::ADMIN],
+            &[tags::GROUP, tags::SEND, tags::REQUIRES_ADMIN],
             Risk::Destructive,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
@@ -309,7 +303,7 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.set_card",
+            "member.card",
             "改群名片。不填 user_id 就是改自己的；改别人的要管理员",
             &[tags::GROUP, tags::MEMBER],
             Risk::Write,
@@ -320,7 +314,7 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.set_remark",
+            "group.remark",
             "给群设一个只有自己看得见的备注名",
             &[tags::GROUP],
             Risk::Write,
@@ -330,7 +324,7 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.upload_file",
+            "group.file.upload",
             "往群文件里上传一个文件。file 可以是本地路径、http 地址或 base64://",
             &[tags::GROUP, tags::FILE, tags::UPLOAD],
             Risk::Write,
@@ -342,14 +336,14 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.set_essence",
+            "group.essence.set",
             "把一条消息设成群精华",
             &[tags::GROUP, tags::MESSAGE],
             Risk::Write,
             &[req("message_id", "要设成精华的消息 id")],
         ),
         m(
-            "group.delete_essence",
+            "group.essence.delete",
             "取消一条消息的群精华",
             &[tags::GROUP, tags::MESSAGE],
             Risk::Write,
@@ -364,7 +358,7 @@ fn methods() -> Vec<MethodSpec> {
         ),
         m(
             "group.approve",
-            "同意或拒绝一个加群/邀请请求。flag 和 sub_type 从 group.get_system_msg 或入群请求事件里拿",
+            "同意或拒绝一个加群/邀请请求。flag 和 sub_type 从 group.system_msg 或入群请求事件里拿",
             &[tags::GROUP, tags::APPROVE],
             Risk::Write,
             &[
@@ -376,9 +370,9 @@ fn methods() -> Vec<MethodSpec> {
         ),
         // ── 群：管理（破坏性） ──
         m(
-            "group.kick",
+            "member.kick",
             "把一个人踢出群。他会被移出，之后能不能再加看 reject_add_request",
-            &[tags::GROUP, tags::MEMBER, tags::ADMIN],
+            &[tags::GROUP, tags::MEMBER, tags::REQUIRES_ADMIN],
             Risk::Destructive,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
@@ -387,9 +381,9 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.ban",
+            "group.mute",
             "禁言一个人。duration 是秒，0 = 解除禁言",
-            &[tags::GROUP, tags::MEMBER, tags::MUTE, tags::ADMIN],
+            &[tags::GROUP, tags::MEMBER, tags::MUTE, tags::REQUIRES_ADMIN],
             Risk::Destructive,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
@@ -398,9 +392,9 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.whole_ban",
+            "group.mute_all",
             "全员禁言开关。开了之后只有管理员能说话",
-            &[tags::GROUP, tags::MUTE, tags::ADMIN],
+            &[tags::GROUP, tags::MUTE, tags::REQUIRES_ADMIN],
             Risk::Destructive,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
@@ -408,9 +402,9 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.set_admin",
+            "member.admin",
             "设/撤群管理员",
-            &[tags::GROUP, tags::MEMBER, tags::ADMIN],
+            &[tags::GROUP, tags::MEMBER, tags::REQUIRES_ADMIN],
             Risk::Destructive,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
@@ -419,9 +413,9 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.set_name",
+            "group.name",
             "改群名。全群可见",
-            &[tags::GROUP, tags::ADMIN],
+            &[tags::GROUP, tags::REQUIRES_ADMIN],
             Risk::Destructive,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
@@ -429,9 +423,9 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.set_special_title",
+            "member.title",
             "设/撤群成员的专属头衔（群主才能设）",
-            &[tags::GROUP, tags::MEMBER, tags::ADMIN],
+            &[tags::GROUP, tags::MEMBER, tags::REQUIRES_ADMIN],
             Risk::Destructive,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
@@ -440,9 +434,9 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.set_portrait",
+            "group.avatar",
             "换群头像。file 可以是本地路径、http 地址或 base64://",
-            &[tags::GROUP, tags::ADMIN, tags::IMAGE],
+            &[tags::GROUP, tags::REQUIRES_ADMIN, tags::IMAGE],
             Risk::Destructive,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
@@ -452,7 +446,7 @@ fn methods() -> Vec<MethodSpec> {
         m(
             "group.leave",
             "退出群。is_dismiss 只有群主能用来解散",
-            &[tags::GROUP, tags::ADMIN],
+            &[tags::GROUP, tags::REQUIRES_ADMIN],
             Risk::Destructive,
             &[
                 opt("group_id", "群号；在群里调用可以不填"),
@@ -460,7 +454,7 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "group.delete_file",
+            "group.file.delete",
             "删群文件。搞不好是别人传的，删了就没了",
             &[tags::GROUP, tags::FILE],
             Risk::Destructive,
@@ -472,10 +466,10 @@ fn methods() -> Vec<MethodSpec> {
         ),
         // ── 消息 ──
         m(
-            "message.send_group",
-            "往群里发消息。message 是消息段数组，文本、图片、语音、视频、文件、@ 都走这一个；\
+            "msg.send",
+            "往当前房间发消息（群聊或私聊由 room 决定）。message 是消息段数组，文本、图片、语音、视频、文件、@ 都走这一个；\
          例：[{\"type\":\"text\",\"text\":\"看这个\"},{\"type\":\"image\",\"file\":\"https://…\"}]。\
-         配合 message.send_forward 还能发合并转发",
+         配合 msg.send_forward 还能发合并转发",
             &[
                 tags::SEND,
                 tags::MESSAGE,
@@ -486,46 +480,21 @@ fn methods() -> Vec<MethodSpec> {
                 tags::FILE,
             ],
             Risk::Write,
-            &[
-                opt("group_id", "群号；在群里调用可以不填"),
-                any(
-                    "message",
-                    "消息段数组，如 [{\"type\":\"text\",\"text\":\"hi\"}]",
-                ),
-            ],
+            &[any(
+                "message",
+                "消息段数组，如 [{\"type\":\"text\",\"text\":\"hi\"}]",
+            )],
         ),
         m(
-            "message.send_private",
-            "往一个 QQ 号发私聊消息。message 形状同 message.send_group",
-            &[
-                tags::SEND,
-                tags::MESSAGE,
-                tags::MEDIA,
-                tags::IMAGE,
-                tags::VOICE,
-                tags::VIDEO,
-                tags::FILE,
-            ],
-            Risk::Write,
-            &[
-                opt("user_id", "发给谁；在私聊里调用可以不填"),
-                any("message", "消息段数组"),
-            ],
-        ),
-        m(
-            "message.send_forward",
+            "msg.send_forward",
             "发合并转发（那种「聊天记录」卡片）。messages 是节点数组：\
          [{\"type\":\"node\",\"data\":{\"name\":\"昵称\",\"uin\":\"QQ号\",\"content\":[消息段]}}]",
             &[tags::SEND, tags::MESSAGE, tags::FORWARD],
             Risk::Write,
-            &[
-                any("messages", "转发节点数组"),
-                opt("group_id", "发到哪个群；在群里调用可以不填"),
-                opt("user_id", "发到哪个私聊"),
-            ],
+            &[any("messages", "转发节点数组")],
         ),
         m(
-            "message.get",
+            "msg.get",
             "按消息 id 取一条消息的原始内容（含发送者、消息段）",
             &[tags::MESSAGE, tags::HISTORY],
             Risk::Read,
@@ -535,36 +504,24 @@ fn methods() -> Vec<MethodSpec> {
             )],
         ),
         m(
-            "message.recall",
+            "msg.recall",
             "撤回一条消息。撤别人的要管理员，撤自己的随时可以",
             &[tags::MESSAGE, tags::RECALL],
             Risk::Destructive,
             &[req("message_id", "要撤回的消息 id")],
         ),
         m(
-            "message.history_group",
-            "翻群消息历史。message_seq 是起点序号，往前取 count 条",
-            &[tags::MESSAGE, tags::HISTORY, tags::GROUP],
+            "msg.history",
+            "翻当前房间的消息历史。message_seq 是起点序号，往前取 count 条",
+            &[tags::MESSAGE, tags::HISTORY],
             Risk::Read,
             &[
-                opt("group_id", "群号；在群里调用可以不填"),
                 num("message_seq", "从这条的序号开始往前"),
                 num("count", "取多少条，默认 20"),
             ],
         ),
         m(
-            "message.history_private",
-            "翻和某个人的私聊历史",
-            &[tags::MESSAGE, tags::HISTORY, tags::FRIEND],
-            Risk::Read,
-            &[
-                opt("user_id", "和谁；在私聊里调用可以不填"),
-                num("message_seq", "从这条的序号开始往前"),
-                num("count", "取多少条，默认 20"),
-            ],
-        ),
-        m(
-            "message.forward_content",
+            "msg.forward",
             "读一条合并转发的正文，一次给到最里层。返回摊平的节点表：每条的 path（如 1.0 表示\
          第二条第 0 个回复）、depth（第几层）、sender、text；最外层还有 leaf_text 一句话\
          概括全部内容。默认展开 3 层，最多 5 层。节点多到上限时 has_more 为真，\
@@ -578,14 +535,14 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "message.image",
+            "msg.image",
             "拿到一个图片段的真实文件：本地路径或下载地址",
             &[tags::IMAGE, tags::MEDIA, tags::DOWNLOAD],
             Risk::Read,
             &[req("file", "图片段的 file 字段")],
         ),
         m(
-            "message.voice",
+            "msg.voice",
             "把语音转成能用的格式，拿到文件路径。out_format 可填 mp3/amr/wav/silk",
             &[tags::VOICE, tags::MEDIA, tags::DOWNLOAD],
             Risk::Read,
@@ -595,7 +552,7 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "message.react",
+            "msg.react",
             "给一条消息加表情回应（那个小表情）。emoji_id 是平台的表情 id",
             &[tags::MESSAGE, tags::IMAGE],
             Risk::Write,
@@ -606,7 +563,7 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
-            "message.mark_read",
+            "msg.mark_read",
             "把消息标成已读",
             &[tags::MESSAGE],
             Risk::Write,
@@ -614,7 +571,7 @@ fn methods() -> Vec<MethodSpec> {
         ),
         // ── 互动 ──
         m(
-            "poke.send",
+            "msg.poke",
             "拍一拍。群里要指定拍谁；私聊里不填就是拍对方",
             &[tags::POKE, tags::SEND, tags::MEMBER],
             Risk::Write,
@@ -704,21 +661,21 @@ const fn group_route(method: &'static str, action: &'static str) -> Route {
     }
 }
 
-/// 私聊参数 `user_id` 由房间补上。
-const fn private_route(method: &'static str, action: &'static str) -> Route {
-    Route {
-        method,
-        target: Target::Fixed(action),
-        from_group: None,
-        from_private: Some("user_id"),
-    }
-}
-
 /// 群聊/私聊同一个动作、两边都可能从房间推导目标参数（如合并转发）。
 const fn both_route(method: &'static str, action: &'static str) -> Route {
     Route {
         method,
         target: Target::Fixed(action),
+        from_group: Some("group_id"),
+        from_private: Some("user_id"),
+    }
+}
+
+/// 群聊/私聊两个动作，目标参数从房间推导（发消息、历史、拍一拍）。
+const fn room_route(method: &'static str, group: &'static str, private: &'static str) -> Route {
+    Route {
+        method,
+        target: Target::ByRoom { group, private },
         from_group: Some("group_id"),
         from_private: Some("user_id"),
     }
@@ -733,56 +690,50 @@ pub static ROUTES: &[Route] = &[
     route("friend.approve", "set_friend_add_request"),
     route("friend.delete", "delete_friend"),
     route("group.list", "get_group_list"),
-    group_route("group.get_info", "get_group_info"),
-    group_route("group.get_member_info", "get_group_member_info"),
-    group_route("group.get_member_list", "get_group_member_list"),
-    group_route("group.get_honor", "get_group_honor_info"),
-    route("group.get_system_msg", "get_group_system_msg"),
-    group_route("group.get_notice", "_get_group_notice"),
-    group_route("group.files", "get_group_root_files"),
-    group_route("group.files_in_folder", "get_group_files_by_folder"),
-    group_route("group.file_url", "get_group_file_url"),
-    group_route("group.file_system_info", "get_group_file_system_info"),
-    group_route("group.essence_list", "get_essence_msg_list"),
+    group_route("group.info", "get_group_info"),
+    group_route("member.info", "get_group_member_info"),
+    group_route("member.list", "get_group_member_list"),
+    group_route("group.honor", "get_group_honor_info"),
+    route("group.system_msg", "get_group_system_msg"),
+    group_route("group.notice.get", "_get_group_notice"),
+    group_route("group.file.list", "get_group_root_files"),
+    group_route("group.file.folder", "get_group_files_by_folder"),
+    group_route("group.file.url", "get_group_file_url"),
+    group_route("group.file.info", "get_group_file_system_info"),
+    group_route("group.essence.list", "get_essence_msg_list"),
     group_route("group.at_all_remain", "get_group_at_all_remain"),
-    group_route("group.send_notice", "_send_group_notice"),
-    group_route("group.set_card", "set_group_card"),
-    group_route("group.set_remark", "set_group_remark"),
-    group_route("group.upload_file", "upload_group_file"),
-    route("group.set_essence", "set_essence_msg"),
-    route("group.delete_essence", "delete_essence_msg"),
+    group_route("group.notice.send", "_send_group_notice"),
+    group_route("member.card", "set_group_card"),
+    group_route("group.remark", "set_group_remark"),
+    group_route("group.file.upload", "upload_group_file"),
+    route("group.essence.set", "set_essence_msg"),
+    route("group.essence.delete", "delete_essence_msg"),
     group_route("group.sign", "set_group_sign"),
     route("group.approve", "set_group_add_request"),
-    group_route("group.kick", "set_group_kick"),
-    group_route("group.ban", "set_group_ban"),
-    group_route("group.whole_ban", "set_group_whole_ban"),
-    group_route("group.set_admin", "set_group_admin"),
-    group_route("group.set_name", "set_group_name"),
-    group_route("group.set_special_title", "set_group_special_title"),
-    group_route("group.set_portrait", "set_group_portrait"),
+    group_route("member.kick", "set_group_kick"),
+    group_route("group.mute", "set_group_ban"),
+    group_route("group.mute_all", "set_group_whole_ban"),
+    group_route("member.admin", "set_group_admin"),
+    group_route("group.name", "set_group_name"),
+    group_route("member.title", "set_group_special_title"),
+    group_route("group.avatar", "set_group_portrait"),
     group_route("group.leave", "set_group_leave"),
-    group_route("group.delete_file", "delete_group_file"),
-    group_route("message.send_group", "send_group_msg"),
-    private_route("message.send_private", "send_private_msg"),
-    both_route("message.send_forward", "send_forward_msg"),
-    route("message.get", "get_msg"),
-    route("message.recall", "delete_msg"),
-    group_route("message.history_group", "get_group_msg_history"),
-    private_route("message.history_private", "get_friend_msg_history"),
-    route("message.forward_content", "get_forward_msg"),
-    route("message.image", "get_image"),
-    route("message.voice", "get_record"),
-    route("message.react", "set_msg_emoji_like"),
-    route("message.mark_read", "mark_msg_as_read"),
-    Route {
-        method: "poke.send",
-        target: Target::ByRoom {
-            group: "group_poke",
-            private: "friend_poke",
-        },
-        from_group: Some("group_id"),
-        from_private: Some("user_id"),
-    },
+    group_route("group.file.delete", "delete_group_file"),
+    room_route("msg.send", "send_group_msg", "send_private_msg"),
+    both_route("msg.send_forward", "send_forward_msg"),
+    route("msg.get", "get_msg"),
+    route("msg.recall", "delete_msg"),
+    room_route(
+        "msg.history",
+        "get_group_msg_history",
+        "get_friend_msg_history",
+    ),
+    route("msg.forward", "get_forward_msg"),
+    route("msg.image", "get_image"),
+    route("msg.voice", "get_record"),
+    route("msg.react", "set_msg_emoji_like"),
+    route("msg.mark_read", "mark_msg_as_read"),
+    room_route("msg.poke", "group_poke", "friend_poke"),
     route("like.send", "send_like"),
     route("system.check_url", "check_url_safely"),
 ];
@@ -797,16 +748,82 @@ pub fn catalog() -> std::sync::Arc<[MethodSpec]> {
         .get_or_init(|| {
             methods()
                 .into_iter()
-                .map(|method| MethodSpec {
-                    targets: targets_of(method.name.as_ref()).into(),
-                    effect: effect_of(&method),
-                    record: record_of(method.name.as_ref()),
-                    ..method
+                .map(|method| {
+                    let effect = effect_of(&method);
+                    MethodSpec {
+                        tags: tags_for(&method).into(),
+                        targets: targets_of(method.name.as_ref()).into(),
+                        effect,
+                        record: record_of(method.name.as_ref()),
+                        ..method
+                    }
                 })
                 .collect::<Vec<_>>()
                 .into()
         })
         .clone()
+}
+
+/// 常用 op：清单里优先展示，模型最常走的几条路径。
+const COMMON_OPS: &[&str] = &[
+    "account.login_info",
+    "friend.list",
+    "group.list",
+    "group.info",
+    "member.list",
+    "member.info",
+    "msg.send",
+    "msg.history",
+    "msg.get",
+    "msg.recall",
+    "msg.image",
+    "msg.voice",
+    "msg.react",
+];
+
+/// 实现特有、其它 OneBot 实现不保证的 op。
+const SNOWLUMA_ONLY_OPS: &[&str] = &["group.sign", "like.send", "system.check_url"];
+
+fn push_tag(tags: &mut Vec<PlatformTag>, tag: PlatformTag) {
+    if !tags.contains(&tag) {
+        tags.push(tag);
+    }
+}
+
+/// 标签由「作者声明的用途」+「风险/作用范围自动标签」组成。
+/// 风险与作用范围始终来自 `MethodSpec.risk` / `scope`，不是从标签反推的。
+fn tags_for(method: &MethodSpec) -> Vec<PlatformTag> {
+    let mut tags = method.tags.to_vec();
+    push_tag(
+        &mut tags,
+        match method.risk {
+            Risk::Read => tags::READ,
+            Risk::Write => tags::WRITE,
+            Risk::Destructive => tags::DESTRUCTIVE,
+        },
+    );
+    push_tag(
+        &mut tags,
+        match method.scope {
+            Scope::Room => tags::ROOM,
+            Scope::Connection => tags::CONNECTION,
+        },
+    );
+    if method.risk == Risk::Read {
+        push_tag(&mut tags, tags::IDEMPOTENT);
+    }
+    if (method.risk == Risk::Destructive && matches!(method.group(), "group" | "member"))
+        || method.name.as_ref() == "msg.recall"
+    {
+        push_tag(&mut tags, tags::REQUIRES_ADMIN);
+    }
+    if COMMON_OPS.contains(&method.name.as_ref()) {
+        push_tag(&mut tags, tags::COMMON);
+    }
+    if SNOWLUMA_ONLY_OPS.contains(&method.name.as_ref()) {
+        push_tag(&mut tags, tags::SNOWLUMA_ONLY);
+    }
+    tags
 }
 
 /// 这个方法做什么。发送/撤回/删除按语义认，其余按风险认。
@@ -824,19 +841,19 @@ fn effect_of(method: &MethodSpec) -> Effect {
 }
 
 /// 名字里带 delete 但没挂 `recall` 标签的几个。
-const DELETE_METHODS: &[&str] = &["friend.delete", "group.delete_file", "group.delete_essence"];
+const DELETE_METHODS: &[&str] = &["friend.delete", "group.file.delete", "group.essence.delete"];
 
 /// 调用成功后要写进流水的那几个。core 靠它判断“这次调用会不会改变房间”。
 fn record_of(method: &str) -> RecordMode {
     match method {
-        "message.send_group" | "message.send_private" => RecordMode::Message,
-        "message.send_forward" | "group.send_notice" => RecordMode::Event,
+        "msg.send" => RecordMode::Message,
+        "msg.send_forward" | "group.notice.send" => RecordMode::Event,
         _ => RecordMode::None,
     }
 }
 
 fn targets_of(method: &str) -> &'static [TargetSpec] {
-    if method == "poke.send" {
+    if method == "msg.poke" {
         return POKE_TARGETS;
     }
     let Some(route) = ROUTES.iter().find(|route| route.method == method) else {

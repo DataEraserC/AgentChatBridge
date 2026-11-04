@@ -40,7 +40,7 @@ static GROUP_TARGETS: &[TargetSpec] = &[TargetSpec::room("group_id", "group")];
 fn spec(
     name: &'static str,
     summary: &'static str,
-    tags: &[&'static str],
+    tags: &[acb_kernel::PlatformTag],
     risk: Risk,
     scope: Scope,
     params: &[ParamSpec],
@@ -51,11 +51,7 @@ fn spec(
     MethodSpec {
         name: name.into(),
         summary: summary.into(),
-        tags: tags
-            .iter()
-            .map(|tag| Cow::Borrowed(*tag))
-            .collect::<Vec<_>>()
-            .into(),
+        tags: tags.to_vec().into(),
         risk,
         scope,
         params: params
@@ -82,7 +78,7 @@ fn spec(
 fn methods() -> Arc<[MethodSpec]> {
     vec![
         spec(
-            "forward.get_content",
+            "msg.forward",
             "读一条合并转发的正文",
             &[tags::FORWARD, tags::MESSAGE],
             Risk::Read,
@@ -93,7 +89,7 @@ fn methods() -> Arc<[MethodSpec]> {
             RecordMode::None,
         ),
         spec(
-            "group.get_member_info",
+            "member.info",
             "查群成员信息",
             &[tags::MEMBER, tags::GROUP],
             Risk::Read,
@@ -104,7 +100,7 @@ fn methods() -> Arc<[MethodSpec]> {
             RecordMode::None,
         ),
         spec(
-            "message.send_image",
+            "msg.send_image",
             "往会话里发一张图",
             &[tags::SEND, tags::IMAGE, tags::MEDIA],
             Risk::Write,
@@ -115,7 +111,7 @@ fn methods() -> Arc<[MethodSpec]> {
             RecordMode::Message,
         ),
         spec(
-            "group.get_file_url",
+            "group.file.url",
             "取群文件的下载地址",
             &[tags::FILE, tags::IMAGE, tags::DOWNLOAD],
             Risk::Read,
@@ -126,9 +122,9 @@ fn methods() -> Arc<[MethodSpec]> {
             RecordMode::None,
         ),
         spec(
-            "group.kick",
+            "member.kick",
             "踢人",
-            &[tags::ADMIN, tags::MEMBER],
+            &[tags::REQUIRES_ADMIN, tags::MEMBER],
             Risk::Destructive,
             Scope::Room,
             KICK_PARAMS,
@@ -137,9 +133,9 @@ fn methods() -> Arc<[MethodSpec]> {
             RecordMode::None,
         ),
         spec(
-            "group.ban",
+            "group.mute",
             "禁言",
-            &[tags::ADMIN, tags::MUTE],
+            &[tags::REQUIRES_ADMIN, tags::MUTE],
             Risk::Destructive,
             Scope::Room,
             KICK_PARAMS,
@@ -148,7 +144,7 @@ fn methods() -> Arc<[MethodSpec]> {
             RecordMode::None,
         ),
         spec(
-            "group.get_member_list",
+            "member.list",
             "群成员列表（不带分页，一次给全）",
             &[tags::MEMBER, tags::GROUP],
             Risk::Read,
@@ -208,11 +204,11 @@ impl Outbound for Platformy {
             .expect("没被毒死")
             .push((method.to_owned(), params.clone()));
         match method {
-            "forward.get_content" => Ok(CallOutcome::value(json!({
+            "msg.forward" => Ok(CallOutcome::value(json!({
                 "messages": [{"sender": "老王", "text": "转发的正文"}]
             }))),
             // 发送类方法要把“实际发出去的内容”翻译成流水记录带回来。
-            "message.send_image" => Ok(CallOutcome {
+            "msg.send_image" => Ok(CallOutcome {
                 value: json!({"message_id": 9002}),
                 record: Some(OutgoingRecord {
                     kind: OutgoingKind::Message,
@@ -224,16 +220,16 @@ impl Outbound for Platformy {
                     at: Some(AT),
                 }),
             }),
-            "group.get_member_info" => Ok(CallOutcome::value(json!({
+            "member.info" => Ok(CallOutcome::value(json!({
                 "nickname": "老王",
                 "role": "member"
             }))),
-            "group.kick" | "group.ban" => Ok(CallOutcome::value(json!({"done": true}))),
+            "member.kick" | "group.mute" => Ok(CallOutcome::value(json!({"done": true}))),
             "friend.list" => Ok(CallOutcome::value(json!({
                 "friends": [{"user_id": "10001", "nickname": "老王"}]
             }))),
             // 213 人的群：7 个管理员、206 个普通成员。用来验分页和分组计数。
-            "group.get_member_list" => {
+            "member.list" => {
                 let members: Vec<Value> = (1..=213)
                     .map(|index| {
                         json!({
@@ -512,17 +508,12 @@ fn list_rooms_reports_platform_and_method_count() {
 
 /// 目录按连接查：多平台会话不用假装在别的房间里，也能看那条连接能干什么。
 #[test]
-fn platform_methods_can_target_a_connection_and_summarize_all() {
+fn platform_list_can_target_a_connection_and_summarize_all() {
     let (mut bridge, _calls) = setup();
     let ticket = open_turn(&mut bridge);
 
     let all = bridge
-        .tool_call(
-            &ticket,
-            &sessions(),
-            "platform_methods",
-            json!({"all": true}),
-        )
+        .tool_call(&ticket, &sessions(), "platform_call", json!({"all": true}))
         .expect("能查连接摘要");
     assert_eq!(all["scope"], "connections");
     assert_eq!(all["total"], 2);
@@ -553,7 +544,7 @@ fn platform_methods_can_target_a_connection_and_summarize_all() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
+            "platform_call",
             json!({"connection": "qq"}),
         )
         .expect("能查 qq 那条连接");
@@ -566,18 +557,18 @@ fn platform_methods_can_target_a_connection_and_summarize_all() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
-            json!({"connection": "qq", "group": "forward"}),
+            "platform_call",
+            json!({"connection": "qq", "path": "msg"}),
         )
         .expect("能按归属过滤");
-    assert_eq!(filtered["methods"][0]["name"], "forward.get_content");
+    assert_eq!(filtered["ops"][0]["op"], "msg.forward");
 
     // dc 没声明目录：明确报「平台不支持」，不是空清单。
     let unsupported = bridge
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
+            "platform_call",
             json!({"connection": "dc"}),
         )
         .expect_err("dc 没有平台目录");
@@ -587,7 +578,7 @@ fn platform_methods_can_target_a_connection_and_summarize_all() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
+            "platform_call",
             json!({"connection": "nope"}),
         )
         .expect_err("不存在的连接要报错");
@@ -597,7 +588,7 @@ fn platform_methods_can_target_a_connection_and_summarize_all() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
+            "platform_call",
             json!({"all": true, "connection": "qq"}),
         )
         .expect_err("all 不能和 connection 一起给");
@@ -607,7 +598,7 @@ fn platform_methods_can_target_a_connection_and_summarize_all() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
+            "platform_call",
             json!({"connection": "dc", "room": "qq:group/123"}),
         )
         .expect_err("room 不在指定连接上");
@@ -621,15 +612,15 @@ fn catalog_lists_every_method_without_dumping_params() {
     let ticket = open_turn(&mut bridge);
 
     let result = bridge
-        .tool_call(&ticket, &sessions(), "platform_methods", json!({}))
+        .tool_call(&ticket, &sessions(), "platform_call", json!({}))
         .expect("能查目录");
 
     assert_eq!(result["platform"], "qq");
     assert_eq!(result["total"], 8);
 
-    let methods = result["methods"].as_array().expect("有清单");
+    let methods = result["ops"].as_array().expect("有清单");
     assert_eq!(methods.len(), 8);
-    assert_eq!(methods[0]["name"], "forward.get_content");
+    assert_eq!(methods[0]["op"], "msg.forward");
     assert_eq!(methods[0]["tags"][0], "forward");
     assert_eq!(methods[2]["risk"], "write");
     // 清单档不带参数表。
@@ -654,14 +645,14 @@ fn catalog_group_detail_carries_json_schema_params() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
-            json!({"group": "forward"}),
+            "platform_call",
+            json!({"path": "msg", "query": "转发"}),
         )
         .expect("能查这一组");
 
-    let methods = result["methods"].as_array().expect("有方法");
+    let methods = result["ops"].as_array().expect("有方法");
     assert_eq!(methods.len(), 1);
-    assert_eq!(methods[0]["name"], "forward.get_content");
+    assert_eq!(methods[0]["op"], "msg.forward");
     assert_eq!(methods[0]["risk"], "read");
     assert_eq!(methods[0]["params"]["type"], "object");
     assert_eq!(methods[0]["params"]["properties"]["id"]["type"], "string");
@@ -678,19 +669,19 @@ fn catalog_tag_pulls_methods_from_several_groups() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
-            json!({"tag": "image"}),
+            "platform_call",
+            json!({"tags": ["image"]}),
         )
         .expect("能按标签查");
 
-    let methods = result["methods"].as_array().expect("有方法");
+    let methods = result["ops"].as_array().expect("有方法");
     assert_eq!(result["matched"], 2);
     let names: Vec<&str> = methods
         .iter()
-        .map(|method| method["name"].as_str().unwrap_or_default())
+        .map(|method| method["op"].as_str().unwrap_or_default())
         .collect();
-    assert!(names.contains(&"message.send_image"));
-    assert!(names.contains(&"group.get_file_url"));
+    assert!(names.contains(&"msg.send_image"));
+    assert!(names.contains(&"group.file.url"));
     // 缩了范围就带参数表，模型下一步就能直接调。
     assert!(methods[0].get("params").is_some());
 }
@@ -705,7 +696,7 @@ fn catalog_query_in_chinese_still_reaches_tags() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
+            "platform_call",
             json!({"query": "图片"}),
         )
         .expect("能搜");
@@ -723,13 +714,13 @@ fn catalog_filters_stack() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
-            json!({"group": "group", "tag": "image"}),
+            "platform_call",
+            json!({"path": "group", "tags": ["image"]}),
         )
         .expect("能叠加");
 
     assert_eq!(result["matched"], 1);
-    assert_eq!(result["methods"][0]["name"], "group.get_file_url");
+    assert_eq!(result["ops"][0]["op"], "group.file.url");
 }
 
 #[test]
@@ -741,13 +732,13 @@ fn catalog_group_that_does_not_exist_lists_the_real_ones() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
-            json!({"group": "user"}),
+            "platform_call",
+            json!({"path": "user"}),
         )
         .expect_err("没有这一组");
     assert!(error.message.contains("no_match"));
-    assert!(error.message.contains("forward"));
-    assert!(error.message.contains("message"));
+    assert!(error.message.contains("msg"));
+    assert!(error.message.contains("member"));
 }
 
 /// 标签不存在时把手上的标签列出来，别让模型挨个瞎试。
@@ -760,11 +751,11 @@ fn catalog_unknown_tag_lists_the_known_ones() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
-            json!({"tag": "qwq"}),
+            "platform_call",
+            json!({"tags": ["qwq"]}),
         )
         .expect_err("没这个标签");
-    assert!(error.message.contains("no_match"));
+    assert!(error.message.contains("unknown tag"));
     assert!(error.message.contains("image"));
     assert!(error.message.contains("member"));
 }
@@ -779,14 +770,14 @@ fn catalog_query_matches_the_summary_text() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
+            "platform_call",
             json!({"query": "转发"}),
         )
         .expect("能搜");
 
-    let hits = result["methods"].as_array().expect("有命中");
+    let hits = result["ops"].as_array().expect("有命中");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0]["name"], "forward.get_content");
+    assert_eq!(hits[0]["op"], "msg.forward");
 }
 
 /// 这个连接没声明任何方法：明确说「平台不支持」，别报个内部错让模型瞎猜。
@@ -799,7 +790,7 @@ fn connection_without_a_catalog_says_unsupported() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
+            "platform_call",
             json!({"room": "dc:channel/456"}),
         )
         .expect_err("这条连接没有平台能力");
@@ -818,14 +809,14 @@ fn call_returns_the_platform_result() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "forward.get_content", "params": {"id": "x7/O5"}}),
+            json!({"op": "msg.forward", "params": {"id": "x7/O5"}}),
         )
         .expect("能调");
 
     assert_eq!(result["messages"][0]["text"], "转发的正文");
     let calls = calls.lock().expect("没被毒死");
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, "forward.get_content");
+    assert_eq!(calls[0].0, "msg.forward");
     assert_eq!(calls[0].1["id"], "x7/O5");
 }
 
@@ -842,7 +833,7 @@ fn platform_call_send_is_recorded_and_acked() {
             &sessions(),
             "platform_call",
             json!({
-                "method": "message.send_image",
+                "op": "msg.send_image",
                 "params": {"file": "https://example.com/a.png"},
             }),
         )
@@ -875,7 +866,7 @@ fn platform_call_send_is_recorded_and_acked() {
 
 /// 方法名写错：给出同组的近似名，让模型一轮就改对，而不是反复猜。
 #[test]
-fn unknown_method_suggests_a_direct_neighbour() {
+fn unknown_op_suggests_a_direct_neighbour() {
     let (mut bridge, _calls) = setup();
     let ticket = open_turn(&mut bridge);
 
@@ -884,12 +875,12 @@ fn unknown_method_suggests_a_direct_neighbour() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "group.get_member", "params": {}}),
+            json!({"op": "member.get", "params": {}}),
         )
-        .expect_err("没有这个方法");
+        .expect_err("没有这个 op");
 
-    assert!(error.message.contains("unknown_method"));
-    assert!(error.message.contains("group.get_member_info"));
+    assert!(error.message.contains("unknown_op"));
+    assert!(error.message.contains("member.info"));
 }
 
 /// 必填参数没给：说清楚缺哪个、它是干什么的。
@@ -903,7 +894,7 @@ fn missing_required_param_names_the_field() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "forward.get_content", "params": {}}),
+            json!({"op": "msg.forward", "params": {}}),
         )
         .expect_err("少了 id");
     assert!(error.message.contains("bad_params"));
@@ -921,7 +912,7 @@ fn undeclared_param_is_refused_with_the_allowed_list() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "forward.get_content", "params": {"id": "x", "verbose": true}}),
+            json!({"op": "msg.forward", "params": {"id": "x", "verbose": true}}),
         )
         .expect_err("多了参数");
     assert!(error.message.contains("verbose"));
@@ -939,7 +930,7 @@ fn destructive_method_is_refused_by_default() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "group.kick", "params": {"user_id": "1"}}),
+            json!({"op": "member.kick", "params": {"user_id": "1"}}),
         )
         .expect_err("破坏性的默认不给");
 
@@ -959,7 +950,7 @@ fn destructive_method_runs_when_the_connection_allows_it() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "group.kick", "params": {"user_id": "1"}}),
+            json!({"op": "member.kick", "params": {"user_id": "1"}}),
         )
         .expect("开了就放行");
 
@@ -970,7 +961,7 @@ fn destructive_method_runs_when_the_connection_allows_it() {
 /// 只开名单里的那几个：列表外的仍然拒。
 #[test]
 fn allow_destructive_list_only_opens_the_named_methods() {
-    let (mut bridge, calls) = setup_with("allow_destructive = [\"group.ban\"]");
+    let (mut bridge, calls) = setup_with("allow_destructive = [\"group.mute\"]");
     let ticket = open_turn(&mut bridge);
 
     let refused = bridge
@@ -978,7 +969,7 @@ fn allow_destructive_list_only_opens_the_named_methods() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "group.kick", "params": {"user_id": "1"}}),
+            json!({"op": "member.kick", "params": {"user_id": "1"}}),
         )
         .expect_err("不在名单里");
     assert!(refused.message.contains("forbidden"));
@@ -988,7 +979,7 @@ fn allow_destructive_list_only_opens_the_named_methods() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "group.ban", "params": {"user_id": "1"}}),
+            json!({"op": "group.mute", "params": {"user_id": "1"}}),
         )
         .expect("在名单里");
     assert_eq!(allowed["done"], true);
@@ -1006,7 +997,7 @@ fn room_outside_the_subscription_is_refused() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"room": "qq:group/999", "method": "forward.get_content", "params": {"id": "x"}}),
+            json!({"room": "qq:group/999", "op": "msg.forward", "params": {"id": "x"}}),
         )
         .expect_err("没订阅这个房间");
     assert!(calls.lock().expect("没被毒死").is_empty());
@@ -1024,7 +1015,7 @@ fn platform_call_cannot_change_the_room_target_via_params() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "group.get_member_info", "params": {"user_id": "10001", "group_id": "999"}}),
+            json!({"op": "member.info", "params": {"user_id": "10001", "group_id": "999"}}),
         )
         .expect_err("不能在 params 里换群");
     assert_eq!(error.code, ErrorCode::BadRequest);
@@ -1051,7 +1042,7 @@ fn connection_scoped_method_needs_no_room() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "friend.list"}),
+            json!({"op": "friend.list"}),
         )
         .expect("不给房间也能查好友列表");
 
@@ -1070,7 +1061,7 @@ fn connection_scoped_method_does_not_check_the_room() {
         &ticket,
         &sessions(),
         "platform_call",
-        json!({"room": "qq:group/999", "method": "friend.list"}),
+        json!({"room": "qq:group/999", "op": "friend.list"}),
     );
     assert!(result.is_ok(), "连接级方法不该因为房间没订阅就拒");
 }
@@ -1082,19 +1073,19 @@ fn catalog_marks_only_connection_scoped_methods() {
     let ticket = open_turn(&mut bridge);
 
     let result = bridge
-        .tool_call(&ticket, &sessions(), "platform_methods", json!({}))
+        .tool_call(&ticket, &sessions(), "platform_call", json!({}))
         .expect("能查目录");
 
-    let methods = result["methods"].as_array().expect("有清单");
+    let methods = result["ops"].as_array().expect("有清单");
     let friend = methods
         .iter()
-        .find(|item| item["name"] == "friend.list")
+        .find(|item| item["op"] == "friend.list")
         .expect("有好友列表");
     assert_eq!(friend["scope"], "connection");
 
     let forward = methods
         .iter()
-        .find(|item| item["name"] == "forward.get_content")
+        .find(|item| item["op"] == "msg.forward")
         .expect("有转发");
     assert!(forward.get("scope").is_none(), "房间级是默认，不用写出来");
 }
@@ -1113,7 +1104,7 @@ fn big_lists_page_with_a_total_instead_of_truncating() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "group.get_member_list", "limit": 50}),
+            json!({"op": "member.list", "limit": 50}),
         )
         .expect("能调");
 
@@ -1133,7 +1124,7 @@ fn big_lists_page_with_a_total_instead_of_truncating() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "group.get_member_list", "limit": 50, "offset": next}),
+            json!({"op": "member.list", "limit": 50, "offset": next}),
         )
         .expect("能翻页");
     assert_eq!(second["data"][0]["user_id"], 51);
@@ -1151,7 +1142,7 @@ fn group_by_answers_counting_questions_without_the_whole_list() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"method": "group.get_member_list", "group_by": "role"}),
+            json!({"op": "member.list", "group_by": "role"}),
         )
         .expect("能分组");
 
@@ -1178,7 +1169,7 @@ fn where_filter_projection_run_before_paging() {
             &sessions(),
             "platform_call",
             json!({
-                "method": "group.get_member_list",
+                "op": "member.list",
                 "where": [{"field": "role", "op": "eq", "value": "admin"}],
                 "fields": ["user_id"],
                 "order_by": "user_id desc",
@@ -1207,7 +1198,7 @@ fn bad_query_field_lists_the_real_ones() {
             &sessions(),
             "platform_call",
             json!({
-                "method": "group.get_member_list",
+                "op": "member.list",
                 "where": [{"field": "rol", "op": "eq", "value": "admin"}],
             }),
         )
@@ -1227,14 +1218,14 @@ fn catalog_details_carry_a_copyable_example() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
-            json!({"group": "forward"}),
+            "platform_call",
+            json!({"path": "msg"}),
         )
         .expect("能查这一组");
 
-    let example = &result["methods"][0]["example"];
+    let example = &result["ops"][0]["example"];
     assert_eq!(
-        example["method"], "forward.get_content",
+        example["op"], "msg.forward",
         "样例要能直接喂给 platform_call"
     );
     assert_eq!(example["params"]["id"], "123456");
@@ -1242,9 +1233,9 @@ fn catalog_details_carry_a_copyable_example() {
 
     // 清单档不带样例：五十来条都塞一遍，清单就没法看了。
     let list = bridge
-        .tool_call(&ticket, &sessions(), "platform_methods", json!({}))
+        .tool_call(&ticket, &sessions(), "platform_call", json!({}))
         .expect("能查清单");
-    assert!(list["methods"][0].get("example").is_none());
+    assert!(list["ops"][0].get("example").is_none());
 }
 
 /// 样例里的值是「改一改就能跑」的，不是 `<string>` 这种还得翻译一遍的占位符。
@@ -1257,15 +1248,15 @@ fn example_values_look_real() {
         .tool_call(
             &ticket,
             &sessions(),
-            "platform_methods",
-            json!({"tag": "send"}),
+            "platform_call",
+            json!({"tags": ["send"]}),
         )
         .expect("能查");
 
-    let methods = result["methods"].as_array().expect("有方法");
+    let methods = result["ops"].as_array().expect("有方法");
     let send = methods
         .iter()
-        .find(|method| method["name"] == "message.send_image")
+        .find(|method| method["op"] == "msg.send_image")
         .expect("有发图的方法");
     assert_eq!(
         send["example"]["params"]["file"], "https://example.com/a.png",
@@ -1327,7 +1318,7 @@ fn 平台调用的params里本机文件换成中继URL() {
             &sessions(),
             "platform_call",
             json!({
-                "method": "message.send_image",
+                "op": "msg.send_image",
                 "params": {"file": source.display().to_string()},
             }),
         )
@@ -1335,7 +1326,7 @@ fn 平台调用的params里本机文件换成中继URL() {
 
     let calls = calls.lock().expect("没被毒死");
     let (method, params) = &calls[0];
-    assert_eq!(method, "message.send_image");
+    assert_eq!(method, "msg.send_image");
     let file = params["file"].as_str().expect("file 还是字符串");
     assert!(
         file.starts_with("http://10.89.0.1:3131/f/"),
@@ -1374,7 +1365,7 @@ fn 平台调用的http路径原样透传() {
             &sessions(),
             "platform_call",
             json!({
-                "method": "message.send_image",
+                "op": "msg.send_image",
                 "params": {"file": "https://elsewhere.example/a.png"},
             }),
         )

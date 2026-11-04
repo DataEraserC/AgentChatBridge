@@ -7,7 +7,7 @@
 //! 正文正文正文。</text>
 //! </mcp__acb__send_message>
 //! <｜｜DSML｜｜ calls>
-//! <｜｜DSML｜｜ invoke name="mcp__acb__platform_methods">
+//! <｜｜DSML｜｜ invoke name="mcp__acb__platform_call">
 //! ```
 //!
 //! 这类残渣会一路走到群里——它已经发生过：群里出现过带 `</mcp__acb__send_message>`
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn cut_at_dsml_token() {
         // 实测漏出来的样子：正文写完了，后面跟着一串特殊 token。
-        let raw = "停停停，人在。</text>\n</mcp__acb__send_message>\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"mcp__acb__platform_methods\">";
+        let raw = "停停停，人在。</text>\n</mcp__acb__send_message>\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"mcp__acb__platform_call\">";
         let (text, cut) = trim_call_markup(raw);
         assert_eq!(text, "停停停，人在。");
         assert!(cut);

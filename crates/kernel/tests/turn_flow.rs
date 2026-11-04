@@ -2866,7 +2866,7 @@ fn feedback_is_recorded_counted_and_deduped() {
             "report_feedback",
             json!({
                 "text": "群成员列表只回来 16 个，没有 total，我数不出 15 个管理员是不是全部\n真正的群里 24 人。",
-                "refs": ["#620", "group.get_member_list"],
+                "refs": ["#620", "member.list"],
                 "count": 3,
                 "kind": "gap",
                 "suggestion": "列表统一带 total / has_more",
@@ -2900,7 +2900,7 @@ fn feedback_is_recorded_counted_and_deduped() {
         stored[0].title,
         "群成员列表只回来 16 个，没有 total，我数不出 15 个管理员是不是全部"
     );
-    assert_eq!(stored[0].refs, vec!["#620", "group.get_member_list"]);
+    assert_eq!(stored[0].refs, vec!["#620", "member.list"]);
     assert_eq!(stored[0].kind, "gap");
     assert_eq!(stored[0].severity, "major", "gap 默认 major");
     assert_eq!(stored[0].session, "main");
@@ -2981,7 +2981,7 @@ fn leaked_call_markup_never_reaches_the_room() {
             &sessions(),
             "send_message",
             json!({"elements": [{"type": "text", "text":
-                "在的，你说。</text>\n</mcp__acb__send_message>\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"mcp__acb__platform_methods\">"
+                "在的，你说。</text>\n</mcp__acb__send_message>\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"mcp__acb__platform_call\">"
             }]}),
         )
         .expect("能发");
@@ -3090,8 +3090,8 @@ fn merging_fills_empty_fields_but_keeps_the_first_classification() {
             "report_feedback",
             json!({
                 "text": "平台方法清单里没有「撤回」这个动作名",
-                "refs": ["#700", "platform_methods"],
-                "tool": "platform_methods",
+                "refs": ["#700", "platform_call"],
+                "tool": "platform_call",
                 "suggestion": "动作名跟 QQ 的 delete_msg 对齐",
                 "kind": "gap",
             }),
@@ -3103,7 +3103,7 @@ fn merging_fills_empty_fields_but_keeps_the_first_classification() {
     assert_eq!(stored[0].kind, "friction", "分类保留第一次的（ADR-0021）");
     assert_eq!(
         stored[0].refs,
-        vec!["#700", "platform_methods"],
+        vec!["#700", "platform_call"],
         "空着的出处补上了"
     );
     assert_eq!(
@@ -3111,7 +3111,7 @@ fn merging_fills_empty_fields_but_keeps_the_first_classification() {
         Some("动作名跟 QQ 的 delete_msg 对齐"),
         "空着的建议补上了"
     );
-    assert_eq!(stored[0].tool.as_deref(), Some("platform_methods"));
+    assert_eq!(stored[0].tool.as_deref(), Some("platform_call"));
 }
 
 /// 查历史要给总数：不然「还有没有更早的」只能靠猜。

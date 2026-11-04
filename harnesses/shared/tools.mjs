@@ -93,7 +93,7 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
 票据只放宽「能不能碰这个房间」的目标判定：不绕过连接的 allow_destructive，也不授予 plugin 全权。
 同一个会话的审批消息会聚合成一条，在本轮结束时发出；冷却期内的申请会被明确拒绝并给出剩余秒数。
 op 列表要具体：send_message，send_message_to，get_history，fetch_records，get_notes，set_note，del_note，
-get_platform_events，wait_message，或 platform_call:<method>（如 platform_call:group.kick）。
+get_platform_events，wait_message，或 platform_call:<op>（如 platform_call:member.kick）。
 批量最多 8 条；任一条校验失败整批拒绝。`,
     schema: {
       type: "object",
@@ -284,96 +284,103 @@ false 是「这次没查」，不是「这条没这个值」，要的话把它�
     },
   },
   {
-    name: "platform_methods",
-    description: `查这个平台还能干哪些消息之外的事（读合并转发的正文、查群成员、发图、审批入群……）。
-桥只提供这一个目录和下面那个通用调用口——平台特有的能力都从这里查，不在工具列表里。
+    name: "platform_call",
+    description: `平台能力单入口：给 op 执行，不给 op 列目录。
 
-不给条件：列出当前轮次那条连接的全部方法（名字 + 一句话 + 标签），不带参数表。
-给 group / tag / query：命中的方法带参数表。三者可以叠加。
-给 connection：查指定的另一条连接（比如同时订阅了 QQ 和 Discord，人在 QQ 房间里也能看 Discord 能干什么）。
-all=true：只给每条订阅连接的摘要（平台、kind、方法数、events / event_tags / supports_at / supports_reply），
-想展开某条再带 connection 查。all 不能和 room / connection / 过滤条件一起给。
+**执行**：op 用层级名，如 msg.send、member.list、group.mute；params 的形状先用不带 op 的调用查。
+risk 由 op→risk 策略表决定，未知 op 直接拒绝；破坏性 op 默认不开放（报 forbidden），
+连接配置 allow_destructive 打开后才会真的执行。
+room 决定目标房间：不给就是当前轮次；给别的房间必须在本会话订阅内。
+不要在 params 里改 group_id/user_id 换目标——params 里的 user_id 只表示「踢谁/拍谁」这类成员目标。
 
-方法名是「归属.动作」，归属跟平台 API 的命名空间对齐（forward.* / message.* / group.*）。
-tags 是用途，跨归属：想找「图片相关」，用 tag="image"，不必知道平台把它放在哪个归属下。
-query 按词搜名字、说明、标签，中文和英文都认（「图片」能搜到 image）。
+**列目录**：不给 op。path 按父路径前缀过滤（group 命中 group.*，group.file 只命中文件子路径）；
+tags 是封闭枚举，多个 tag 取 AND；query 按关键词搜 op/说明/标签；all=true 只给每条连接摘要。
+清单只给 op+path+摘要+标签；给 path/tags/query 后命中的 op 才带参数表和可照抄的 example。
 
-清单里有些方法带 scope="connection"（好友列表、账号资料、群列表、点赞这类）——那是
-「这个号上的事」，跟哪个房间无关，调它不用给 room。其余默认是房间里的事。
-
-看到消息里带「可调 platform_call(...)」的提示时，直接照着调就行，不用先查目录。`,
+**结果查询**（仅执行）：where / fields / order_by / group_by 在桥这边过滤投影排序分组；
+limit/offset 分页，默认 100、上限 500，_page 里有 total/returned/has_more/next_offset。
+报错分类：unknown_op（会给近似候选）、bad_params、unknown_tag、unsupported_platform、
+not_implemented、forbidden。`,
     schema: {
       type: "object",
       properties: {
         room: ROOM_SCHEMA,
         connection: {
           type: "string",
-          description: "连接名（如 qq / dc）；给了就不用给 room，但会话必须能访问这条连接",
+          description: "列目录时指定连接（如 qq / dc）；执行时不用给",
+        },
+        op: {
+          type: "string",
+          description: "层级 op，如 msg.send、member.list、group.mute；省略则列目录",
+        },
+        params: {
+          type: "object",
+          description: "op 的平台参数；列目录时不要给",
+          additionalProperties: true,
+        },
+        path: {
+          type: "string",
+          description: "列目录：父路径前缀，如 group、group.file",
+        },
+        tags: {
+          type: "array",
+          description: "列目录：封闭标签过滤（AND），如 destructive、requires_admin",
+          items: {
+            type: "string",
+            enum: [
+              "read",
+              "write",
+              "destructive",
+              "requires_admin",
+              "room",
+              "connection",
+              "idempotent",
+              "snowluma_only",
+              "common",
+              "send",
+              "recall",
+              "forward",
+              "history",
+              "upload",
+              "download",
+              "approve",
+              "poke",
+              "message",
+              "member",
+              "group",
+              "friend",
+              "account",
+              "media",
+              "text",
+              "image",
+              "voice",
+              "video",
+              "file",
+              "mute",
+              "system",
+            ],
+          },
+        },
+        query: {
+          type: "string",
+          description: "列目录：按关键词搜 op/说明/标签（中英都认）",
         },
         all: {
           type: "boolean",
-          description: "只给每条订阅连接的摘要，不能和 room / connection / 过滤条件同时给",
-        },
-        group: { type: "string", description: "只看某个归属，如 forward、message、group" },
-        tag: { type: "string", description: "只看带这个用途标签的，如 image、send、member、file" },
-        query: { type: "string", description: "按关键词找方法（中英都认）" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "platform_call",
-    description: `调一个平台特有方法。core 不认识任何方法名，原样转给适配器。
-
-method 用 resource.method 的写法，如 message.forward_content、group.get_member_info。
-params 是对象，形状照 platform_methods 里给的参数表填；群号/私聊对象能从房间推出来时可以不填。
-
-room 怎么给，看方法的 scope：
-- 房间里的事（默认）：不给就是当前轮次的房间；给了就必须是会话订阅过的房间。
-- scope="connection" 的事（好友列表、账号资料、群列表、点赞、链接安全检测）：跟房间无关，
-  不用给 room。只有你同时盯了多个号、要说清是哪个号时才给一个那个号下的房间。
-
-**跨房间操作**：要把动作落到另一个房间（私聊里发群公告、群里给私聊发消息），
-用 room 选目标房间（必须在本会话订阅内），例如 room: "qq:group/123"；
-**不要**在 params 里改 group_id/user_id 来换目标。params 里的 group_id/user_id
-只用来表示“成员/消息目标”（踢谁、拍谁、给谁发私聊），房间目标由 room 决定。
-
-只能调这个连接声明过的方法。踢人、禁言、改群名、发群公告这类破坏性操作默认不开放（报 forbidden）；
-连接配置里开了就会真的执行，这时候你就是在替这个人操作，想清楚再调。
-
-**查列表别拉全表再自己数**：结果里的列表可以在桥这边先过滤、只取几列、排序、分组计数。
-- where: [{"field":"role","op":"eq","value":"admin"}]   op 是 eq/ne/in/gt/gte/lt/lte/contains/not_null
-- fields: ["user_id","nickname"]                         只要这几列（省上下文）
-- order_by: "at desc"                                    按字段排
-- group_by: "role"                                       分组计数，回答「几个管理员」这种问题
-字段名写错会报 [bad_field] 并把这批数据真实有的字段列出来。
-- limit / offset: 分页，默认 100 条。返回的 _page 里有 total / returned / has_more / next_offset。
-
-报错会带上分类：unknown_method（名字错了，会给你近似的）、bad_params（参数不对，
-会说哪个字段）、unsupported_platform（这平台没这能力）、not_implemented（平台有但我们
-还没写）、forbidden（没权限或没开）。照着改就行，别重复调同一个错的。`,
-    schema: {
-      type: "object",
-      properties: {
-        room: ROOM_SCHEMA,
-        method: { type: "string", description: "方法名，如 message.send_group、group.get_member_info" },
-        params: {
-          type: "object",
-          description: "方法参数。照 platform_methods 给的参数表填",
-          additionalProperties: true,
+          description: "列目录：只给每条订阅连接的摘要，不能和其它过滤条件同时给",
         },
         limit: {
           type: "number",
           description:
-            "结果里的列表最多给几条，默认 100、上限 500。返回里的 _page 会告诉你总数（total）、给了几条（returned）、还有没有（has_more）",
+            "执行：结果里的列表最多给几条，默认 100、上限 500。_page 里有 total/returned/has_more/next_offset",
         },
         offset: {
           type: "number",
-          description: "从第几条开始给。翻页时填上一次返回的 _page.next_offset",
+          description: "执行：从第几条开始给，翻页时填上一次的 _page.next_offset",
         },
         where: {
           type: "array",
-          description: "过滤条件（全部满足才留下），如 [{\"field\":\"role\",\"op\":\"eq\",\"value\":\"admin\"}]",
+          description: "执行：过滤条件（全部满足才留下），如 [{\"field\":\"role\",\"op\":\"eq\",\"value\":\"admin\"}]",
           items: {
             type: "object",
             properties: {
@@ -391,18 +398,17 @@ room 怎么给，看方法的 scope：
         fields: {
           type: "array",
           items: { type: "string" },
-          description: "只要这几列，如 [\"user_id\",\"nickname\",\"role\"]",
+          description: "执行：只要这几列，如 [\"user_id\",\"nickname\",\"role\"]",
         },
         order_by: {
           type: "string",
-          description: "排序，如 \"at desc\"（默认升序）；空值永远排最后",
+          description: "执行：排序，如 \"at desc\"（默认升序）",
         },
         group_by: {
           type: "string",
-          description: "按这个字段分组计数，返回 groups:[{key,count}]——「几个管理员」问它就够了，不用拉全表",
+          description: "执行：按字段分组计数，返回 groups:[{key,count}]",
         },
       },
-      required: ["method"],
       additionalProperties: false,
     },
   },
@@ -565,7 +571,7 @@ status 可过滤 queued / running / succeeded / failed。`,
         refs: {
           type: "array",
           items: { type: "string" },
-          description: "出处：如 \"#620\"、\"platform_call\"、\"[no_active_round]\"、\"group.get_member_list\"",
+          description: "出处：如 \"#620\"、\"platform_call\"、\"[no_active_round]\"、\"member.list\"",
         },
         kind: {
           type: "string",

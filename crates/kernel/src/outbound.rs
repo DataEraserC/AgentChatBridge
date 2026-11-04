@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use acb_proto::{Element, RoomId};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -287,43 +288,181 @@ impl ParamType {
 
 /// 建议的用途标签。
 ///
-/// 标签是**跨归属**的维度：`message.send` 和 `image.upload` 都挂 `image`，模型说「图片相关」
-/// 就能一次捞齐，不必知道平台把这些散在哪个命名空间里。
-///
-/// 词表只列跨平台都成立的概念，因为这是 core 唯一该懂的那种知识。适配器可以自己加，
-/// 但优先用这里的词——两个平台用同一个词，模型对同一个需求才只需要问一次。
-pub mod tags {
+/// 平台方法的跨类标签。**封闭枚举**：wire 入口遇到未知字符串直接拒绝，
+/// 不允许适配器发明新标签。标签只用于目录查询与展示，不参与放行判断；
+/// 放行只看 [`MethodSpec::risk`] 和 [`MethodSpec::scope`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformTag {
+    // 风险与作用范围
+    Read,
+    Write,
+    Destructive,
+    RequiresAdmin,
+    Room,
+    Connection,
+    // 跨类属性
+    Idempotent,
+    SnowlumaOnly,
+    Common,
     // 用途
-    pub const SEND: &str = "send";
-    pub const RECALL: &str = "recall";
-    pub const FORWARD: &str = "forward";
-    pub const HISTORY: &str = "history";
-    pub const UPLOAD: &str = "upload";
-    pub const DOWNLOAD: &str = "download";
-    pub const APPROVE: &str = "approve";
-    pub const POKE: &str = "poke";
+    Send,
+    Recall,
+    Forward,
+    History,
+    Upload,
+    Download,
+    Approve,
+    Poke,
+    // 对象
+    Message,
+    Member,
+    Group,
+    Friend,
+    Account,
+    // 内容类型
+    Media,
+    Text,
+    Image,
+    Voice,
+    Video,
+    File,
+    // 管理 / 系统
+    Mute,
+    System,
+}
+
+impl PlatformTag {
+    /// 全部合法值。错误信息与测试用这一份，避免两处漂移。
+    pub const ALL: &'static [PlatformTag] = &[
+        Self::Read,
+        Self::Write,
+        Self::Destructive,
+        Self::RequiresAdmin,
+        Self::Room,
+        Self::Connection,
+        Self::Idempotent,
+        Self::SnowlumaOnly,
+        Self::Common,
+        Self::Send,
+        Self::Recall,
+        Self::Forward,
+        Self::History,
+        Self::Upload,
+        Self::Download,
+        Self::Approve,
+        Self::Poke,
+        Self::Message,
+        Self::Member,
+        Self::Group,
+        Self::Friend,
+        Self::Account,
+        Self::Media,
+        Self::Text,
+        Self::Image,
+        Self::Voice,
+        Self::Video,
+        Self::File,
+        Self::Mute,
+        Self::System,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Destructive => "destructive",
+            Self::RequiresAdmin => "requires_admin",
+            Self::Room => "room",
+            Self::Connection => "connection",
+            Self::Idempotent => "idempotent",
+            Self::SnowlumaOnly => "snowluma_only",
+            Self::Common => "common",
+            Self::Send => "send",
+            Self::Recall => "recall",
+            Self::Forward => "forward",
+            Self::History => "history",
+            Self::Upload => "upload",
+            Self::Download => "download",
+            Self::Approve => "approve",
+            Self::Poke => "poke",
+            Self::Message => "message",
+            Self::Member => "member",
+            Self::Group => "group",
+            Self::Friend => "friend",
+            Self::Account => "account",
+            Self::Media => "media",
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Voice => "voice",
+            Self::Video => "video",
+            Self::File => "file",
+            Self::Mute => "mute",
+            Self::System => "system",
+        }
+    }
+
+    /// 解析一个封闭标签；未知值返回 `None`，由调用方 fail closed。
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|tag| tag.as_str().eq_ignore_ascii_case(value))
+    }
+}
+
+impl std::fmt::Display for PlatformTag {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// 跨平台标签常量。封闭值域见 [`PlatformTag`]。
+pub mod tags {
+    use super::PlatformTag;
+
+    // 风险 / 作用范围
+    pub const READ: PlatformTag = PlatformTag::Read;
+    pub const WRITE: PlatformTag = PlatformTag::Write;
+    pub const DESTRUCTIVE: PlatformTag = PlatformTag::Destructive;
+    pub const REQUIRES_ADMIN: PlatformTag = PlatformTag::RequiresAdmin;
+    pub const ROOM: PlatformTag = PlatformTag::Room;
+    pub const CONNECTION: PlatformTag = PlatformTag::Connection;
+
+    // 跨类属性
+    pub const IDEMPOTENT: PlatformTag = PlatformTag::Idempotent;
+    pub const SNOWLUMA_ONLY: PlatformTag = PlatformTag::SnowlumaOnly;
+    pub const COMMON: PlatformTag = PlatformTag::Common;
+
+    // 用途
+    pub const SEND: PlatformTag = PlatformTag::Send;
+    pub const RECALL: PlatformTag = PlatformTag::Recall;
+    pub const FORWARD: PlatformTag = PlatformTag::Forward;
+    pub const HISTORY: PlatformTag = PlatformTag::History;
+    pub const UPLOAD: PlatformTag = PlatformTag::Upload;
+    pub const DOWNLOAD: PlatformTag = PlatformTag::Download;
+    pub const APPROVE: PlatformTag = PlatformTag::Approve;
+    pub const POKE: PlatformTag = PlatformTag::Poke;
 
     // 对象
-    pub const MESSAGE: &str = "message";
-    pub const MEMBER: &str = "member";
-    pub const GROUP: &str = "group";
-    pub const FRIEND: &str = "friend";
-    pub const ACCOUNT: &str = "account";
+    pub const MESSAGE: PlatformTag = PlatformTag::Message;
+    pub const MEMBER: PlatformTag = PlatformTag::Member;
+    pub const GROUP: PlatformTag = PlatformTag::Group;
+    pub const FRIEND: PlatformTag = PlatformTag::Friend;
+    pub const ACCOUNT: PlatformTag = PlatformTag::Account;
 
     // 内容类型
-    pub const MEDIA: &str = "media";
-    pub const TEXT: &str = "text";
-    pub const IMAGE: &str = "image";
-    pub const VOICE: &str = "voice";
-    pub const VIDEO: &str = "video";
-    pub const FILE: &str = "file";
+    pub const MEDIA: PlatformTag = PlatformTag::Media;
+    pub const TEXT: PlatformTag = PlatformTag::Text;
+    pub const IMAGE: PlatformTag = PlatformTag::Image;
+    pub const VOICE: PlatformTag = PlatformTag::Voice;
+    pub const VIDEO: PlatformTag = PlatformTag::Video;
+    pub const FILE: PlatformTag = PlatformTag::File;
 
-    // 管理
-    pub const ADMIN: &str = "admin";
-    pub const MUTE: &str = "mute";
-
-    // 系统
-    pub const SYSTEM: &str = "system";
+    // 管理 / 系统
+    pub const MUTE: PlatformTag = PlatformTag::Mute;
+    pub const SYSTEM: PlatformTag = PlatformTag::System;
 }
 
 /// 同一个概念的各种叫法，一行一组。
@@ -429,11 +568,11 @@ impl TargetSpec {
 /// 字段都是 `Cow`：内置适配器用静态借用，动态/外置适配器可以构造自己的目录。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodSpec {
-    /// 全名，强制 `resource.method`（`forward.get_content`）。
+    /// 层级化 op 全名，至少两段（`msg.send`、`group.file.list`）。
     pub name: Cow<'static, str>,
     pub summary: Cow<'static, str>,
-    /// 用途标签，跨归属表达「这是干什么的」。从 [`tags`] 里挑。
-    pub tags: Cow<'static, [Cow<'static, str>]>,
+    /// 用途标签，跨归属表达「这是干什么的」。值域是封闭枚举 [`PlatformTag`]。
+    pub tags: Cow<'static, [PlatformTag]>,
     pub risk: Risk,
     /// 这个能力是「房间里的事」还是「账号上的事」。
     ///
@@ -449,8 +588,17 @@ pub struct MethodSpec {
 }
 
 impl MethodSpec {
-    /// 归属：名字里点号前面那段。跟平台 API 的命名空间对齐，模型看到 `{"type":"forward"}`
-    /// 就能联想到 `forward.*`。
+    /// 归属：名字里最后一个点之前那段。`group.file.list` 的归属是 `group.file`，
+    /// `msg.send` 的归属是 `msg`。目录按前缀过滤时也用这个层级。
+    pub fn path(&self) -> &str {
+        self.name
+            .as_ref()
+            .rsplit_once('.')
+            .map(|(path, _)| path)
+            .unwrap_or(self.name.as_ref())
+    }
+
+    /// 顶层归属：`group.file.list` -> `group`。用于「你是不是想找 group 下某个 op」提示。
     pub fn group(&self) -> &str {
         self.name
             .as_ref()
@@ -459,11 +607,22 @@ impl MethodSpec {
             .unwrap_or(self.name.as_ref())
     }
 
-    /// 带不带这个标签。大小写不敏感——模型未必记得住声明时是大写还是小写。
-    pub fn has_tag(&self, tag: &str) -> bool {
-        self.tags
-            .iter()
-            .any(|item| item.as_ref().eq_ignore_ascii_case(tag))
+    /// 带不带这个标签。标签是封闭枚举，不做字符串猜测。
+    pub fn has_tag(&self, tag: PlatformTag) -> bool {
+        self.tags.contains(&tag)
+    }
+
+    pub fn in_path(&self, path: &str) -> bool {
+        let path = path.trim().trim_matches('.');
+        if path.is_empty() {
+            return true;
+        }
+        self.name.as_ref() == path
+            || self
+                .name
+                .as_ref()
+                .strip_prefix(path)
+                .is_some_and(|rest| rest.starts_with('.'))
     }
 
     /// 这个词命中不命中：名字、说明、标签任一含它都算。
@@ -471,10 +630,7 @@ impl MethodSpec {
         let needle = needle.to_lowercase();
         self.name.as_ref().to_lowercase().contains(&needle)
             || self.summary.as_ref().to_lowercase().contains(&needle)
-            || self
-                .tags
-                .iter()
-                .any(|tag| tag.as_ref().to_lowercase().contains(&needle))
+            || self.tags.iter().any(|tag| tag.as_str().contains(&needle))
     }
 
     /// 参数表渲染成 JSON Schema。
@@ -510,7 +666,7 @@ impl MethodSpec {
             params.insert(param.name.as_ref().to_owned(), param.sample());
         }
         serde_json::json!({
-            "method": self.name,
+            "op": self.name,
             "params": Value::Object(params),
         })
     }
@@ -851,11 +1007,7 @@ mod tests {
 
         let room = RoomId::new("qq", "group/1").expect("合法");
         let error = outbounds
-            .call(
-                &room,
-                "forward.get_content",
-                &serde_json::json!({"id": "x"}),
-            )
+            .call(&room, "msg.forward", &serde_json::json!({"id": "x"}))
             .expect_err("没声明就调不动");
         assert!(matches!(error, CallError::UnsupportedPlatform(_)));
     }
@@ -866,11 +1018,10 @@ mod tests {
 
     static FORWARD_PARAMS: &[ParamSpec] = &[ParamSpec::required("id", "转发 id")];
 
-    static FORWARD_TAGS: &[Cow<'static, str>] =
-        &[Cow::Borrowed(tags::FORWARD), Cow::Borrowed(tags::MESSAGE)];
+    static FORWARD_TAGS: &[PlatformTag] = &[tags::FORWARD, tags::MESSAGE];
 
     static METHODS: &[MethodSpec] = &[MethodSpec {
-        name: Cow::Borrowed("forward.get_content"),
+        name: Cow::Borrowed("msg.forward"),
         summary: Cow::Borrowed("读合并转发的正文"),
         tags: Cow::Borrowed(FORWARD_TAGS),
         risk: Risk::Read,
@@ -915,35 +1066,31 @@ mod tests {
         assert_eq!(outbounds.catalog("qq").len(), 1);
         assert_eq!(
             outbounds.catalog("qq").first().map(MethodSpec::group),
-            Some("forward")
+            Some("msg")
         );
         assert!(outbounds.catalog("qq2").is_empty());
         assert!(outbounds.catalog("没这个连接").is_empty());
 
         let room = RoomId::new("qq", "group/1").expect("合法");
         let result = outbounds
-            .call(
-                &room,
-                "forward.get_content",
-                &serde_json::json!({"id": "x7"}),
-            )
+            .call(&room, "msg.forward", &serde_json::json!({"id": "x7"}))
             .expect("声明过就能调");
-        assert_eq!(result.value["called"], "forward.get_content");
+        assert_eq!(result.value["called"], "msg.forward");
         assert_eq!(result.value["params"]["id"], "x7");
 
         // 另一条连接没声明，落到默认实现：报平台不支持，而不是静默成功。
         let other = RoomId::new("qq2", "group/1").expect("合法");
         let error = outbounds
-            .call(&other, "forward.get_content", &serde_json::json!({}))
+            .call(&other, "msg.forward", &serde_json::json!({}))
             .expect_err("没声明就调不动");
         assert!(matches!(error, CallError::UnsupportedPlatform(_)));
     }
 
-    /// 名字里点号前面那段就是归属，目录靠它在清单里排序认路。
+    /// 名字里最后一个点之前那段就是路径，目录按层级过滤时用它。
     #[test]
-    fn method_group_is_prefix() {
+    fn method_path_is_the_parent_prefix() {
         let spec = MethodSpec {
-            name: Cow::Borrowed("group.get_member_info"),
+            name: Cow::Borrowed("member.info"),
             summary: Cow::Borrowed(""),
             tags: Cow::Borrowed(&[]),
             risk: Risk::Read,
@@ -953,7 +1100,10 @@ mod tests {
             effect: Effect::Read,
             record: RecordMode::None,
         };
-        assert_eq!(spec.group(), "group");
+        assert_eq!(spec.group(), "member");
+        assert_eq!(spec.path(), "member");
+        assert!(spec.in_path("member"));
+        assert!(!spec.in_path("msg"));
     }
 
     /// 标签跨归属：两个不同命名空间的方法挂同一个 tag，是这个维度存在的全部理由。
@@ -961,9 +1111,9 @@ mod tests {
     fn tag_cuts_across_groups() {
         static MIXED: &[MethodSpec] = &[
             MethodSpec {
-                name: Cow::Borrowed("message.send"),
+                name: Cow::Borrowed("msg.send"),
                 summary: Cow::Borrowed("发一条消息"),
-                tags: Cow::Borrowed(&[Cow::Borrowed(tags::SEND), Cow::Borrowed(tags::IMAGE)]),
+                tags: Cow::Borrowed(&[tags::SEND, tags::IMAGE]),
                 risk: Risk::Write,
                 scope: Scope::Room,
                 params: Cow::Borrowed(&[]),
@@ -972,9 +1122,9 @@ mod tests {
                 record: RecordMode::Message,
             },
             MethodSpec {
-                name: Cow::Borrowed("group.get_member_info"),
+                name: Cow::Borrowed("member.info"),
                 summary: Cow::Borrowed("查群成员"),
-                tags: Cow::Borrowed(&[Cow::Borrowed(tags::MEMBER)]),
+                tags: Cow::Borrowed(&[tags::MEMBER]),
                 risk: Risk::Read,
                 scope: Scope::Room,
                 params: Cow::Borrowed(&[]),
@@ -986,11 +1136,11 @@ mod tests {
 
         let pictures: Vec<&str> = MIXED
             .iter()
-            .filter(|method| method.has_tag("image"))
+            .filter(|method| method.has_tag(tags::IMAGE))
             .map(|method| method.name.as_ref())
             .collect();
-        assert_eq!(pictures, vec!["message.send"]);
-        assert_eq!(MIXED[0].group(), "message");
+        assert_eq!(pictures, vec!["msg.send"]);
+        assert_eq!(MIXED[0].group(), "msg");
     }
 
     /// 模型说中文，适配器声明英文标识符：查询词得两头都能接上。

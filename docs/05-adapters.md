@@ -150,7 +150,7 @@ transport / 平台方法目录外，还声明入站语义能力：
 | `supports_at` | 入站记录里的 `at_self`（@ 到本账号 / 冲我来的事件）是否可信 |
 | `supports_reply` | 入站记录里的 `reply_to_self`（引用我发的消息）是否可信 |
 
-这些字段是**声明不是保证**：agent 通过 `describe_plugins` / `platform_methods(all=true)` /
+这些字段是**声明不是保证**：agent 通过 `describe_plugins` / `platform_call({all:true})` /
 `list_rooms` 看得到，用来判断某个平台能配哪些唤醒条件；core 不拿它做强制校验。
 `process` 载体声明 `supports_at` / `supports_reply`（子进程原样带 hints），事件留空由子进程决定；
 动态库插件在自己的 `WireManifest` 里填。

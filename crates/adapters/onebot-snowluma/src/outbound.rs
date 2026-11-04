@@ -142,7 +142,7 @@ impl Outbound for OneBotSnowLumaOutbound {
         }
 
         // 合并转发要一层层取，模型不该为这件事点三次（ADR-0024）。
-        if method == "message.forward_content" {
+        if method == "msg.forward" {
             return self.forward_tree(params).map(CallOutcome::value);
         }
 
@@ -194,7 +194,7 @@ impl OneBotSnowLumaOutbound {
         let mut fetch = |id: &str| {
             // 展开是一层层读，单层用普通时限：别让一次深转发的总耗时撞上 harness 超时。
             let raw = self.dispatch("get_forward_msg", json!({ "id": id }), self.timeout)?;
-            parse_call_response("message.forward_content", raw)
+            parse_call_response("msg.forward", raw)
         };
         forward::expand(&id, depth, max_nodes, &mut fetch)
     }
@@ -274,9 +274,9 @@ fn call_payload(route: &Route, room: &RoomId, params: &Value) -> Result<Value, C
                 [kind, id] if kind == "group" => {
                     fill_room_target(&mut payload, route.method, group_key, room, id)?;
                     // user_id 在这类方法里可能有两种身份：
-                    // - poke.send 在群里：user_id 是“拍谁”，不是房间目标，必须保留；
-                    // - 其它（如 message.send_forward）：user_id 指向另一个私聊房间，拒绝。
-                    if route.method != "poke.send" && payload.contains_key(private_key) {
+                    // - msg.poke 在群里：user_id 是“拍谁”，不是房间目标，必须保留；
+                    // - 其它（如 msg.send_forward）：user_id 指向另一个私聊房间，拒绝。
+                    if route.method != "msg.poke" && payload.contains_key(private_key) {
                         return Err(CallError::BadParams(acb_i18n::t!(
                             "adapter.onebot11.private_target_other_room",
                             method = route.method,
@@ -284,7 +284,7 @@ fn call_payload(route: &Route, room: &RoomId, params: &Value) -> Result<Value, C
                             room = room
                         )));
                     }
-                    if route.method == "poke.send" && !payload.contains_key(private_key) {
+                    if route.method == "msg.poke" && !payload.contains_key(private_key) {
                         return Err(CallError::BadParams(acb_i18n::t!(
                             "adapter.onebot11.poke_needs_user_id"
                         )));
@@ -436,7 +436,7 @@ fn private_id_of(room: &RoomId) -> Option<&str> {
 fn outgoing_record(method: &str, params: &Value, value: &Value) -> Option<OutgoingRecord> {
     let platform_id = platform_id_of(value);
     let record = match method {
-        "message.send_group" | "message.send_private" => {
+        "msg.send" => {
             let message = params.get("message").cloned().unwrap_or(Value::Null);
             // 出站不需要判「@ 了我没有」，第二个返回值不用。
             let (elements, _) = from_onebot(&message, "");
@@ -447,7 +447,7 @@ fn outgoing_record(method: &str, params: &Value, value: &Value) -> Option<Outgoi
                 at: None,
             }
         }
-        "message.send_forward" => {
+        "msg.send_forward" => {
             let count = params
                 .get("messages")
                 .and_then(Value::as_array)
@@ -458,13 +458,13 @@ fn outgoing_record(method: &str, params: &Value, value: &Value) -> Option<Outgoi
                 "[合并转发]".to_owned()
             };
             OutgoingRecord {
-                kind: OutgoingKind::Event("message.send_forward".into()),
+                kind: OutgoingKind::Event("msg.send_forward".into()),
                 elements: vec![Element::text(text)],
                 platform_id,
                 at: None,
             }
         }
-        "group.send_notice" => {
+        "group.notice.send" => {
             let content = params
                 .get("content")
                 .and_then(Value::as_str)
@@ -810,7 +810,7 @@ mod tests {
         let methods = catalog();
         let poke = methods
             .iter()
-            .find(|method| method.name.as_ref() == "poke.send")
+            .find(|method| method.name.as_ref() == "msg.poke")
             .expect("有 poke");
         assert!(
             poke.targets.iter().any(
@@ -826,7 +826,7 @@ mod tests {
 
         let forward = methods
             .iter()
-            .find(|method| method.name.as_ref() == "message.send_forward")
+            .find(|method| method.name.as_ref() == "msg.send_forward")
             .expect("有合并转发");
         assert!(
             forward.targets.iter().any(
@@ -860,20 +860,20 @@ mod tests {
         let methods = outbound.catalog("qq");
         let names: Vec<&str> = methods.iter().map(|m| m.name.as_ref()).collect();
         for expected in [
-            "message.send_group",
-            "message.history_group",
-            "message.recall",
-            "message.forward_content",
-            "group.get_member_list",
-            "group.get_notice",
-            "group.files",
-            "group.kick",
-            "group.ban",
-            "group.whole_ban",
-            "group.set_card",
-            "group.set_name",
-            "group.upload_file",
-            "poke.send",
+            "msg.send",
+            "msg.history",
+            "msg.recall",
+            "msg.forward",
+            "member.list",
+            "group.notice.get",
+            "group.file.list",
+            "member.kick",
+            "group.mute",
+            "group.mute_all",
+            "member.card",
+            "group.name",
+            "group.file.upload",
+            "msg.poke",
             "like.send",
         ] {
             assert!(names.contains(&expected), "缺 {expected}");
@@ -912,7 +912,7 @@ mod tests {
         let mut outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let room = RoomId::new("qq", "group/456").expect("合法");
         let error = outbound
-            .call(&room, "message.forward_content", &json!({"id": "x"}))
+            .call(&room, "msg.forward", &json!({"id": "x"}))
             .expect_err("没连上就不该假装调成功");
         assert!(matches!(error, CallError::Unavailable(_)));
     }
@@ -922,7 +922,7 @@ mod tests {
         let mut outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let room = RoomId::new("qq2", "group/123").expect("合法");
         let error = outbound
-            .call(&room, "message.get", &json!({"message_id": "1"}))
+            .call(&room, "msg.get", &json!({"message_id": "1"}))
             .expect_err("一条连接只管它自己那个号");
         assert!(matches!(error, CallError::Forbidden(_)));
     }
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn success_returns_only_the_data_payload() {
         let result = parse_call_response(
-            "message.forward_content",
+            "msg.forward",
             json!({"status": "ok", "retcode": 0, "data": {"messages": [1, 2]}}),
         )
         .expect("应当成功");
@@ -951,24 +951,22 @@ mod tests {
     #[test]
     fn platform_retcodes_map_to_distinct_errors() {
         let not_implemented = parse_call_response(
-            "message.forward_content",
+            "msg.forward",
             json!({"retcode": 1404, "wording": "API 不存在"}),
         )
         .expect_err("1404 是实现层面缺");
         assert!(matches!(not_implemented, CallError::NotImplemented(_)));
 
         let bad = parse_call_response(
-            "group.get_member_info",
+            "member.info",
             json!({"retcode": 1400, "wording": "参数错误"}),
         )
         .expect_err("1400 是参数错");
         assert!(matches!(bad, CallError::BadParams(_)));
 
-        let denied = parse_call_response(
-            "message.get",
-            json!({"retcode": 1403, "wording": "权限不足"}),
-        )
-        .expect_err("1403 是没权限");
+        let denied =
+            parse_call_response("msg.get", json!({"retcode": 1403, "wording": "权限不足"}))
+                .expect_err("1403 是没权限");
         assert!(matches!(denied, CallError::Forbidden(_)));
     }
 
@@ -978,9 +976,70 @@ mod tests {
         let mut outbound = OneBotSnowLumaOutbound::new(LinkSlot::new(), "qq");
         let room = RoomId::new("qq", "group/1").expect("合法");
         let error = outbound
-            .call(&room, "message.forward_content", &json!({}))
+            .call(&room, "msg.forward", &json!({}))
             .expect_err("要 id");
         assert!(matches!(error, CallError::BadParams(_)), "{error:?}");
+    }
+
+    #[test]
+    fn every_op_is_hierarchical_tagged_and_routed() {
+        let methods = catalog();
+        assert_eq!(methods.len(), 50, "52 个 method 收敛成 50 个 op");
+        assert!(!methods.is_empty());
+        for method in methods.iter() {
+            let name = method.name.as_ref();
+            assert!(name.contains('.'), "{name} 不是层级 op");
+            assert!(!method.tags.is_empty(), "{name} 没有标签");
+            assert!(
+                method.has_tag(match method.risk {
+                    Risk::Read => acb_kernel::outbound::tags::READ,
+                    Risk::Write => acb_kernel::outbound::tags::WRITE,
+                    Risk::Destructive => acb_kernel::outbound::tags::DESTRUCTIVE,
+                }),
+                "{name} 缺少风险标签"
+            );
+            assert!(
+                method.has_tag(match method.scope {
+                    Scope::Room => acb_kernel::outbound::tags::ROOM,
+                    Scope::Connection => acb_kernel::outbound::tags::CONNECTION,
+                }),
+                "{name} 缺少作用范围标签"
+            );
+            assert!(
+                ROUTES.iter().any(|route| route.method == name),
+                "{name} 没有路由"
+            );
+        }
+    }
+
+    #[test]
+    fn unified_send_and_history_dispatch_by_room() {
+        let room = |path: &str| RoomId::new("qq", path).expect("合法");
+        let send = ROUTES
+            .iter()
+            .find(|route| route.method == "msg.send")
+            .expect("msg.send 路由");
+        assert_eq!(
+            action_of_route(send, &room("group/456")).expect("群"),
+            "send_group_msg"
+        );
+        assert_eq!(
+            action_of_route(send, &room("private/10002")).expect("私聊"),
+            "send_private_msg"
+        );
+
+        let history = ROUTES
+            .iter()
+            .find(|route| route.method == "msg.history")
+            .expect("msg.history 路由");
+        assert_eq!(
+            action_of_route(history, &room("group/456")).expect("群"),
+            "get_group_msg_history"
+        );
+        assert_eq!(
+            action_of_route(history, &room("private/10002")).expect("私聊"),
+            "get_friend_msg_history"
+        );
     }
 
     /// 在群里调 `group.*` 不用重复填群号。
@@ -988,7 +1047,7 @@ mod tests {
     fn group_id_is_filled_from_the_room() {
         let route = ROUTES
             .iter()
-            .find(|route| route.method == "group.get_member_list")
+            .find(|route| route.method == "member.list")
             .expect("有这个路由");
         let room = RoomId::new("qq", "group/456").expect("合法");
 
@@ -1005,7 +1064,7 @@ mod tests {
     fn poke_in_group_keeps_the_member_target_and_fills_the_group() {
         let route = ROUTES
             .iter()
-            .find(|route| route.method == "poke.send")
+            .find(|route| route.method == "msg.poke")
             .expect("有 poke 路由");
         let room = RoomId::new("qq", "group/456").expect("合法");
 
@@ -1021,7 +1080,7 @@ mod tests {
     fn poke_in_private_fills_the_target() {
         let route = ROUTES
             .iter()
-            .find(|route| route.method == "poke.send")
+            .find(|route| route.method == "msg.poke")
             .expect("有 poke 路由");
         let room = RoomId::new("qq", "private/10002").expect("合法");
 
@@ -1034,7 +1093,7 @@ mod tests {
     fn send_forward_uses_the_room_target_and_refuses_the_other_kind() {
         let route = ROUTES
             .iter()
-            .find(|route| route.method == "message.send_forward")
+            .find(|route| route.method == "msg.send_forward")
             .expect("有转发布路由");
         let group = RoomId::new("qq", "group/456").expect("合法");
         let private = RoomId::new("qq", "private/10002").expect("合法");
@@ -1061,7 +1120,7 @@ mod tests {
     fn group_method_without_a_group_room_is_a_param_error() {
         let route = ROUTES
             .iter()
-            .find(|route| route.method == "group.get_member_info")
+            .find(|route| route.method == "member.info")
             .expect("有这个路由");
         let room = RoomId::new("qq", "private/10001").expect("合法");
         let error = call_payload(route, &room, &json!({"user_id": "1"})).expect_err("补不出来");
@@ -1075,24 +1134,22 @@ mod tests {
             {"type": "text", "data": {"text": "看这个"}},
             {"type": "image", "data": {"file": "https://example.com/a.png"}},
         ]});
-        let record = outgoing_record("message.send_group", &params, &json!({"message_id": 9001}))
-            .expect("发送要记账");
+        let record =
+            outgoing_record("msg.send", &params, &json!({"message_id": 9001})).expect("发送要记账");
         assert_eq!(record.kind, OutgoingKind::Message);
         assert_eq!(record.platform_id.as_deref(), Some("9001"));
         assert_eq!(record.elements.len(), 2);
         assert!(matches!(record.elements[0], Element::Text { .. }));
 
         // 读方法不记账：它们不改变房间里的聊天记录。
-        assert!(
-            outgoing_record("message.get", &json!({"message_id": "1"}), &Value::Null).is_none()
-        );
+        assert!(outgoing_record("msg.get", &json!({"message_id": "1"}), &Value::Null).is_none());
     }
 
     /// 公告和合并转发在流水里是事件：内容概括成一两句话，不是原样重放。
     #[test]
     fn group_notice_and_forward_are_events() {
         let notice = outgoing_record(
-            "group.send_notice",
+            "group.notice.send",
             &json!({"content": "明天维护"}),
             &json!({"notice_id": 1}),
         )
@@ -1105,13 +1162,13 @@ mod tests {
         assert_eq!(notice.elements, vec![Element::text("明天维护")]);
 
         let forward = outgoing_record(
-            "message.send_forward",
+            "msg.send_forward",
             &json!({"messages": [{}, {}, {}]}),
             &json!({"message_id": "f-1"}),
         )
         .expect("转发要记账");
         assert!(
-            matches!(&forward.kind, OutgoingKind::Event(name) if name == "message.send_forward"),
+            matches!(&forward.kind, OutgoingKind::Event(name) if name == "msg.send_forward"),
             "{:?}",
             forward.kind
         );
@@ -1129,19 +1186,19 @@ mod tests {
                 .unwrap_or_else(|| panic!("没有 {name}"))
         };
 
-        let send = method("message.send_group");
+        let send = method("msg.send");
         assert_eq!(send.effect, Effect::Send);
         assert_eq!(send.record, RecordMode::Message);
 
-        let notice = method("group.send_notice");
+        let notice = method("group.notice.send");
         assert_eq!(notice.effect, Effect::Send, "公告也是“发出去”");
         assert_eq!(notice.record, RecordMode::Event);
 
-        let kick = method("group.kick");
+        let kick = method("member.kick");
         assert_eq!(kick.effect, Effect::Write);
         assert_eq!(kick.record, RecordMode::None, "踢人不写聊天流水");
 
-        let recall = method("message.recall");
+        let recall = method("msg.recall");
         assert_eq!(recall.effect, Effect::Delete);
         assert_eq!(recall.record, RecordMode::None);
     }
