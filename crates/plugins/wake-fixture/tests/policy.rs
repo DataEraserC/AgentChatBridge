@@ -104,7 +104,6 @@ fn decision_providers_use_the_shared_wire() {
 
         let policy = AccessPolicy {
             provider: id.clone(),
-            rooms: Vec::new(),
             ..Default::default()
         };
         let provider = plugins

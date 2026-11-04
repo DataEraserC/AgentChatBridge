@@ -646,19 +646,11 @@ pub struct Subscription {
 /// **只决定「能不能碰这个房间/这条连接」**；破坏性操作仍由连接配置的
 /// `allow_destructive` 单独把关（两个维度，不能互相顶替）。
 ///
-/// `rooms` 只有 `acb.access.elevated_in_rooms` 用：列在里面的房间不用订阅
-/// 也能读、能发、能调平台方法。空表 = 没有额外豁免。
-///
-/// `origins` 只有 `acb.access.privileged_origins` 用：从这些房间触发的轮次可以访问
-/// 任意房间；其它来源仍按订阅边界。空表 = 没有提权来源。
+/// 不写 `provider` 时用内置 `[grants]` 评估器；写外部 provider 时由插件负责判定。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccessPolicy {
     /// 访问策略的 provider id（ADR-0026）。
     pub provider: ProviderId,
-    /// 额外豁免的目标房间。
-    pub rooms: Vec<RoomId>,
-    /// 提权来源房间（按轮次触发房间）。
-    pub origins: Vec<RoomId>,
     /// 插件专属配置；内置 access 忽略它。
     pub options: serde_json::Value,
 }
@@ -667,8 +659,6 @@ impl Default for AccessPolicy {
     fn default() -> Self {
         Self {
             provider: ProviderId::builtin_access(),
-            rooms: Vec::new(),
-            origins: Vec::new(),
             options: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
@@ -1051,20 +1041,8 @@ pub enum ConfigError {
         provider: String,
         detail: String,
     },
-    #[error("{}", acb_i18n::t!("kernel.config.bad_access_room", session = session, room = room, detail = detail))]
-    BadAccessRoom {
-        session: String,
-        room: String,
-        detail: String,
-    },
-    #[error("{}", acb_i18n::t!("kernel.config.duplicate_access_room", session = session, room = room))]
-    DuplicateAccessRoom { session: String, room: String },
-    #[error("{}", acb_i18n::t!("kernel.config.unknown_access_connection", session = session, room = room, connection = connection))]
-    UnknownAccessConnection {
-        session: String,
-        room: String,
-        connection: String,
-    },
+    #[error("{}", acb_i18n::t!("kernel.config.removed_access_provider", session = session, provider = provider))]
+    RemovedAccessProvider { session: String, provider: String },
     #[error("{}", acb_i18n::t!("kernel.config.bad_delivery_provider", session = session, provider = provider, detail = detail))]
     BadDeliveryProvider {
         session: String,
@@ -1778,7 +1756,7 @@ impl Config {
             });
 
             let on_turn_error = parse_turn_error_actions(&raw_session.on_turn_error)?;
-            let access = build_access(&id, raw_session.access, &connections)?;
+            let access = build_access(&id, raw_session.access)?;
             let delivery = build_delivery(&id, raw_session.delivery)?;
             let outbound = build_outbound(&id, raw_session.outbound)?;
             let turn_error = build_turn_error(&id, raw_session.turn_error)?;
@@ -2125,88 +2103,44 @@ fn build_clock(
     })
 }
 
-fn build_access(
-    session: &str,
-    raw: RawAccess,
-    connections: &[Connection],
-) -> Result<AccessPolicy, ConfigError> {
+fn build_access(session: &str, raw: RawAccess) -> Result<AccessPolicy, ConfigError> {
     let provider = match raw
         .provider
         .as_deref()
         .map(str::trim)
         .filter(|text| !text.is_empty())
     {
-        Some(text) => ProviderId::parse(text).map_err(|error| ConfigError::BadAccessProvider {
-            session: session.to_owned(),
-            provider: text.to_owned(),
-            detail: error.to_string(),
-        })?,
+        Some(text) => {
+            if is_removed_access_provider(text) {
+                return Err(ConfigError::RemovedAccessProvider {
+                    session: session.to_owned(),
+                    provider: text.to_owned(),
+                });
+            }
+            ProviderId::parse(text).map_err(|error| ConfigError::BadAccessProvider {
+                session: session.to_owned(),
+                provider: text.to_owned(),
+                detail: error.to_string(),
+            })?
+        }
         None => ProviderId::builtin_grants_access(),
     };
 
-    let mut rooms = Vec::new();
-    for text in raw.rooms {
-        let text = text.trim();
-        let room = RoomId::parse(text).map_err(|error| ConfigError::BadAccessRoom {
-            session: session.to_owned(),
-            room: text.to_owned(),
-            detail: error.to_string(),
-        })?;
-        if !connections
-            .iter()
-            .any(|connection| connection.id == room.connection)
-        {
-            return Err(ConfigError::UnknownAccessConnection {
-                session: session.to_owned(),
-                room: room.to_string(),
-                connection: room.connection.clone(),
-            });
-        }
-        if rooms.iter().any(|listed| listed == &room) {
-            return Err(ConfigError::DuplicateAccessRoom {
-                session: session.to_owned(),
-                room: room.to_string(),
-            });
-        }
-        rooms.push(room);
-    }
-
-    let mut origins = Vec::new();
-    for text in raw.origins {
-        let text = text.trim();
-        let room = RoomId::parse(text).map_err(|error| ConfigError::BadAccessRoom {
-            session: session.to_owned(),
-            room: text.to_owned(),
-            detail: error.to_string(),
-        })?;
-        if !connections
-            .iter()
-            .any(|connection| connection.id == room.connection)
-        {
-            return Err(ConfigError::UnknownAccessConnection {
-                session: session.to_owned(),
-                room: room.to_string(),
-                connection: room.connection.clone(),
-            });
-        }
-        if origins.iter().any(|listed| listed == &room) {
-            return Err(ConfigError::DuplicateAccessRoom {
-                session: session.to_owned(),
-                room: room.to_string(),
-            });
-        }
-        origins.push(room);
-    }
-
     Ok(AccessPolicy {
         provider,
-        rooms,
-        origins,
         options: policy_options(
             raw.options,
             &acb_i18n::t!("kernel.config.label.access_policy"),
         )?,
     })
+}
+
+/// 已移除的内置 access provider。旧配置留着这些键会直接启动失败。
+fn is_removed_access_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "acb.access.all_rooms" | "acb.access.elevated_in_rooms" | "acb.access.privileged_origins"
+    )
 }
 
 fn build_delivery(session: &str, raw: RawDelivery) -> Result<DeliveryPolicy, ConfigError> {
@@ -2612,15 +2546,10 @@ struct RawTurnError {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawAccess {
-    /// 访问策略 provider id。不写就用内置「按订阅」。
+    /// 访问策略 provider id。不写就用内置 `[grants]` 评估器。
     provider: Option<String>,
-    /// 额外豁免的目标房间（完整写法 `连接:路径`，如 `qq:group/123`）。
-    #[serde(default)]
-    rooms: Vec<String>,
-    /// 提权来源房间：从这些房间触发的轮次可以访问任意房间。
-    #[serde(default)]
-    origins: Vec<String>,
     #[serde(default)]
     options: toml::value::Table,
 }
@@ -3048,8 +2977,6 @@ mod tests {
         let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         let access = &config.sessions[0].access;
         assert_eq!(access.provider, ProviderId::builtin_grants_access());
-        assert!(access.rooms.is_empty());
-        assert!(access.origins.is_empty());
     }
 
     /// `[sessions.access]` 写在 `[[sessions]]` 里、订阅表之前。
@@ -3062,60 +2989,48 @@ mod tests {
     }
 
     #[test]
-    fn access_policy_parses_provider_and_rooms() {
-        let sessions = session_with_access(
-            "        provider = \"acb.access.elevated_in_rooms\"\n        rooms = [\"qq:group/999\"]",
-        );
-        let config = Config::parse(&config_with(ONE_CONNECTION, &sessions)).expect("能解析");
-        let access = &config.sessions[0].access;
-        assert_eq!(access.provider, ProviderId::builtin_elevated_access());
-        assert_eq!(
-            access.rooms,
-            vec![RoomId::new("qq", "group/999").expect("合法")]
-        );
+    fn removed_access_providers_fail_at_startup() {
+        for provider in [
+            "acb.access.all_rooms",
+            "acb.access.elevated_in_rooms",
+            "acb.access.privileged_origins",
+        ] {
+            let sessions = session_with_access(&format!("        provider = \"{provider}\""));
+            let error = Config::parse(&config_with(ONE_CONNECTION, &sessions))
+                .expect_err("旧 provider 必须启动失败");
+            assert!(
+                matches!(error, ConfigError::RemovedAccessProvider { .. }),
+                "{provider} 应当报 RemovedAccessProvider，实际：{error}"
+            );
+            let text = error.to_string();
+            assert!(
+                text.contains("removed") || text.contains("已移除"),
+                "错误文案要说清已移除：{text}"
+            );
+            assert!(text.contains("[grants]"), "错误文案要指向新写法：{text}");
+        }
     }
 
     #[test]
-    fn access_policy_parses_origins() {
-        let sessions = session_with_access(
-            "        provider = \"acb.access.privileged_origins\"\n        origins = [\"qq:private/7\"]",
-        );
-        let config = Config::parse(&config_with(ONE_CONNECTION, &sessions)).expect("能解析");
-        let access = &config.sessions[0].access;
-        assert_eq!(
-            access.provider,
-            ProviderId::builtin_privileged_origins_access()
-        );
-        assert_eq!(
-            access.origins,
-            vec![RoomId::new("qq", "private/7").expect("合法")]
-        );
+    fn removed_access_keys_fail_at_startup() {
+        for key in [
+            "        rooms = [\"qq:group/999\"]",
+            "        origins = [\"qq:private/7\"]",
+        ] {
+            let sessions = session_with_access(key);
+            assert!(
+                Config::parse(&config_with(ONE_CONNECTION, &sessions)).is_err(),
+                "旧键 {key} 不能被静默忽略"
+            );
+        }
     }
 
     #[test]
-    fn access_policy_rejects_bad_provider_and_rooms() {
+    fn access_policy_rejects_bad_provider() {
         let bad_provider = session_with_access("        provider = \"subscribed\"");
         assert!(matches!(
             Config::parse(&config_with(ONE_CONNECTION, &bad_provider)),
             Err(ConfigError::BadAccessProvider { .. })
-        ));
-
-        let bad_room = session_with_access("        rooms = [\"qq:\"]");
-        assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &bad_room)),
-            Err(ConfigError::BadAccessRoom { .. })
-        ));
-
-        let unknown_connection = session_with_access("        rooms = [\"tg:group/999\"]");
-        assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &unknown_connection)),
-            Err(ConfigError::UnknownAccessConnection { .. })
-        ));
-
-        let duplicate = session_with_access("        rooms = [\"qq:group/999\", \"qq:group/999\"]");
-        assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &duplicate)),
-            Err(ConfigError::DuplicateAccessRoom { .. })
         ));
     }
 

@@ -1887,7 +1887,6 @@ impl ClockProvider for DylibClockProvider {
 fn access_options(policy: &AccessPolicy) -> Value {
     json!({
         "provider": policy.provider.to_string(),
-        "rooms": policy.rooms.iter().map(|room| room.to_string()).collect::<Vec<_>>(),
         "extra": policy.options,
     })
 }

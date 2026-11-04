@@ -46,13 +46,12 @@ use crate::outbound::{
     OutgoingKind, OutgoingRecord, RecordMode, Risk, Scope, Sent, TargetRole, expand_query,
 };
 use crate::plugin::{
-    ALL_ROOMS_ACCESS_PROVIDER, AccessAction, AccessDecision, AccessRequest, Capability,
-    ClockContext, DEFAULT_ACCESS_PROVIDER, DefaultDeliveryComposer, DefaultTurnErrorProvider,
-    DeliveryRequest, ELEVATED_ACCESS_PROVIDER, GRANTS_ACCESS_PROVIDER, Health, InterruptScope,
-    PRIVILEGED_ORIGINS_ACCESS_PROVIDER, PluginError, PluginManager, PromptContext, PromptDraft,
-    PromptProvider, ProviderId, ReceiveDecision, ReceiveRequest, ReloadScope, RouteAction,
-    RouteContext, RouteDecision, SendContext, SendHook, SendOrigin, TurnErrorProvider,
-    TurnErrorRequest, WakeContext, default_delivery_plan, provider_is_external,
+    AccessAction, AccessDecision, AccessRequest, Capability, ClockContext, DEFAULT_ACCESS_PROVIDER,
+    DefaultDeliveryComposer, DefaultTurnErrorProvider, DeliveryRequest, GRANTS_ACCESS_PROVIDER,
+    Health, InterruptScope, PluginError, PluginManager, PromptContext, PromptDraft, PromptProvider,
+    ProviderId, ReceiveDecision, ReceiveRequest, ReloadScope, RouteAction, RouteContext,
+    RouteDecision, SendContext, SendHook, SendOrigin, TurnErrorProvider, TurnErrorRequest,
+    WakeContext, default_delivery_plan, provider_is_external,
 };
 use crate::plugin_meta::{PluginLifecycle, PluginSource};
 use crate::render;
@@ -3900,14 +3899,11 @@ impl<S: Store> Bridge<S> {
                     .map(|subscription| subscription.room.clone())
                     .collect();
                 let query = grants::GrantQuery {
-                    provider: &provider_id,
-                    policy: &session.access,
                     subject,
                     place,
                     capability,
                     target: GrantTarget::Room(&room),
                     subscriptions: &subscriptions,
-                    origin: Some(&ctx.room),
                 };
                 if let Some(decision) = grants::evaluate_platform(&ctx.config.grants, &query) {
                     if decision.audited() {
@@ -4262,14 +4258,11 @@ impl<S: Store> Bridge<S> {
             .map(|subscription| subscription.room.clone())
             .collect();
         let query = grants::GrantQuery {
-            provider: &provider_id,
-            policy: &session.access,
             subject,
             place,
             capability: GrantCapability::Plugin,
             target: GrantTarget::Room(&ctx.room),
             subscriptions: &subscriptions,
-            origin: Some(&ctx.room),
         };
         let decision = grants::evaluate_tool(&ctx.config.grants, &query);
         if decision.audited() {
@@ -4418,14 +4411,11 @@ impl<S: Store> Bridge<S> {
 
             let (allowed, basis) = if built_in {
                 let query = grants::GrantQuery {
-                    provider: provider_id.as_str(),
-                    policy: &session.access,
                     subject,
                     place,
                     capability,
                     target,
                     subscriptions: &subscriptions,
-                    origin: origin_room,
                 };
                 let decision = grants::evaluate_access(&config.grants, &query);
                 if decision.audited() {
@@ -4542,14 +4532,7 @@ impl<S: Store> Bridge<S> {
     }
 
     fn is_builtin_access_provider(provider: &str) -> bool {
-        matches!(
-            provider,
-            GRANTS_ACCESS_PROVIDER
-                | DEFAULT_ACCESS_PROVIDER
-                | ALL_ROOMS_ACCESS_PROVIDER
-                | ELEVATED_ACCESS_PROVIDER
-                | PRIVILEGED_ORIGINS_ACCESS_PROVIDER
-        )
+        matches!(provider, GRANTS_ACCESS_PROVIDER | DEFAULT_ACCESS_PROVIDER)
     }
 
     fn subject_place(
@@ -4592,12 +4575,6 @@ impl<S: Store> Bridge<S> {
         let target = match target {
             GrantTarget::Room(room) => room.to_string(),
             GrantTarget::Connection(connection) => connection.to_owned(),
-        };
-        // 兼容层映射的是 system 主体的常态授予，审计按 system 记。
-        let subject = if decision.basis.starts_with("compat:") {
-            GrantSubject::System
-        } else {
-            subject
         };
         eprintln!(
             "[access] subject={} place={} capability={} target={} result={} basis={} reason=\"{}\" session={}",

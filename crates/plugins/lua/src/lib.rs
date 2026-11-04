@@ -1030,11 +1030,6 @@ fn wake_context_table(lua: &Lua, context: &WakeContext<'_>) -> mlua::Result<Tabl
 fn access_options_table(lua: &Lua, options: &AccessPolicy) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("provider", options.provider.to_string())?;
-    let rooms = lua.create_table()?;
-    for (index, room) in options.rooms.iter().enumerate() {
-        rooms.set(index + 1, room.to_string())?;
-    }
-    table.set("rooms", rooms)?;
     table.set("extra", json_to_lua(lua, &options.options)?)?;
     Ok(table)
 }
