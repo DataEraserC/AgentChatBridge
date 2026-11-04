@@ -363,7 +363,7 @@ fn spawn_poke_lookup(raw: Value, slot: LinkSlot, ctx: PokeContext, group: String
                 "group_id": number_value(&group),
                 "user_id": number_value(&user),
             });
-            match outbound.call(&room, "group.get_member_info", &params) {
+            match outbound.call(&room, "member.info", &params) {
                 Ok(outcome) => {
                     let data = &outcome.value;
                     let nickname = data.get("nickname").and_then(Value::as_str).unwrap_or("");

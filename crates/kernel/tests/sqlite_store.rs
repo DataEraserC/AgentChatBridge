@@ -990,7 +990,7 @@ fn merging_fills_empty_fields_in_sqlite_too() {
             Vec::new()
         },
         occurrences: 1,
-        tool: full.then(|| "platform_methods".to_owned()),
+        tool: full.then(|| "platform_call".to_owned()),
         session: "main".to_owned(),
         harness: Some("dsh".to_owned()),
         room: Some("qq:group/123".to_owned()),
@@ -1011,7 +1011,7 @@ fn merging_fills_empty_fields_in_sqlite_too() {
     assert_eq!(items[0].severity, "minor", "严重度跟着分类，也不动");
     assert_eq!(items[0].refs, vec!["#700"], "空着的出处补上");
     assert_eq!(items[0].suggestion.as_deref(), Some("跟 delete_msg 对齐"));
-    assert_eq!(items[0].tool.as_deref(), Some("platform_methods"));
+    assert_eq!(items[0].tool.as_deref(), Some("platform_call"));
     assert_eq!(items[0].repeats, 2);
 }
 

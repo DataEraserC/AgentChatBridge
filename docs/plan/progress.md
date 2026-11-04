@@ -1420,6 +1420,44 @@
 
 - 2026-11-04 — 决策索引：supervisor 平台无关、Nix profile 回滚、测试矩阵、回滚判据、反馈/工单、记忆管家、扩展工厂 → [supervision-packaging-issues.md](supervision-packaging-issues.md)
 
+## 2026-11-05 — platform_call 单入口（层级 op + 封闭 tag）
+
+- 任务编号：adapter-snowluma 第 9 节实装
+- 做了什么：
+  - `crates/kernel/src/tools.rs`：`TOOL_NAMES` 移除 `platform_methods`；`platform_call`
+    成为唯一平台入口。给 `op` 执行；不给 `op` 列目录。
+  - `crates/kernel/src/engine.rs`：新增 `find_platform_op` 统一解析；普通调用、票据申请、
+    票据执行都走它。目录档支持 `path` 前缀、`tags` AND、`query` 搜索、`all` 连接摘要；
+    执行档与目录档字段互斥，混用直接 `BadRequest`。
+  - `crates/kernel/src/outbound.rs`：`MethodSpec.tags` 改为封闭枚举 `PlatformTag`
+    （30 个固定值）；wire 入口拒绝未知 tag；`MethodSpec::path/in_path` 支持层级前缀。
+  - `crates/adapters/onebot-snowluma/src/catalog.rs`：52 个 method 收敛为 50 个层级 op；
+    `msg.send` / `msg.history` 合并群/私聊动作，按房间分派；路由、effect、record 同步改名；
+    catalog 自动补风险/作用范围/幂等标签。
+  - `harnesses/shared/tools.mjs`、dsh/opencode 提示与测试：删除 `platform_methods`，
+    `platform_call` schema 改成 `op/path/tags/query/all` + 原有结果查询字段。
+- 取舍：
+  - 没有按设计原稿拆成 `platform_call` + `platform_call.list` 两个工具。原因：MCP 工具名
+    不允许点号；单工具位最省上下文。改成同工具的「省略 op = 列目录」模式。
+  - 按用户要求不留旧 method 兼容层、不做短别名；旧名直接删除，目录/路由/测试/harness 一次改齐。
+  - 风险策略保持每条 op 的显式 `MethodSpec.risk`（catalog 是唯一 op→risk 表）；不从 tag 推导。
+    未知 op 不在 catalog，直接 `unknown_op` 拒绝。没有新增 `admin` risk：core 目前无法验证群
+    管理员身份，`requires_admin` 只作为标签，权限不足仍由平台侧拒绝。
+  - 目录里的未知 tag 在 core/wire 两层都 fail closed；schema 里给封闭枚举。
+- 证据：
+  - adapter：`every_op_is_hierarchical_tagged_and_routed`（50 op 全部层级名、有 tag、有路由）、
+    `unified_send_and_history_dispatch_by_room`（群/私聊动作分派）。
+  - kernel：`unknown_op_suggests_a_direct_neighbour`、`destructive_method_is_refused_by_default`、
+    `catalog_unknown_tag_lists_the_known_ones`、`ticket_and_normal_call_share_unknown_op_rejection`
+    （票据与普通路径同一段 op 解析）；wire `bad_names_and_enums_are_rejected`。
+  - `cargo test --workspace` 全绿；`cargo clippy --workspace --all-targets -- -D warnings`；
+    `node --check harnesses/shared/tools.mjs`；dsh 40/40、opencode 45/45。
+  - 体积：`tools.mjs` 里平台入口从 6,747 bytes（`platform_call` 4,297 + `platform_methods` 2,450）
+    降到 3,922 bytes（单 `platform_call`），约 -42%；工具数 40 → 39；op 52 method → 50 op。
+- 下一步入口：若还要压工具描述，按 `extension-point-catalog.md` 的 30 工具上限把
+  `memory_git_*` / notes 合并成单入口。
+
+
 ## 部署注意事项（nix-config 打包）
 
 - `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置

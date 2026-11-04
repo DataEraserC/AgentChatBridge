@@ -27,8 +27,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "set_note",
     "del_note",
     "get_platform_events",
-    // 平台能力：一个目录 + 一个通用调用口（ADR-0020）。core 不认识任何方法名。
-    "platform_methods",
+    // 平台能力：单入口。给 op = 执行，不给 op = 按层级/标签列目录（ADR-0020）。
     "platform_call",
     // 插件目录：本会话实际用了哪些 wake/access/delivery 策略，它们声称做什么。
     "describe_plugins",
@@ -105,7 +104,7 @@ pub struct AccessRequestItem {
     /// 目标房间，形如 `qq:group/123`；一张票据只覆盖这一个房间。
     pub target: String,
     /// 要放行的具体操作。形如 `send_message_to`、`get_history`、
-    /// `platform_call:group.kick`；不接受模糊的「整个房间」。
+    /// `platform_call:member.kick`；不接受模糊的「整个房间」。
     pub ops: Vec<String>,
     /// 挂起动作的参数快照。发送类给 `elements` / `text`；平台调用给 params 对象。
     #[serde(default)]
@@ -261,30 +260,73 @@ pub const DEFAULT_PAGE_LIMIT: usize = 100;
 /// 分页上限：一次最多给多少条。再大就该翻页，而不是硬塞进上下文。
 pub const MAX_PAGE_LIMIT: usize = 500;
 
-/// 查平台能力目录（ADR-0020）。
+/// `platform_call` 的统一输入。
 ///
-/// 三样都不给 = 逐条清单（名字 + 一句话 + 标签）；给了任一过滤条件 = 命中方法连参数表一起给。
-/// `group` / `tag` / `query` 可以叠加，取交集。
+/// 给 `op` = 执行；不给 `op` = 列目录。二者字段互斥，由 core 明确拒绝混用。
 #[derive(Debug, Default, Deserialize)]
-pub struct PlatformMethodsArgs {
+pub struct PlatformToolArgs {
     #[serde(default)]
     pub room: Option<String>,
-    /// 只看这条连接（如 `qq`），不用给房间。会话必须能访问这条连接。
+    /// 列目录时指定另一条连接；执行时不使用。
     #[serde(default)]
     pub connection: Option<String>,
-    /// 只给每条可访问连接的摘要（平台、kind、方法数、事件/标签能力），
-    /// 想展开某条再用 `connection` 查。不能和 room / connection / 过滤条件同时给。
+    /// 层级化 op，如 `msg.send`、`member.list`、`group.mute`。
     #[serde(default)]
-    pub all: Option<bool>,
-    /// 只看某一归属，如 `forward`、`group`。
+    pub op: Option<String>,
+    /// 平台参数；core 原样转给适配器。
     #[serde(default)]
-    pub group: Option<String>,
-    /// 只看带这个用途标签的方法，如 `image`、`send`、`member`。跨归属。
+    pub params: serde_json::Value,
+    /// 列目录：按路径前缀过滤，如 `group`、`group.file`。
     #[serde(default)]
-    pub tag: Option<String>,
-    /// 按关键词找方法（名字、说明、标签都会搜，中英都认）。
+    pub path: Option<String>,
+    /// 列目录：按封闭标签过滤（AND），如 `destructive`、`requires_admin`。
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 列目录：按关键词搜 op / 说明 / 标签。
     #[serde(default)]
     pub query: Option<String>,
+    /// 列目录：只给每条订阅连接的摘要，不展开 op。
+    #[serde(default)]
+    pub all: bool,
+    /// 执行：结果里的主数组最多给几条。
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// 执行：从第几条开始给。
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// 执行：过滤 / 投影 / 排序 / 分组。
+    #[serde(flatten)]
+    pub shape: crate::query::Query,
+}
+
+/// 真正执行一次平台调用。分页与结果过滤都在桥这层做（ADR-0022 / ADR-0023）。
+#[derive(Debug, Default, Deserialize)]
+pub struct PlatformCallArgs {
+    #[serde(default)]
+    pub room: Option<String>,
+    pub op: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    /// 结果里的主数组最多给几条。默认 [`DEFAULT_PAGE_LIMIT`]，上限 [`MAX_PAGE_LIMIT`]。
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// 从第几条开始给（翻页用，值取上一次返回的 `_page.next_offset`）。
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// 过滤 / 投影 / 排序 / 分组。四个都不给就是平台原样的结果。
+    #[serde(flatten)]
+    pub query: crate::query::Query,
+}
+
+/// 列平台目录（`platform_call` 不给 `op` 时的形状）。
+#[derive(Debug, Default)]
+pub struct PlatformListArgs {
+    pub room: Option<String>,
+    pub connection: Option<String>,
+    pub path: Option<String>,
+    pub tags: Vec<crate::outbound::PlatformTag>,
+    pub query: Option<String>,
+    pub all: bool,
 }
 
 /// 查插件/策略目录。默认只看当前会话实际用到的 provider。
@@ -345,32 +387,6 @@ pub struct TaskListArgs {
 #[derive(Debug, Deserialize)]
 pub struct TaskGetArgs {
     pub id: String,
-}
-
-/// 调一个平台方法。`params` 是任意 map，core 不认识里面任何字段，原样转给适配器。
-///
-/// `limit` / `offset` 是**桥这一层**的分页：平台照旧一次给全，桥切片后再交出去。
-/// 这样不用为了分页去改五十个方法的签名，大群的大列表也不会因为「一次给不完」被写死。
-///
-/// `where` / `fields` / `order_by` / `group_by` 也是桥这一层的事（ADR-0023）：
-/// 平台不认识它们，桥在结果上做过滤、投影、排序、分组计数。字段名靠看数据得出，
-/// 传错会报 `bad_field` 并列出真实可用的字段。
-#[derive(Debug, Default, Deserialize)]
-pub struct PlatformCallArgs {
-    #[serde(default)]
-    pub room: Option<String>,
-    pub method: String,
-    #[serde(default)]
-    pub params: serde_json::Value,
-    /// 结果里的主数组最多给几条。默认 [`DEFAULT_PAGE_LIMIT`]，上限 [`MAX_PAGE_LIMIT`]。
-    #[serde(default)]
-    pub limit: Option<usize>,
-    /// 从第几条开始给（翻页用，值取上一次返回的 `_page.next_offset`）。
-    #[serde(default)]
-    pub offset: Option<usize>,
-    /// 过滤 / 投影 / 排序 / 分组。四个都不给就是平台原样的结果。
-    #[serde(flatten)]
-    pub query: crate::query::Query,
 }
 
 /// 一条反馈（ADR-0021）。

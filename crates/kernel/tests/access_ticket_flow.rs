@@ -24,7 +24,7 @@ struct Recorder {
 /// 目标连接只声明一个 destructive 方法，用来验证票据不放宽 `allow_destructive`。
 fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
     std::sync::Arc::from(vec![MethodSpec {
-        name: "group.kick".into(),
+        name: "member.kick".into(),
         summary: "踢人".into(),
         tags: Vec::new().into(),
         risk: Risk::Destructive,
@@ -394,7 +394,7 @@ fn batch_request_approve_by_batch_id_and_query() {
             &sessions(),
             "access_request",
             json!({"items": [
-                {"target": "qq:group/999", "ops": ["platform_call:group.kick"],
+                {"target": "qq:group/999", "ops": ["platform_call:member.kick"],
                  "params": {"user_id": "10001"}},
                 {"target": "qq:group/998", "ops": ["send_message_to"],
                  "params": {"elements": [{"type": "text", "text": "batch two"}]}}
@@ -611,7 +611,7 @@ fn destructive_platform_call_is_refused_even_after_approval() {
             "access_request",
             json!({"items": [{
                 "target": "qq:group/999",
-                "ops": ["platform_call:group.kick"],
+                "ops": ["platform_call:member.kick"],
                 "params": {"user_id": "10001"}
             }]}),
         )
@@ -699,6 +699,54 @@ fn read_only_ticket_stays_active_for_the_session_to_retry() {
         .expect("查询票据");
     assert_eq!(queried["state"], "active", "只读票据不能被 core 执行消费");
     assert!(queried["execution_status"].is_null());
+}
+
+#[test]
+fn ticket_and_normal_call_share_unknown_op_rejection() {
+    let (mut bridge, _sends) = bridge();
+    bridge
+        .ingest(message("qq:group/123", "user1", "层级的 op", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let normal = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"op": "member.nope", "params": {}}),
+        )
+        .expect_err("普通路径拒绝未知 op");
+    assert_eq!(normal.code, ErrorCode::BadRequest);
+    assert!(
+        normal.message.contains("[unknown_op]"),
+        "{}",
+        normal.message
+    );
+
+    let requested = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["platform_call:member.nope"],
+                "params": {}
+            }]}),
+        )
+        .expect_err("票据申请走同一段 op 解析");
+    assert_eq!(requested.code, ErrorCode::BadRequest);
+    assert!(
+        requested.message.contains("[unknown_op]"),
+        "{}",
+        requested.message
+    );
+    assert!(
+        requested.message.contains("items[0]"),
+        "{}",
+        requested.message
+    );
 }
 
 #[test]

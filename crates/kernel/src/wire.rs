@@ -20,7 +20,7 @@ use crate::adapter::{AdapterCapability, AdapterManifest};
 use crate::config::Connection;
 use crate::outbound::{
     CallError, Effect, MethodSpec, OutboundError, OutgoingKind, OutgoingRecord, ParamSpec,
-    ParamType, RecordMode, Risk, Scope, TargetRole, TargetSpec,
+    ParamType, PlatformTag, RecordMode, Risk, Scope, TargetRole, TargetSpec,
 };
 use crate::plugin_meta::{PluginEffect, PluginMetadata};
 use crate::storage::RecordDraft;
@@ -168,7 +168,23 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
             .into_iter()
             .map(WireTargetSpec::try_into)
             .collect::<Result<Vec<TargetSpec>, String>>()?;
-        let tags = spec.tags.into_iter().map(Cow::Owned).collect::<Vec<_>>();
+        let tags = spec
+            .tags
+            .into_iter()
+            .map(|tag| {
+                PlatformTag::parse(&tag).ok_or_else(|| {
+                    acb_i18n::t!(
+                        "kernel.wire.unknown_tag",
+                        tag = tag,
+                        known = PlatformTag::ALL
+                            .iter()
+                            .map(|tag| tag.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
 
         Ok(MethodSpec {
             name: Cow::Owned(name.to_owned()),
@@ -395,7 +411,7 @@ mod tests {
         assert_eq!(method.params[0].values.len(), 2);
         assert_eq!(method.params[0].sample(), serde_json::json!("hi"));
         assert_eq!(method.targets[0].role, TargetRole::Room);
-        assert!(method.has_tag("send"));
+        assert!(method.has_tag(crate::outbound::tags::SEND));
     }
 
     #[test]
@@ -407,6 +423,11 @@ mod tests {
         let mut method = wire_method();
         method.risk = "danger".into();
         assert!(MethodSpec::try_from(method).is_err());
+
+        let mut method = wire_method();
+        method.tags = vec!["danger".into()];
+        let error = MethodSpec::try_from(method).expect_err("未知标签必须拒绝");
+        assert!(error.contains("unknown tag"), "{error}");
     }
 
     #[test]

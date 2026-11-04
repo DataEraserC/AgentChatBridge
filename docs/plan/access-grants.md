@@ -136,7 +136,7 @@ evaluate(subject, place, scope, capability, target) -> allow/deny + reason
 
 - 授权只决定"能不能到这个目标/用这个能力"；`Risk::Destructive` 是第二道独立闸门。
 - 结论：**叠加，不替代**。
-- 即使 system admin，`group.kick` / `group.ban` / `message.recall` 等仍要求目标连接配置了 `allow_destructive`（或方法白名单）。
+- 即使 system admin，`member.kick` / `group.mute` / `msg.recall` 等仍要求目标连接配置了 `allow_destructive`（或方法白名单）。
 - 不把 `allow_destructive` 并入 grant 表，也不因为 grant 放行就跳过它。
 
 ---
@@ -258,7 +258,7 @@ AccessTicket {
   session,           // 票据只属于这个会话
   request_room,      // 申请时所在房间：结果指针写这里，唤醒也落在这一间
   target_room,       // 单目标房间，不覆盖连接或全局
-  ops: [op_id],      // 具体 op，例如 send_message_to / platform_call:group.kick
+  ops: [op_id],      // 具体 op，例如 send_message_to / platform_call:member.kick
   params_snapshot,   // 挂起动作参数；只存内存，终态立即释放
   origin_sender,     // 申请轮次触发者；唤醒结果时沿用，不继承管理员
   capabilities,      // 由 ops 推导：room_read / room_write / platform / destructive
@@ -274,7 +274,7 @@ AccessTicket {
 - **票据是会话级，不是轮次级**：批准需要人等，若把票据钉死在申请轮，
   审批回来时轮次往往已经结束。`request_turn` 只用于审计；票据有效期内由同一会话使用。
 - **单目标房间**：一张票据只覆盖一个房间；连接级访问（好友列表等）不走票据。
-- **具体 op 列表**：只放行列出的 op；`platform_call` 必须写成 `platform_call:<method>`。
+- **具体 op 列表**：只放行列出的 op；`platform_call` 必须写成 `platform_call:<op>`。
 - **用后即废**：命中一次 `ensure_room_access` 或批准后由 core 执行一次就置 `used`。即使随后被
   `allow_destructive` 拒绝，也不退回票据（fail closed）。
 - **过期**：pending 10 分钟；批准后 active 2 分钟。到点即 `expired`。
@@ -321,7 +321,7 @@ admin_cooldown_secs = 30     # 同一个 system admin 收到两条审批私信�
 批次：bt-...
 1. ticket=tk-... batch=bt-... nonce=... [DESTRUCTIVE]
    目标：qq:group/123
-   动作：platform_call:group.kick
+   动作：platform_call:member.kick
    能力：destructive, platform, room_write
 ...
 批准整批：/approve <batch_id>
@@ -455,7 +455,7 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 ### 13.1 票据升级为「挂起的动作」
 
 - 申请时除 `op + 目标房间` 外，再存一份 **参数快照**（`params_snapshot`），例如 `send_message_to` 的
-  `elements`、`platform_call:<method>` 的规范化 `params`。快照只存内存，随票据终态一起丢弃。
+  `elements`、`platform_call:<op>` 的规范化 `params`。快照只存内存，随票据终态一起丢弃。
 - 只接受 core 能验证形状的 op；参数先过现有 `MethodSpec` 校验（必填、类型、target 不换房间）。
 - 快照大小设上限（草案 256 KiB），超限拒绝申请；日志和审批私信不打印正文，只打印摘要/长度。
 - **敏感度**：消息正文会在进程内存里驻留最长一个 pending 窗口（10 分钟）。这是可接受的取舍：
@@ -467,7 +467,7 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 - 单张批准和整批批准都由 core 执行；批量按票据创建顺序**逐条执行**，不要求模型参与。
 - 执行入口复用现有路径：
   - `send_message` / `send_message_to`：`prepare_send` / `deliver_out`；
-  - `platform_call:<method>`：`prepare_platform_call` + 锁外 execute + `finish_platform_call`。
+  - `platform_call:<op>`：`prepare_platform_call` + 锁外 execute + `finish_platform_call`。
 - 执行前仍检查 `MethodSpec.risk = Destructive` 的 `allow_destructive`；票据不放宽这个闸门。
 - 票据不授予 `plugin` 能力，不改变会话的常态 grants；执行只使用票据快照里的目标/op/参数。
 - 单条执行结果：`succeeded` / `failed` / `skipped`，附失败原因；批量逐条记录，不因一条失败中止后续。
