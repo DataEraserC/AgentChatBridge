@@ -908,6 +908,58 @@
 - 可回退：A1 回退 `PreparedSend/PreparedPlatformCall` 的 relay 字段与调用点；A2 回退
   后台线程与 sweep 返回值；A3 回退 writer 线程改回直接写 stdin；文档纯新增。
 
+## 2026-11-04 08:55 CST — 动态库调用超时方案 D（句柄标死）
+
+- 任务编号：`dynamic-call-timeout.md` 方案 D（用户代行决策：队列上限暂不动）
+- 做了什么：
+  - `[[plugins]].timeout_ms` 可配置：缺省/0 → 5 秒（保守默认），钳到 100ms–60s；
+    只对动态库平台适配器生效。
+  - `DylibOutbound` 超时后把该连接句柄写入锁外 `OnceLock` 失效标记；后续 `send/call`
+    在拿锁前直接返回明确错误，不再 spawn 线程排队。
+  - `DylibAdapterFactory` 按连接记录失效原因；`AdapterFactory::health()` 默认健康，
+    动态工厂返回 `Unhealthy`，`PluginManager::catalog` 对平台适配器读取该状态。
+  - 重新 `create` 同连接适配器实例（新 handle）时清掉失效记录，catalog 恢复
+    `Healthy`，无需重启进程。
+  - 日志：`adapter.dynamic.handle_dead`；错误文案改为「句柄已标死」。
+  - 测试（`dynamic-fixture/tests/loader.rs`）：`demo.slow` 阻塞 1200ms、超时 300ms；
+    断言超时触发、后续调用 <50ms 失败、catalog `Unhealthy`、内置 provider 仍健康、
+    新实例恢复且调用成功。
+- 证据：
+  - `cargo clippy --workspace --all-targets -- -D warnings` → exit 0；
+  - `cargo test --workspace` → 54 个 suite 全 `ok`；
+  - 动态适配器测试 1/1、配置解析测试 1/1。
+- commit：`10791f8 fix(dynamic): mark adapter handles dead after call timeout`
+- 残留（未解决，已写入 core-risk-inventory）：
+  - 超时那次调用线程仍卡在插件 FFI，无法强制中断；线程与库引用泄漏到进程退出。
+  - 适配器载体仍不支持热 reload；“恢复”指重新创建连接实例/新 handle，不是同一个
+    dead handle 复活。
+  - 动态策略 provider（wake/access/...）仍是同步调用、无超时；本次只覆盖适配器
+    发送/调用路径。
+- 可回退：移除 `timeout_ms` 字段、`DeadCell/DeadRegistry`、`AdapterFactory::health`
+  与 catalog 分支即可；测试与文档可保留。
+
+## 2026-11-04 08:55 CST — decision-brief 用户异议修订（纯文档）
+
+- 任务编号：用户四条异议（memory 远端、扩展工厂、自动回滚、tool/回滚 B+C）
+- 修订：
+  1. memory 远端：B 改为「裸仓库权威，本地路径/ssh/另一台机器均可」，不依赖
+     GitHub/Gitea；代价改为 ssh/文件系统权限与跨机可达性。
+  2. 扩展工厂：明确 A → B → C 递进；B 验收线只有「能装、能验（摘要固定）、能卸」，
+     评分/搜索/自动更新划到 C；并标明旧 B 草案缺少「验/卸」。
+  3. 自动回滚：LKG 定义为 bridge 运行时状态 `plugins-lkg.toml`（版本/摘要/上次健康），
+     回滚 = 改配置引用 + reload，不依赖 Nix、不需要 root、不 rebuild；Nix 只钉二进制
+     与基础配置，不拥有该文件。写明 Nix / 非 Nix 各自的干净维护方式。
+  4. 回滚 B/C 改为层次：C（插件 LKG，core，跨平台无 root）先做，B 的 Nix generation
+     作为 Nix 侧适配器后加；真正阻塞是可信健康判据，不是顺序。tool 载体 B/C 另注
+     与回滚 B/C 不是同一组选项。
+- 结论变化：扩展工厂从「A 现在、B 以后再看」变为明确三步验收；自动回滚从「A 手动、
+  B 需要健康判据」变为「C 先做 core 能力、B 作为 Nix 适配器后加」；阻塞点统一为
+  **可信健康判据**。
+- 仍待用户拍板：LKG 的默认健康判据与写入时机；B（本地扩展工厂）启动时间；
+  tool 首期载体是否确认 C（外置进程）。
+- 证据：纯文档；`cargo test --workspace` 与 clippy 不受影响（D 提交前已全绿）。
+- 可回退：纯文档，按条目回退即可。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
