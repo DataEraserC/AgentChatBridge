@@ -274,7 +274,7 @@ pub struct GrantQuery<'a> {
     pub subscriptions: &'a [RoomId],
 }
 
-/// 评估结果。`basis` 非 `base:` 时调用方应写审计日志。
+/// 评估结果。豁免（basis 非 `base:`）与任何拒绝都要写审计；普通 base allow 不写。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantDecision {
     pub allow: bool,
@@ -282,9 +282,39 @@ pub struct GrantDecision {
     pub reason: String,
 }
 
+/// 审计行里 target 的最大字符数；房间/连接 id 再长也只截到这里。
+const AUDIT_TARGET_MAX_CHARS: usize = 120;
+
 impl GrantDecision {
+    /// 豁免（命中规则的 allow/deny）和所有 deny 都要审计；普通 base allow 不审计。
+    pub fn should_audit(&self) -> bool {
+        self.audited() || !self.allow
+    }
+
     pub fn audited(&self) -> bool {
         !self.basis.starts_with("base:")
+    }
+
+    /// 一行结构化审计。target 超长时截断，避免日志被超长 id 撑爆。
+    pub fn audit_line(
+        &self,
+        subject: GrantSubject,
+        place: GrantPlace,
+        capability: GrantCapability,
+        target: &str,
+        session: &str,
+    ) -> String {
+        format!(
+            "[access] subject={} place={} capability={} target={} result={} basis={} reason=\"{}\" session={}",
+            subject.as_str(),
+            place.as_str(),
+            capability.as_str(),
+            truncate_target(target),
+            if self.allow { "allow" } else { "deny" },
+            self.basis,
+            self.reason.replace('"', "'"),
+            session,
+        )
     }
 
     fn allow(basis: impl Into<String>, reason: impl Into<String>) -> Self {
@@ -301,6 +331,16 @@ impl GrantDecision {
             basis: basis.into(),
             reason: reason.into(),
         }
+    }
+}
+
+fn truncate_target(target: &str) -> String {
+    let mut chars = target.chars();
+    let head: String = chars.by_ref().take(AUDIT_TARGET_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
     }
 }
 
@@ -528,6 +568,70 @@ mod tests {
         );
         assert!(!decision.allow);
         assert!(!decision.audited());
+    }
+
+    #[test]
+    fn deny_is_audited_and_plain_allow_is_not() {
+        let inside = RoomId::parse("qq:group/1").expect("房间");
+        let outside = RoomId::parse("qq:group/2").expect("房间");
+        let grants = GrantsConfig::default();
+
+        let deny = eval_access(
+            &grants,
+            GrantSubject::User,
+            GrantPlace::Group,
+            GrantCapability::RoomRead,
+            GrantTarget::Room(&outside),
+            std::slice::from_ref(&inside),
+        );
+        assert!(!deny.allow);
+        assert!(deny.should_audit(), "普通主体越权必须留一条 deny 审计");
+        let line = deny.audit_line(
+            GrantSubject::User,
+            GrantPlace::Group,
+            GrantCapability::RoomRead,
+            &outside.to_string(),
+            "main",
+        );
+        assert_eq!(line.matches("[access]").count(), 1);
+        assert!(line.contains("result=deny"));
+        assert!(line.contains("basis=base:not_subscribed"));
+        assert!(line.contains("target=qq:group/2"));
+        assert!(line.contains("session=main"));
+
+        let allow = eval_access(
+            &grants,
+            GrantSubject::User,
+            GrantPlace::Group,
+            GrantCapability::RoomRead,
+            GrantTarget::Room(&inside),
+            std::slice::from_ref(&inside),
+        );
+        assert!(allow.allow);
+        assert!(!allow.should_audit(), "订阅内普通读写不产生审计");
+    }
+
+    #[test]
+    fn audit_target_is_truncated() {
+        let inside = RoomId::parse("qq:group/1").expect("房间");
+        let target = format!("qq:group/{}", "x".repeat(200));
+        let decision = eval_access(
+            &GrantsConfig::default(),
+            GrantSubject::User,
+            GrantPlace::Group,
+            GrantCapability::RoomRead,
+            GrantTarget::Room(&inside),
+            std::slice::from_ref(&inside),
+        );
+        let line = decision.audit_line(
+            GrantSubject::User,
+            GrantPlace::Group,
+            GrantCapability::RoomRead,
+            &target,
+            "main",
+        );
+        let truncated: String = target.chars().take(AUDIT_TARGET_MAX_CHARS).collect();
+        assert!(line.contains(&format!("target={truncated}…")));
     }
 
     #[test]
