@@ -82,6 +82,8 @@ pub struct Config {
     pub queues: QueueConfig,
     /// 插件 LKG 的失败阈值与观察窗口。
     pub lkg: LkgConfig,
+    /// 策略 provider 同步调用的通用超时。
+    pub provider_calls: ProviderCallsConfig,
     /// 带外通知（ntfy 兼容 HTTP）与 in-band 失败通知策略。没配整层不加载。
     pub notifications: Option<NotificationsConfig>,
     /// 记忆 worktree 的根目录。每个「会话 × 记忆」checkout 到这下面。
@@ -372,6 +374,25 @@ impl Default for LkgConfig {
         Self {
             max_failures: DEFAULT_LKG_MAX_FAILURES,
             window_secs: DEFAULT_LKG_WINDOW_SECS,
+        }
+    }
+}
+
+/// 策略 provider 同步调用的默认超时（毫秒）。0 = 关闭。
+pub const DEFAULT_PROVIDER_CALL_TIMEOUT_MS: u64 = 5000;
+/// 允许配置的最大 provider 超时，避免误配成几分钟。
+pub const MAX_PROVIDER_CALL_TIMEOUT_MS: u64 = 60_000;
+
+/// 策略 provider 同步调用的超时配置。`timeout_ms = 0` 表示不做超时（旧行为）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderCallsConfig {
+    pub timeout_ms: u64,
+}
+
+impl Default for ProviderCallsConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: DEFAULT_PROVIDER_CALL_TIMEOUT_MS,
         }
     }
 }
@@ -1115,6 +1136,8 @@ pub enum ConfigError {
     BadQueueLimit { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_lkg_config", field = field, value = value))]
     BadLkgConfig { field: String, value: u64 },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_provider_calls_timeout", timeout_ms = timeout_ms, max = MAX_PROVIDER_CALL_TIMEOUT_MS))]
+    BadProviderCallsTimeout { timeout_ms: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_notifications_config", field = field, value = value))]
     BadNotificationsConfig { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_notifications_url", url = url))]
@@ -1267,6 +1290,17 @@ impl Config {
                 window_secs: lkg_limit("window_secs", raw.window_secs, DEFAULT_LKG_WINDOW_SECS)?,
             },
             None => LkgConfig::default(),
+        };
+
+        let provider_calls = match raw.provider_calls {
+            Some(raw) => {
+                let timeout_ms = raw.timeout_ms.unwrap_or(DEFAULT_PROVIDER_CALL_TIMEOUT_MS);
+                if timeout_ms > MAX_PROVIDER_CALL_TIMEOUT_MS {
+                    return Err(ConfigError::BadProviderCallsTimeout { timeout_ms });
+                }
+                ProviderCallsConfig { timeout_ms }
+            }
+            None => ProviderCallsConfig::default(),
         };
 
         let notifications = match raw.notifications {
@@ -1728,6 +1762,7 @@ impl Config {
             retention,
             queues,
             lkg,
+            provider_calls,
             notifications,
             worktrees_root,
             default_on_turn_error,
@@ -2408,6 +2443,7 @@ struct RawConfig {
     retention: Option<RawRetention>,
     queues: Option<RawQueue>,
     lkg: Option<RawLkg>,
+    provider_calls: Option<RawProviderCalls>,
     notifications: Option<RawNotifications>,
     worktrees_root: Option<String>,
     /// 会话没配 `on_turn_error` 时的默认动作列表（默认空 = 只记日志）。
@@ -2535,6 +2571,12 @@ struct RawPlugin {
     timeout_ms: Option<u64>,
     #[serde(default)]
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawProviderCalls {
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3135,6 +3177,39 @@ mod tests {
                 Err(ConfigError::BadLkgConfig { .. })
             ));
         }
+    }
+
+    #[test]
+    fn provider_calls_timeout_defaults_and_validates() {
+        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        assert_eq!(
+            config.provider_calls.timeout_ms,
+            DEFAULT_PROVIDER_CALL_TIMEOUT_MS
+        );
+
+        let text = format!(
+            "{}\n[provider_calls]\ntimeout_ms = 100\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&text).expect("能解析");
+        assert_eq!(config.provider_calls.timeout_ms, 100);
+
+        let text = format!(
+            "{}\n[provider_calls]\ntimeout_ms = 0\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&text).expect("能解析");
+        assert_eq!(config.provider_calls.timeout_ms, 0, "0 = 关闭超时");
+
+        let text = format!(
+            "{}\n[provider_calls]\ntimeout_ms = {}\n",
+            config_with(ONE_CONNECTION, ONE_SESSION),
+            MAX_PROVIDER_CALL_TIMEOUT_MS + 1
+        );
+        assert!(matches!(
+            Config::parse(&text),
+            Err(ConfigError::BadProviderCallsTimeout { .. })
+        ));
     }
 
     #[test]

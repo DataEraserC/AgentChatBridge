@@ -8,11 +8,16 @@
 //! 其余（receive / clock / 换投递引擎 / 动态 platform adapter）按 ADR-0026 的 phase
 //! 逐个加，不在这里提前造空壳。
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use acb_proto::{Element, Omitted, Record, RecordKind, RoomId, Sender, ToolError, TurnReason};
 use serde_json::Value;
@@ -85,6 +90,12 @@ fn observe_one(id: &ProviderId, observer: &Arc<dyn RecordObserver>, record: &Rec
             )
         );
     }
+}
+
+/// provider 是否在 core 之外（外部插件/树外 manager）。内置 provider 走同步快路径，
+/// 不加超时、不做输入快照。
+pub fn provider_is_external(id: &ProviderId) -> bool {
+    id.namespace() != "acb"
 }
 
 /// 内置 wake provider 的 id。默认订阅没有显式写 provider 时用它。
@@ -501,6 +512,16 @@ pub enum PluginError {
     Manager { namespace: String, detail: String },
     #[error("{}", acb_i18n::t!("kernel.plugin.provider_error", id = id, detail = detail))]
     Provider { id: String, detail: String },
+    #[error("{}", acb_i18n::t!("kernel.plugin.provider_timeout", id = id, call = call, ms = ms))]
+    ProviderTimeout {
+        id: String,
+        call: &'static str,
+        ms: u64,
+    },
+    #[error("{}", acb_i18n::t!("kernel.plugin.provider_busy", id = id, call = call))]
+    ProviderBusy { id: String, call: &'static str },
+    #[error("{}", acb_i18n::t!("kernel.plugin.provider_executor_stopped", id = id, detail = detail))]
+    ProviderExecutorStopped { id: String, detail: String },
     #[error("{}", acb_i18n::t!("kernel.plugin.manager_depth", namespace = namespace, max = max))]
     ManagerDepth { namespace: String, max: usize },
     #[error("{}", acb_i18n::t!("kernel.plugin.manager_cycle", chain = .0))]
@@ -1701,6 +1722,105 @@ pub struct PluginManager {
     instantiate_errors: Mutex<HashMap<ProviderId, String>>,
     /// 安装过的 loader，用于按 provider 找到能卸载它的载体。
     loaders: Vec<Arc<dyn PluginLoader>>,
+    /// 外部 provider 的同步调用执行器。每个 provider 一个常驻 worker，
+    /// 超时后 worker 可能卡住，但不会按调用次数新增线程。
+    timed_executors: Mutex<HashMap<ProviderId, Arc<TimedExecutor>>>,
+    /// 外部 provider 调用超时（毫秒）。0 = 关闭。由 Bridge 按配置注入。
+    provider_timeout_ms: AtomicU64,
+}
+
+/// 把借用的 [`ProviderOptions`] 拷成可跨线程的 owned 形态。
+enum OwnedProviderOptions {
+    Wake(WakePolicy),
+    Access(AccessPolicy),
+    Delivery(DeliveryPolicy),
+    TurnError(TurnErrorPolicy),
+    Clock(ClockPolicy),
+    Receive(ReceivePolicy),
+    Route(RoutePolicy),
+    Observer,
+    Tool,
+    Task,
+    ToolAccess,
+    Prompt,
+    PlatformAdapter(Connection),
+    None,
+}
+
+impl OwnedProviderOptions {
+    fn from_options(options: ProviderOptions<'_>) -> Self {
+        match options {
+            ProviderOptions::Wake(policy) => Self::Wake(policy.clone()),
+            ProviderOptions::Access(policy) => Self::Access(policy.clone()),
+            ProviderOptions::Delivery(policy) => Self::Delivery(policy.clone()),
+            ProviderOptions::TurnError(policy) => Self::TurnError(policy.clone()),
+            ProviderOptions::Clock(policy) => Self::Clock(policy.clone()),
+            ProviderOptions::Receive(policy) => Self::Receive(policy.clone()),
+            ProviderOptions::Route(policy) => Self::Route(policy.clone()),
+            ProviderOptions::Observer => Self::Observer,
+            ProviderOptions::Tool => Self::Tool,
+            ProviderOptions::Task => Self::Task,
+            ProviderOptions::ToolAccess => Self::ToolAccess,
+            ProviderOptions::Prompt => Self::Prompt,
+            ProviderOptions::PlatformAdapter(connection) => {
+                Self::PlatformAdapter(connection.clone())
+            }
+            ProviderOptions::None => Self::None,
+        }
+    }
+
+    fn as_options(&self) -> ProviderOptions<'_> {
+        match self {
+            Self::Wake(policy) => ProviderOptions::Wake(policy),
+            Self::Access(policy) => ProviderOptions::Access(policy),
+            Self::Delivery(policy) => ProviderOptions::Delivery(policy),
+            Self::TurnError(policy) => ProviderOptions::TurnError(policy),
+            Self::Clock(policy) => ProviderOptions::Clock(policy),
+            Self::Receive(policy) => ProviderOptions::Receive(policy),
+            Self::Route(policy) => ProviderOptions::Route(policy),
+            Self::Observer => ProviderOptions::Observer,
+            Self::Tool => ProviderOptions::Tool,
+            Self::Task => ProviderOptions::Task,
+            Self::ToolAccess => ProviderOptions::ToolAccess,
+            Self::Prompt => ProviderOptions::Prompt,
+            Self::PlatformAdapter(connection) => ProviderOptions::PlatformAdapter(connection),
+            Self::None => ProviderOptions::None,
+        }
+    }
+}
+
+type TimedJob = Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>;
+type TimedReply = Result<Box<dyn Any + Send>, String>;
+
+struct TimedTask {
+    run: TimedJob,
+    reply: SyncSender<TimedReply>,
+}
+
+/// 一个 provider 的串行调用 worker。调用方用 `busy` 拒绝并发，
+/// 所以卡住的 provider 不会被排队请求继续放大。
+struct TimedExecutor {
+    tx: SyncSender<TimedTask>,
+    busy: Arc<AtomicBool>,
+}
+
+impl TimedExecutor {
+    fn spawn(id: &ProviderId) -> Self {
+        let (tx, rx) = sync_channel::<TimedTask>(1);
+        let busy = Arc::new(AtomicBool::new(false));
+        let worker_busy = Arc::clone(&busy);
+        let name = format!("provider-call:{}", id);
+        let _ = thread::Builder::new().name(name).spawn(move || {
+            while let Ok(task) = rx.recv() {
+                let result = catch_unwind(AssertUnwindSafe(task.run));
+                worker_busy.store(false, Ordering::SeqCst);
+                let _ = task
+                    .reply
+                    .send(result.map_err(|payload| panic_text(payload)));
+            }
+        });
+        Self { tx, busy }
+    }
 }
 
 /// 安装前的预检结果：先攒齐整棵子树，再落表，避免装到一半失败留下半棵树。
@@ -1739,6 +1859,98 @@ impl PluginManager {
         manager
     }
 
+    /// 由 Bridge 按 `[provider_calls].timeout_ms` 注入；0 = 关闭。
+    pub fn set_provider_timeout_ms(&self, ms: u64) {
+        self.provider_timeout_ms.store(ms, Ordering::SeqCst);
+    }
+
+    fn provider_timeout(&self) -> Option<Duration> {
+        let ms = self.provider_timeout_ms.load(Ordering::SeqCst);
+        (ms > 0).then(|| Duration::from_millis(ms))
+    }
+
+    /// 调用一个外部 provider 的方法并等待结果；超时返回明确错误。
+    ///
+    /// 每个 provider 一个常驻 worker：超时后该 worker 可能仍卡在 provider 里，
+    /// 但后续调用会因 `busy` 立即失败，不会按调用次数新增线程；worker 恢复后
+    /// 同一 provider 的调用可以继续。`job` 的输入必须是 owned 数据（调用点先做
+    /// 快照），因为线程要求 `'static`。
+    pub fn call_timed<R: Send + 'static>(
+        &self,
+        id: &ProviderId,
+        call: &'static str,
+        timeout: Duration,
+        job: impl FnOnce() -> R + Send + 'static,
+    ) -> Result<R, PluginError> {
+        let executor = self.timed_executor(id)?;
+        if executor
+            .busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(PluginError::ProviderBusy {
+                id: id.to_string(),
+                call,
+            });
+        }
+        let (reply, receiver) = sync_channel(1);
+        let task = TimedTask {
+            run: Box::new(move || Box::new(job())),
+            reply,
+        };
+        match executor.tx.try_send(task) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                executor.busy.store(false, Ordering::SeqCst);
+                return Err(PluginError::ProviderBusy {
+                    id: id.to_string(),
+                    call,
+                });
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                executor.busy.store(false, Ordering::SeqCst);
+                return Err(PluginError::ProviderExecutorStopped {
+                    id: id.to_string(),
+                    detail: "worker stopped".to_owned(),
+                });
+            }
+        }
+        match receiver.recv_timeout(timeout) {
+            Ok(Ok(boxed)) => match boxed.downcast::<R>() {
+                Ok(value) => Ok(*value),
+                Err(_) => Err(PluginError::Provider {
+                    id: id.to_string(),
+                    detail: "provider returned an unexpected result type".to_owned(),
+                }),
+            },
+            Ok(Err(panic)) => Err(PluginError::Provider {
+                id: id.to_string(),
+                detail: acb_i18n::t!("kernel.plugin.provider_panicked", panic = panic),
+            }),
+            Err(RecvTimeoutError::Timeout) => Err(PluginError::ProviderTimeout {
+                id: id.to_string(),
+                call,
+                ms: timeout.as_millis() as u64,
+            }),
+            Err(RecvTimeoutError::Disconnected) => Err(PluginError::ProviderExecutorStopped {
+                id: id.to_string(),
+                detail: "worker stopped".to_owned(),
+            }),
+        }
+    }
+
+    fn timed_executor(&self, id: &ProviderId) -> Result<Arc<TimedExecutor>, PluginError> {
+        let mut executors = self
+            .timed_executors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(Arc::clone(
+            executors
+                .entry(id.clone())
+                .or_insert_with(|| Arc::new(TimedExecutor::spawn(id))),
+        ))
+    }
+
     /// 实例化一个 manager provider；插件 panic 只影响这一个 provider。
     ///
     /// 失败写进 `instantiate_errors`（控制台 `lastError` 可见），并返回
@@ -1749,6 +1961,30 @@ impl PluginManager {
         id: &ProviderId,
         options: ProviderOptions<'_>,
     ) -> Result<ProviderInstance, PluginError> {
+        if let Some(timeout) = self.provider_timeout().filter(|_| provider_is_external(id)) {
+            let manager = Arc::clone(manager);
+            let owned_id = id.clone();
+            let owned_options = OwnedProviderOptions::from_options(options);
+            let result = self.call_timed(id, "instantiate", timeout, move || {
+                manager.instantiate(&owned_id, owned_options.as_options())
+            });
+            return match result {
+                Ok(Ok(instance)) => {
+                    self.instantiate_errors
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(id);
+                    Ok(instance)
+                }
+                Ok(Err(error)) | Err(error) => {
+                    self.instantiate_errors
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(id.clone(), error.to_string());
+                    Err(error)
+                }
+            };
+        }
         match catch_unwind(AssertUnwindSafe(|| manager.instantiate(id, options))) {
             Ok(Ok(instance)) => {
                 self.instantiate_errors
@@ -2534,14 +2770,20 @@ impl PluginManager {
         ids.sort();
         for id in ids {
             if let Some(observer) = self.observers.get(id) {
-                observe_one(id, observer, record);
+                if !self.observe_timed(id, observer, record) {
+                    observe_one(id, observer, record);
+                }
                 continue;
             }
             let Some(manager) = self.managers.get(id.namespace()) else {
                 continue;
             };
             match self.instantiate_safe(manager, id, ProviderOptions::Observer) {
-                Ok(ProviderInstance::Observer(observer)) => observe_one(id, &observer, record),
+                Ok(ProviderInstance::Observer(observer)) => {
+                    if !self.observe_timed(id, &observer, record) {
+                        observe_one(id, &observer, record);
+                    }
+                }
                 Ok(other) => eprintln!(
                     "{}",
                     acb_i18n::t!(
@@ -2580,13 +2822,14 @@ impl PluginManager {
 
     /// 依次询问所有工具访问 provider（按 provider id 排序，保证可复现）。
     ///
-    /// 返回 `None` = 没人拦；`Some((provider, reason))` = 拒绝本次调用。
-    /// provider 返回错误或 manager 实例化失败时按**失败关闭**处理：宁可拒绝，
-    /// 也不让一个坏掉的策略插件变成隐式放行。
+    /// 返回 `None` = 没人拦；`Some((provider, reason, provider_failed))` = 拒绝
+    /// 本次调用。provider 返回错误或 manager 实例化失败时按**失败关闭**处理：
+    /// 宁可拒绝，也不让一个坏掉的策略插件变成隐式放行。`provider_failed`
+    /// 表示这是 provider 自身出错（超时/panic/实例化失败），不是它主动拒绝。
     pub fn check_tool_access(
         &self,
         context: &ToolAccessContext<'_>,
-    ) -> Option<(ProviderId, String)> {
+    ) -> Option<(ProviderId, String, bool)> {
         let mut ids: Vec<&ProviderId> = self
             .descriptors
             .values()
@@ -2615,7 +2858,7 @@ impl PluginManager {
                             found = format!("{:?}", other.extension_point())
                         );
                         eprintln!("{reason}");
-                        return Some((id.clone(), reason));
+                        return Some((id.clone(), reason, true));
                     }
                     Err(error) => {
                         let reason = acb_i18n::t!(
@@ -2624,22 +2867,86 @@ impl PluginManager {
                             error = error
                         );
                         eprintln!("{reason}");
-                        return Some((id.clone(), reason));
+                        return Some((id.clone(), reason, true));
                     }
                 }
             };
-            match provider.check(context) {
+            let verdict = if let Some(timeout) =
+                self.provider_timeout().filter(|_| provider_is_external(id))
+            {
+                let owned_id = id.clone();
+                let owned_tool = context.tool.to_owned();
+                let owned_args = context.args.clone();
+                let owned_session = context.session.to_owned();
+                let owned_room = context.room.clone();
+                let owned_platform = context.platform.to_owned();
+                let owned_origin = context.origin_sender.map(ToOwned::to_owned);
+                let is_admin = context.is_admin;
+                let live = context.live;
+                let provider = Arc::clone(&provider);
+                match self.call_timed(id, "tool_access.check", timeout, move || {
+                    let context = ToolAccessContext {
+                        tool: &owned_tool,
+                        args: &owned_args,
+                        session: &owned_session,
+                        room: &owned_room,
+                        platform: &owned_platform,
+                        origin_sender: owned_origin.as_deref(),
+                        is_admin,
+                        live,
+                    };
+                    provider.check(&context)
+                }) {
+                    Ok(verdict) => verdict,
+                    Err(error) => {
+                        let reason = acb_i18n::t!(
+                            "kernel.plugin.tool_access_error",
+                            id = owned_id,
+                            error = error
+                        );
+                        eprintln!("{reason}");
+                        return Some((id.clone(), reason, true));
+                    }
+                }
+            } else {
+                provider.check(context)
+            };
+            match verdict {
                 Ok(ToolAccessVerdict::Allow) => {}
-                Ok(ToolAccessVerdict::Deny { reason }) => return Some((id.clone(), reason)),
+                Ok(ToolAccessVerdict::Deny { reason }) => {
+                    return Some((id.clone(), reason, false));
+                }
                 Err(error) => {
                     let reason =
                         acb_i18n::t!("kernel.plugin.tool_access_error", id = id, error = error);
                     eprintln!("{reason}");
-                    return Some((id.clone(), reason));
+                    return Some((id.clone(), reason, true));
                 }
             }
         }
         None
+    }
+
+    fn observe_timed(
+        &self,
+        id: &ProviderId,
+        observer: &Arc<dyn RecordObserver>,
+        record: &Record,
+    ) -> bool {
+        let Some(timeout) = self.provider_timeout().filter(|_| provider_is_external(id)) else {
+            return false;
+        };
+        let record = record.clone();
+        let observer = Arc::clone(observer);
+        if let Err(error) = self.call_timed(id, "observer.observe", timeout, move || {
+            observer.observe(&record);
+        }) {
+            eprintln!(
+                "{}",
+                acb_i18n::t!("kernel.plugin.observer_timeout", id = id, error = error)
+            );
+        }
+        true
     }
 
     /// 注册上下文注入 provider。
@@ -3269,6 +3576,59 @@ mod tests {
 
     fn test_room() -> RoomId {
         RoomId::new("qq", "group/1").expect("合法")
+    }
+
+    #[test]
+    fn timed_provider_call_times_out_without_growing_threads() {
+        let manager = PluginManager::with_native_builtins();
+        let slow = ProviderId::parse("test.slow").expect("合法");
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let result =
+            manager.call_timed(&slow, "test.call", Duration::from_millis(100), move || {
+                let _ = wait.recv();
+                1usize
+            });
+        assert!(
+            matches!(result, Err(PluginError::ProviderTimeout { .. })),
+            "{result:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(100)
+                && started.elapsed() < Duration::from_millis(250),
+            "按配置超时：{:?}",
+            started.elapsed()
+        );
+
+        let busy_start = std::time::Instant::now();
+        let busy = manager.call_timed(&slow, "test.call", Duration::from_millis(100), || 2usize);
+        assert!(
+            matches!(busy, Err(PluginError::ProviderBusy { .. })),
+            "{busy:?}"
+        );
+        assert!(
+            busy_start.elapsed() < Duration::from_millis(50),
+            "卡住的 provider 不接受排队"
+        );
+
+        let fast = ProviderId::parse("test.fast").expect("合法");
+        let other = manager.call_timed(&fast, "test.call", Duration::from_millis(100), || 3usize);
+        assert_eq!(other.expect("别的 provider 不受影响"), 3);
+
+        release.send(()).expect("能唤醒慢调用");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match manager.call_timed(&slow, "test.call", Duration::from_millis(100), || 4usize) {
+                Ok(value) => {
+                    assert_eq!(value, 4);
+                    break;
+                }
+                Err(PluginError::ProviderBusy { .. }) if std::time::Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("慢 provider 恢复后应当可用：{error:?}"),
+            }
+        }
     }
 
     fn context(room: &RoomId) -> WakeContext<'_> {
