@@ -3906,7 +3906,7 @@ impl<S: Store> Bridge<S> {
                     subscriptions: &subscriptions,
                 };
                 if let Some(decision) = grants::evaluate_platform(&ctx.config.grants, &query) {
-                    if decision.audited() {
+                    if decision.should_audit() {
                         self.audit_grant(
                             &ctx.session,
                             subject,
@@ -4265,7 +4265,7 @@ impl<S: Store> Bridge<S> {
             subscriptions: &subscriptions,
         };
         let decision = grants::evaluate_tool(&ctx.config.grants, &query);
-        if decision.audited() {
+        if decision.should_audit() {
             self.audit_grant(
                 &ctx.session,
                 subject,
@@ -4418,7 +4418,7 @@ impl<S: Store> Bridge<S> {
                     subscriptions: &subscriptions,
                 };
                 let decision = grants::evaluate_access(&config.grants, &query);
-                if decision.audited() {
+                if decision.should_audit() {
                     self.audit_grant(id, subject, place, capability, target, &decision);
                 }
                 (decision.allow, decision.basis)
@@ -4577,15 +4577,8 @@ impl<S: Store> Bridge<S> {
             GrantTarget::Connection(connection) => connection.to_owned(),
         };
         eprintln!(
-            "[access] subject={} place={} capability={} target={} result={} basis={} reason=\"{}\" session={}",
-            subject.as_str(),
-            place.as_str(),
-            capability.as_str(),
-            target,
-            if decision.allow { "allow" } else { "deny" },
-            decision.basis,
-            decision.reason.replace('"', "'"),
-            session,
+            "{}",
+            decision.audit_line(subject, place, capability, &target, session)
         );
     }
 

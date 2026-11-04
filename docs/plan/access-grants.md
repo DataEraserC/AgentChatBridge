@@ -315,6 +315,8 @@ Ticket {
 ## 8. 审计与可观测性
 
 - **启动告警**：配置 system admin 时打醒目一行，包含连接和账号，但不含 token。
+- **审计范围**：命中 `[grants]` 规则的豁免（allow/deny）与**所有 deny** 都记一行；普通订阅内的 `base:subscription` allow 不记。理由：拒绝才是事后追责要看的东西，普通 allow 逐条记只会淹没日志。
+- **审计字段**：`subject / place / capability / target / result / basis / reason`，与拒绝行保持同一格式；`target` 超过 120 字符截断。
 - **system admin 逐次审计**：主体 / 场所 / 能力 / 目标 / 房间 / 会话。
 - **票据审计**：申请、批准、使用、超时/撤销各一条；带 ticket id、turn id、target、ops。
 - **拒绝审计**：授权拒绝与 destructive 拒绝分别记录 reason；evaluator 返回的 `reason` 必须可读。
