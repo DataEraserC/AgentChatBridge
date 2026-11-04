@@ -1364,6 +1364,20 @@
 - commit：`026230a feat(deps): expose per-dependency health and tighten failure edges`
   （第①–③步收口合计）。
 
+## 2026-11-04 — 控制台依赖健康面板
+
+- 做了什么：概览页新增「依赖健康」卡片，逐条展示 `id` / `kind` / `state` /
+  `since` / `lastOkAt` / `attempts` / `lastError` + `lastErrorClass` /
+  `configured` / `expected`；时间用本地时间，空值显示「从未连上」。
+- 决策：不改后端 API，直接复用 `/api/dependencies`；`up` / `down` / `unknown`
+  使用三套独立 pill 样式（正常绿、不可用红、未观测灰）；刷新复用
+  `loadStatus()` 与既有标签切换；接口失败时保留上次成功快照并标注过期时间与错误。
+- 测试：`console_html_defines_distinct_dependency_state_rendering` 静态契约测试
+  锁定三态分支与三种样式；Node 语法检查 `console.html` 内嵌脚本；
+  `cargo test --workspace` 62 suite 全绿；clippy `-D warnings`、fmt 全绿。
+- 未做：仓库没有前端测试框架，未加浏览器级渲染测试；未改 supervisor / WASM /
+  插件加载区域。
+
 - 2026-11-04 — 决策索引：supervisor 平台无关、Nix profile 回滚、测试矩阵、回滚判据、反馈/工单、记忆管家、扩展工厂 → [supervision-packaging-issues.md](supervision-packaging-issues.md)
 
 ## 部署注意事项（nix-config 打包）

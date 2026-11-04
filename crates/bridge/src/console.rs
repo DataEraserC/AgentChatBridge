@@ -1268,6 +1268,19 @@ mod tests {
         assert!(!cookie_token_matches("xacb_console=s3cret", "s3cret"));
     }
 
+    #[test]
+    fn console_html_defines_distinct_dependency_state_rendering() {
+        // 前端没有独立测试框架；这条静态契约测试保证三态映射和三种视觉样式
+        // 不会被后续改动合并成同一分支。实际渲染仍由浏览器完成。
+        assert!(CONSOLE_HTML.contains("function depStateClass"));
+        assert!(CONSOLE_HTML.contains(r#"if (state === "up") return "dep-up";"#));
+        assert!(CONSOLE_HTML.contains(r#"if (state === "down") return "dep-down";"#));
+        assert!(CONSOLE_HTML.contains(r#"return "dep-unknown";"#));
+        for class in [".pill.dep-up", ".pill.dep-down", ".pill.dep-unknown"] {
+            assert!(CONSOLE_HTML.contains(class), "缺少样式 {class}");
+        }
+    }
+
     /// 一份能通过解析的最小配置。改字段测影响对比用。
     fn toml_with(wake_line: &str, endpoint_listen: &str, connection_url: &str) -> String {
         format!(
