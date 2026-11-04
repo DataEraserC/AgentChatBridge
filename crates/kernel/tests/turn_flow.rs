@@ -167,6 +167,65 @@ fn bridge_with_plugins(text: &str, plugins: PluginManager) -> (Bridge<MemoryStor
     (bridge, sends)
 }
 
+struct BlockingWake;
+
+impl WakeProvider for BlockingWake {
+    fn decide(&self, _options: &WakePolicy, _context: &WakeContext<'_>) -> WakeDecision {
+        thread::sleep(Duration::from_secs(5));
+        WakeDecision::Stay
+    }
+}
+
+#[test]
+fn blocking_wake_provider_times_out_without_blocking_ingest() {
+    let mut plugins = PluginManager::with_native_builtins();
+    let id = ProviderId::parse("test.blocking_wake").expect("合法");
+    plugins
+        .register_wake(
+            ProviderDescriptor::new(
+                id.clone(),
+                ExtensionPoint::Wake,
+                PLUGIN_API_VERSION,
+                vec![Capability::WakeDecision],
+            ),
+            Arc::new(BlockingWake),
+        )
+        .expect("能注册自定义 wake provider");
+    let text = format!(
+        "{}\n[provider_calls]\ntimeout_ms = 100\n",
+        fallback_config().replace(
+            "[sessions.subscriptions.wake]",
+            "[sessions.subscriptions.wake]\n        provider = \"test.blocking_wake\""
+        )
+    );
+    let (mut bridge, _) = bridge_with_plugins(&text, plugins);
+
+    let started = Instant::now();
+    let ingested = bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("超时按 Stay 处理，消息仍入库");
+    assert!(
+        started.elapsed() >= Duration::from_millis(100)
+            && started.elapsed() < Duration::from_millis(300),
+        "应当按 100ms 超时返回：{:?}",
+        started.elapsed()
+    );
+    assert!(
+        matches!(&ingested, Ingest::Recorded { woke, .. } if woke.is_empty()),
+        "超时按 Stay，不唤醒：{ingested:?}"
+    );
+
+    let second = Instant::now();
+    bridge
+        .ingest(message("qq:group/123", "10001", "又一条", true))
+        .expect("卡住的 provider 不应让后续入库阻塞");
+    assert!(
+        second.elapsed() < Duration::from_millis(50),
+        "第二次调用应因 busy 快速返回：{:?}",
+        second.elapsed()
+    );
+}
+
 /// 只投最新一条的 composer。
 struct LatestOnly;
 

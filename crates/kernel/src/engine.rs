@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::config::{
-    ClockPolicy, Config, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy,
+    ClockPolicy, Config, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy, WakeVerdict,
 };
 use crate::deps::DependencyRegistry;
 use crate::lkg::PluginLkg;
@@ -47,7 +47,7 @@ use crate::plugin::{
     DefaultTurnErrorProvider, DeliveryRequest, Health, InterruptScope, PluginError, PluginManager,
     PromptContext, PromptDraft, PromptProvider, ProviderId, ReceiveDecision, ReceiveRequest,
     ReloadScope, RouteAction, RouteContext, RouteDecision, SendContext, SendHook, SendOrigin,
-    TurnErrorRequest, WakeContext,
+    TurnErrorProvider, TurnErrorRequest, WakeContext, default_delivery_plan, provider_is_external,
 };
 use crate::plugin_meta::{PluginLifecycle, PluginSource};
 use crate::render;
@@ -286,8 +286,9 @@ pub(crate) struct PreparedSend {
     session: String,
     /// 工具正文还是失败通知。
     origin: SendOrigin,
-    /// 发送成功后要跑的观察钩子。
+    /// 发送成功后要跑的观察钩子及其 provider id（超时日志要带 id）。
     after_hooks: Vec<Arc<dyn SendHook>>,
+    after_hook_ids: Vec<ProviderId>,
     /// 改写正文的发送前钩子（provider id，按执行顺序）。回执里如实告诉 agent
     /// 「你写的正文被谁改过」，不然它以为发出去的是原文。
     modified_by: Vec<String>,
@@ -684,6 +685,7 @@ impl<S: Store> Bridge<S> {
         // 再包一层兜底只是多一次转发，不改变按连接分发。
         let outbound = Outbounds::fallback(outbound);
         let memory = MemoryRepo::new(config.worktrees_root.clone());
+        plugins.set_provider_timeout_ms(config.provider_calls.timeout_ms);
         let relay = config
             .file_relay
             .as_ref()
@@ -1795,6 +1797,8 @@ impl<S: Store> Bridge<S> {
             .map(|cfg| crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base));
         // 依赖表跟配置走：新增的登记为 unknown，移除的直接删掉。
         self.deps.retain_config(&config);
+        self.plugins
+            .set_provider_timeout_ms(config.provider_calls.timeout_ms);
         self.config = config;
         self.config_version += 1;
     }
@@ -2008,7 +2012,56 @@ impl<S: Store> Bridge<S> {
                 tags: &tags_ref,
                 sessions: &sessions,
             };
-            let decision =
+            let decision = if let Some(timeout) = provider_call_timeout(&self.config)
+                .filter(|_| provider_is_external(&policy.provider))
+            {
+                let id = policy.provider.clone();
+                let owned_policy = policy.clone();
+                let connection = room.connection.clone();
+                let owned_platform = platform.clone();
+                let owned_room = room.clone();
+                let sender = draft.sender.clone();
+                let is_admin = self.config.is_admin(&room, &draft.sender.id);
+                let kind = draft.kind.clone();
+                let elements = draft.elements.clone();
+                let owned_text = command.clone();
+                let at_self = draft.at_self;
+                let reply_to_self = draft.reply_to_self;
+                let has_body = draft.has_body();
+                let event = event_ref.map(ToOwned::to_owned);
+                let tags = tag_names.clone();
+                let owned_sessions = sessions.clone();
+                let provider = Arc::clone(&provider);
+                match self
+                    .plugins
+                    .call_timed(&id, "route.decide", timeout, move || {
+                        let tags_ref: Vec<&str> = tags.iter().map(String::as_str).collect();
+                        let context = RouteContext {
+                            connection: &connection,
+                            platform: &owned_platform,
+                            room: &owned_room,
+                            sender: &sender,
+                            is_admin,
+                            kind: &kind,
+                            elements: &elements,
+                            text: &owned_text,
+                            at_self,
+                            reply_to_self,
+                            has_body,
+                            event: event.as_deref(),
+                            tags: &tags_ref,
+                            sessions: &owned_sessions,
+                        };
+                        provider.decide(&owned_policy, &context)
+                    }) {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        self.note_plugin_failure(&id, &error.to_string(), now_millis());
+                        log_provider_call_failure(&id, "route.decide", &error);
+                        RouteDecision::Pass
+                    }
+                }
+            } else {
                 match catch_unwind(AssertUnwindSafe(|| provider.decide(policy, &context))) {
                     Ok(decision) => decision,
                     Err(payload) => {
@@ -2031,7 +2084,8 @@ impl<S: Store> Bridge<S> {
                         );
                         RouteDecision::Pass
                     }
-                };
+                }
+            };
             match decision {
                 RouteDecision::Pass => continue,
                 decision => {
@@ -2110,7 +2164,47 @@ impl<S: Store> Bridge<S> {
                 text: &text,
                 at_self: draft.at_self,
             };
-            if receive_provider.decide(&receive_policy, &receive_context) == ReceiveDecision::Drop {
+            let decision = match provider_call_timeout(&self.config)
+                .filter(|_| provider_is_external(&receive_policy.provider))
+            {
+                Some(timeout) => {
+                    let id = receive_policy.provider.clone();
+                    let policy = receive_policy.clone();
+                    let connection = room.connection.clone();
+                    let owned_platform = platform.clone();
+                    let owned_room = room.clone();
+                    let sender = draft.sender.clone();
+                    let kind = draft.kind.clone();
+                    let elements = draft.elements.clone();
+                    let owned_text = text.clone();
+                    let at_self = draft.at_self;
+                    let provider = Arc::clone(&receive_provider);
+                    match self
+                        .plugins
+                        .call_timed(&id, "receive.decide", timeout, move || {
+                            let request = ReceiveRequest {
+                                connection: &connection,
+                                platform: &owned_platform,
+                                room: &owned_room,
+                                sender: &sender,
+                                kind: &kind,
+                                elements: &elements,
+                                text: &owned_text,
+                                at_self,
+                            };
+                            provider.decide(&policy, &request)
+                        }) {
+                        Ok(decision) => decision,
+                        Err(error) => {
+                            self.note_plugin_failure(&id, &error.to_string(), now_millis());
+                            log_provider_call_failure(&id, "receive.decide", &error);
+                            return Err(error.into());
+                        }
+                    }
+                }
+                None => receive_provider.decide(&receive_policy, &receive_context),
+            };
+            if decision == ReceiveDecision::Drop {
                 return Ok(Ingest::Dropped { room });
             }
         }
@@ -2201,7 +2295,60 @@ impl<S: Store> Bridge<S> {
                 last_wake_at,
                 now,
             };
-            let verdict = provider.decide_with_reason(&subscriber.wake, &context);
+            let verdict = match provider_call_timeout(&self.config)
+                .filter(|_| provider_is_external(&subscriber.wake.provider))
+            {
+                Some(timeout) => {
+                    let id = subscriber.wake.provider.clone();
+                    let policy = subscriber.wake.clone();
+                    let session = subscriber.session.clone();
+                    let owned_room = room.clone();
+                    let connection = room.connection.clone();
+                    let owned_platform = platform.clone();
+                    let sender_id = record.sender.id.clone();
+                    let owned_text = text.clone();
+                    let at_self = record.at_self;
+                    let reply_to_self = record.reply_to_self;
+                    let has_body = record.has_body();
+                    let event = event_ref.map(ToOwned::to_owned);
+                    let tags = tag_names.clone();
+                    let provider = Arc::clone(&provider);
+                    match self
+                        .plugins
+                        .call_timed(&id, "wake.decide", timeout, move || {
+                            let tags_ref: Vec<&str> = tags.iter().map(String::as_str).collect();
+                            let context = WakeContext {
+                                session: &session,
+                                room: &owned_room,
+                                connection: &connection,
+                                platform: &owned_platform,
+                                sender_id: &sender_id,
+                                text: &owned_text,
+                                at_self,
+                                reply_to_self,
+                                has_body,
+                                event: event.as_deref(),
+                                tags: &tags_ref,
+                                unread: pending,
+                                last_wake_at,
+                                now,
+                            };
+                            provider.decide_with_reason(&policy, &context)
+                        }) {
+                        Ok(verdict) => verdict,
+                        Err(error) => {
+                            self.note_plugin_failure(&id, &error.to_string(), now_millis());
+                            log_provider_call_failure(&id, "wake.decide", &error);
+                            WakeVerdict {
+                                decision: WakeDecision::Stay,
+                                reason: None,
+                                delay_ms: 0,
+                            }
+                        }
+                    }
+                }
+                None => provider.decide_with_reason(&subscriber.wake, &context),
+            };
             if verdict.decision == WakeDecision::Wake {
                 woke.push(subscriber.session.clone());
                 self.enqueue(
@@ -3048,19 +3195,69 @@ impl<S: Store> Bridge<S> {
                 Arc::new(DefaultTurnErrorProvider)
             }
         };
-        let actions = provider.decide(
-            &policy,
-            &TurnErrorRequest {
-                session,
-                room,
-                error,
-                actions: config
-                    .session(session)
-                    .map(|session| session.on_turn_error.as_slice())
-                    .unwrap_or(&[]),
-                default_actions: &config.default_on_turn_error,
-            },
-        );
+        let actions = if let Some(timeout) =
+            provider_call_timeout(config).filter(|_| provider_is_external(&policy.provider))
+        {
+            let id = policy.provider.clone();
+            let owned_policy = policy.clone();
+            let owned_session = session.to_owned();
+            let owned_room = room.clone();
+            let owned_error = error.to_owned();
+            let owned_actions = config
+                .session(session)
+                .map(|session| session.on_turn_error.clone())
+                .unwrap_or_default();
+            let owned_defaults = config.default_on_turn_error.clone();
+            let provider = Arc::clone(&provider);
+            match self
+                .plugins
+                .call_timed(&id, "turn_error.decide", timeout, move || {
+                    provider.decide(
+                        &owned_policy,
+                        &TurnErrorRequest {
+                            session: &owned_session,
+                            room: &owned_room,
+                            error: &owned_error,
+                            actions: &owned_actions,
+                            default_actions: &owned_defaults,
+                        },
+                    )
+                }) {
+                Ok(actions) => actions,
+                Err(plugin_error) => {
+                    self.note_plugin_failure(&id, &plugin_error.to_string(), now_millis());
+                    log_provider_call_failure(&id, "turn_error.decide", &plugin_error);
+                    <DefaultTurnErrorProvider as TurnErrorProvider>::decide(
+                        &DefaultTurnErrorProvider,
+                        &policy,
+                        &TurnErrorRequest {
+                            session,
+                            room,
+                            error,
+                            actions: config
+                                .session(session)
+                                .map(|session| session.on_turn_error.as_slice())
+                                .unwrap_or(&[]),
+                            default_actions: &config.default_on_turn_error,
+                        },
+                    )
+                }
+            }
+        } else {
+            provider.decide(
+                &policy,
+                &TurnErrorRequest {
+                    session,
+                    room,
+                    error,
+                    actions: config
+                        .session(session)
+                        .map(|session| session.on_turn_error.as_slice())
+                        .unwrap_or(&[]),
+                    default_actions: &config.default_on_turn_error,
+                },
+            )
+        };
         let mut sent = 0usize;
         for action in actions {
             match action {
@@ -3862,7 +4059,12 @@ impl<S: Store> Bridge<S> {
 
     /// 工具访问否决点。放在 core 既有的「已知工具 + 轮次有效」判定之后；
     /// 插件只能在这里拒绝，`Allow` 不能覆盖 core 的任何拒绝。
-    fn check_tool_access(&self, ctx: &TurnCtx, tool: &str, args: &Value) -> Result<(), ToolError> {
+    fn check_tool_access(
+        &mut self,
+        ctx: &TurnCtx,
+        tool: &str,
+        args: &Value,
+    ) -> Result<(), ToolError> {
         let platform = ctx
             .config
             .connection(&ctx.room.connection)
@@ -3882,9 +4084,13 @@ impl<S: Store> Bridge<S> {
             is_admin,
             live: ctx.live,
         };
-        let Some((provider, reason)) = self.plugins.check_tool_access(&context) else {
+        let Some((provider, reason, provider_failed)) = self.plugins.check_tool_access(&context)
+        else {
             return Ok(());
         };
+        if provider_failed {
+            self.note_plugin_failure(&provider, &reason, now_millis());
+        }
         eprintln!(
             "{}",
             acb_i18n::t!(
@@ -4046,7 +4252,48 @@ impl<S: Store> Bridge<S> {
                 action,
                 subscriptions: &subscriptions,
             };
-            if provider.check(&session.access, &request) == AccessDecision::Allow {
+            let allowed = if let Some(timeout) = provider_call_timeout(config)
+                .filter(|_| provider_is_external(&session.access.provider))
+            {
+                let provider_id = session.access.provider.clone();
+                let owned_policy = session.access.clone();
+                let owned_session = id.to_string();
+                let owned_connection = connection.to_owned();
+                let owned_room = room.cloned();
+                let owned_origin = origin.cloned();
+                let owned_subscriptions = subscriptions.clone();
+                let provider = Arc::clone(&provider);
+                match self
+                    .plugins
+                    .call_timed(&provider_id, "access.check", timeout, move || {
+                        let request = AccessRequest {
+                            session: &owned_session,
+                            connection: &owned_connection,
+                            room: owned_room.as_ref(),
+                            origin_room: owned_origin.as_ref(),
+                            action,
+                            subscriptions: &owned_subscriptions,
+                        };
+                        provider.check(&owned_policy, &request)
+                    }) {
+                    Ok(decision) => decision == AccessDecision::Allow,
+                    Err(error) => {
+                        self.note_plugin_failure(&provider_id, &error.to_string(), now_millis());
+                        log_provider_call_failure(&provider_id, "access.check", &error);
+                        return Err(ToolError::new(
+                            ErrorCode::Internal,
+                            acb_i18n::t!(
+                                "kernel.engine.access_provider_timeout",
+                                provider = provider_id,
+                                error = error
+                            ),
+                        ));
+                    }
+                }
+            } else {
+                provider.check(&session.access, &request) == AccessDecision::Allow
+            };
+            if allowed {
                 return Ok(());
             }
             denied.push(format!("{} ({})", id, session.access.provider));
@@ -4225,7 +4472,38 @@ impl<S: Store> Bridge<S> {
                     last_wake_at,
                     last_record_at,
                 };
-                if provider.is_due(&policy, &context) {
+                let due = if let Some(timeout) = provider_call_timeout(&self.config)
+                    .filter(|_| provider_is_external(&policy.provider))
+                {
+                    let id = policy.provider.clone();
+                    let owned_policy = policy.clone();
+                    let owned_session = session.clone();
+                    let owned_room = room.clone();
+                    let provider = Arc::clone(&provider);
+                    match self
+                        .plugins
+                        .call_timed(&id, "clock.is_due", timeout, move || {
+                            let context = ClockContext {
+                                session: &owned_session,
+                                room: &owned_room,
+                                now,
+                                last_clock_at,
+                                last_wake_at,
+                                last_record_at,
+                            };
+                            provider.is_due(&owned_policy, &context)
+                        }) {
+                        Ok(due) => due,
+                        Err(error) => {
+                            self.note_plugin_failure(&id, &error.to_string(), now_millis());
+                            log_provider_call_failure(&id, "clock.is_due", &error);
+                            false
+                        }
+                    }
+                } else {
+                    provider.is_due(&policy, &context)
+                };
+                if due {
                     self.enqueue(
                         session.clone(),
                         room.clone(),
@@ -4344,15 +4622,51 @@ impl<S: Store> Bridge<S> {
                 Arc::new(DefaultDeliveryComposer)
             }
         };
-        let plan = composer.compose(
-            &delivery_policy,
-            &DeliveryRequest {
-                session: &pending.session,
-                room: &pending.room,
-                records: &records,
-                limit,
-            },
-        );
+        let plan = if let Some(timeout) = provider_call_timeout(&turn_config)
+            .filter(|_| provider_is_external(&delivery_policy.provider))
+        {
+            let id = delivery_policy.provider.clone();
+            let owned_policy = delivery_policy.clone();
+            let own_session = pending.session.clone();
+            let own_room = pending.room.clone();
+            let own_records = records.clone();
+            let composer = Arc::clone(&composer);
+            match self
+                .plugins
+                .call_timed(&id, "delivery.compose", timeout, move || {
+                    composer.compose(
+                        &owned_policy,
+                        &DeliveryRequest {
+                            session: &own_session,
+                            room: &own_room,
+                            records: &own_records,
+                            limit,
+                        },
+                    )
+                }) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.note_plugin_failure(&id, &error.to_string(), now_millis());
+                    log_provider_call_failure(&id, "delivery.compose", &error);
+                    default_delivery_plan(&DeliveryRequest {
+                        session: &pending.session,
+                        room: &pending.room,
+                        records: &records,
+                        limit,
+                    })
+                }
+            }
+        } else {
+            composer.compose(
+                &delivery_policy,
+                &DeliveryRequest {
+                    session: &pending.session,
+                    room: &pending.room,
+                    records: &records,
+                    limit,
+                },
+            )
+        };
         let omitted = plan.omitted;
         let more = omitted.map(|omitted| omitted.count);
         let mut by_id: HashMap<u64, Record> = records.into_iter().map(|r| (r.id, r)).collect();
@@ -4745,13 +5059,50 @@ impl<S: Store> Bridge<S> {
         let mut modified_by = Vec::new();
         for (id, hook) in outbound_policy.before.iter().zip(before_hooks.iter()) {
             let before = elements.clone();
-            hook.before_send(&hook_context, &mut elements)
-                .map_err(|error| {
-                    ToolError::new(
-                        ErrorCode::Internal,
-                        acb_i18n::t!("kernel.engine.before_hook_failed", error = error),
-                    )
-                })?;
+            if let Some(timeout) =
+                provider_call_timeout(&config).filter(|_| provider_is_external(id))
+            {
+                let owned_session = session.to_owned();
+                let owned_room = room.clone();
+                let owned_elements = elements.clone();
+                let hook = Arc::clone(hook);
+                match self
+                    .plugins
+                    .call_timed(id, "send.before", timeout, move || {
+                        let context = SendContext {
+                            session: &owned_session,
+                            room: &owned_room,
+                            origin,
+                        };
+                        let mut elements = owned_elements;
+                        let result = hook.before_send(&context, &mut elements);
+                        (result, elements)
+                    }) {
+                    Ok((Ok(()), updated)) => elements = updated,
+                    Ok((Err(error), _updated)) => {
+                        return Err(ToolError::new(
+                            ErrorCode::Internal,
+                            acb_i18n::t!("kernel.engine.before_hook_failed", error = error),
+                        ));
+                    }
+                    Err(error) => {
+                        self.note_plugin_failure(id, &error.to_string(), now_millis());
+                        log_provider_call_failure(id, "send.before", &error);
+                        return Err(ToolError::new(
+                            ErrorCode::Internal,
+                            acb_i18n::t!("kernel.engine.before_hook_timeout", error = error),
+                        ));
+                    }
+                }
+            } else {
+                hook.before_send(&hook_context, &mut elements)
+                    .map_err(|error| {
+                        ToolError::new(
+                            ErrorCode::Internal,
+                            acb_i18n::t!("kernel.engine.before_hook_failed", error = error),
+                        )
+                    })?;
+            }
             // 只报告真的改了正文的钩子；没改的也在回执里列出来只会变成噪音。
             if elements != before {
                 modified_by.push(id.to_string());
@@ -4796,6 +5147,7 @@ impl<S: Store> Bridge<S> {
             session: session.to_owned(),
             origin,
             after_hooks,
+            after_hook_ids: outbound_policy.after.clone(),
             modified_by,
         })
     }
@@ -4815,6 +5167,7 @@ impl<S: Store> Bridge<S> {
             session,
             origin,
             after_hooks,
+            after_hook_ids,
             modified_by,
             ..
         } = prepared;
@@ -4845,8 +5198,28 @@ impl<S: Store> Bridge<S> {
             room: &room,
             origin,
         };
-        for hook in &after_hooks {
-            hook.after_send(&hook_context, &sent);
+        for (id, hook) in after_hook_ids.iter().zip(after_hooks.iter()) {
+            if let Some(timeout) =
+                provider_call_timeout(&config).filter(|_| provider_is_external(id))
+            {
+                let owned_session = session.clone();
+                let owned_room = room.clone();
+                let owned_sent = sent.clone();
+                let hook = Arc::clone(hook);
+                if let Err(error) = self.plugins.call_timed(id, "send.after", timeout, move || {
+                    let context = SendContext {
+                        session: &owned_session,
+                        room: &owned_room,
+                        origin,
+                    };
+                    hook.after_send(&context, &owned_sent);
+                }) {
+                    self.note_plugin_failure(id, &error.to_string(), now_millis());
+                    log_provider_call_failure(id, "send.after", &error);
+                }
+            } else {
+                hook.after_send(&hook_context, &sent);
+            }
         }
 
         let account = config.account_of_room(&room);
@@ -6816,6 +7189,25 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// 配置里的 provider 超时；0 = 不启用，走原来的同步快路径。
+fn provider_call_timeout(config: &Config) -> Option<Duration> {
+    (config.provider_calls.timeout_ms > 0)
+        .then(|| Duration::from_millis(config.provider_calls.timeout_ms))
+}
+
+/// 外部 provider 的调用失败统一落一行日志；调用方再决定 fallback。
+fn log_provider_call_failure(id: &ProviderId, call: &'static str, error: &PluginError) {
+    eprintln!(
+        "{}",
+        acb_i18n::t!(
+            "kernel.engine.provider_call_failed",
+            provider = id,
+            call = call,
+            error = error
+        )
+    );
 }
 
 /// 在独立线程里调用一次 prompt provider；超时或 panic 都按“跳过该来源”处理。

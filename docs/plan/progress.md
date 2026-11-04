@@ -1221,6 +1221,64 @@
 - 可回退：删掉 `[notifications]` 配置即整层不加载；代码可整体删除而不影响
   依赖表与 turn 通道。
 
+## 2026-11-04 — 策略 provider 同步调用通用超时
+
+- 修复前现状（最坏情况都是永久阻塞）：
+  - `resolve_*` 本身是 Root 的 map/descriptor 查找；只有委托树外 manager 的
+    `instantiate` 会执行插件代码，没有任何超时。
+  - `wake.decide_with_reason`、`receive.decide`、`route.decide`、`access.check`、
+    `delivery.compose`、`clock.is_due`、`turn_error.decide`、`send.before/after`、
+    `observer.observe`、`tool_access.check` 全部在调用线程同步执行；只有 route 与
+    observer 有 `catch_unwind`，没有超时。卡住时会分别阻塞 ingest、tool_call、
+    open_turn、end_turn、clock tick 或发送，且没有明确错误。
+  - 已有例外：prompt provider 是独立线程 + 50ms 超时；process 工具插件是
+    100–60000ms 每调用超时 + 500ms 宽限，超时会杀子进程重启。
+- 实现：
+  - `[provider_calls] timeout_ms`，默认 5000ms；`0` 关闭超时（行为回到旧语义），
+    上限 60000ms。
+  - `PluginManager::call_timed`：每个外部 provider 一个常驻 worker 线程；
+    调用方用 `busy` 拒绝并发。超时返回 `PluginError::ProviderTimeout`，
+    panic 返回 `PluginError::Provider`，worker 停掉返回
+    `ProviderExecutorStopped`，都带 provider id 与 call 名。
+  - 覆盖点：外部 provider 的 wake / receive / route / access / delivery /
+    clock / turn_error / send before / send after / observer / tool_access，
+    以及树外 manager 的 `instantiate`。
+  - 快路径：`acb.*` 内置 provider 直接同步调用，不做输入快照、不跨线程、
+    不付超时代价；只有 `namespace != acb` 的外部 provider 走 `call_timed`。
+  - 超时后的 fallback：
+    - wake → Stay；route → Pass；clock → 不 due；delivery → 默认 composer 计划；
+    - receive → 返回错误、不入库；access / send.before → 返回明确 ToolError；
+    - turn_error → 默认 provider 的动作；send.after / observer → 跳过并记日志；
+    - tool_access → 拒绝（安全闸门 fail closed）。
+- 线程语义：超时那次 worker 线程仍可能卡在 provider 里，无法强制中断；但
+  每个 provider 最多一个这样的线程，后续调用因 `busy` 立即失败，不会按调用
+  次数新增线程；worker 恢复后同一 provider 的调用继续可用。
+- LKG 判定：**超时算一次失败**。引擎侧的解析/实例化、策略决策、发送钩子和
+  tool_access 超时都会经过 `note_plugin_failure`，与解析失败、panic 共用
+  `[lkg]` 阈值；理由是超时是外部 provider 运行期故障，如果忽略，一个永久
+  卡死的插件永远不会触发回滚。内置 provider 不走超时，因此不受影响。
+  `observer.observe` 是只读旁路：超时只记日志、跳过该观察者，不计数（它不参与
+  任何决策，且 PluginManager 不持有 Bridge 的 LKG 状态）。分 class 阈值
+  （如 panic 1 次回滚）仍是后续议题，本次未改。
+- 测试：
+  - `plugin.rs`：永久阻塞调用 → 100ms 超时；随后同一 provider 快速返回
+    busy；另一个 provider 正常；释放阻塞后同一 provider 恢复可用。
+  - `turn_flow.rs`：外部 blocking wake provider 让 `ingest` 在 100ms 返回，
+    消息仍入库、不唤醒；第二次入库因 busy <50ms 返回。
+  - 配置测试覆盖默认值、0 关闭、超上限拒绝。
+- 证据：`cargo test --workspace`、clippy、fmt 全绿。
+
+## 部署注意事项（nix-config 打包）
+
+- `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置
+  `ACB_NOTIFIER_BIN`）。带外通知进程按 `acb-bridge` 同级路径找它。
+- `cargo build -p acb-bridge` **不会**构建 `acb-notifier`；需要同时构建
+  `acb-notifier-process`（或 `cargo build --workspace`）。nix-config 打包时
+  要把 `acb-notifier` 一并装进 bin 目录，否则 `[notifications]` 配置会在启动时
+  报 `cannot spawn acb-notifier` 并跳过该层（桥本身继续运行）。
+- 其他第二进制/资源（`process-tool-fixture` 等）仍在各自 crate，不需要进
+  生产包。
+
 ## 待办（用户指定，暂不实现）
 
 - LKG 失败阈值分 class：panic 类失败也许应该 1 次就回滚，不应与 provider 解析
