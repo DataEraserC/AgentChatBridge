@@ -87,7 +87,9 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
     name: "access_request",
     description: `申请一次性访问票据。一条 item = 单张；多条 = 批量（共享 batch_id，每张仍是独立票据）。
 申请本身不执行任何平台动作；core 会把归一化后的目标/op 发给 system admin 私信，由人在私信里批准或拒绝。
-批准后票据在有效期内可用一次；用后即废，下一轮不会自动带上。
+批准后 core 按申请时保存的 params 快照直接执行 send_message / send_message_to / platform_call:<method>；
+快照必须完整（例如 send 的 elements、平台方法的全部参数），批准后不能再改。
+只读 op（get_history 等）不由 core 执行：批准后票据保持 active，由会话在有效期内自己重试一次。
 票据只放宽「能不能碰这个房间」的目标判定：不绕过连接的 allow_destructive，也不授予 plugin 全权。
 同一个会话的审批消息会聚合成一条，在本轮结束时发出；冷却期内的申请会被明确拒绝并给出剩余秒数。
 op 列表要具体：send_message，send_message_to，get_history，fetch_records，get_notes，set_note，del_note，
@@ -108,6 +110,11 @@ get_platform_events，wait_message，或 platform_call:<method>（如 platform_c
                 type: "array",
                 items: { type: "string" },
                 description: "要放行的具体 op，最多 8 个",
+              },
+              params: {
+                type: "object",
+                description:
+                  "挂起动作的参数快照（只存内存、上限 256 KiB）。send 类给 elements；platform_call 给方法参数。只读 op 可省略。",
               },
             },
             required: ["target", "ops"],

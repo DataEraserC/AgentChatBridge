@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use acb_proto::RoomId;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::grants::{GrantCapability, GrantPlace, GrantSubject, truncate_target};
 
@@ -46,6 +47,8 @@ pub const MAX_REQUESTS_PER_TURN: usize = 3;
 pub const MAX_LIVE_PER_SESSION: usize = 8;
 /// 单次批量申请最多几张票据。
 pub const MAX_ITEMS_PER_BATCH: usize = 8;
+/// 单个参数快照的最大字节数。
+pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
 /// 单张票据最多列几个 op。
 pub const MAX_OPS: usize = 8;
 /// 单个 op 的最大长度。
@@ -91,9 +94,17 @@ pub struct AccessTicket {
     pub principal: GrantSubject,
     pub place: GrantPlace,
     pub session: String,
+    /// 申请时所在的房间（原会话流水写结果指针的位置）。
+    pub request_room: RoomId,
     pub target: RoomId,
     pub ops: Vec<String>,
+    /// 挂起动作的参数快照；只存内存，随票据终态释放。
+    pub params: Option<Value>,
+    /// 申请轮次的触发者；唤醒执行结果时沿用，不继承管理员身份。
+    pub origin_sender: Option<String>,
     pub capabilities: BTreeSet<GrantCapability>,
+    /// 进程内的创建序号；批量执行按它还原申请顺序。
+    pub seq: u64,
     pub created_at: i64,
     pub expires_at: i64,
     pub state: TicketState,
@@ -104,6 +115,12 @@ pub struct AccessTicket {
     pub used_at: Option<i64>,
     /// 审批私信是否已经把这张票据列给管理员。同轮多张票据在收工时聚合发送。
     pub announced: bool,
+    /// core 执行状态：succeeded / failed / skipped。
+    pub execution_status: Option<String>,
+    pub executed_at: Option<i64>,
+    pub result: Option<Value>,
+    pub failure_reason: Option<String>,
+    pub audit_ref: Option<String>,
 }
 
 /// 一次申请的全部输入。
@@ -112,8 +129,11 @@ pub struct TicketRequest {
     pub principal: GrantSubject,
     pub place: GrantPlace,
     pub session: String,
+    pub request_room: RoomId,
     pub target: RoomId,
     pub ops: Vec<String>,
+    pub params: Option<Value>,
+    pub origin_sender: Option<String>,
     pub capabilities: BTreeSet<GrantCapability>,
     pub request_turn: String,
     pub batch_id: Option<String>,
@@ -170,6 +190,7 @@ impl AccessTickets {
                 && ticket.session == request.session
                 && ticket.target == request.target
                 && ticket.ops == ops
+                && ticket.params == request.params
                 && ticket.capabilities == request.capabilities
         }) {
             return Ok(TicketReply {
@@ -235,7 +256,15 @@ impl AccessTickets {
             if request.session != session || request.request_turn != turn {
                 return Err("batch items must share session and turn".to_owned());
             }
-            let key = (request.target.to_string(), ops.join("|"));
+            let key = (
+                request.target.to_string(),
+                ops.join("|"),
+                request
+                    .params
+                    .as_ref()
+                    .map(Value::to_string)
+                    .unwrap_or_default(),
+            );
             if !seen.insert(key) {
                 return Err(
                     "batch contains duplicate target + ops; whole batch rejected".to_owned(),
@@ -246,6 +275,7 @@ impl AccessTickets {
                     && ticket.session == request.session
                     && ticket.target == request.target
                     && ticket.ops == ops
+                    && ticket.params == request.params
                     && ticket.capabilities == request.capabilities
             }) {
                 return Err("batch item already has a live ticket; whole batch rejected".to_owned());
@@ -296,9 +326,13 @@ impl AccessTickets {
             principal: request.principal,
             place: request.place,
             session: request.session,
+            request_room: request.request_room,
             target: request.target,
             ops,
+            params: request.params,
+            origin_sender: request.origin_sender,
             capabilities: request.capabilities,
+            seq: self.seq,
             created_at: request.now,
             expires_at: request.now.saturating_add(PENDING_TTL_MS),
             state: TicketState::PendingApproval,
@@ -308,6 +342,11 @@ impl AccessTickets {
             approver: None,
             used_at: None,
             announced: false,
+            execution_status: None,
+            executed_at: None,
+            result: None,
+            failure_reason: None,
+            audit_ref: None,
         };
         self.audit("request", &ticket, "requested");
         let reply = TicketReply {
@@ -358,7 +397,7 @@ impl AccessTickets {
             .filter(|ticket| ticket.state == TicketState::PendingApproval && !ticket.announced)
             .cloned()
             .collect();
-        pending.sort_by_key(|ticket| (ticket.created_at, ticket.id.clone()));
+        pending.sort_by_key(|ticket| (ticket.created_at, ticket.seq));
         pending
     }
 
@@ -381,6 +420,39 @@ impl AccessTickets {
         }
     }
 
+    /// 记录 core 执行结果。active 票据执行后置终态 `used`（即使失败也不再复用）；
+    /// 已经过期/撤销/用过的票据保持原终态，只补执行字段，不把终态改写成 used。
+    pub fn complete_execution(
+        &mut self,
+        id: &str,
+        status: &str,
+        result: Option<Value>,
+        failure: Option<String>,
+        audit_ref: &str,
+        now: i64,
+    ) -> Result<(), String> {
+        let snapshot = {
+            let ticket = self
+                .tickets
+                .get_mut(id)
+                .ok_or_else(|| format!("unknown ticket {id}"))?;
+            if ticket.state == TicketState::Active {
+                ticket.state = TicketState::Used;
+                ticket.used_at = Some(now);
+            }
+            ticket.execution_status = Some(status.to_owned());
+            ticket.executed_at = Some(now);
+            ticket.result = result;
+            ticket.failure_reason = failure;
+            ticket.audit_ref = Some(audit_ref.to_owned());
+            ticket.nonce.clear();
+            ticket.params = None;
+            ticket.snapshot()
+        };
+        self.audit("execute", &snapshot, status);
+        Ok(())
+    }
+
     /// 按 batch id 取票据（只读，按创建时间排序）。
     pub fn for_batch(&self, batch_id: &str) -> Vec<&AccessTicket> {
         let mut tickets: Vec<&AccessTicket> = self
@@ -388,7 +460,7 @@ impl AccessTickets {
             .values()
             .filter(|ticket| ticket.batch_id.as_deref() == Some(batch_id))
             .collect();
-        tickets.sort_by_key(|ticket| (ticket.created_at, ticket.id.clone()));
+        tickets.sort_by_key(|ticket| (ticket.created_at, ticket.seq));
         tickets
     }
 
@@ -474,6 +546,7 @@ impl AccessTickets {
             ticket.approval_ref = Some(approval_ref.to_owned());
             ticket.approver = Some(approver.to_owned());
             ticket.nonce.clear();
+            ticket.params = None;
             let snapshot = ticket.snapshot();
             self.audit("deny", &snapshot, "denied");
             replies.push(reply(&snapshot, false));
@@ -552,6 +625,7 @@ impl AccessTickets {
             ticket.approval_ref = Some(approval_ref.to_owned());
             ticket.approver = Some(approver.to_owned());
             ticket.nonce.clear();
+            ticket.params = None;
             ticket.snapshot()
         };
         self.audit("deny", &snapshot, "denied");
@@ -576,6 +650,7 @@ impl AccessTickets {
             ticket.state = TicketState::Revoked;
             ticket.approver = Some(approver.to_owned());
             ticket.nonce.clear();
+            ticket.params = None;
             ticket.snapshot()
         };
         self.audit("revoke", &snapshot, "revoked");
@@ -604,13 +679,14 @@ impl AccessTickets {
                     && ticket.ops.iter().any(|listed| listed == op)
                     && ticket.expires_at > now
             })
-            .min_by_key(|ticket| (ticket.created_at, ticket.id.as_str()))
+            .min_by_key(|ticket| (ticket.created_at, ticket.seq))
             .map(|ticket| ticket.id.clone())?;
         let snapshot = {
             let ticket = self.tickets.get_mut(&id)?;
             ticket.state = TicketState::Used;
             ticket.used_at = Some(now);
             ticket.nonce.clear();
+            ticket.params = None;
             ticket.snapshot()
         };
         self.audit("use", &snapshot, "used");
@@ -627,12 +703,13 @@ impl AccessTickets {
     }
 
     /// 过期扫描：pending/active 到点即失效。每次请求/批准/使用前都会跑一次。
-    fn sweep(&mut self, now: i64) {
+    pub(crate) fn sweep(&mut self, now: i64) {
         let mut expired = Vec::new();
         for ticket in self.tickets.values_mut() {
             if ticket.state.live() && ticket.expires_at <= now {
                 ticket.state = TicketState::Expired;
                 ticket.nonce.clear();
+                ticket.params = None;
                 expired.push(ticket.snapshot());
             }
         }
@@ -782,8 +859,11 @@ mod tests {
             principal: GrantSubject::User,
             place: GrantPlace::Group,
             session: "main".to_owned(),
+            request_room: RoomId::parse("qq:group/123").expect("房间"),
             target: target(),
             ops: ops.iter().map(|op| (*op).to_owned()).collect(),
+            params: Some(serde_json::json!({"elements": [{"type": "text", "text": "x"}]})),
+            origin_sender: Some("user1".to_owned()),
             capabilities: BTreeSet::from([GrantCapability::RoomWrite]),
             request_turn: "turn-1".to_owned(),
             batch_id: None,
@@ -893,6 +973,64 @@ mod tests {
         assert_eq!(
             tickets.get(&expired.id).expect("还在簿上").state,
             TicketState::Expired
+        );
+    }
+
+    #[test]
+    fn expired_execution_is_skipped_and_state_is_kept() {
+        let mut tickets = AccessTickets::new();
+        let reply = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        tickets
+            .approve(&reply.id, &reply.nonce, "ref", "system_admin", 2000)
+            .expect("批准");
+        let now = 2000 + ACTIVE_TTL_MS + 1;
+        tickets.sweep(now);
+        tickets
+            .complete_execution(
+                &reply.id,
+                "skipped",
+                None,
+                Some("ticket is expired".to_owned()),
+                "ref",
+                now,
+            )
+            .expect("记录跳过");
+        let ticket = tickets.get(&reply.id).expect("还在簿上");
+        assert_eq!(ticket.state, TicketState::Expired, "终态不能被改写成 used");
+        assert_eq!(ticket.execution_status.as_deref(), Some("skipped"));
+        assert_eq!(ticket.failure_reason.as_deref(), Some("ticket is expired"));
+    }
+
+    #[test]
+    fn active_execution_consumes_the_ticket() {
+        let mut tickets = AccessTickets::new();
+        let reply = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        tickets
+            .approve(&reply.id, &reply.nonce, "ref", "system_admin", 2000)
+            .expect("批准");
+        tickets
+            .complete_execution(&reply.id, "succeeded", None, None, "ref", 2100)
+            .expect("记录执行");
+        let ticket = tickets.get(&reply.id).expect("还在簿上");
+        assert_eq!(ticket.state, TicketState::Used);
+        assert_eq!(ticket.execution_status.as_deref(), Some("succeeded"));
+        assert_eq!(ticket.executed_at, Some(2100));
+        assert!(ticket.params.is_none(), "终态释放参数快照");
+        assert!(
+            tickets
+                .authorize(
+                    "main",
+                    &target(),
+                    GrantCapability::RoomWrite,
+                    "send_message_to",
+                    2101
+                )
+                .is_none(),
+            "core 执行后票据已消费"
         );
     }
 

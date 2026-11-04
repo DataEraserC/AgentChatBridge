@@ -236,6 +236,10 @@ Pack 拆分（用于分层设计，不默认启用）：
 
 **待实验（先设计 + 基准，不默认启用）**
 
+- **工具数上限 30（计划，不实现）**：`TOOL_NAMES` 超过 30 个时不再平铺新增工具，改走
+  「单入口 + op」：`memory_git_status/log/diff/blame/add/commit/push/branch` 八件套收成
+  `memory_git { op, args }`；`get_notes` / `set_note` / `del_note` 合并为 `notes { op, ... }`。
+  入口的错误信息必须列出可用 op，避免可发现性下降。
 - **分层工具包**：按会话能力注册 core / notes / memory / extensions / feedback / task /
   describe_plugins 等 pack。基线 9,058 tokens；最小 core pack 约 5,541 tokens，
   不含 memory 的会话可省约 1,206，普通成员可省 extensions 约 608 + feedback 约 389。

@@ -256,14 +256,18 @@ AccessTicket {
   principal,         // 申请时的 subject（user / bot_admin / ...）
   place,             // 申请时的场所（private / group / ...）
   session,           // 票据只属于这个会话
+  request_room,      // 申请时所在房间：结果指针写这里，唤醒也落在这一间
   target_room,       // 单目标房间，不覆盖连接或全局
   ops: [op_id],      // 具体 op，例如 send_message_to / platform_call:group.kick
+  params_snapshot,   // 挂起动作参数；只存内存，终态立即释放
+  origin_sender,     // 申请轮次触发者；唤醒结果时沿用，不继承管理员
   capabilities,      // 由 ops 推导：room_read / room_write / platform / destructive
   created_at,
   expires_at,
   state,             // pending_approval / active / used / expired / revoked / denied
   request_turn,      // 申请轮次，只用于审计溯源，不是使用范围
   approval_ref,      // 批准/拒绝命令的记录标识：<room>#<record-id>
+  execution,         // { status, executed_at, result, failure_reason, audit_ref }
 }
 ```
 
@@ -271,7 +275,7 @@ AccessTicket {
   审批回来时轮次往往已经结束。`request_turn` 只用于审计；票据有效期内由同一会话使用。
 - **单目标房间**：一张票据只覆盖一个房间；连接级访问（好友列表等）不走票据。
 - **具体 op 列表**：只放行列出的 op；`platform_call` 必须写成 `platform_call:<method>`。
-- **用后即废**：命中一次 `ensure_room_access` 就置 `used`。即使随后被
+- **用后即废**：命中一次 `ensure_room_access` 或批准后由 core 执行一次就置 `used`。即使随后被
   `allow_destructive` 拒绝，也不退回票据（fail closed）。
 - **过期**：pending 10 分钟；批准后 active 2 分钟。到点即 `expired`。
 - **可撤销**：私信管理员可以 `/revoke <id>`，立刻置 `revoked`。
@@ -424,6 +428,8 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 3. **接口扩展**：已完成。`AccessRequest` / `ToolAccessContext` 带 subject/place；旧 provider 直接移除。
 4. **票据**：已完成。统一 `access_request { items }`（单条/批量）、私信 `/approve` `/deny` `/revoke`、
    批量 `/approve <batch_id>`、状态机、TTL、冷却聚合、`access_ticket_get` 只读查询。
+   「批准即执行」已落地：参数快照、core 执行 send/platform、`ticket_result` 指针、唤醒与降级；
+   只读 op 不执行，票据保持 `active` 由会话在有效期内重试。
 5. **审计**：已完成。system admin 逐次、deny、票据六事件、批量批准/拒绝汇总行、destructive 拒绝。
 6. **测试**：已完成。场所/主体矩阵、无主体轮次、票据生命周期、单次使用、群内零常驻、fail closed。
 
@@ -441,7 +447,7 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 
 ---
 
-## 13. 批准即执行（设计，未实现）
+## 13. 批准即执行（已实现）
 
 方向已定：**批准由 core 直接执行挂起的动作**，不唤醒模型重发。模型重发的参数可以被改写；目标房间能校验，
 消息正文不能。core 保存的快照才是管理员批准的那一份。
@@ -465,6 +471,8 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 - 执行前仍检查 `MethodSpec.risk = Destructive` 的 `allow_destructive`；票据不放宽这个闸门。
 - 票据不授予 `plugin` 能力，不改变会话的常态 grants；执行只使用票据快照里的目标/op/参数。
 - 单条执行结果：`succeeded` / `failed` / `skipped`，附失败原因；批量逐条记录，不因一条失败中止后续。
+- 只读 op（`get_history` 等）不由 core 执行：票据保持 `active`，由会话在有效期内自己重试一次；
+  混合票据（send + 只读）执行 send 后即 `used`，只读部分记为 `skipped`。
 
 ### 13.3 结果投递：只带指针，不塞正文
 

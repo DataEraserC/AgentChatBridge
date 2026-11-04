@@ -59,7 +59,9 @@ use crate::storage::{
     Cursor, FEEDBACK_CAP, Feedback, FeedbackReply, MIN_KEPT, Note, NoteKey, NoteKind, PrunePlan,
     RecordDraft, StorageError, Store, TopicStatus, unread,
 };
-use crate::tickets::{ACTIVE_TTL_MS, AccessTickets, BatchReply, TicketReply, TicketRequest};
+use crate::tickets::{
+    ACTIVE_TTL_MS, AccessTicket, AccessTickets, BatchReply, TicketReply, TicketRequest, TicketState,
+};
 use crate::tools::{
     AccessRequestArgs, AccessTicketGetArgs, AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT,
     DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs, DescribePluginsArgs, EventsArgs, ExtensionsListArgs,
@@ -2444,18 +2446,22 @@ impl<S: Store> Bridge<S> {
         let approval_ref = format!("{}#{}", room, record.id);
         let approver = format!("{}:{}", room.connection, draft.sender.id);
         let now = now_millis();
-        let confirmation = match verb.as_str() {
+        let mut approved = Vec::new();
+        let mut confirmation = match verb.as_str() {
             "/approve" => match (parts.next(), parts.next()) {
                 (Some(id), Some(nonce)) => {
                     match self
                         .access_tickets
                         .approve(id, nonce, &approval_ref, &approver, now)
                     {
-                        Ok(reply) => format!(
-                            "票据 {} 已批准：{} 分钟内可用一次。",
-                            reply.id,
-                            ACTIVE_TTL_MS / 60_000
-                        ),
+                        Ok(reply) => {
+                            approved.push(reply.id.clone());
+                            format!(
+                                "票据 {} 已批准：{} 分钟内可用一次。",
+                                reply.id,
+                                ACTIVE_TTL_MS / 60_000
+                            )
+                        }
                         Err(reason) => format!("授权命令失败：{reason}"),
                     }
                 }
@@ -2464,12 +2470,15 @@ impl<S: Store> Bridge<S> {
                         .access_tickets
                         .approve_batch(batch_id, &approval_ref, &approver, now)
                     {
-                        Ok(replies) => format!(
-                            "批次 {} 已整批批准，共 {} 项；每项 {} 分钟内单次可用。",
-                            batch_id,
-                            replies.len(),
-                            ACTIVE_TTL_MS / 60_000
-                        ),
+                        Ok(replies) => {
+                            approved.extend(replies.iter().map(|reply| reply.id.clone()));
+                            format!(
+                                "批次 {} 已整批批准，共 {} 项；每项 {} 分钟内单次可用。",
+                                batch_id,
+                                replies.len(),
+                                ACTIVE_TTL_MS / 60_000
+                            )
+                        }
                         Err(reason) => format!("授权命令失败：{reason}"),
                     }
                 }
@@ -2507,6 +2516,11 @@ impl<S: Store> Bridge<S> {
             },
             _ => unreachable!("verb already matched"),
         };
+        let executed = self.execute_approved_tickets(&approved, now);
+        if !executed.is_empty() {
+            confirmation.push_str("\n执行：");
+            confirmation.push_str(&executed.join("；"));
+        }
         if let Err(error) = self.send_admin_text(room, &confirmation) {
             eprintln!("[access-ticket] confirmation failed: {error}");
         }
@@ -4071,6 +4085,18 @@ impl<S: Store> Bridge<S> {
             }
         }
 
+        self.assemble_platform_call(config, room, spec.clone(), args)
+    }
+
+    /// `platform_call` 的校验尾巴：参数、destructive 闸门、账号与出站句柄。
+    /// 普通工具入口和「批准即执行」共用这一段，避免两套校验漂移。
+    fn assemble_platform_call(
+        &mut self,
+        config: Arc<Config>,
+        room: RoomId,
+        spec: MethodSpec,
+        args: PlatformCallArgs,
+    ) -> Result<PreparedPlatformCall, ToolError> {
         // 要写流水的方法必须先知道“我是谁”。放在平台调用之前查：平台已经发出去了
         // 再发现记不了账，那条消息就会在自己的水位上留洞。
         if spec.record != RecordMode::None && config.account_of_room(&room).is_empty() {
@@ -4081,7 +4107,7 @@ impl<S: Store> Bridge<S> {
         }
 
         if spec.risk == Risk::Destructive
-            && !Self::allows_destructive(&ctx.config, &room.connection, spec.name.as_ref())
+            && !Self::allows_destructive(&config, &room.connection, spec.name.as_ref())
         {
             return Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
@@ -4095,8 +4121,8 @@ impl<S: Store> Bridge<S> {
             ));
         }
 
-        check_params(spec, &args.params)?;
-        check_target_params(spec, &room, &args.params)?;
+        check_params(&spec, &args.params)?;
+        check_target_params(&spec, &room, &args.params)?;
 
         let outbound = self.outbound.handle_for(&room.connection).ok_or_else(|| {
             call_error(CallError::Unavailable(acb_i18n::t!(
@@ -4108,7 +4134,7 @@ impl<S: Store> Bridge<S> {
 
         Ok(PreparedPlatformCall {
             room,
-            spec: spec.clone(),
+            spec,
             // 中继的 I/O 必须留到锁外：这里只登记 relay 与原始 params。
             params: args.params.clone(),
             args,
@@ -4606,12 +4632,28 @@ impl<S: Store> Bridge<S> {
             let capabilities = self
                 .ticket_capabilities(&target, &ops)
                 .map_err(|error| batch_item_error(index, &error.message))?;
+            if let Some(params) = &item.params
+                && params.to_string().len() > crate::tickets::MAX_SNAPSHOT_BYTES
+            {
+                return Err(batch_item_error(
+                    index,
+                    &format!(
+                        "params snapshot exceeds {} bytes",
+                        crate::tickets::MAX_SNAPSHOT_BYTES
+                    ),
+                ));
+            }
+            self.validate_ticket_params(&target, &ops, item.params.as_ref())
+                .map_err(|detail| batch_item_error(index, &detail))?;
             requests.push(TicketRequest {
                 principal,
                 place,
                 session: ctx.session.clone(),
+                request_room: ctx.room.clone(),
                 target,
                 ops,
+                params: item.params.clone(),
+                origin_sender: ctx.origin_sender.clone(),
                 capabilities,
                 request_turn: ticket.as_str().to_owned(),
                 batch_id: None,
@@ -4711,6 +4753,45 @@ impl<S: Store> Bridge<S> {
             "count": tickets.len(),
             "tickets": tickets.iter().map(|ticket| ticket_json(ticket)).collect::<Vec<_>>(),
         }))
+    }
+
+    /// 挂起动作的参数快照在申请期就校验；批准后只按快照执行，不再信模型重写。
+    fn validate_ticket_params(
+        &self,
+        target: &RoomId,
+        ops: &[String],
+        params: Option<&Value>,
+    ) -> Result<(), String> {
+        for op in ops {
+            if matches!(op.as_str(), "send_message" | "send_message_to") {
+                let Some(params) = params else {
+                    return Err(format!("{op} requires params with elements/text"));
+                };
+                parse::<SendArgs>(params.clone()).map_err(|error| error.message)?;
+                continue;
+            }
+            let Some(method) = op.strip_prefix("platform_call:") else {
+                continue;
+            };
+            let Some(params) = params else {
+                return Err(format!("{op} requires params"));
+            };
+            let methods = self.outbound.catalog(&target.connection);
+            let Some(spec) = methods.iter().find(|spec| spec.name.as_ref() == method) else {
+                return Err(format!(
+                    "unknown platform method {method} on connection {}",
+                    target.connection
+                ));
+            };
+            if spec.scope != Scope::Room {
+                return Err(format!(
+                    "{method} is connection-scope; tickets can only carry room actions"
+                ));
+            }
+            check_params(spec, params).map_err(|error| error.message)?;
+            check_target_params(spec, target, params).map_err(|error| error.message)?;
+        }
+        Ok(())
     }
 
     /// 从 op 列表推导票据能力集。平台方法必须能在目标连接的目录里查到。
@@ -4824,6 +4905,232 @@ impl<S: Store> Bridge<S> {
                 self.access_tickets.mark_announced(&ids, now);
             }
             Err(error) => eprintln!("[access-ticket] approval message failed: {error}"),
+        }
+    }
+
+    /// 批准后由 core 执行挂起动作；批量逐条执行，每条独立结果。
+    fn execute_approved_tickets(&mut self, ids: &[String], now: i64) -> Vec<String> {
+        self.access_tickets.sweep(now);
+        let mut summaries = Vec::new();
+        for id in ids {
+            let Some(ticket) = self.access_tickets.get(id).cloned() else {
+                continue;
+            };
+            let audit_ref = format!("ticket:{id}#exec");
+            if ticket.state != TicketState::Active {
+                let reason = format!("ticket is {}", ticket.state.as_str());
+                let _ = self.access_tickets.complete_execution(
+                    id,
+                    "skipped",
+                    None,
+                    Some(reason.clone()),
+                    &audit_ref,
+                    now,
+                );
+                summaries.push(format!("{id} skipped ({reason})"));
+                let pointer = ticket_result_text(&ticket, "skipped", None);
+                self.write_ticket_result_record(&ticket, pointer, now);
+                continue;
+            }
+            // 只读 op 不在 core 执行；票据保持 active，由会话在有效期内自己重试。
+            if !ticket.ops.iter().any(|op| is_core_executable_op(op)) {
+                let pointer = ticket_result_text(&ticket, "active", None);
+                self.write_ticket_result_record(&ticket, pointer, now);
+                summaries.push(format!("{id} active（由会话重试只读 op）"));
+                continue;
+            }
+            let (status, result, failure) = self.execute_ticket_action(&ticket);
+            let _ = self.access_tickets.complete_execution(
+                id,
+                status,
+                result,
+                failure.clone(),
+                &audit_ref,
+                now,
+            );
+            let pointer = ticket_result_text(&ticket, status, failure.as_deref());
+            self.write_ticket_result_record(&ticket, pointer, now);
+            let reason = failure
+                .as_deref()
+                .map(|detail| format!("：{detail}"))
+                .unwrap_or_default();
+            summaries.push(match status {
+                "succeeded" => format!("{id} succeeded"),
+                "failed" => format!("{id} failed{reason}"),
+                _ => format!("{id} skipped{reason}"),
+            });
+        }
+        summaries
+    }
+
+    fn execute_ticket_action(
+        &mut self,
+        ticket: &AccessTicket,
+    ) -> (&'static str, Option<Value>, Option<String>) {
+        let config = Arc::new(self.config.clone());
+        let mut per_op = Vec::new();
+        let mut any_succeeded = false;
+        let mut any_failed = false;
+        let mut first_failure: Option<String> = None;
+
+        for op in &ticket.ops {
+            let (status, result, failure) = match op.as_str() {
+                "send_message" | "send_message_to" => {
+                    let Some(params) = ticket.params.clone() else {
+                        let reason = format!("{op} has no params snapshot");
+                        any_failed = true;
+                        first_failure.get_or_insert(reason.clone());
+                        per_op.push(json!({"op": op, "status": "failed", "reason": reason}));
+                        continue;
+                    };
+                    match parse::<SendArgs>(params) {
+                        Ok(args) => match self.deliver_out(
+                            config.clone(),
+                            &ticket.session,
+                            &ticket.target,
+                            SendOrigin::Message,
+                            args.elements.0,
+                        ) {
+                            Ok(value) => ("succeeded", Some(value), None),
+                            Err(error) => ("failed", None, Some(error.message)),
+                        },
+                        Err(error) => ("failed", None, Some(error.message)),
+                    }
+                }
+                other if other.starts_with("platform_call:") => {
+                    let method = other.strip_prefix("platform_call:").unwrap_or("");
+                    self.execute_ticket_platform(
+                        ticket,
+                        method,
+                        ticket.params.clone(),
+                        config.clone(),
+                    )
+                }
+                // 读类 op 由模型在拿到票据后自己重试；core 不替它读。
+                _ => (
+                    "skipped",
+                    None,
+                    Some("read-only op is not executed by core".to_owned()),
+                ),
+            };
+            if status == "succeeded" {
+                any_succeeded = true;
+            }
+            if status == "failed" {
+                any_failed = true;
+                if first_failure.is_none() {
+                    first_failure = failure.clone();
+                }
+            }
+            per_op.push(json!({
+                "op": op,
+                "status": status,
+                "result": result,
+                "reason": failure,
+            }));
+        }
+
+        let status = if any_failed {
+            "failed"
+        } else if any_succeeded {
+            "succeeded"
+        } else {
+            "skipped"
+        };
+        (status, Some(json!({"ops": per_op})), first_failure)
+    }
+
+    fn execute_ticket_platform(
+        &mut self,
+        ticket: &AccessTicket,
+        method: &str,
+        params: Option<Value>,
+        config: Arc<Config>,
+    ) -> (&'static str, Option<Value>, Option<String>) {
+        let Some(params) = params else {
+            return (
+                "failed",
+                None,
+                Some("platform_call has no params snapshot".to_owned()),
+            );
+        };
+        let methods = self.outbound.catalog(&ticket.target.connection);
+        let Some(spec) = methods
+            .iter()
+            .find(|spec| spec.name.as_ref() == method)
+            .cloned()
+        else {
+            return (
+                "failed",
+                None,
+                Some(format!("unknown platform method {method}")),
+            );
+        };
+        if spec.scope != Scope::Room {
+            return (
+                "skipped",
+                None,
+                Some(format!(
+                    "{method} is connection-scope; ticket execution skipped"
+                )),
+            );
+        }
+        let args = PlatformCallArgs {
+            room: Some(ticket.target.to_string()),
+            method: method.to_owned(),
+            params: params.clone(),
+            ..Default::default()
+        };
+        let mut prepared =
+            match self.assemble_platform_call(config, ticket.target.clone(), spec, args) {
+                Ok(prepared) => prepared,
+                Err(error) => return ("failed", None, Some(error.message)),
+            };
+        if let Err(error) = prepared.relay() {
+            return ("failed", None, Some(error.message));
+        }
+        let executed = prepared.execute();
+        match self.finish_platform_call(prepared, executed) {
+            Ok(value) => ("succeeded", Some(value), None),
+            Err(error) => ("failed", None, Some(error.message)),
+        }
+    }
+
+    fn write_ticket_result_record(&mut self, ticket: &AccessTicket, text: String, now: i64) {
+        let draft = RecordDraft::event(
+            ticket.request_room.clone(),
+            Sender {
+                id: "system".to_owned(),
+                name: "system".to_owned(),
+                role: None,
+            },
+            now,
+            "ticket_result",
+            vec![Element::text(text)],
+            false,
+        );
+        match self.store.append(draft) {
+            Ok(record) => {
+                self.plugins.observe(&record);
+                let subscribed = self.config.session(&ticket.session).is_some_and(|session| {
+                    session
+                        .subscriptions
+                        .iter()
+                        .any(|subscription| subscription.room == ticket.request_room)
+                });
+                if subscribed && !self.draining {
+                    self.enqueue(
+                        ticket.session.clone(),
+                        ticket.request_room.clone(),
+                        TurnReason::Wake,
+                        Some("ticket_result".to_owned()),
+                        ticket.origin_sender.clone(),
+                        now,
+                        0,
+                    );
+                }
+            }
+            Err(error) => eprintln!("[access-ticket] result record failed: {error}"),
         }
     }
 
@@ -7571,6 +7878,21 @@ fn resolve_room(text: &str) -> Result<RoomId, ToolError> {
     })
 }
 
+fn is_core_executable_op(op: &str) -> bool {
+    matches!(op, "send_message" | "send_message_to") || op.starts_with("platform_call:")
+}
+
+fn ticket_result_text(ticket: &AccessTicket, status: &str, _failure: Option<&str>) -> String {
+    format!(
+        "ticket {} {}：目标 {}，op {}。用 access_ticket_get {{\"id\":\"{}\"}} 查详情。",
+        ticket.id,
+        status,
+        ticket.target,
+        ticket.ops.join(", "),
+        ticket.id,
+    )
+}
+
 fn cooldown_seconds(millis: i64) -> i64 {
     millis.saturating_add(999) / 1000
 }
@@ -7603,6 +7925,11 @@ fn ticket_json(ticket: &crate::tickets::AccessTicket) -> Value {
         "expires_at": ticket.expires_at,
         "request_turn": ticket.request_turn,
         "approval_ref": ticket.approval_ref,
+        "execution_status": ticket.execution_status,
+        "executed_at": ticket.executed_at,
+        "result": ticket.result,
+        "failure_reason": ticket.failure_reason,
+        "audit_ref": ticket.audit_ref,
     })
 }
 
