@@ -415,6 +415,9 @@ pub fn run_connection<S: Store>(
             }
         };
         let frame = decode(&line).map_err(|error| EndpointError::Protocol(error.to_string()))?;
+        if let Frame::Hello { harness, .. } = &frame {
+            deps.harness_attempt(harness, now_millis());
+        }
         let guard = lock(bridge);
         let sessions = handshake(&guard, frame)?;
         // 握手已经校验过「这些会话都属于这个 harness」，取第一个会话反查 harness id。

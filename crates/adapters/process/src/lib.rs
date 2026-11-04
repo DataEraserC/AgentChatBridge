@@ -458,6 +458,7 @@ fn supervise(
     events: EventQueue,
     mut child: Child,
 ) {
+    status.attempt();
     status.connected();
     let mut delay = RESTART_DELAY;
     loop {
@@ -499,6 +500,7 @@ fn supervise(
             thread::sleep(Duration::from_millis(100));
         }
 
+        status.attempt();
         match start_child(
             &config,
             &connection,

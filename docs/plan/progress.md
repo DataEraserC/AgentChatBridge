@@ -1102,6 +1102,24 @@
   文档里 30s 宽限期尚未实现。
 - 可回退：去掉 AdapterStatus 上报调用即可，依赖表不影响 turn 通道。
 
+## 2026-11-04 — fix(deps): count attempts on every connection attempt
+
+- 问题：`attempts` 只在连接成功时累加，导致「从未连上但 attempts>0」永远不会出现，
+  而这正是排障时最需要的一条。
+- 改动：新增 `harness_attempt` / `platform_attempt` / `AdapterStatus::attempt()`；
+  适配器在每次 `connect` 前、接入点在每个 `Hello` 握手前记一次尝试。
+  `connected` 不再顺带累加 attempts，也不再写 `lastAttemptAt`。
+  `neverConnected` 独立保留，只看 `lastOkAt` 是否为空。
+- 测试：新增「只尝试三次、从未连上」用例：`state=unknown`、`neverConnected=true`、
+  `attempts=3`、无迁移记录；既有连/断/重连用例改为显式尝试再连。
+- 证据：`cargo test --workspace`、clippy、fmt 全绿。
+- 可回退：去掉 attempt 调用点即可恢复旧的只在成功时计数。
+
+## 待办（用户指定，暂不实现）
+
+- LKG 失败阈值分 class：panic 类失败也许应该 1 次就回滚，不应与 provider 解析
+  失败共用 `[lkg] max_failures`。分 class 阈值是后续议题，现在不改行为。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，
