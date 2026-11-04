@@ -16,6 +16,7 @@ use thiserror::Error;
 use crate::config::Connection;
 use crate::event_queue::EventQueue;
 use crate::outbound::Outbound;
+use crate::plugin::Health;
 use crate::plugin_meta::PluginMetadata;
 
 /// 适配器接口版本。manifest 要对得上。
@@ -135,6 +136,11 @@ pub trait AdapterFactory: Send + Sync {
         connection: &Connection,
         events: EventQueue,
     ) -> Result<AdapterInstance, AdapterError>;
+
+    /// 工厂级健康状态。默认健康；动态适配器可据此报告「句柄已标死」。
+    fn health(&self) -> Health {
+        Health::Healthy
+    }
 }
 
 /// 适配器注册/实例化错误。

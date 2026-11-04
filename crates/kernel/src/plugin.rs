@@ -1971,6 +1971,15 @@ impl PluginManager {
             .map(|descriptor| {
                 let health = match instantiate_errors.get(&descriptor.id) {
                     Some(error) => Health::Unhealthy(error.clone()),
+                    // 平台适配器没有 manager；健康状态来自工厂（动态适配器会报句柄失效）。
+                    None if descriptor.extension_point == ExtensionPoint::PlatformAdapter => {
+                        descriptor
+                            .kind
+                            .as_ref()
+                            .and_then(|kind| self.adapters.get(kind))
+                            .map(|factory| factory.health())
+                            .unwrap_or(Health::Healthy)
+                    }
                     None => self
                         .managers
                         .get(descriptor.id.namespace())
