@@ -79,6 +79,7 @@ dependencies = [
  "acb-i18n",
  "acb-kernel",
  "acb-plugin-lua",
+ "acb-plugin-process-tools",
  "acb-plugin-trusted",
  "acb-proto",
  "libc",
@@ -127,6 +128,16 @@ dependencies = [
  "acb-kernel",
  "acb-proto",
  "mlua",
+ "serde_json",
+]
+
+[[package]]
+name = "acb-plugin-process-tools"
+version = "0.1.0"
+dependencies = [
+ "acb-kernel",
+ "acb-proto",
+ "serde",
  "serde_json",
 ]
 

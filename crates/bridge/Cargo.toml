@@ -13,6 +13,7 @@ acb-i18n = { workspace = true }
 acb-kernel = { path = "../kernel" }
 acb-plugin-trusted = { path = "../plugins/trusted" }
 acb-plugin-lua = { path = "../plugins/lua" }
+acb-plugin-process-tools = { path = "../plugins/process-tools" }
 acb-adapter-onebot11 = { path = "../adapters/onebot11" }
 acb-adapter-process = { path = "../adapters/process" }
 acb-adapter-dynamic = { path = "../adapters/dynamic" }

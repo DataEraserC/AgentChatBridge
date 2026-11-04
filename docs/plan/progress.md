@@ -984,6 +984,27 @@
   通过；`cargo test --workspace` 全绿。
 - 可回退：移除 LKG 模块与 Bridge 接线即可回到提交前行为；状态文件可单独删除。
 
+## 2026-11-04 — B：外置进程工具载体 MVP（已实现）
+
+- 做了什么：
+  - 新增 `crates/plugins/process-tools`：stdio 行 JSON-RPC（initialize / list_tools /
+    call_tool / shutdown）、每调用超时、调用队列上限 64、崩溃后退避重启并标 Unhealthy。
+  - `ToolProvider` 增加默认 `health()`；`PluginManager::catalog` 对直连工具 provider
+    使用该健康状态。
+  - `Config` 新增 `[[tool_plugins]]`（id / command / args / timeout_ms），解析期校验
+    id、保留 namespace、重复 id、空 command、超时范围 100..60000。
+  - `crates/bridge/src/main.rs` 在配置非空时安装 `ProcessToolLoader`；第一方工具不变。
+  - 新增 `examples/process-tool-echo/`（Node echo 工具 + 四步 README）与
+    `docs/plan/process-tool-carrier.md`。
+- 测试：协议编解码、工具列表解析、超时标 Unhealthy + 快速失败、crash-once 退避恢复、
+  同名工具拒绝、shutdown 终止子进程。
+- 偏离：`ErrorCode` 没有 `Unavailable`，超时用 `Timeout`、进程不可用/崩溃用 `Internal`。
+  进程载体 provider 暂不支持热卸载/重载。
+- 残留：被杀子进程的外部副作用不由 core 清理；权限模型/签名/市场明确不做。
+- 证据：`cargo clippy -p acb-plugin-process-tools -p acb-kernel -p acb-bridge --all-targets -D warnings`
+  通过；`cargo test --workspace` 全绿。
+- 可回退：移除 `[[tool_plugins]]` 接线与 crate 即可；示例与文档可单独删。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，

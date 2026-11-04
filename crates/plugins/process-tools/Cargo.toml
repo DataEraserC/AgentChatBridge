@@ -1,0 +1,17 @@
+[package]
+name = "acb-plugin-process-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "外置进程工具载体：stdio JSON-RPC、超时、崩溃重启"
+
+[dependencies]
+acb-kernel = { path = "../../kernel" }
+acb-proto = { path = "../../proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "process-tool-fixture"
+path = "src/bin/fixture.rs"

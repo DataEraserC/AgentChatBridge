@@ -23,6 +23,7 @@ use acb_kernel::{
     Outbounds, PluginManager, RouteWorker, SqliteStore, drain_events, serve,
 };
 use acb_plugin_lua::LuaLoader;
+use acb_plugin_process_tools::ProcessToolLoader;
 use acb_plugin_trusted::TrustedLoader;
 
 mod config_patch;
@@ -141,6 +142,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // 动态库插件：配了 [[plugins]] 才装载；插件自己报 manifest（适配器或策略 provider）。
     if !config.plugins.is_empty() {
         plugins.install_loader_owned(Arc::new(DynamicLoader::new(&config.plugins)))?;
+    }
+    // 外置进程工具：只承载第三方工具，第一方工具仍走进程内 ToolLoader。
+    if !config.tool_plugins.is_empty() {
+        plugins.install_loader_owned(Arc::new(ProcessToolLoader::new(&config.tool_plugins)))?;
     }
     // 动态扩展目录（ADR-0029 P1）：只从 ACB_DYNAMIC_DIR 发现声明式 route 模块。
     if let Some(extensions) = acb_extensions::DynamicRouteManager::from_env()? {

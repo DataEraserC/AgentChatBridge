@@ -586,6 +586,11 @@ pub trait ToolProvider: Send + Sync {
         tool: &str,
         args: Value,
     ) -> Result<Value, ToolError>;
+
+    /// 工具载体的健康状态。进程载体用它报告崩溃/超时；进程内工具默认 Healthy。
+    fn health(&self) -> Health {
+        Health::Healthy
+    }
 }
 
 /// 工具调用否决点的上下文。只读；不含 Store、票和水位。
@@ -2020,6 +2025,13 @@ impl PluginManager {
                             .map(|factory| factory.health())
                             .unwrap_or(Health::Healthy)
                     }
+                    // 直连工具 provider（进程载体等）自己报健康；manager 提供的工具
+                    // 仍按 manager 子树健康。
+                    None if descriptor.extension_point == ExtensionPoint::Tool => self
+                        .tool_providers
+                        .get(&descriptor.id)
+                        .map(|provider| provider.health())
+                        .unwrap_or(Health::Healthy),
                     None => self
                         .managers
                         .get(descriptor.id.namespace())
