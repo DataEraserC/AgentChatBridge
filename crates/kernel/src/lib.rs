@@ -39,7 +39,7 @@ pub use config::{
     ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision,
     WakeInput, WakePolicy, WakeVerdict,
 };
-pub use deps::{DependencyKind, DependencyRegistry};
+pub use deps::{DependencyKind, DependencyRegistry, PlatformVersionInfo};
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
 pub use engine::{Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned, TaskRecord, TaskStatus};
 pub use event_queue::{

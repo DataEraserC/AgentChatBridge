@@ -20,6 +20,9 @@ use crate::segment;
 pub enum Parsed {
     /// 值得记进流水的一条。
     Record(RecordDraft),
+    /// 账号上下线。它是连接级信号，不是房间内容；不能伪装成 `private/<self_id>`
+    /// 的私聊消息，否则会凭空造出一个房间并可能触发订阅唤醒。
+    AccountStatus { online: bool, detail: String },
     /// 不记，说明原因（只进日志）。
     Ignored(String),
 }
@@ -123,6 +126,21 @@ fn notice(
         .get("notice_type")
         .and_then(Value::as_str)
         .ok_or(EventError::Missing("notice_type"))?;
+
+    // 账号上下线是连接级信号。SnowLuma 的 `bot_status` 带 `user_id = self_id`，
+    // 按房间逻辑会被错误地记成 `private/<self_id>`；这里直接分流到账号状态。
+    if matches!(notice_type, "bot_status" | "bot_offline") {
+        let sub_type = event
+            .get("sub_type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let online = notice_type == "bot_status" && sub_type == "online";
+        return Ok(Parsed::AccountStatus {
+            online,
+            detail: format!("{notice_type}/{sub_type}"),
+        });
+    }
+
     let sender_id = {
         let user = id_of(event.get("user_id"));
         if user.is_empty() {
@@ -451,6 +469,53 @@ mod tests {
             RoomId::new("qq", "private/10001").expect("合法")
         );
         assert!(!draft.at_self);
+    }
+
+    #[test]
+    fn bot_status_is_an_account_signal_not_a_private_room() {
+        let online = json!({
+            "post_type": "notice",
+            "notice_type": "bot_status",
+            "sub_type": "online",
+            "self_id": 999,
+            "user_id": 999,
+        });
+        let offline = json!({
+            "post_type": "notice",
+            "notice_type": "bot_status",
+            "sub_type": "offline",
+            "self_id": 999,
+            "user_id": 999,
+        });
+        let kicked = json!({
+            "post_type": "notice",
+            "notice_type": "bot_offline",
+            "self_id": 999,
+            "user_id": 999,
+        });
+
+        assert_eq!(
+            parse("qq", &online, &[]).expect("能解析"),
+            Parsed::AccountStatus {
+                online: true,
+                detail: "bot_status/online".to_owned()
+            }
+        );
+        assert_eq!(
+            parse("qq", &offline, &[]).expect("能解析"),
+            Parsed::AccountStatus {
+                online: false,
+                detail: "bot_status/offline".to_owned()
+            }
+        );
+        assert_eq!(
+            parse("qq", &kicked, &[]).expect("能解析"),
+            Parsed::AccountStatus {
+                online: false,
+                detail: "bot_offline/unknown".to_owned()
+            },
+            "被踢下线不能伪装成 private/999 的房间事件"
+        );
     }
 
     #[test]

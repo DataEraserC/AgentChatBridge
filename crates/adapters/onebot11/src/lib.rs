@@ -21,6 +21,6 @@ pub mod segment;
 
 pub use event::{EventError, Parsed};
 pub use factory::{MANIFEST, OneBotAdapterFactory};
-pub use link::{Action, LinkError, LinkSlot, connect, pump, supervise};
+pub use link::{Action, LinkError, LinkSlot, connect, supervise};
 pub use outbound::OneBotOutbound;
 pub use segment::{PLATFORM, SegmentError};
