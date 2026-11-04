@@ -57,6 +57,10 @@ pub struct PlatformVersionInfo {
     pub implementation_version: Option<String>,
     /// 适配器 crate 版本。
     pub adapter_version: String,
+    /// 适配器声明/覆盖的 SnowLuma 兼容下限；只对 SnowLuma 实现有意义。
+    pub compat_floor: Option<String>,
+    /// `ok` / `below_declared_floor` / `unknown`。低于下限只告警，不断连。
+    pub compat_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -928,6 +932,11 @@ fn version_json(version: &PlatformVersionInfo) -> Value {
         "adapter": {
             "version": version.adapter_version,
             "source": "crate",
+            "compat": {
+                "protocol": version.protocol_kind,
+                "snowlumaMin": version.compat_floor.as_deref().unwrap_or("unknown"),
+                "state": version.compat_state.as_deref().unwrap_or("unknown"),
+            },
         },
     })
 }
@@ -1559,6 +1568,8 @@ mod tests {
                 implementation_name: Some("snowluma".to_owned()),
                 implementation_version: Some("2.4.0".to_owned()),
                 adapter_version: "0.1.0".to_owned(),
+                compat_floor: Some("2.4.0".to_owned()),
+                compat_state: Some("ok".to_owned()),
             },
             100,
         );
@@ -1571,6 +1582,8 @@ mod tests {
         assert_eq!(qq["version"]["impl"]["source"], "get_version_info");
         assert_eq!(qq["version"]["adapter"]["version"], "0.1.0");
         assert_eq!(qq["version"]["adapter"]["source"], "crate");
+        assert_eq!(qq["version"]["adapter"]["compat"]["snowlumaMin"], "2.4.0");
+        assert_eq!(qq["version"]["adapter"]["compat"]["state"], "ok");
         assert_eq!(qq["versionObservedAt"], 100);
 
         registry.platform_version(
@@ -1582,6 +1595,8 @@ mod tests {
                 implementation_name: None,
                 implementation_version: None,
                 adapter_version: "0.1.0".to_owned(),
+                compat_floor: Some("2.4.0".to_owned()),
+                compat_state: Some("unknown".to_owned()),
             },
             200,
         );
@@ -1590,6 +1605,7 @@ mod tests {
         assert_eq!(qq["version"]["protocol"]["source"], "unknown");
         assert_eq!(qq["version"]["impl"]["name"], "unknown");
         assert_eq!(qq["version"]["impl"]["version"], "unknown");
+        assert_eq!(qq["version"]["adapter"]["compat"]["state"], "unknown");
     }
 
     #[test]
