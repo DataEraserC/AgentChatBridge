@@ -6,8 +6,8 @@
 //! 3. 丢弃暂存后配置回到旧的。
 
 use acb_kernel::{
-    Bridge, Element, Ingest, MemoryStore, Outbound, OutboundError, RecordDraft, RoomId, Sender,
-    Sent, TurnReason,
+    Bridge, Config, DependencyRegistry, Element, Ingest, MemoryStore, Outbound, OutboundError,
+    RecordDraft, RoomId, Sender, Sent, TurnReason,
 };
 
 const AT: i64 = 1_793_000_000_000;
@@ -75,6 +75,15 @@ fn config_with_extra_room() -> String {
             "        room = \"group/999\"",
         ),
     )
+}
+
+/// 新配置：连接 id 改成 qq2、harness id 改成 dsh2，其余引用同步改。
+fn config_renamed() -> String {
+    config_base()
+        .replace("id = \"qq\"", "id = \"qq2\"")
+        .replace("id = \"dsh\"", "id = \"dsh2\"")
+        .replace("harness = \"dsh\"", "harness = \"dsh2\"")
+        .replace("connection = \"qq\"", "connection = \"qq2\"")
 }
 
 fn message(room: &str, sender: &str, text: &str, at_self: bool) -> RecordDraft {
@@ -170,6 +179,42 @@ fn discard_staged_config_keeps_old_config() {
         "丢弃暂存后回到旧订阅范围：{ingested:?}"
     );
     assert!(!bridge.discard_staged_config(), "没有暂存时丢弃返回 false");
+}
+
+#[test]
+fn config_reload_prunes_removed_dependencies() {
+    let config = Config::parse(&config_base()).expect("配置合法");
+    let deps = DependencyRegistry::from_config(&config);
+    deps.platform_connected("qq", AT);
+    deps.harness_connected("dsh", AT);
+    let mut bridge =
+        Bridge::new(config, MemoryStore::new(), Box::new(Recorder)).with_dependencies(deps.clone());
+
+    bridge.stage_config(Config::parse(&config_renamed()).expect("新配置合法"));
+    // 没有待开轮次也要在下一轮边界换上配置。
+    assert!(bridge.poll_turn().expect("能换配置").is_none());
+
+    let snapshot = deps.snapshot(None);
+    let ids: Vec<&str> = snapshot["dependencies"]
+        .as_array()
+        .expect("数组")
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect();
+    assert!(!ids.contains(&"qq"), "被移除的连接直接删除：{snapshot}");
+    assert!(
+        !ids.contains(&"dsh"),
+        "被移除的 harness 直接删除：{snapshot}"
+    );
+
+    let added = snapshot["dependencies"]
+        .as_array()
+        .expect("数组")
+        .iter()
+        .find(|item| item["id"] == "qq2")
+        .expect("新连接已登记");
+    assert_eq!(added["state"], "unknown");
+    assert_eq!(added["lastErrorClass"], "not_configured");
 }
 
 #[test]

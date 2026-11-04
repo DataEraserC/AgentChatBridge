@@ -4,8 +4,7 @@
 //! harness 由接入点上报；平台适配器通过 `AdapterStatus` 上报。
 //! `attempts` 记每一次连接尝试，与是否连上无关；`neverConnected` 只看 `lastOkAt`。
 
-use std::collections::BTreeMap;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -112,62 +111,87 @@ impl DependencyRegistry {
         Self::default()
     }
 
-    /// 按当前配置登记 harness。平台/模型在后续步骤再加。
+    /// 按当前配置登记 harness 与平台连接。
     pub fn from_config(config: &Config) -> Self {
         let registry = Self::default();
+        registry.retain_config(config);
+        registry
+    }
+
+    /// 按新配置重组依赖表（启动与配置热重载共用）。
+    ///
+    /// - 配置里新增的依赖以 `unknown` 登记；平台带 `not_configured`。
+    /// - 配置里仍在的条目原样保留：连接状态不因重载被重置。
+    /// - 配置里被移除的条目**直接删除**，不留 `down` 幽灵，也不写迁移环。
+    ///   迁移环只描述运行时状态变化；配置增删用 `[deps] removed` 日志表达。
+    pub fn retain_config(&self, config: &Config) {
         let now = now_millis();
-        let mut inner = registry
+        let harnesses: BTreeSet<&str> = config
+            .harnesses
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        let platforms: BTreeSet<&str> = config
+            .connections
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let stale: Vec<Key> = inner
+            .entries
+            .keys()
+            .filter(|key| match key.kind {
+                DependencyKind::Harness => !harnesses.contains(key.id.as_str()),
+                DependencyKind::Platform => !platforms.contains(key.id.as_str()),
+                DependencyKind::Model => false,
+            })
+            .cloned()
+            .collect();
+        for key in stale {
+            inner.entries.remove(&key);
+            eprintln!("[deps] removed kind={} id={}", key.kind.as_str(), key.id);
+        }
+
         for harness in &config.harnesses {
-            inner
-                .entries
-                .entry(Key {
-                    kind: DependencyKind::Harness,
-                    id: harness.id.clone(),
-                })
-                .or_insert(Entry {
-                    key: Key {
-                        kind: DependencyKind::Harness,
-                        id: harness.id.clone(),
-                    },
-                    configured: true,
-                    expected: true,
-                    state: State::Unknown,
-                    since: now,
-                    last_ok_at: None,
-                    last_attempt_at: None,
-                    attempts: 0,
-                    last_error: None,
-                    last_class: None,
-                });
+            let key = Key {
+                kind: DependencyKind::Harness,
+                id: harness.id.clone(),
+            };
+            inner.entries.entry(key.clone()).or_insert(Entry {
+                key,
+                configured: true,
+                expected: true,
+                state: State::Unknown,
+                since: now,
+                last_ok_at: None,
+                last_attempt_at: None,
+                attempts: 0,
+                last_error: None,
+                last_class: None,
+            });
         }
         for connection in &config.connections {
-            inner
-                .entries
-                .entry(Key {
-                    kind: DependencyKind::Platform,
-                    id: connection.id.clone(),
-                })
-                .or_insert(Entry {
-                    key: Key {
-                        kind: DependencyKind::Platform,
-                        id: connection.id.clone(),
-                    },
-                    configured: true,
-                    expected: true,
-                    state: State::Unknown,
-                    since: now,
-                    last_ok_at: None,
-                    last_attempt_at: None,
-                    attempts: 0,
-                    last_error: Some("not configured".to_owned()),
-                    last_class: Some("not_configured".to_owned()),
-                });
+            let key = Key {
+                kind: DependencyKind::Platform,
+                id: connection.id.clone(),
+            };
+            inner.entries.entry(key.clone()).or_insert(Entry {
+                key,
+                configured: true,
+                expected: true,
+                state: State::Unknown,
+                since: now,
+                last_ok_at: None,
+                last_attempt_at: None,
+                attempts: 0,
+                last_error: Some("not configured".to_owned()),
+                last_class: Some("not_configured".to_owned()),
+            });
         }
-        drop(inner);
-        registry
     }
 
     /// 记一次连接尝试（不改变状态）。成功也是尝试，由 connected 前的 attempt 记一次。
@@ -547,6 +571,103 @@ mod tests {
         assert_eq!(qq["state"], "up");
         assert_eq!(qq["attempts"], 2);
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn retain_config_keeps_existing_and_adds_new_entries() {
+        let registry = DependencyRegistry::from_config(&harness_config());
+        registry.harness_connected("dsh", 100);
+        let config = Config::parse(
+            r#"
+            [[harnesses]]
+            id = "dsh"
+            name = "DSH"
+
+            [[harnesses]]
+            id = "opencode"
+            name = "OpenCode"
+
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            url = "ws://127.0.0.1:3001"
+            account = "bot"
+            "#,
+        )
+        .expect("配置合法");
+
+        registry.retain_config(&config);
+        let snapshot = registry.snapshot(None);
+        assert_eq!(
+            entry(&snapshot, "dsh")["state"],
+            "up",
+            "仍在配置里的状态保留"
+        );
+        assert_eq!(entry(&snapshot, "opencode")["state"], "unknown");
+        assert_eq!(entry(&snapshot, "qq")["state"], "unknown");
+        assert_eq!(entry(&snapshot, "qq")["lastErrorClass"], "not_configured");
+        assert_eq!(
+            snapshot["transitions"].as_array().unwrap().len(),
+            1,
+            "配置增删不追加迁移环：只有连接成功那一条"
+        );
+        assert_eq!(registry.summary()["up"], 1);
+        assert_eq!(registry.summary()["unknown"], 2);
+    }
+
+    #[test]
+    fn retain_config_removes_dependencies_dropped_from_config() {
+        let config = Config::parse(
+            r#"
+            [[harnesses]]
+            id = "dsh"
+            name = "DSH"
+
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            url = "ws://127.0.0.1:3001"
+            account = "bot"
+            "#,
+        )
+        .expect("配置合法");
+        let registry = DependencyRegistry::from_config(&config);
+        registry.platform_connected("qq", 100);
+        registry.harness_connected("dsh", 100);
+
+        let config = Config::parse(
+            r#"
+            [[harnesses]]
+            id = "opencode"
+            name = "OpenCode"
+            "#,
+        )
+        .expect("配置合法");
+        registry.retain_config(&config);
+        let snapshot = registry.snapshot(None);
+        assert!(
+            snapshot["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["id"] != "qq"),
+            "被移除的平台条目直接删除：{snapshot}"
+        );
+        assert!(
+            snapshot["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["id"] != "dsh"),
+            "被移除的 harness 条目直接删除：{snapshot}"
+        );
+        assert_eq!(
+            snapshot["transitions"].as_array().unwrap().len(),
+            2,
+            "删除不写迁移环"
+        );
     }
 
     #[test]

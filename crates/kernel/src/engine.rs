@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::config::{ClockPolicy, Config, TurnErrorAction, WakeDecision, WakePolicy};
+use crate::deps::DependencyRegistry;
 use crate::lkg::PluginLkg;
 use crate::memory::{
     MemoryRepo, git_add, git_blame, git_branch, git_commit, git_diff, git_log, git_push,
@@ -482,6 +483,8 @@ pub struct Bridge<S: Store> {
     plugins: PluginManager,
     /// 可回滚插件的 last-known-good 状态（运行时文件，不进 Nix）。
     lkg: PluginLkg,
+    /// 依赖状态表。配置在轮次边界换上来时同步裁剪；默认空表，生产 main 注入。
+    deps: DependencyRegistry,
     pending: VecDeque<Pending>,
     /// 键是会话 id：一个会话同时只跑一轮。
     active: HashMap<String, ActiveTurn>,
@@ -615,6 +618,7 @@ impl<S: Store> Bridge<S> {
             outbound,
             plugins,
             lkg,
+            deps: DependencyRegistry::new(),
             pending: VecDeque::new(),
             active: HashMap::new(),
             by_ticket: HashMap::new(),
@@ -641,6 +645,12 @@ impl<S: Store> Bridge<S> {
             draining: false,
             config_version: 0,
         }
+    }
+
+    /// 注入外部持有的依赖表（接入点、适配器、控制台共用同一份）。
+    pub fn with_dependencies(mut self, deps: DependencyRegistry) -> Self {
+        self.deps = deps;
+        self
     }
 
     pub fn config(&self) -> &Config {
@@ -1706,6 +1716,8 @@ impl<S: Store> Bridge<S> {
             .file_relay
             .as_ref()
             .map(|cfg| crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base));
+        // 依赖表跟配置走：新增的登记为 unknown，移除的直接删掉。
+        self.deps.retain_config(&config);
         self.config = config;
         self.config_version += 1;
     }

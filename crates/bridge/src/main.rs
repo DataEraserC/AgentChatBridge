@@ -180,13 +180,16 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     let lkg_path = plugins_lkg_path(&config.storage.path);
-    let bridge = Arc::new(Mutex::new(Bridge::with_plugins_lkg(
-        config.clone(),
-        store,
-        Box::new(outbounds),
-        plugins,
-        lkg_path,
-    )));
+    let bridge = Arc::new(Mutex::new(
+        Bridge::with_plugins_lkg(
+            config.clone(),
+            store,
+            Box::new(outbounds),
+            plugins,
+            lkg_path,
+        )
+        .with_dependencies(deps.clone()),
+    ));
 
     // provider id 写错要在启动时死，不能等第一轮才报。
     {

@@ -1125,6 +1125,23 @@
 - 证据：该用例与 event_queue 单测全绿；workspace 全量随后统一跑。
 - 可回退：只影响统计口径，不改队列本身。
 
+## 2026-11-04 — fix(deps): prune dependencies on config reload
+
+- 问题：依赖表只在启动时登记，配置热重载后旧条目一直留着，`/api/dependencies`
+  会展示已不在配置里的连接，越积越多。
+- 改动：新增 `DependencyRegistry::retain_config(&Config)`，启动与轮次边界换配置
+  共用：新增条目以 `unknown` 登记（平台带 `not_configured`），仍在配置里的条目
+  原样保留，被移除的条目**直接删除**。
+- 删除语义：不改成 `down`、不留幽灵条目、不写迁移环；只打一行
+  `[deps] removed kind=... id=...`。迁移环只描述运行时状态变化。
+- 接线：`Bridge` 持有注入的依赖表；`apply_staged_config` 换配置时调用
+  `retain_config`；生产 main 用 `with_dependencies(deps.clone())` 注入同一份表。
+- 测试：deps 单测覆盖「保留旧状态 + 新增 unknown + 不追加迁移」与「删除不写迁移」；
+  `hot_reload_flow` 增加端到端用例：暂存改名配置后 `poll_turn` 生效，旧 id 消失、
+  新 id 出现且为 `not_configured`。
+- 证据：`cargo test --workspace`、clippy、fmt 全绿。
+- 可回退：去掉 `retain_config` 调用即可恢复「只增不减」；表字段不变。
+
 ## 待办（用户指定，暂不实现）
 
 - LKG 失败阈值分 class：panic 类失败也许应该 1 次就回滚，不应与 provider 解析
