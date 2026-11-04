@@ -1162,6 +1162,29 @@
 - 证据：workspace 全量、clippy、fmt 待提交前统一跑。
 - 可回退：删掉 `turn_failures` 表与 `end_turn` 检查即可恢复现有行为。
 
+## 2026-11-04 — connectivity 第④步：harness 结构化失败分类
+
+- 协议：`TurnEnd` 增加可选 `failure { component, id?, class }`；`PROTOCOL_VERSION`
+  升到 7，`version_compatible` 同时接受 6，旧 harness 不带字段时走原路径。
+  `docs/04-protocol.md` 同步补字段形状。
+- core：`Bridge::end_turn_with_failure`（`end_turn` 保持原签名）消费分类：
+  - `component=model`：写 `DependencyKind::Model`，id 用 `failure.id`，否则
+    `session.model`，再否则 `model:<harness>/default`。
+  - `component=backend`：写对应 harness 条目，class 用 harness 给的分类。
+  - 一轮成功：该会话的模型与 harness 标回 `up`，并对齐 `lastOkAt`。
+  - 有结构化分类时 in-band 去重键用 `(session, component, id, class)`；
+    没有时仍用原始错误文本指纹。
+  - 依赖表按新配置登记/裁剪 model 条目（仍以当前配置为界）。
+- harness：`acb-wire.mjs` 协议版本 7，`endTurn` 可带 `failure`。
+  dsh 区分 `model_unconfigured`（selectModel 对照 catalog 失败）与
+  `model_unavailable`（turn/end 的 model-unavailable code）；dsh 自身不可达归
+  `backend/unreachable`。opencode 只在错误码/文本有明确模型、鉴权、限流线索时
+  填分类，`outcome=failed` 这类模糊失败不猜。
+- 测试：proto 覆盖 v6 无 failure 解码与 v6/v7 兼容；turn_flow 覆盖模型 down→up
+  与按结构化分类去重；dsh/opencode JS 测试覆盖 turn_end 带 failure 的形状。
+- 证据：workspace 全量、clippy、fmt 全绿；两个 harness 的 `node --test` 全绿。
+- 可回退：去掉 `failure` 字段与 `end_turn_with_failure` 接线即可回到第③步路径。
+
 ## 待办（用户指定，暂不实现）
 
 - LKG 失败阈值分 class：panic 类失败也许应该 1 次就回滚，不应与 provider 解析

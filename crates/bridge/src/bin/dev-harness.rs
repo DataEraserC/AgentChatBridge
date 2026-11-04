@@ -116,6 +116,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &Frame::TurnEnd {
                         ticket: delivery.ticket,
                         error: None,
+                        failure: None,
                     },
                 )?;
 

@@ -328,6 +328,7 @@ class TurnDriver {
 
   async #one(delivery, link) {
     let failure = null
+    let failureInfo = null
     try {
       let sessionId = await this.#session(delivery.session, link)
       const modelRef = this.#modelFor(delivery)
@@ -369,13 +370,15 @@ class TurnDriver {
         typeof delivery.turn_timeout_ms === "number" ? delivery.turn_timeout_ms : 5 * 60 * 1000,
       )
       if (turnFailure) {
-        failure = turnFailure
+        failure = turnFailure.message
+        failureInfo = turnFailure.failure
         this.log("error", t("dsh.turn_failed", { error: failure }))
         // 失败/中止不丢会话映射：下次开轮继续用同一个 dsh 会话，不新建。
         // 只有显式 reset（handleControl）才解除 acb↔harness 会话关联。
       }
     } catch (error) {
       failure = error?.message ?? String(error)
+      failureInfo = classifyTurnError(error)
       this.log("error", t("dsh.turn_failed", { error: failure }))
       // 同上：异常也不丢映射，避免「一轮失败就换一个新会话」。
     } finally {
@@ -388,7 +391,7 @@ class TurnDriver {
         }),
       )
       try {
-        link.endTurn(delivery.ticket, failure)
+        link.endTurn(delivery.ticket, failure, failureInfo)
       } catch (error) {
         this.log("warn", t("dsh.turn_end_failed", { error: error.message }))
       }
@@ -604,10 +607,18 @@ class TurnDriver {
           deadline = Date.now() + 30_000
           continue
         }
-        return "turn timeout: no turn/end within 30 seconds after interrupting; treating it as failed"
+        // 是我们主动打断后没等到收尾：不是后端连通性故障，不写结构化分类。
+        return {
+          message:
+            "turn timeout: no turn/end within 30 seconds after interrupting; treating it as failed",
+          failure: null,
+        }
       }
       if (next.done) {
-        return "event stream ended before turn/end"
+        return {
+          message: "event stream ended before turn/end",
+          failure: { component: "backend", class: "closed" },
+        }
       }
       const event = next.value
       if (event.type === "turn/end") {
@@ -647,7 +658,8 @@ function isDeadSessionError(error) {
 }
 
 /**
- * 把 dsh 的 turn/end reason 翻成给用户看的失败信息；正常结束返回 null。
+ * 把 dsh 的 turn/end reason 翻成 `{ message, failure }`；正常结束返回 null。
+ * `failure` 是 v7 可选的结构化分类，只有模型/鉴权/限流类 code 才填。
  *
  * dsh 的 reason 是 `{ kind, ... }`：`completed` 是正常；`error` 带 `error.message`
  * 和 `error.code`；`blocked` / `aborted` / `max-tokens` / `interrupted` 等是其它
@@ -656,23 +668,77 @@ function isDeadSessionError(error) {
  */
 function renderTurnFailure(reason) {
   if (!reason || reason.kind === "completed") return null
+  const failure = classifyTurnReason(reason)
+  let message
   switch (reason.kind) {
     case "error": {
-      const message = reason.error?.message ?? "unknown error"
+      const text = reason.error?.message ?? "unknown error"
       const code = reason.error?.code ?? ""
-      return code ? `${message} (${code})` : message
+      message = code ? `${text} (${code})` : text
+      break
     }
     case "aborted":
-      return "this turn was aborted"
+      message = "this turn was aborted"
+      break
     case "blocked":
-      return "this turn was blocked (possibly awaiting manual authorization)"
+      message = "this turn was blocked (possibly awaiting manual authorization)"
+      break
     case "max-tokens":
-      return "this turn hit the output limit (max-tokens)"
+      message = "this turn hit the output limit (max-tokens)"
+      break
     case "interrupted":
-      return "this turn was interrupted before a crash and did not finish normally"
+      message = "this turn was interrupted before a crash and did not finish normally"
+      break
     default:
-      return `this turn ended for an unexpected reason: ${reason.kind ?? "unknown"}`
+      message = `this turn ended for an unexpected reason: ${reason.kind ?? "unknown"}`
   }
+  return { message, failure }
+}
+
+function normalizeErrorCode(code) {
+  return String(code ?? "")
+    .toLowerCase()
+    .replaceAll("_", "-")
+}
+
+/// #pinModel 抛出的错误：selectModel 对照 catalog 失败 = 模型未配置。
+/// dsh 自身不可达/鉴权失败归到后端。
+function classifyTurnError(error) {
+  const code = normalizeErrorCode(error?.code)
+  if (code === "model-unavailable") {
+    return { component: "model", class: "model_unconfigured" }
+  }
+  if (code === "unreachable" || code === "closed") {
+    return { component: "backend", class: code }
+  }
+  if (code === "auth-failed" || code === "unauthorized" || code === "forbidden") {
+    return { component: "backend", class: "auth_failed" }
+  }
+  return null
+}
+
+/// turn/end 的 reason 只有带模型/限流语义的 code 才算模型故障；
+/// blocked / max-tokens / 业务错误不乱标成连通性 down。
+function classifyTurnReason(reason) {
+  if (reason.kind !== "error") return null
+  const code = normalizeErrorCode(reason.error?.code)
+  if (code.includes("model-unconfigured")) {
+    return { component: "model", class: "model_unconfigured" }
+  }
+  if (code.includes("model-unavailable") || code.includes("model-not-found")) {
+    return { component: "model", class: "model_unavailable" }
+  }
+  if (
+    code.includes("auth") ||
+    code.includes("unauthorized") ||
+    code.includes("forbidden")
+  ) {
+    return { component: "model", class: "auth_failed" }
+  }
+  if (code.includes("rate") || code.includes("429") || code.includes("quota")) {
+    return { component: "model", class: "rate_limited" }
+  }
+  return null
 }
 
 async function callBridge(link, name, args) {

@@ -1,6 +1,6 @@
 # 失联提示与带外通知（设计提案）
 
-状态：提案（2026-11-04）；第①②③步已实现、第④步待做。
+状态：提案（2026-11-04）；第①②③④步已实现。
 范围：turn 级失败通知、组件级连通性状态、`/healthz`、`/api/plugins`、带外通知（log / pull / ntfy）。
 非目标：自动拉起 dsh/opencode、自动切换平台、在 core 里探测平台、为每个平台写特例。
 
@@ -15,8 +15,12 @@
 >   `Health::Unknown`，不再假装 Healthy；平台连接细节看 `/api/dependencies`。
 > - 第③步：`Bridge::end_turn` 对 `error` 文本取 FNV-1a 指纹，按
 >   `(session, room, fingerprint)` 在 10 分钟窗口内只发首条；同一房间窗口内最多
->   3 条；一轮成功清空该 `(session, room)` 的历史失败。组件级抑制仍等第④步的
->   结构化 `component`，现在不猜。
+>   3 条；一轮成功清空该 `(session, room)` 的历史失败。
+> - 第④步：`turn_end` 增加可选 `failure { component, id?, class }`（协议 v7，
+>   兼容 v6）；dsh 在模型/后端失败时填，opencode 只在明确线索时填。core 把
+>   `model` 写进 `DependencyKind::Model`，`backend` 写进对应 harness；一轮成功
+>   把该会话的模型与 harness 标回 `up`。有结构化分类时 in-band 去重键改为
+>   `(session, component, id, class)`，不再看错误文本。
 
 ## 0. 结论
 

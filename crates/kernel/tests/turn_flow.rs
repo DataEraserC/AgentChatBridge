@@ -10,15 +10,15 @@ use std::time::{Duration, Instant};
 
 use acb_kernel::{
     AccessAction, AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Bridge, Capability,
-    ControlRegistry, Cursor, DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest,
-    Element, ErrorCode, EventQueue, ExtensionPoint, Feedbacks, Ingest, ManagerManifest,
-    ManagerPlugin, MemoryStore, NoteKey, NoteKind, Notes, Omitted, Outbound, OutboundError,
-    PLUGIN_API_VERSION, PluginError, PluginManager, ProviderDescriptor, ProviderId,
-    ProviderInstance, ProviderOptions, ReceiveDecision, ReceiveProvider, ReceiveRequest,
-    RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision, RoutePolicy, RouteProvider,
-    RouteWorker, SendContext, SendHook, Sender, Sent, Transcript, TurnErrorAction, TurnErrorPolicy,
-    TurnErrorProvider, TurnErrorRequest, TurnReason, WakeContext, WakeDecision, WakePolicy,
-    WakeProvider, WakeVerdict, Watermarks, drain_events, unread,
+    Config, ControlRegistry, Cursor, DeliveryComposer, DeliveryPlan, DeliveryPolicy,
+    DeliveryRequest, DependencyRegistry, Element, ErrorCode, EventQueue, ExtensionPoint, Feedbacks,
+    Ingest, ManagerManifest, ManagerPlugin, MemoryStore, NoteKey, NoteKind, Notes, Omitted,
+    Outbound, OutboundError, PLUGIN_API_VERSION, PluginError, PluginManager, ProviderDescriptor,
+    ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision, ReceiveProvider,
+    ReceiveRequest, RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision, RoutePolicy,
+    RouteProvider, RouteWorker, SendContext, SendHook, Sender, Sent, Transcript, TurnErrorAction,
+    TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest, TurnFailure, TurnReason, WakeContext,
+    WakeDecision, WakePolicy, WakeProvider, WakeVerdict, Watermarks, drain_events, unread,
 };
 use serde_json::{Value, json};
 
@@ -2410,6 +2410,84 @@ fn successful_turn_resets_failure_dedupe() {
 
     let sends = sends.lock().expect("没被毒死");
     assert_eq!(sends.len(), 2, "恢复后同一故障应重新通知：{sends:?}");
+}
+
+/// v7 结构化失败：更新模型依赖；同一 component/id/class 即使文本不同也只发一条。
+#[test]
+fn structured_turn_failure_updates_model_and_dedupes_by_class() {
+    let text = fallback_config().replace(
+        "        persona = \"p\"",
+        "        persona = \"p\"\n        model = \"test/model\"",
+    );
+    let config = Config::parse(&text).expect("配置合法");
+    let deps = DependencyRegistry::from_config(&config);
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let mut bridge = Bridge::new(
+        config,
+        MemoryStore::new(),
+        Box::new(Recorder {
+            sends: sends.clone(),
+        }),
+    )
+    .with_dependencies(deps.clone());
+
+    let failure = TurnFailure {
+        component: "model".into(),
+        id: Some("test/model".into()),
+        class: "model_unavailable".into(),
+    };
+
+    bridge
+        .ingest(message("qq:group/123", "10001", "第一次", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+    bridge
+        .end_turn_with_failure(&delivery.ticket, Some("模型网关拒绝连接"), Some(&failure))
+        .expect("能收工");
+    bridge.flush_notices();
+
+    let snapshot = deps.snapshot(None);
+    let model = dep_entry(&snapshot, "test/model");
+    assert_eq!(model["kind"], "model");
+    assert_eq!(model["state"], "down");
+    assert_eq!(model["lastErrorClass"], "model_unavailable");
+
+    // 同一 component/id/class，文本不同：按结构化分类去重，不再发。
+    bridge
+        .ingest(message("qq:group/123", "10001", "第二次", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+    bridge
+        .end_turn_with_failure(&delivery.ticket, Some("模型网关超时"), Some(&failure))
+        .expect("能收工");
+    bridge.flush_notices();
+    assert_eq!(
+        sends.lock().expect("没被毒死").len(),
+        1,
+        "结构化分类相同就只发首条"
+    );
+
+    // 成功一轮：模型恢复 up。
+    bridge
+        .ingest(message("qq:group/123", "10001", "恢复正常", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+    bridge.end_turn(&delivery.ticket, None).expect("成功收工");
+
+    let snapshot = deps.snapshot(None);
+    let model = dep_entry(&snapshot, "test/model");
+    assert_eq!(model["state"], "up");
+    assert!(model["lastError"].is_null());
+}
+
+fn dep_entry(snapshot: &Value, id: &str) -> Value {
+    snapshot["dependencies"]
+        .as_array()
+        .expect("数组")
+        .iter()
+        .find(|item| item["id"] == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("依赖表里没有 {id}：{snapshot}"))
 }
 
 /// 不同错误文本是不同指纹，但同一房间 10 分钟内最多 3 条。

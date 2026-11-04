@@ -136,6 +136,19 @@ impl DependencyRegistry {
             .iter()
             .map(|item| item.id.as_str())
             .collect();
+        let models: BTreeSet<String> = config
+            .sessions
+            .iter()
+            .map(|session| {
+                session
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| format!("model:{}/default", session.harness))
+            })
+            .collect();
         let mut inner = self
             .inner
             .lock()
@@ -147,7 +160,7 @@ impl DependencyRegistry {
             .filter(|key| match key.kind {
                 DependencyKind::Harness => !harnesses.contains(key.id.as_str()),
                 DependencyKind::Platform => !platforms.contains(key.id.as_str()),
-                DependencyKind::Model => false,
+                DependencyKind::Model => !models.contains(&key.id),
             })
             .cloned()
             .collect();
@@ -192,6 +205,24 @@ impl DependencyRegistry {
                 last_class: Some("not_configured".to_owned()),
             });
         }
+        for id in models {
+            let key = Key {
+                kind: DependencyKind::Model,
+                id,
+            };
+            inner.entries.entry(key.clone()).or_insert(Entry {
+                key,
+                configured: true,
+                expected: true,
+                state: State::Unknown,
+                since: now,
+                last_ok_at: None,
+                last_attempt_at: None,
+                attempts: 0,
+                last_error: None,
+                last_class: None,
+            });
+        }
     }
 
     /// 记一次连接尝试（不改变状态）。成功也是尝试，由 connected 前的 attempt 记一次。
@@ -222,6 +253,22 @@ impl DependencyRegistry {
     /// 平台适配器上报断开（第②步使用）。
     pub fn platform_disconnected(&self, id: &str, class: &str, detail: &str, now: i64) {
         self.mark_down(DependencyKind::Platform, id, class, detail, now);
+    }
+
+    /// harness 明确报告后端失败：把它记成 down，class 用 harness 给的分类。
+    /// 连接状态仍由 endpoint 维护；这是「harness 连着但后端不可用」的叠加信号。
+    pub fn harness_turn_down(&self, id: &str, class: &str, detail: &str, now: i64) {
+        self.mark_down(DependencyKind::Harness, id, class, detail, now);
+    }
+
+    /// harness 报告模型失败：更新模型条目。
+    pub fn model_down(&self, id: &str, class: &str, detail: &str, now: i64) {
+        self.mark_down(DependencyKind::Model, id, class, detail, now);
+    }
+
+    /// 一轮成功：模型恢复可用。
+    pub fn model_up(&self, id: &str, now: i64) {
+        self.mark_up(DependencyKind::Model, id, now);
     }
 
     /// 平台连接尚未配置/尚未开始：保持 unknown，不报 down。

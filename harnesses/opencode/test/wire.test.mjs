@@ -216,6 +216,28 @@ test("收工发 turn_end，票随之作废", async (t) => {
   assert.equal(link.ticket, null)
 })
 
+test("收工可以带 v7 结构化失败分类", async (t) => {
+  const { bridge, link } = await setup(t, {
+    onTurn: async (turn) => {
+      link.endTurn(turn.ticket, "gateway down", {
+        component: "model",
+        id: "openai/gpt-4",
+        class: "model_unavailable",
+      })
+    },
+  })
+  await bridge.send({ frame: "turn_start", delivery: delivery() })
+
+  const end = await bridge.next()
+  assert.equal(end.frame, "turn_end")
+  assert.equal(end.error, "gateway down")
+  assert.deepEqual(end.failure, {
+    component: "model",
+    id: "openai/gpt-4",
+    class: "model_unavailable",
+  })
+})
+
 test("桥发 ping 要回 pong", async (t) => {
   const { bridge } = await setup(t)
 

@@ -8,7 +8,8 @@
 - 一条长连接（本机套接字或 TCP），**每帧一行 JSON**，UTF-8。
 - 单帧上限 1 MiB，超了直接断连。
 - 首帧必须是 `hello`，带协议版本与令牌（TCP 时必填）。版本不符由桥拒绝并说明原因。
-  当前 `PROTOCOL_VERSION = 6`；wire 形状变了就加一，文档和 `crates/proto` 同时改。
+  当前 `PROTOCOL_VERSION = 7`；wire 形状变了就加一，文档和 `crates/proto` 同时改。
+  v7 兼容 v6 harness：`turn_end.failure` 是可选字段，旧 harness 不带时走原路径。
 
 ## 接入点
 
@@ -27,13 +28,35 @@
 | `hello` | harness → 桥 | 握手：协议版本 + 接入令牌 |
 | `ready` | 桥 → harness | 握手成功：`sessions` = 这条连接代表哪几个会话（配置顺序）+ `maps` = 已落盘的会话映射（harness 重启后据此复用旧会话，ADR-0018） |
 | `turn_start` | 桥 → harness | 开一轮：回合票 + 会话 + 记忆 + 房间 + 本次投递的记录 + 开轮原因 + 轮次超时 |
-| `turn_end` | harness → 桥 | 本轮收工（可带错误） |
+| `turn_end` | harness → 桥 | 本轮收工（可带错误与 v7 可选结构化失败分类） |
 | `tool_call` | harness → 桥 | 调用**桥的工具面**（ADR-0006：发送/读取/笔记这些 acb 内置工具）：票 + 工具名 + 参数。harness 自己挂的工具（如 dsh 的 MCP）不经桥 |
 | `tool_result` | 桥 → harness | 工具结果或错误 |
 | `control` | 桥 → harness | 控制指令（如重置会话映射）。桥只转发，语义由 harness 决定（ADR-0018） |
 | `control_result` | harness → 桥 | 控制指令的执行结果 |
 | `log` | 桥 → harness | 给 harness 侧的日志，不影响流程 |
 | `ping` / `pong` | 双向 | 保活 |
+
+## turn_end 的可选失败分类（v7）
+
+```json
+{
+  "frame": "turn_end",
+  "ticket": "main-...",
+  "error": "模型网关拒绝连接",
+  "failure": {
+    "component": "model",
+    "id": "openai/gpt-4",
+    "class": "model_unavailable"
+  }
+}
+```
+
+- `component`：`model` 或 `backend`。core 不认识的 component 按无结构化信息处理。
+- `id`：模型引用或 harness id；省略时 core 按会话配置补默认值（模型用
+  `session.model`，空则 `model:<harness>/default`；backend 用会话所属 harness id）。
+- `class`：`model_unavailable` / `model_unconfigured` / `auth_failed` /
+  `rate_limited` / `internal` 等；core 原样存进依赖表，不做文本反推。
+- 字段整体可选：v6 harness 不填时，core 仍按 `error` 文本指纹去重。
 
 ## 一轮的形状
 

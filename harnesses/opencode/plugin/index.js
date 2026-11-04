@@ -45,6 +45,40 @@ function parseModelRef(text) {
 }
 
 /**
+ * 把 opencode/模型侧错误翻成 v7 的结构化失败分类。只有明确线索才分类；
+ * 业务错误（内容拦截、参数 400）返回 null，不污染依赖表。
+ */
+function classifyTurnError(error) {
+  const code = String(error?.code ?? "")
+    .toLowerCase()
+    .replaceAll("_", "-")
+  const message = String(error?.message ?? error ?? "").toLowerCase()
+  if (
+    code.includes("model-unavailable") ||
+    /econnrefused|model[^.]*(unavailable|refused)|gateway[^.]*(unavailable|refused)/.test(
+      message,
+    )
+  ) {
+    return { component: "model", class: "model_unavailable" }
+  }
+  if (
+    code.includes("model-unconfigured") ||
+    /model[^.]*(not found|unknown|not configured)|provider[^.]*(not found|not configured)/.test(
+      message,
+    )
+  ) {
+    return { component: "model", class: "model_unconfigured" }
+  }
+  if (code.includes("auth") || /401|403|unauthorized|forbidden|invalid api key|credentials/.test(message)) {
+    return { component: "model", class: "auth_failed" }
+  }
+  if (code.includes("rate") || /429|rate limit|quota/.test(message)) {
+    return { component: "model", class: "rate_limited" }
+  }
+  return null
+}
+
+/**
  * opencode 报的错是不是「这个会话记录的工作目录已经不存在」。
  *
  * `session.get` 只返回记录，不校验目录；真正投话时 opencode 才报
@@ -270,6 +304,7 @@ class TurnDriver {
 
   async #one(delivery, link) {
     let failure = null
+    let turnFailureInfo = null
     const started = Date.now()
     try {
       let sessionID = await this.#session(delivery.session)
@@ -352,6 +387,7 @@ class TurnDriver {
       }
     } catch (error) {
       failure = error?.message ?? String(error)
+      const failureInfo = classifyTurnError(error)
       this.log(
         "error",
         t("opencode.turn_failed_elapsed", {
@@ -362,9 +398,10 @@ class TurnDriver {
       )
       // 会话可能被删了：下次重建，别一直往一个死会话里灌。
       this.#forget(delivery.session)
+      turnFailureInfo = failureInfo
     } finally {
       try {
-        link.endTurn(delivery.ticket, failure)
+        link.endTurn(delivery.ticket, failure, turnFailureInfo)
       } catch (error) {
         this.log("warn", t("opencode.turn_end_failed", { error: error.message }))
       }
