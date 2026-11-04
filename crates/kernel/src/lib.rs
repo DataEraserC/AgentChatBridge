@@ -23,6 +23,7 @@ mod route_worker;
 pub mod sanitize;
 pub mod storage;
 mod task;
+pub mod tickets;
 pub mod tools;
 pub mod wire;
 

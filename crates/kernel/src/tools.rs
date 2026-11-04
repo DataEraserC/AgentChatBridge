@@ -14,6 +14,8 @@ use serde::Deserialize;
 pub const TOOL_NAMES: &[&str] = &[
     "send_message",
     "send_message_to",
+    // 一次性票据：群内申请，私信管理员批准，单目标房间 + 具体 op 列表。
+    "access_request",
     "ack_messages",
     "get_history",
     "fetch_records",
@@ -87,6 +89,16 @@ pub struct SendToArgs {
     pub elements: Elements,
     /// 目标房间，形如 `qq:group/123`。必须落在当前会话订阅范围之内。
     pub to: String,
+}
+
+/// 申请一张一次性访问票据。申请本身不执行任何平台动作。
+#[derive(Debug, Deserialize)]
+pub struct AccessRequestArgs {
+    /// 目标房间，形如 `qq:group/123`；一张票据只覆盖这一个房间。
+    pub target: String,
+    /// 要放行的具体操作。形如 `send_message_to`、`get_history`、
+    /// `platform_call:group.kick`；不接受模糊的「整个房间」。
+    pub ops: Vec<String>,
 }
 
 /// 确认这批消息处理完了。

@@ -334,7 +334,7 @@ impl GrantDecision {
     }
 }
 
-fn truncate_target(target: &str) -> String {
+pub(crate) fn truncate_target(target: &str) -> String {
     let mut chars = target.chars();
     let head: String = chars.by_ref().take(AUDIT_TARGET_MAX_CHARS).collect();
     if chars.next().is_some() {
