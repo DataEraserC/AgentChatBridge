@@ -1185,6 +1185,42 @@
 - 证据：workspace 全量、clippy、fmt 全绿；两个 harness 的 `node --test` 全绿。
 - 可回退：去掉 `failure` 字段与 `end_turn_with_failure` 接线即可回到第③步路径。
 
+## 2026-11-04 — connectivity 第⑤步：带外通知层
+
+- 落地位置：
+  - `crates/plugins/process-tools` 新增 `ProcessNotifier`：kernel `NoticeSink`
+    的进程实现，复用本 crate 的 stdio 行 JSON-RPC 载体；有界队列 128，
+    满了丢事件并计数，绝不在主流程等网络。
+  - `crates/notifier-process` 的 `acb-notifier` 子进程负责 ntfy 兼容 HTTP、
+    去重、恢复配对与有界重试；HTTP 客户端（`ureq`）只在这个 crate，core /
+    bridge 的依赖图里没有。
+  - kernel 新增 `NoticeEvent` / `NoticeSink`：`DependencyRegistry` 在
+    `unknown→up`、`→down`、`up→down` 等状态边沿发出事件；engine 在 turn
+    失败通知被去重/限流时发 `TurnSuppressed`。不读 harness 内部状态。
+- 配置：
+  - `[notifications] enabled / url / topic / token / min_interval_secs`；
+    `[notifications.in_band] window_secs / room_limit / max_entries` 接管第③步
+    三个硬编码常量，省略时默认值与旧行为一致。
+  - `url` / `topic` 任一为空或 `enabled = false`：整层不加载——不 spawn、不建
+    线程、不打启动日志。`ProcessNotifier::spawn` 也会拒绝不完整配置。
+- 推送行为：
+  - `POST {url}/{topic}`；`Title` / `Priority` / `Tags` 走 header，body 纯文本
+    含 component、transition、since、last_ok、class、lastError、attempts。
+  - 同一依赖边沿在 `min_interval_secs` 内只推一次；`up` 只有该组件 `down`
+    成功推送过才配对，且带 `down_since` / `duration` / `down_class` /
+    `down_lastError`；连续抖动由边沿去重吸收。
+  - HTTP 失败首次后最多重试 3 次，退避 250/500/1000ms；仍失败只记日志与计数并丢弃，
+    不影响桥和其他事件。
+- 测试：`crates/notifier-process/tests/push.rs` 用本地 stub HTTP server 覆盖
+  ntfy 请求形状、去重、恢复配对、未配对恢复、3 次重试、turn 抑制去重；
+  process-tools 宿主测试用假子进程确认事件按行 JSON 发送；kernel 测试覆盖
+  依赖边沿进 sink。
+- 部署注意：需要把 `acb-notifier` 与 `acb-bridge` 一起安装（同目录）；
+  测试/特殊部署可用 `ACB_NOTIFIER_BIN` 覆盖路径。
+- 证据：`cargo test --workspace`、clippy、fmt 待提交前统一跑。
+- 可回退：删掉 `[notifications]` 配置即整层不加载；代码可整体删除而不影响
+  依赖表与 turn 通道。
+
 ## 待办（用户指定，暂不实现）
 
 - LKG 失败阈值分 class：panic 类失败也许应该 1 次就回滚，不应与 provider 解析

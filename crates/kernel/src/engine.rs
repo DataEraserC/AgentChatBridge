@@ -29,7 +29,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::config::{ClockPolicy, Config, TurnErrorAction, WakeDecision, WakePolicy};
+use crate::config::{
+    ClockPolicy, Config, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy,
+};
 use crate::deps::DependencyRegistry;
 use crate::lkg::PluginLkg;
 use crate::memory::{
@@ -540,13 +542,6 @@ pub struct Bridge<S: Store> {
     config_version: u64,
 }
 
-/// in-band 失败通知的去重/限流窗口：同一 (session, room, 错误指纹) 在窗口内只发首条；
-/// 同一房间在窗口内最多发 `TURN_FAILURE_ROOM_LIMIT` 条。
-const TURN_FAILURE_WINDOW_MS: i64 = 10 * 60 * 1000;
-const TURN_FAILURE_ROOM_LIMIT: usize = 3;
-/// 去重表上限：超出丢最旧的，避免长期运行无限增长。
-const TURN_FAILURE_KEEP: usize = 256;
-
 /// 一条已发出的 in-band 失败通知，用于去重与按房间限流。
 #[derive(Debug, Clone)]
 struct TurnFailureNotice {
@@ -560,9 +555,19 @@ struct TurnFailureNotice {
     at: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
 enum TurnFailureSuppressed {
     Duplicate,
     RoomLimit,
+}
+
+impl TurnFailureSuppressed {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Duplicate => "duplicate",
+            Self::RoomLimit => "room_limit",
+        }
+    }
 }
 
 /// 会话的模型依赖 id：显式 `session.model` 优先，否则归到 harness 默认模型。
@@ -2771,6 +2776,12 @@ impl<S: Store> Bridge<S> {
                 );
             } else {
                 let now = now_millis();
+                let in_band = turn
+                    .config
+                    .notifications
+                    .as_ref()
+                    .map(|notifications| notifications.in_band)
+                    .unwrap_or_default();
                 // 结构化失败先落到依赖表；这一步不影响是否发 in-band 通知。
                 if let Some(failure) = failure {
                     self.note_structured_failure(&turn.config, &turn.session, failure, error, now);
@@ -2791,9 +2802,17 @@ impl<S: Store> Bridge<S> {
                     &turn.room,
                     fingerprint,
                     structured_key,
+                    in_band,
                     now,
                 ) {
                     Some(reason) => {
+                        self.deps.notice_turn_suppressed(
+                            &turn.session,
+                            &turn.room.to_string(),
+                            structured_key,
+                            reason.as_str(),
+                            &format!("{fingerprint:016x}"),
+                        );
                         let key = match reason {
                             TurnFailureSuppressed::Duplicate => {
                                 "kernel.engine.turn_error_duplicate"
@@ -2809,7 +2828,7 @@ impl<S: Store> Bridge<S> {
                                 session = turn.session,
                                 room = turn.room,
                                 fingerprint = format!("{fingerprint:016x}"),
-                                limit = TURN_FAILURE_ROOM_LIMIT
+                                limit = in_band.room_limit
                             )
                         );
                     }
@@ -2822,6 +2841,7 @@ impl<S: Store> Bridge<S> {
                                 &turn.room,
                                 fingerprint,
                                 structured_key,
+                                in_band,
                                 now,
                             );
                         }
@@ -2903,9 +2923,10 @@ impl<S: Store> Bridge<S> {
         room: &RoomId,
         fingerprint: u64,
         structured: Option<(&str, Option<&str>, &str)>,
+        in_band: InBandNoticeConfig,
         now: i64,
     ) -> Option<TurnFailureSuppressed> {
-        let cutoff = now.saturating_sub(TURN_FAILURE_WINDOW_MS);
+        let cutoff = now.saturating_sub((in_band.window_secs as i64).saturating_mul(1000));
         self.turn_failures.retain(|item| item.at >= cutoff);
         let duplicate = match structured {
             Some((component, id, class)) => self.turn_failures.iter().any(|item| {
@@ -2927,7 +2948,7 @@ impl<S: Store> Bridge<S> {
             .iter()
             .filter(|item| item.room == *room)
             .count()
-            >= TURN_FAILURE_ROOM_LIMIT
+            >= in_band.room_limit as usize
         {
             return Some(TurnFailureSuppressed::RoomLimit);
         }
@@ -2940,6 +2961,7 @@ impl<S: Store> Bridge<S> {
         room: &RoomId,
         fingerprint: u64,
         structured: Option<(&str, Option<&str>, &str)>,
+        in_band: InBandNoticeConfig,
         now: i64,
     ) {
         self.turn_failures.push_back(TurnFailureNotice {
@@ -2951,7 +2973,7 @@ impl<S: Store> Bridge<S> {
             class: structured.map(|(_, _, class)| class.to_owned()),
             at: now,
         });
-        while self.turn_failures.len() > TURN_FAILURE_KEEP {
+        while self.turn_failures.len() > in_band.max_entries as usize {
             self.turn_failures.pop_front();
         }
     }

@@ -5,11 +5,12 @@
 //! `attempts` 记每一次连接尝试，与是否连上无关；`neverConnected` 只看 `lastOkAt`。
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::{Value, json};
 
 use crate::config::Config;
+use crate::notice::{NoticeEvent, NoticeSink};
 
 const TRANSITION_KEEP: usize = 200;
 
@@ -92,6 +93,8 @@ struct Inner {
 #[derive(Clone)]
 pub struct DependencyRegistry {
     inner: Arc<Mutex<Inner>>,
+    /// 带外通知接收端。未配置时保持 None，整条路径零开销。
+    sink: Arc<RwLock<Option<Arc<dyn NoticeSink>>>>,
 }
 
 impl Default for DependencyRegistry {
@@ -102,6 +105,7 @@ impl Default for DependencyRegistry {
                 transitions: VecDeque::new(),
                 seq: 0,
             })),
+            sink: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -109,6 +113,53 @@ impl Default for DependencyRegistry {
 impl DependencyRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 注入带外通知接收端。生产 main 只在 `[notifications]` 完整配置时调用。
+    pub fn set_notice_sink(&self, sink: Arc<dyn NoticeSink>) {
+        *self
+            .sink
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
+    }
+
+    fn emit(&self, event: NoticeEvent) {
+        let sink = self
+            .sink
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(sink) = sink {
+            sink.notify(event);
+        }
+    }
+
+    /// turn 失败通知被 in-band 抑制时，把这件事交给带外层。
+    pub fn notice_turn_suppressed(
+        &self,
+        session: &str,
+        room: &str,
+        component: Option<(&str, Option<&str>, &str)>,
+        reason: &str,
+        fingerprint: &str,
+    ) {
+        if self
+            .sink
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none()
+        {
+            return;
+        }
+        self.emit(NoticeEvent::TurnSuppressed {
+            session: session.to_owned(),
+            room: room.to_owned(),
+            component: component.map(|(component, _, _)| component.to_owned()),
+            component_id: component.and_then(|(_, id, _)| id).map(ToOwned::to_owned),
+            class: component.map(|(_, _, class)| class.to_owned()),
+            reason: reason.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+        });
     }
 
     /// 按当前配置登记 harness 与平台连接。
@@ -282,7 +333,7 @@ impl DependencyRegistry {
             kind: DependencyKind::Platform,
             id: id.to_owned(),
         };
-        let from = {
+        let (from, notice) = {
             let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
             let from = entry.state;
             entry.last_error = Some(detail.to_owned());
@@ -291,7 +342,18 @@ impl DependencyRegistry {
                 entry.state = State::Unknown;
                 entry.since = now;
             }
-            from
+            let notice = (from != State::Unknown).then(|| NoticeEvent::DependencyEdge {
+                kind: key.kind.as_str().to_owned(),
+                id: key.id.clone(),
+                from: from.as_str().to_owned(),
+                to: State::Unknown.as_str().to_owned(),
+                since: entry.since,
+                last_ok_at: entry.last_ok_at,
+                class: Some(class.to_owned()),
+                detail: Some(detail.to_owned()),
+                attempts: entry.attempts,
+            });
+            (from, notice)
         };
         if from != State::Unknown {
             push_transition(
@@ -303,6 +365,10 @@ impl DependencyRegistry {
                 Some(detail.to_owned()),
                 now,
             );
+        }
+        drop(inner);
+        if let Some(event) = notice {
+            self.emit(event);
         }
     }
 
@@ -332,7 +398,7 @@ impl DependencyRegistry {
             kind,
             id: id.to_owned(),
         };
-        let from = {
+        let (from, notice) = {
             let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
             let from = entry.state;
             entry.last_ok_at = Some(now);
@@ -342,10 +408,25 @@ impl DependencyRegistry {
                 entry.state = State::Up;
                 entry.since = now;
             }
-            from
+            let notice = (from != State::Up).then(|| NoticeEvent::DependencyEdge {
+                kind: key.kind.as_str().to_owned(),
+                id: key.id.clone(),
+                from: from.as_str().to_owned(),
+                to: State::Up.as_str().to_owned(),
+                since: entry.since,
+                last_ok_at: entry.last_ok_at,
+                class: None,
+                detail: None,
+                attempts: entry.attempts,
+            });
+            (from, notice)
         };
         if from != State::Up {
             push_transition(&mut inner, key, from, State::Up, None, None, now);
+        }
+        drop(inner);
+        if let Some(event) = notice {
+            self.emit(event);
         }
     }
 
@@ -359,7 +440,7 @@ impl DependencyRegistry {
             kind,
             id: id.to_owned(),
         };
-        let from = {
+        let (from, notice) = {
             let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
             let from = entry.state;
             entry.last_error = Some(detail.to_owned());
@@ -368,7 +449,18 @@ impl DependencyRegistry {
                 entry.state = State::Down;
                 entry.since = now;
             }
-            from
+            let notice = (from != State::Down).then(|| NoticeEvent::DependencyEdge {
+                kind: key.kind.as_str().to_owned(),
+                id: key.id.clone(),
+                from: from.as_str().to_owned(),
+                to: State::Down.as_str().to_owned(),
+                since: entry.since,
+                last_ok_at: entry.last_ok_at,
+                class: Some(class.to_owned()),
+                detail: Some(detail.to_owned()),
+                attempts: entry.attempts,
+            });
+            (from, notice)
         };
         if from != State::Down {
             push_transition(
@@ -380,6 +472,10 @@ impl DependencyRegistry {
                 Some(detail.to_owned()),
                 now,
             );
+        }
+        drop(inner);
+        if let Some(event) = notice {
+            self.emit(event);
         }
     }
 
@@ -715,6 +811,67 @@ mod tests {
             2,
             "删除不写迁移环"
         );
+    }
+
+    struct RecordingSink(Arc<Mutex<Vec<NoticeEvent>>>);
+
+    impl NoticeSink for RecordingSink {
+        fn notify(&self, event: NoticeEvent) {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(event);
+        }
+    }
+
+    #[test]
+    fn state_edges_feed_the_notice_sink_but_attempts_do_not() {
+        let registry = DependencyRegistry::from_config(&harness_config());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        registry.set_notice_sink(Arc::new(RecordingSink(Arc::clone(&events))));
+
+        registry.harness_attempt("dsh", 100);
+        registry.harness_connected("dsh", 101);
+        registry.harness_connected("dsh", 102);
+        registry.harness_disconnected("dsh", "socket closed", 103);
+        registry.harness_attempt("dsh", 104);
+
+        let events = events.lock().expect("没被毒死");
+        assert_eq!(events.len(), 2, "只有 unknown→up 与 up→down 两条边");
+        match &events[0] {
+            NoticeEvent::DependencyEdge {
+                kind,
+                id,
+                from,
+                to,
+                since,
+                attempts,
+                ..
+            } => {
+                assert_eq!(kind, "harness");
+                assert_eq!(id, "dsh");
+                assert_eq!(from, "unknown");
+                assert_eq!(to, "up");
+                assert_eq!(*since, 101);
+                assert_eq!(*attempts, 1);
+            }
+            other => panic!("应当是依赖边沿，收到 {other:?}"),
+        }
+        match &events[1] {
+            NoticeEvent::DependencyEdge {
+                from,
+                to,
+                class,
+                detail,
+                ..
+            } => {
+                assert_eq!(from, "up");
+                assert_eq!(to, "down");
+                assert_eq!(class.as_deref(), Some("closed"));
+                assert_eq!(detail.as_deref(), Some("socket closed"));
+            }
+            other => panic!("应当是依赖边沿，收到 {other:?}"),
+        }
     }
 
     #[test]

@@ -82,6 +82,8 @@ pub struct Config {
     pub queues: QueueConfig,
     /// 插件 LKG 的失败阈值与观察窗口。
     pub lkg: LkgConfig,
+    /// 带外通知（ntfy 兼容 HTTP）与 in-band 失败通知策略。没配整层不加载。
+    pub notifications: Option<NotificationsConfig>,
     /// 记忆 worktree 的根目录。每个「会话 × 记忆」checkout 到这下面。
     pub worktrees_root: String,
     /// 会话**没配自己的 `on_turn_error`** 时的默认失败通知动作列表。
@@ -370,6 +372,62 @@ impl Default for LkgConfig {
         Self {
             max_failures: DEFAULT_LKG_MAX_FAILURES,
             window_secs: DEFAULT_LKG_WINDOW_SECS,
+        }
+    }
+}
+
+/// 带外通知默认去重窗口（秒）。
+pub const DEFAULT_NOTIFICATION_MIN_INTERVAL_SECS: u64 = 600;
+/// in-band 失败通知默认去重窗口（秒）。
+pub const DEFAULT_IN_BAND_WINDOW_SECS: u64 = 600;
+/// in-band 失败通知默认每房间上限。
+pub const DEFAULT_IN_BAND_ROOM_LIMIT: u64 = 3;
+/// in-band 失败通知默认去重表上限。
+pub const DEFAULT_IN_BAND_MAX_ENTRIES: u64 = 256;
+
+/// 带外通知（ntfy 兼容 HTTP）。`active()` 为 false 时整层不加载。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationsConfig {
+    /// 总开关。默认 true；显式 false 时即使填了 url/topic 也不加载。
+    pub enabled: bool,
+    /// ntfy 根地址，如 `http://127.0.0.1:8080`；不含 topic。
+    pub url: Option<String>,
+    /// ntfy topic。
+    pub topic: Option<String>,
+    /// 可选访问令牌；填了就发 `Authorization: Bearer <token>`。
+    pub token: Option<String>,
+    /// 同一依赖边沿/抑制事件的去重窗口（秒）。
+    pub min_interval_secs: u64,
+    /// in-band turn 失败通知的去重/限流参数。
+    pub in_band: InBandNoticeConfig,
+}
+
+impl NotificationsConfig {
+    /// 只有开关打开且 url/topic 都非空时才认为这一层要加载。
+    pub fn active(&self) -> bool {
+        self.enabled
+            && self.url.as_deref().is_some_and(|url| !url.is_empty())
+            && self.topic.as_deref().is_some_and(|topic| !topic.is_empty())
+    }
+}
+
+/// in-band turn 失败通知的策略。默认值与原硬编码常量一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InBandNoticeConfig {
+    /// 同一 (session, room, 故障) 的去重窗口（秒）。
+    pub window_secs: u64,
+    /// 同一房间在窗口内最多发几条。
+    pub room_limit: u64,
+    /// 去重表上限。
+    pub max_entries: u64,
+}
+
+impl Default for InBandNoticeConfig {
+    fn default() -> Self {
+        Self {
+            window_secs: DEFAULT_IN_BAND_WINDOW_SECS,
+            room_limit: DEFAULT_IN_BAND_ROOM_LIMIT,
+            max_entries: DEFAULT_IN_BAND_MAX_ENTRIES,
         }
     }
 }
@@ -1057,6 +1115,10 @@ pub enum ConfigError {
     BadQueueLimit { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_lkg_config", field = field, value = value))]
     BadLkgConfig { field: String, value: u64 },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_notifications_config", field = field, value = value))]
+    BadNotificationsConfig { field: String, value: u64 },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_notifications_url", url = url))]
+    BadNotificationsUrl { url: String },
     #[error("{}", acb_i18n::t!("kernel.config.bad_receive_provider", connection = connection, provider = provider, detail = detail))]
     BadReceiveProvider {
         connection: String,
@@ -1205,6 +1267,62 @@ impl Config {
                 window_secs: lkg_limit("window_secs", raw.window_secs, DEFAULT_LKG_WINDOW_SECS)?,
             },
             None => LkgConfig::default(),
+        };
+
+        let notifications = match raw.notifications {
+            Some(raw) => {
+                let url = raw
+                    .url
+                    .map(|url| url.trim().trim_end_matches('/').to_owned())
+                    .filter(|url| !url.is_empty());
+                let topic = raw
+                    .topic
+                    .map(|topic| topic.trim().trim_start_matches('/').to_owned())
+                    .filter(|topic| !topic.is_empty());
+                let token = raw
+                    .token
+                    .map(|token| token.trim().to_owned())
+                    .filter(|token| !token.is_empty());
+                if raw.enabled && url.is_some() && topic.is_some() {
+                    let value = url.as_deref().unwrap_or_default();
+                    if !value.starts_with("http://") && !value.starts_with("https://") {
+                        return Err(ConfigError::BadNotificationsUrl {
+                            url: value.to_owned(),
+                        });
+                    }
+                }
+                let min_interval_secs = notice_limit(
+                    "min_interval_secs",
+                    raw.min_interval_secs,
+                    DEFAULT_NOTIFICATION_MIN_INTERVAL_SECS,
+                )?;
+                let in_band = InBandNoticeConfig {
+                    window_secs: notice_limit(
+                        "in_band.window_secs",
+                        raw.in_band.window_secs,
+                        DEFAULT_IN_BAND_WINDOW_SECS,
+                    )?,
+                    room_limit: notice_limit(
+                        "in_band.room_limit",
+                        raw.in_band.room_limit,
+                        DEFAULT_IN_BAND_ROOM_LIMIT,
+                    )?,
+                    max_entries: notice_limit(
+                        "in_band.max_entries",
+                        raw.in_band.max_entries,
+                        DEFAULT_IN_BAND_MAX_ENTRIES,
+                    )?,
+                };
+                Some(NotificationsConfig {
+                    enabled: raw.enabled,
+                    url,
+                    topic,
+                    token,
+                    min_interval_secs,
+                    in_band,
+                })
+            }
+            None => None,
         };
 
         let worktrees_root = match raw.worktrees_root {
@@ -1610,6 +1728,7 @@ impl Config {
             retention,
             queues,
             lkg,
+            notifications,
             worktrees_root,
             default_on_turn_error,
             delivery_limit: raw.delivery_limit.unwrap_or(DEFAULT_DELIVERY_LIMIT),
@@ -2192,7 +2311,20 @@ fn lkg_limit(field: &str, value: Option<u64>, default: u64) -> Result<u64, Confi
     Ok(value)
 }
 
-/// 队列容量：省略用默认值，0 拒绝。
+/// 通知/去重参数：省略用默认值，0 拒绝。
+fn notice_limit(field: &str, value: Option<u64>, default: u64) -> Result<u64, ConfigError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    if value == 0 {
+        return Err(ConfigError::BadNotificationsConfig {
+            field: field.to_owned(),
+            value,
+        });
+    }
+    Ok(value)
+}
+
 fn queue_limit(field: &str, value: Option<u64>, default: usize) -> Result<usize, ConfigError> {
     let Some(value) = value else {
         return Ok(default);
@@ -2276,6 +2408,7 @@ struct RawConfig {
     retention: Option<RawRetention>,
     queues: Option<RawQueue>,
     lkg: Option<RawLkg>,
+    notifications: Option<RawNotifications>,
     worktrees_root: Option<String>,
     /// 会话没配 `on_turn_error` 时的默认动作列表（默认空 = 只记日志）。
     #[serde(default)]
@@ -2402,6 +2535,29 @@ struct RawPlugin {
     timeout_ms: Option<u64>,
     #[serde(default)]
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawNotifications {
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+    url: Option<String>,
+    topic: Option<String>,
+    token: Option<String>,
+    min_interval_secs: Option<u64>,
+    #[serde(default)]
+    in_band: RawInBand,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawInBand {
+    window_secs: Option<u64>,
+    room_limit: Option<u64>,
+    max_entries: Option<u64>,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -2977,6 +3133,86 @@ mod tests {
             assert!(matches!(
                 Config::parse(&text),
                 Err(ConfigError::BadLkgConfig { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn notifications_are_optional_and_inactive_without_url_or_topic() {
+        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        assert!(config.notifications.is_none(), "没写整块就不加载");
+
+        let missing_topic = format!(
+            "{}\n[notifications]\nurl = \"http://127.0.0.1:8080\"\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&missing_topic).expect("能解析");
+        assert!(
+            !config.notifications.expect("块存在").active(),
+            "缺 topic 时不加载"
+        );
+
+        let disabled = format!(
+            "{}\n[notifications]\nenabled = false\nurl = \"http://127.0.0.1:8080\"\ntopic = \"acb\"\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&disabled).expect("能解析");
+        assert!(
+            !config.notifications.expect("块存在").active(),
+            "总开关关掉时不加载"
+        );
+    }
+
+    #[test]
+    fn notifications_parse_defaults_and_validate() {
+        let text = format!(
+            "{}\n[notifications]\nurl = \"http://127.0.0.1:8080/\"\ntopic = \"/acb\"\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&text).expect("能解析");
+        let notifications = config.notifications.expect("块存在");
+        assert!(notifications.active());
+        assert_eq!(notifications.url.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(notifications.topic.as_deref(), Some("acb"));
+        assert_eq!(
+            notifications.min_interval_secs,
+            DEFAULT_NOTIFICATION_MIN_INTERVAL_SECS
+        );
+        assert_eq!(notifications.in_band, InBandNoticeConfig::default());
+
+        let custom = format!(
+            "{}\n[notifications]\nurl = \"https://ntfy.example\"\ntopic = \"acb\"\nmin_interval_secs = 60\n[notifications.in_band]\nwindow_secs = 30\nroom_limit = 5\nmax_entries = 100\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&custom).expect("能解析");
+        let notifications = config.notifications.expect("块存在");
+        assert_eq!(notifications.min_interval_secs, 60);
+        assert_eq!(notifications.in_band.window_secs, 30);
+        assert_eq!(notifications.in_band.room_limit, 5);
+        assert_eq!(notifications.in_band.max_entries, 100);
+
+        let bad_url = format!(
+            "{}\n[notifications]\nurl = \"127.0.0.1:8080\"\ntopic = \"acb\"\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        assert!(matches!(
+            Config::parse(&bad_url),
+            Err(ConfigError::BadNotificationsUrl { .. })
+        ));
+
+        for setting in [
+            "min_interval_secs = 0",
+            "in_band.window_secs = 0",
+            "in_band.room_limit = 0",
+            "in_band.max_entries = 0",
+        ] {
+            let text = format!(
+                "{}\n[notifications]\nurl = \"http://127.0.0.1:8080\"\ntopic = \"acb\"\n{setting}\n",
+                config_with(ONE_CONNECTION, ONE_SESSION)
+            );
+            assert!(matches!(
+                Config::parse(&text),
+                Err(ConfigError::BadNotificationsConfig { .. })
             ));
         }
     }

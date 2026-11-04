@@ -13,6 +13,7 @@ members = [
     "crates/plugins/lua",
     "crates/plugins/process-tools",
     "crates/plugins/wake-fixture",
+    "crates/notifier-process",
     "crates/extensions",
     "crates/bridge",
 ]

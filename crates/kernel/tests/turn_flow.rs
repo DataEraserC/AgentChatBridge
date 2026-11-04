@@ -12,19 +12,31 @@ use acb_kernel::{
     AccessAction, AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Bridge, Capability,
     Config, ControlRegistry, Cursor, DeliveryComposer, DeliveryPlan, DeliveryPolicy,
     DeliveryRequest, DependencyRegistry, Element, ErrorCode, EventQueue, ExtensionPoint, Feedbacks,
-    Ingest, ManagerManifest, ManagerPlugin, MemoryStore, NoteKey, NoteKind, Notes, Omitted,
-    Outbound, OutboundError, PLUGIN_API_VERSION, PluginError, PluginManager, ProviderDescriptor,
-    ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision, ReceiveProvider,
-    ReceiveRequest, RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision, RoutePolicy,
-    RouteProvider, RouteWorker, SendContext, SendHook, Sender, Sent, Transcript, TurnErrorAction,
-    TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest, TurnFailure, TurnReason, WakeContext,
-    WakeDecision, WakePolicy, WakeProvider, WakeVerdict, Watermarks, drain_events, unread,
+    Ingest, ManagerManifest, ManagerPlugin, MemoryStore, NoteKey, NoteKind, Notes, NoticeEvent,
+    NoticeSink, Omitted, Outbound, OutboundError, PLUGIN_API_VERSION, PluginError, PluginManager,
+    ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision,
+    ReceiveProvider, ReceiveRequest, RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision,
+    RoutePolicy, RouteProvider, RouteWorker, SendContext, SendHook, Sender, Sent, Transcript,
+    TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest, TurnFailure, TurnReason,
+    WakeContext, WakeDecision, WakePolicy, WakeProvider, WakeVerdict, Watermarks, drain_events,
+    unread,
 };
 use serde_json::{Value, json};
 
 const AT: i64 = 1_793_000_000_000;
 
 type Sends = Arc<Mutex<Vec<(RoomId, Vec<Element>)>>>;
+
+struct NoticeRecorder(Arc<Mutex<Vec<NoticeEvent>>>);
+
+impl NoticeSink for NoticeRecorder {
+    fn notify(&self, event: NoticeEvent) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(event);
+    }
+}
 
 /// 记账用的出站通道：把「发到哪儿、发了什么」存起来，不真的往外发。
 struct Recorder {
@@ -2421,6 +2433,8 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
     );
     let config = Config::parse(&text).expect("配置合法");
     let deps = DependencyRegistry::from_config(&config);
+    let notice_events = Arc::new(Mutex::new(Vec::new()));
+    deps.set_notice_sink(Arc::new(NoticeRecorder(Arc::clone(&notice_events))));
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let mut bridge = Bridge::new(
         config,
@@ -2466,6 +2480,22 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
         1,
         "结构化分类相同就只发首条"
     );
+    let events = notice_events.lock().expect("没被毒死");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            NoticeEvent::TurnSuppressed {
+                reason,
+                component,
+                class,
+                ..
+            } if reason == "duplicate"
+                && component.as_deref() == Some("model")
+                && class.as_deref() == Some("model_unavailable")
+        )),
+        "suppressed turn 要进带外事件：{events:?}"
+    );
+    drop(events);
 
     // 成功一轮：模型恢复 up。
     bridge
