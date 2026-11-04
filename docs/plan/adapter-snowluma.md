@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 3 项、部分实现 12 项、未实现 8 项**。动作级：现有 catalog 暴露 52 个方法 / 53 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 3 项、部分实现 12 项、未实现 8 项**。动作级：现有 catalog 暴露 50 个层级 op / 53 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -116,10 +116,10 @@
 - **连接**：只做正向 WebSocket（`ws-client`）；`ws-server` 未实现，manifest 会让注册表拒绝（[config.rs](../../crates/kernel/src/config.rs#L3145-L3150)）。
 - **鉴权**：`Authorization: Bearer`，地址里的 `?access_token=` 原样保留（[link.rs](../../crates/adapters/onebot11/src/link.rs#L94-L149)）。
 - **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、合并转发发送与读取。
-- **平台方法**：`catalog.rs` 的 `ROUTES` 共 52 个方法，映射 53 个 action（`poke.send` 按群/私聊分两个动作）。`platform_call` 只允许调用 catalog 里有的方法（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），所以**没列出的 SnowLuma 动作，agent 根本调不到**。
+- **平台方法**：`catalog.rs` 的 `ROUTES` 共 50 个层级 op，映射 53 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
 - **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略；`meta_event` 直接忽略；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot11/src/event.rs#L115-L200)、[notice 摘要](../../crates/adapters/onebot11/src/event.rs#L324-L345)）。
-- **账号**：连上后另起线程调 `get_login_info` 核对 `account`，不一致就喊（[link.rs](../../crates/adapters/onebot11/src/link.rs#L486-L542)）。
-- **健康**：只报「连接是否建立/断开」，不报账号是否在线、收发链路是否健康。
+- **账号**：连上后另起线程调 `get_login_info` 核对 `account`，并调 `get_version_info` / `get_status` 采集三层版本与在线状态（[link.rs](../../crates/adapters/onebot-snowluma/src/link.rs)）。
+- **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 额外写进 `accountOnline` / `accountGood`，版本信息写进 `version`。
 
 ---
 
@@ -219,7 +219,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 16 | 流式传输 | 6 | **未实现** | 没有 HTTP 流式通道；现有文件中继（ADR-0025）不是流式 |
 | 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **部分** | 只有 `set_msg_emoji_like`；缺读取/用户列表/群回应/自定义表情/系统表情 |
 | 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **部分** | `get_record` / `get_image` 有；缺语音转写、OCR、AI 语音、音乐签名、`get_file` |
-| 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 只调 `get_login_info` 核对账号；`get_status`、`get_version_info` 只在 catalog 里，启动路径不调用；`can_send_*`、资料设置、在线状态未暴露 |
+| 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 启动已调用 `get_login_info` / `get_status` / `get_version_info`；三层版本 + 兼容下限进依赖元数据。仍缺 `can_send_*`、资料设置、在线状态设置 |
 | 20 | 事件类型 | message / message_sent / notice / request / meta | **部分** | 有分流；notice 只解析 6 类 + poke；`bot_status` 会被当成 `private/<self_id>` 的未知通知记录；心跳直接忽略，不更新健康 |
 | 21 | 群相册 | 9 | **未实现** | 无 |
 | 22 | QQ 空间 | 10（中文）/ 26（英文） | **未实现** | 无 |
@@ -228,9 +228,11 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 25 | MCP / TypeScript SDK | 独立包 | **不适用** | 不是 OneBot 运行时协议 |
 
 **计数**：25 项中 2 项不适用；适用 23 项 = 已实现 3 + 部分 12 + 未实现 8。
+批次 1 完成后计数不变：第 19 项仍是「部分」，但缺口从「启动不调用版本/状态」缩小为
+「缺能力查询、资料设置、在线状态设置」。其余域不变。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 52 个方法 / 53 个 action（[catalog.rs](../../crates/adapters/onebot11/src/catalog.rs#L727-L788)）。
+- 现有 `ROUTES` 50 个层级 op / 53 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。这是「完整实现 SnowLuma 能力」的主要工作量。
 
@@ -255,22 +257,21 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 ### 4.2 现状核实
 
-**`get_version_info` 已定义、未调用。**
+**`get_version_info` 已在批次 1 调用。**
 
-- `catalog.rs:730` 有 `route("account.version", "get_version_info")`，所以 agent 可以手动 `platform_call`。
-- `link.rs:486-542` 的连接后探测只调 `get_login_info`；没有 `get_version_info`，也没有 `get_status`。
-- 结论：**启动路径未采集协议版本与实现版本，这是缺口**；不是「接口不存在」。
+- `catalog.rs` 仍有 `route("account.version", "get_version_info")`，agent 也可手动调。
+- `link.rs` 的连接后探测（`probe_identity`）现在会调 `get_login_info`、`get_version_info`、`get_status`。
+- 结论：启动路径已采集协议版本与实现版本；拿不到记 `unknown`，不回退猜测。
 
-**`get_status` 同样只在目录里。**
+**`get_status` 已在批次 1 调用。**
 
-- `catalog.rs:729` 有 `route("account.status", "get_status")`。
-- 连接健康只来自 WS 建立/断开（`AdapterStatus::attempt/connected/disconnected`），没有调用 `get_status` 的 `online` / `good`。
+- `catalog.rs` 仍有 `route("account.status", "get_status")`。
+- 连接健康仍来自 WS 建立/断开；`get_status` 的 `online` / `good` 额外写进平台依赖条目的 `accountOnline` / `accountGood`。
 
-**适配器自身版本未暴露。**
+**适配器自身版本已暴露。**
 
-- `AdapterManifest` 有 `api_version`（接口版本），没有 crate 版本字段（[adapter.rs](../../crates/kernel/src/adapter.rs#L62-L88)）。
-- `PluginArtifact` 有 `version`，但那是可回滚插件的产物版本，不是内置适配器版本（[plugin.rs](../../crates/kernel/src/plugin.rs#L1382-L1387)）。
-- 结论：crate 版本「已有」是指 workspace 里有 `0.1.0`；要出现在依赖元数据里，需要设计一个 manifest 版本字段或元数据字段。
+- `PlatformVersionInfo.adapter_version` 由适配器用 `CARGO_PKG_VERSION` 填入，进入平台依赖条目的 `version.adapter.version`。
+- `AdapterManifest` 仍不新增 crate 版本字段：依赖元数据是运行期事实，manifest 是静态声明，二者不混。
 
 ### 4.3 SnowLuma 侧两个方向
 
@@ -278,10 +279,11 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 - 上游没有版本兼容矩阵；文档明确说 SnowLuma 仍处早期开发，接口、配置结构、发行布局都可能变化，生产环境要固定具体 tag（[介绍](https://snowluma.github.io/zh/docs/guide/introduction)、[更新](https://snowluma.github.io/zh/docs/guide/deploy/update)）。
 - 可观测的最新 release：`v2.4.0`（2026-11-03，GitHub Releases）。
-- 建议的声明方式：
-  - 适配器 manifest / 文档写 `snowluma_min = "2.4.0"`（调查基线），并说明「上游无兼容承诺，升级前看 release notes」；
-  - 配置里允许 `connections[].options.snowluma_min_version` 覆盖（`options` 是适配器自有 JSON，core 不解释，[config.rs](../../crates/kernel/src/config.rs#L300-L301)）；
-  - 实际版本低于声明下限时：启动日志警告 + 依赖元数据标 `compat: below_declared_floor`，**不直接断连**。理由是版本字符串格式未成文，硬失败容易误伤。
+- 已落地的声明方式：
+  - 适配器默认 `snowluma_min_version = "2.4.0"`（调查基线），并说明「上游无兼容承诺，升级前看 release notes」；
+  - `connections[].options.snowluma_min_version` 可以覆盖（`options` 是适配器自有 JSON，core 不解释，[config.rs](../../crates/kernel/src/config.rs#L300-L301)）；
+  - 实际版本低于声明下限时：启动日志警告，依赖元数据 `version.adapter.compat.state = below_declared_floor`，**不断连**。
+    版本字符串解析不了（如带预发布后缀）记 `unknown`，不猜大小。
 - 不要写死「兼容 2.x 全系」；上游自己都不承诺。
 
 **B. 运行时实际版本**
@@ -298,7 +300,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | SnowLuma 文档站是否提供版本查询接口 | **有**：`get_version_info` 动作页，返回 `app_name` / `app_version` / `protocol_version`；另有 `get_status` 返回 `online` / `good` / `time` |
 | 是否提供能力查询接口 | **运行时没有**。OneBot 动作目录里没有 `get_capabilities` / `list_actions` 之类的动作。文档站的 API 目录是构建期生成的页面；`@snowluma/mcp` 有 `list_actions` / `get_action` 和 `snowluma://onebot/actions` 资源，但那是独立 MCP 包的目录快照，不是运行时查询 |
 | 是否提供版本兼容矩阵 | **没有**。只有「早期开发、固定 tag、升级看 release notes」的警告；GitHub Releases 是版本来源 |
-| OneBot `get_version_info` 在当前适配器是否已调用 | **没有**。只在 `catalog.rs` 里作为可调用方法存在；`link.rs` 启动路径只调 `get_login_info`。列为缺口 |
+| OneBot `get_version_info` 在当前适配器是否已调用 | **已调用**（批次 1，2026-11-05）：`probe_identity` 在连接后调用 `get_version_info` / `get_status`，结果写进依赖元数据；拿不到记 `unknown` |
 
 ### 4.5 记录位置（设计）
 
@@ -309,25 +311,26 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   "kind": "platform",
   "id": "qq",
   "state": "up",
+  "versionObservedAt": 1760000000000,
   "version": {
     "protocol": {
+      "kind": "onebot11",
       "name": "OneBot",
       "version": "v11",
-      "source": "get_version_info",
-      "observedAt": 1760000000000
+      "source": "get_version_info"
     },
-    "implementation": {
+    "impl": {
       "name": "snowluma",
       "version": "2.4.0",
-      "source": "get_version_info",
-      "observedAt": 1760000000000
+      "source": "get_version_info"
     },
     "adapter": {
       "version": "0.1.0",
       "source": "crate",
       "compat": {
         "protocol": "onebot11",
-        "snowlumaMin": "2.4.0"
+        "snowlumaMin": "2.4.0",
+        "state": "ok"
       }
     }
   }
@@ -335,6 +338,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 ```
 
 - `source` 取值至少包括 `get_version_info`、`crate`、`unknown`。
+- `compat.state` 取值：`ok` / `below_declared_floor` / `unknown`；低于下限只告警，不断连。
 - `unknown` 是合法结果，不是错误；UI 要显示「未知」，不能显示空或猜测值。
 - 日志只打一行摘要（三层各一段），不打 header、token、完整响应。
 
@@ -432,7 +436,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **前置**：无。
 
-### 批次 1：版本与状态采集（建议最先做）
+### 批次 1：版本与状态采集（已完成，2026-11-05）
 
 **能力范围**
 - 连接成功后自动调 `get_version_info` 与 `get_status`。

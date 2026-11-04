@@ -58,6 +58,12 @@ allow_destructive = false  # 见下
 - `account` 一定要填对：agent 自己发的消息不计入未读，靠的就是它。
 - `allow_destructive` 默认 `false`（踢人/禁言/撤回别人消息这些破坏性操作模型调不到）。
   想让 agent 真能管理群就写 `true`，或者只放行几个：`allow_destructive = ["member.kick"]`。
+- OneBot 连接会带 `options`；`options.snowluma_min_version` 可覆盖适配器默认的 SnowLuma
+  兼容下限（默认 `2.4.0`）。低于下限只在启动日志警告，不拒绝连接：
+  在 `[[connections]]` 里写 `options = { snowluma_min_version = "2.4.0" }`。
+- 连接成功后适配器会自动调 `get_login_info` / `get_version_info` / `get_status`；
+  三层版本与 `compat.state` 可在 `/healthz` 的 `dependencies.items[].version` 和
+  `/api/plugins.connections[].version` 看到。
 - 同一个平台第二个号：再复制一段，`id` 换名（如 `qq2`）。同一个群在两个号眼里是两个房间，各记各的账。
 
 ### 接收策略：消息进不进流水

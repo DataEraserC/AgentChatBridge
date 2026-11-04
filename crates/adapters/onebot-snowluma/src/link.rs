@@ -25,6 +25,9 @@ use tungstenite::{Message, WebSocket};
 use crate::event::{self, Parsed};
 use crate::outbound::OneBotSnowLumaOutbound;
 
+/// 适配器声明的 SnowLuma 兼容下限。上游没有兼容承诺，只做「低于下限告警」，不断连。
+pub const DEFAULT_SNOWLUMA_MIN: &str = "2.4.0";
+
 /// 一条 WebSocket 连接。
 pub type Ws = WebSocket<TcpStream>;
 
@@ -431,6 +434,7 @@ pub fn supervise(
     let id = connection.id.clone();
     let admin_qqs = connection.admin_qqs.clone();
     let account = connection.account.clone();
+    let min_version = version_floor(&connection.options);
 
     while !shutdown.load(Ordering::Relaxed) {
         status.attempt();
@@ -451,7 +455,10 @@ pub fn supervise(
                     let account = account.clone();
                     let id = id.clone();
                     let status = status.clone();
-                    std::thread::spawn(move || probe_identity(&sender, &account, &id, &status));
+                    let min_version = min_version.clone();
+                    std::thread::spawn(move || {
+                        probe_identity(&sender, &account, &id, &status, &min_version)
+                    });
                 }
 
                 let ctx = PumpContext {
@@ -518,6 +525,7 @@ fn probe_identity(
     configured: &str,
     connection: &str,
     status: &AdapterStatus,
+    min_version: &str,
 ) {
     if let Some(value) = ask(sender, "get_login_info") {
         check_login(&value, configured, connection);
@@ -531,28 +539,19 @@ fn probe_identity(
         );
     }
 
-    let mut version = acb_kernel::PlatformVersionInfo {
-        protocol_kind: "onebot11".to_owned(),
-        protocol_name: "OneBot".to_owned(),
-        protocol_version: None,
-        implementation_name: None,
-        implementation_version: None,
-        adapter_version: env!("CARGO_PKG_VERSION").to_owned(),
+    let version = match ask(sender, "get_version_info") {
+        Some(value) => parse_version_info(&value, min_version),
+        None => {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "adapter.onebot11.version_probe_timeout",
+                    connection = connection
+                )
+            );
+            empty_version_info(min_version)
+        }
     };
-    if let Some(value) = ask(sender, "get_version_info") {
-        let data = value.get("data").unwrap_or(&Value::Null);
-        version.protocol_version = text_field(data, "protocol_version");
-        version.implementation_name = text_field(data, "app_name");
-        version.implementation_version = text_field(data, "app_version");
-    } else {
-        eprintln!(
-            "{}",
-            acb_i18n::t!(
-                "adapter.onebot11.version_probe_timeout",
-                connection = connection
-            )
-        );
-    }
     eprintln!(
         "{}",
         acb_i18n::t!(
@@ -564,15 +563,29 @@ fn probe_identity(
                 .implementation_version
                 .as_deref()
                 .unwrap_or("unknown"),
-            adapter = version.adapter_version
+            adapter = version.adapter_version,
+            floor = version.compat_floor.as_deref().unwrap_or("unknown"),
+            compat = version.compat_state.as_deref().unwrap_or("unknown")
         )
     );
+    if version.compat_state.as_deref() == Some("below_declared_floor") {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.snowluma_below_min",
+                connection = connection,
+                version = version
+                    .implementation_version
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                floor = version.compat_floor.as_deref().unwrap_or("unknown")
+            )
+        );
+    }
     status.version(version);
 
     if let Some(value) = ask(sender, "get_status") {
-        let data = value.get("data").unwrap_or(&Value::Null);
-        if let Some(online) = data.get("online").and_then(Value::as_bool) {
-            let good = data.get("good").and_then(Value::as_bool);
+        if let Some((online, good)) = parse_status(&value) {
             status.account(online, good, "get_status");
         }
     } else {
@@ -584,6 +597,117 @@ fn probe_identity(
             )
         );
     }
+}
+
+fn empty_version_info(min_version: &str) -> acb_kernel::PlatformVersionInfo {
+    acb_kernel::PlatformVersionInfo {
+        protocol_kind: "onebot11".to_owned(),
+        protocol_name: "OneBot".to_owned(),
+        protocol_version: None,
+        implementation_name: None,
+        implementation_version: None,
+        adapter_version: env!("CARGO_PKG_VERSION").to_owned(),
+        compat_floor: Some(min_version.to_owned()),
+        compat_state: Some("unknown".to_owned()),
+    }
+}
+
+/// `get_version_info` 回包 → 三层版本。取不到或形状不对都落 `unknown`，不 panic。
+fn parse_version_info(value: &Value, min_version: &str) -> acb_kernel::PlatformVersionInfo {
+    let mut version = empty_version_info(min_version);
+    if !retcode_ok(value) {
+        return version;
+    }
+    let data = value.get("data").unwrap_or(&Value::Null);
+    version.protocol_version =
+        normalize_protocol_version(text_field(data, "protocol_version").as_deref());
+    version.implementation_name = text_field(data, "app_name");
+    version.implementation_version = text_field(data, "app_version");
+    version.compat_state = Some(
+        compat_state(
+            version.implementation_name.as_deref(),
+            version.implementation_version.as_deref(),
+            min_version,
+        )
+        .to_owned(),
+    );
+    version
+}
+
+/// `get_status` 回包 → `(online, good)`。缺字段或 retcode != 0 都返回 None。
+fn parse_status(value: &Value) -> Option<(bool, Option<bool>)> {
+    if !retcode_ok(value) {
+        return None;
+    }
+    let data = value.get("data").unwrap_or(&Value::Null);
+    let online = data.get("online").and_then(Value::as_bool)?;
+    let good = data.get("good").and_then(Value::as_bool);
+    Some((online, good))
+}
+
+fn retcode_ok(value: &Value) -> bool {
+    value
+        .get("retcode")
+        .and_then(Value::as_i64)
+        .is_none_or(|code| code == 0)
+}
+
+/// 只认 OneBot 11 的两种写法；识别不了就记 `unknown`，不切协议解析器。
+fn normalize_protocol_version(value: Option<&str>) -> Option<String> {
+    let value = value?.trim().to_ascii_lowercase();
+    matches!(value.as_str(), "11" | "v11").then(|| "v11".to_owned())
+}
+
+/// SnowLuma 兼容下限：只在实现名能确认是 SnowLuma 时比较，其它实现记 unknown。
+fn compat_state(name: Option<&str>, version: Option<&str>, floor: &str) -> &'static str {
+    let Some(name) = name else {
+        return "unknown";
+    };
+    if !name.to_ascii_lowercase().contains("snowluma") {
+        return "unknown";
+    }
+    let Some(actual) = version.and_then(version_triplet) else {
+        return "unknown";
+    };
+    let Some(floor) = version_triplet(floor) else {
+        return "unknown";
+    };
+    if actual < floor {
+        "below_declared_floor"
+    } else {
+        "ok"
+    }
+}
+
+/// 宽松的 `major.minor.patch` 解析：允许 `v` 前缀、缺 minor/patch 按 0；
+/// 带预发布/构建后缀的版本按 unknown 处理，不猜大小。
+fn version_triplet(text: &str) -> Option<(u64, u64, u64)> {
+    let text = text.trim().trim_start_matches(['v', 'V']);
+    if text.is_empty() {
+        return None;
+    }
+    let mut parts = text.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts
+        .next()
+        .map_or(Some(0), |part| part.parse::<u64>().ok())?;
+    let patch = parts
+        .next()
+        .map_or(Some(0), |part| part.parse::<u64>().ok())?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn version_floor(options: &Value) -> String {
+    options
+        .get("snowluma_min_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_SNOWLUMA_MIN)
+        .to_owned()
 }
 
 /// 发一个动作并等回包。超时/连接断开都算「没问到」。
@@ -737,6 +861,162 @@ mod tests {
         assert_eq!(text_field(&data, "app_name").as_deref(), Some("snowluma"));
         assert_eq!(text_field(&data, "app_version"), None);
         assert_eq!(text_field(&data, "missing"), None);
+    }
+
+    #[test]
+    fn version_probe_normalizes_protocol_and_records_compat() {
+        let value = json!({
+            "retcode": 0,
+            "data": {
+                "protocol_version": "11",
+                "app_name": "SnowLuma",
+                "app_version": "2.4.0",
+            }
+        });
+        let info = parse_version_info(&value, DEFAULT_SNOWLUMA_MIN);
+        assert_eq!(info.protocol_kind, "onebot11");
+        assert_eq!(info.protocol_name, "OneBot");
+        assert_eq!(info.protocol_version.as_deref(), Some("v11"));
+        assert_eq!(info.implementation_name.as_deref(), Some("SnowLuma"));
+        assert_eq!(info.implementation_version.as_deref(), Some("2.4.0"));
+        assert_eq!(info.compat_floor.as_deref(), Some(DEFAULT_SNOWLUMA_MIN));
+        assert_eq!(info.compat_state.as_deref(), Some("ok"));
+        assert_eq!(info.adapter_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn version_probe_falls_back_to_unknown_without_panicking() {
+        let empty = json!({"retcode": 0, "data": {}});
+        let info = parse_version_info(&empty, DEFAULT_SNOWLUMA_MIN);
+        assert_eq!(info.protocol_version, None);
+        assert_eq!(info.implementation_name, None);
+        assert_eq!(info.implementation_version, None);
+        assert_eq!(info.compat_state.as_deref(), Some("unknown"));
+
+        let failed = json!({
+            "retcode": 1,
+            "data": {"protocol_version": "v11", "app_name": "snowluma", "app_version": "2.4.0"}
+        });
+        let info = parse_version_info(&failed, DEFAULT_SNOWLUMA_MIN);
+        assert_eq!(info.protocol_version, None, "retcode != 0 不采信");
+        assert_eq!(info.implementation_name, None);
+        assert_eq!(info.compat_state.as_deref(), Some("unknown"));
+
+        let wrong_protocol = json!({
+            "retcode": 0,
+            "data": {"protocol_version": "12", "app_name": "snowluma", "app_version": "2.4.0"}
+        });
+        let info = parse_version_info(&wrong_protocol, DEFAULT_SNOWLUMA_MIN);
+        assert_eq!(info.protocol_version, None, "识别不了的协议版本记 unknown");
+        assert_eq!(info.implementation_name.as_deref(), Some("snowluma"));
+    }
+
+    #[test]
+    fn status_probe_requires_retcode_and_online() {
+        let online = json!({"retcode": 0, "data": {"online": true, "good": true}});
+        assert_eq!(parse_status(&online), Some((true, Some(true))));
+        let offline = json!({"retcode": 0, "data": {"online": false}});
+        assert_eq!(parse_status(&offline), Some((false, None)));
+        let missing = json!({"retcode": 0, "data": {"good": true}});
+        assert_eq!(parse_status(&missing), None);
+        let failed = json!({"retcode": 1, "data": {"online": true}});
+        assert_eq!(parse_status(&failed), None);
+    }
+
+    #[test]
+    fn compat_floor_marks_below_and_ignores_other_implementations() {
+        assert_eq!(
+            compat_state(Some("snowluma"), Some("2.3.9"), "2.4.0"),
+            "below_declared_floor"
+        );
+        assert_eq!(compat_state(Some("SnowLuma"), Some("2.4"), "2.4.0"), "ok");
+        assert_eq!(
+            compat_state(Some("snowluma"), Some("2.4.0-beta"), "2.4.0"),
+            "unknown",
+            "带后缀的版本不猜大小"
+        );
+        assert_eq!(
+            compat_state(Some("napcat"), Some("2.3.9"), "2.4.0"),
+            "unknown",
+            "其它实现不套 SnowLuma 下限"
+        );
+        assert_eq!(compat_state(None, None, "2.4.0"), "unknown");
+    }
+
+    #[test]
+    fn compat_floor_comes_from_options_with_default() {
+        assert_eq!(version_floor(&json!({})), DEFAULT_SNOWLUMA_MIN);
+        assert_eq!(
+            version_floor(&json!({"snowluma_min_version": " 2.6.1 "})),
+            "2.6.1"
+        );
+        assert_eq!(
+            version_floor(&json!({"snowluma_min_version": "  "})),
+            DEFAULT_SNOWLUMA_MIN
+        );
+    }
+
+    #[test]
+    fn ask_returns_none_when_the_action_queue_is_closed() {
+        let (sender, receiver) = mpsc::channel();
+        drop(receiver);
+        assert!(ask(&sender, "get_version_info").is_none());
+    }
+
+    #[test]
+    fn probe_identity_writes_version_and_status_to_dependencies() {
+        let config = Config::parse(
+            r#"
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            url = "ws://127.0.0.1:3001"
+            account = "10001"
+            "#,
+        )
+        .expect("配置合法");
+        let deps = acb_kernel::DependencyRegistry::from_config(&config);
+        let status = AdapterStatus::new("qq", deps.clone());
+        let (sender, receiver) = mpsc::channel::<Action>();
+
+        std::thread::spawn(move || {
+            while let Ok(action) = receiver.recv() {
+                let name = action.body["action"].as_str().unwrap_or_default();
+                let response = match name {
+                    "get_login_info" => json!({"retcode": 0, "data": {"user_id": 10001}}),
+                    "get_version_info" => json!({
+                        "retcode": 0,
+                        "data": {
+                            "protocol_version": "11",
+                            "app_name": "SnowLuma",
+                            "app_version": "2.4.1",
+                        }
+                    }),
+                    "get_status" => json!({"retcode": 0, "data": {"online": true, "good": true}}),
+                    _ => json!({"retcode": 1404}),
+                };
+                let _ = action.reply.send(Ok(response));
+            }
+        });
+
+        probe_identity(&sender, "10001", "qq", &status, DEFAULT_SNOWLUMA_MIN);
+
+        let qq = deps
+            .platform_items()
+            .into_iter()
+            .find(|item| item["id"] == "qq")
+            .expect("有 qq 平台条目");
+        assert_eq!(qq["version"]["protocol"]["version"], "v11");
+        assert_eq!(qq["version"]["impl"]["name"], "SnowLuma");
+        assert_eq!(qq["version"]["impl"]["version"], "2.4.1");
+        assert_eq!(
+            qq["version"]["adapter"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(qq["version"]["adapter"]["compat"]["state"], "ok");
+        assert_eq!(qq["accountOnline"], true);
+        assert_eq!(qq["accountGood"], true);
     }
 
     #[test]

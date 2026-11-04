@@ -1457,6 +1457,49 @@
 - 下一步入口：若还要压工具描述，按 `extension-point-catalog.md` 的 30 工具上限把
   `memory_git_*` / notes 合并成单入口。
 
+## 2026-11-05 — 批次 1：版本与状态采集
+
+- 任务编号：adapter-snowluma 批次 1
+- 做了什么：
+  - `crates/adapters/onebot-snowluma/src/link.rs`：连接后的 `probe_identity` 依次调
+    `get_login_info` / `get_version_info` / `get_status`；新增纯函数
+    `parse_version_info` / `parse_status`，超时、缺字段、`retcode != 0`、非法协议版本
+    全部落 `unknown`，不 panic。
+  - 协议版本只认 `11` / `v11`，统一成 `v11`；识别不了记 `unknown`，继续用现有 v11 解析器。
+  - `options.snowluma_min_version` 覆盖 SnowLuma 兼容下限（默认 `2.4.0`）；只有实现名
+    能确认是 SnowLuma 时才比较，低版本写
+    `version.adapter.compat.state = below_declared_floor` 并打日志，**不断连**。
+    带预发布后缀/无法解析的版本记 `unknown`，不猜大小。
+  - `crates/kernel/src/deps.rs`：`PlatformVersionInfo` 增加 `compat_floor` / `compat_state`；
+    依赖条目 `version.adapter.compat` 序列化 `{protocol, snowlumaMin, state}`。
+  - `crates/bridge/src/console.html`：依赖表在连接 id 下显示协议/实现/适配器/兼容状态摘要。
+  - 文档：`docs/plan/adapter-snowluma.md` 更新 4.2/4.3/4.4、功能域 #19、计数说明、批次 1 状态；
+    `docs/guide/config.md` / `docs/05-adapters.md` / `config.example.toml` 补 `snowluma_min_version`
+    与 `/healthz` / `/api/plugins` 可见字段。
+- 新增 op：**0 个**。复用已有 `account.version` / `account.status`；没有为探测另加散装 method，
+  也没有新增 tag 或第二张 op→risk 表。
+- 按文档判断先不做：
+  - 运行时能力查询：SnowLuma 没有 `get_capabilities` / `list_actions` 这类运行时动作；
+    `@snowluma/mcp` 的目录快照不算运行时接口，不实现。
+  - `can_send_*`、资料设置、在线状态设置：文档有动作，但不属于「版本/状态采集」，
+    留给后续批次，避免本批扩大范围。
+  - 兼容下限低于时不硬失败：上游没有兼容矩阵和版本格式承诺，硬拒绝容易误伤。
+- 证据：
+  - adapter：`version_probe_normalizes_protocol_and_records_compat`、
+    `version_probe_falls_back_to_unknown_without_panicking`、
+    `status_probe_requires_retcode_and_online`、
+    `compat_floor_marks_below_and_ignores_other_implementations`、
+    `compat_floor_comes_from_options_with_default`、
+    `ask_returns_none_when_the_action_queue_is_closed`、
+    `probe_identity_writes_version_and_status_to_dependencies`（假动作回包 → 依赖条目三层 + accountOnline/Good）。
+  - deps：`platform_version_records_three_layers_and_unknown_slots` 断言 `compat.state`。
+  - `cargo test --workspace`、clippy `-D warnings`、dsh/opencode 测试、`node --check` 全绿。
+- 能力状态：功能域计数仍是 **3 完全 / 12 部分 / 8 未实现**；#19 账号/系统状态仍为「部分」，
+  但缺口从「启动不调用版本/状态」缩小为「缺能力查询、资料设置、在线状态设置」。
+- 未决/风险：没有真实的 SnowLuma 实例可联调；`app_name` / 版本格式按官方文档字段解析，
+  实际命名差异会落 `unknown`，不会阻塞连接。
+
+
 
 ## 部署注意事项（nix-config 打包）
 

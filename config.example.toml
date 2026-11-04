@@ -113,6 +113,8 @@ account = "10001"
 admin_qqs = []   # 这些 QQ 号会被标成系统管理员（记录里的 sender.role = system_admin）
 # 想让它真顶一个人的位置（能踢人能禁言能改群名），把这行改成 true。
 allow_destructive = false
+# SnowLuma 兼容下限（默认 2.4.0）；低于下限只在启动日志告警，不断连。
+# options = { snowluma_min_version = "2.4.0" }
 
 # 入站策略（ADR-0026）：决定这条连接上的记录收不收。默认全部接收。
 # 被丢掉的记录不写流水、不叫醒任何人，就像从没到过桥。

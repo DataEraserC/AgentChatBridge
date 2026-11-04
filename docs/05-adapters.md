@@ -155,6 +155,12 @@ transport / 平台方法目录外，还声明入站语义能力：
 `process` 载体声明 `supports_at` / `supports_reply`（子进程原样带 hints），事件留空由子进程决定；
 动态库插件在自己的 `WireManifest` 里填。
 
+**运行期版本/状态**：OneBot SnowLuma 连接成功后会调 `get_login_info` / `get_version_info` /
+`get_status`，把三层版本（协议 / 实现 / 适配器）和 `compat.state` 写进平台依赖条目；
+`/healthz.dependencies.items[].version` 与 `/api/plugins.connections[].version` 可读。
+取不到记 `unknown`，不回退到镜像 tag 或包名猜测；低于 `options.snowluma_min_version`
+（默认 `2.4.0`）只告警，不断连。
+
 ### wake 策略插件
 
 同一张 `[[plugins]]` 表也装策略 provider。插件 manifest 写
