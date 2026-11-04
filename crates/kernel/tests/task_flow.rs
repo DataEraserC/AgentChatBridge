@@ -270,7 +270,7 @@ fn plugin_task_handler_runs_in_the_route_worker() {
         })
     };
 
-    queue.submit(message("/task plugin", false));
+    let _ = queue.submit(message("/task plugin", false));
     let task = wait_for_task(
         &bridge,
         |task| task["handler"] == "test.echo" && task["status"] == "succeeded",
@@ -280,7 +280,7 @@ fn plugin_task_handler_runs_in_the_route_worker() {
     assert!(task["error"].is_null());
 
     shutdown.store(true, Ordering::Relaxed);
-    queue.submit(message("收工", false));
+    let _ = queue.submit(message("收工", false));
     drain.join().expect("drain 收工");
 }
 
@@ -298,7 +298,7 @@ fn task_records_success_failure_and_can_be_queried_after_turn_end() {
         })
     };
 
-    queue.submit(message("/task ok", false));
+    let _ = queue.submit(message("/task ok", false));
     let ok = wait_for_status(&bridge, "succeeded", Duration::from_secs(3));
     assert_eq!(ok["handler"], "exec");
     assert!(
@@ -322,7 +322,7 @@ fn task_records_success_failure_and_can_be_queried_after_turn_end() {
         "合成事件不能再次进入 route 触发任务"
     );
 
-    queue.submit(message("/task fail", false));
+    let _ = queue.submit(message("/task fail", false));
     let failed = wait_for_status(&bridge, "failed", Duration::from_secs(3));
     assert_eq!(failed["handler"], "exec");
     assert!(failed["error"].as_str().is_some(), "失败原因可见");
@@ -332,7 +332,7 @@ fn task_records_success_failure_and_can_be_queried_after_turn_end() {
         2
     );
 
-    queue.submit(message("/task quiet", false));
+    let _ = queue.submit(message("/task quiet", false));
     let quiet = wait_for_task(
         &bridge,
         |task| task["wake_on"] == "never" && task["status"] == "succeeded",
@@ -346,7 +346,7 @@ fn task_records_success_failure_and_can_be_queried_after_turn_end() {
         "quiet 任务也不能触发额外任务"
     );
 
-    queue.submit(message("/task error-ok", false));
+    let _ = queue.submit(message("/task error-ok", false));
     let error_ok = wait_for_task(
         &bridge,
         |task| task["wake_on"] == "error" && task["status"] == "succeeded",
@@ -358,7 +358,7 @@ fn task_records_success_failure_and_can_be_queried_after_turn_end() {
         "wake_on=error 在成功时不发事件"
     );
 
-    queue.submit(message("/task error-fail", false));
+    let _ = queue.submit(message("/task error-fail", false));
     let error_fail = wait_for_task(
         &bridge,
         |task| task["wake_on"] == "error" && task["status"] == "failed",
@@ -428,7 +428,7 @@ fn task_event_wakes_through_existing_policy() {
         })
     };
 
-    queue.submit(message("/task fail", false));
+    let _ = queue.submit(message("/task fail", false));
     let failed = wait_for_status(&bridge, "failed", Duration::from_secs(3));
     assert_eq!(
         failed["event_woke"].as_array().map(Vec::len),
@@ -460,7 +460,7 @@ fn task_get_is_scoped_to_the_current_session() {
         })
     };
 
-    queue.submit(message("/task ok", false));
+    let _ = queue.submit(message("/task ok", false));
     let ok = wait_for_status(&bridge, "succeeded", Duration::from_secs(3));
     let task_id = ok["id"].as_str().expect("task id").to_owned();
 
