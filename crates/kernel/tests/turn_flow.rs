@@ -2548,7 +2548,7 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
                 component,
                 class,
                 ..
-            } if reason == "duplicate"
+            } if reason == "component_down"
                 && component.as_deref() == Some("model")
                 && class.as_deref() == Some("model_unavailable")
         )),
@@ -2567,6 +2567,68 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
     let model = dep_entry(&snapshot, "test/model");
     assert_eq!(model["state"], "up");
     assert!(model["lastError"].is_null());
+}
+
+/// 连接断掉的轮次不是成功：不能把依赖表刷回 up，也不能清掉失败去重历史。
+#[test]
+fn abandoned_turn_does_not_count_as_success() {
+    let text = fallback_config().replace(
+        "        persona = \"p\"",
+        "        persona = \"p\"\n        model = \"test/model\"",
+    );
+    let config = Config::parse(&text).expect("配置合法");
+    let deps = DependencyRegistry::from_config(&config);
+    let notice_events = Arc::new(Mutex::new(Vec::new()));
+    deps.set_notice_sink(Arc::new(NoticeRecorder(Arc::clone(&notice_events))));
+    let mut bridge = Bridge::new(
+        config,
+        MemoryStore::new(),
+        Box::new(Recorder {
+            sends: Arc::new(Mutex::new(Vec::new())),
+        }),
+    )
+    .with_dependencies(deps.clone());
+
+    let failure = TurnFailure {
+        component: "model".into(),
+        id: Some("test/model".into()),
+        class: "model_unavailable".into(),
+    };
+    bridge
+        .ingest(message("qq:group/123", "10001", "第一次", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+    bridge
+        .end_turn_with_failure(&delivery.ticket, Some("模型网关拒绝连接"), Some(&failure))
+        .expect("能收工");
+    assert_eq!(
+        dep_entry(&deps.snapshot(None), "test/model")["state"],
+        "down"
+    );
+
+    // 第二轮没有 turn_end，连接断掉：只作废，不算成功。
+    bridge
+        .ingest(message("qq:group/123", "10001", "断线中", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+    bridge.abandon_turn(&delivery.ticket).expect("能作废");
+
+    assert_eq!(
+        dep_entry(&deps.snapshot(None), "test/model")["state"],
+        "down",
+        "abandon 不能把模型刷回 up"
+    );
+    assert!(
+        notice_events
+            .lock()
+            .expect("没被毒死")
+            .iter()
+            .all(|event| !matches!(
+                event,
+                NoticeEvent::DependencyEdge { to, .. } if to == "up"
+            )),
+        "abandon 不应产生 up 边沿"
+    );
 }
 
 fn dep_entry(snapshot: &Value, id: &str) -> Value {

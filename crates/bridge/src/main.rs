@@ -91,7 +91,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let config = Config::parse(&text)?;
     print_summary(&config, &options.config);
 
-    // 依赖状态表：只读缓存，锁独立于 Bridge。第①步只登记 harness。
+    // 依赖状态表：只读缓存，锁独立于 Bridge。启动时登记 harness 与平台连接；
+    // model 条目在第一次轮次观测时按需创建。
     let deps = DependencyRegistry::from_config(&config);
     // 带外通知：只有 [notifications] 完整配置时才启动子进程；否则不注册、
     // 不建线程、不打日志。
@@ -366,6 +367,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     {
         let bridge = Arc::clone(&bridge);
         let shutdown = Arc::clone(&shutdown);
+        let clock_deps = deps.clone();
         std::thread::spawn(move || {
             while !shutdown.load(Ordering::Relaxed) {
                 let now = SystemTime::now()
@@ -378,6 +380,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     guard.tick_clock(now)
                 };
+                // 启动宽限期：从未出现过的 harness 在 30s 后转 down(not_started)。
+                clock_deps.tick(now);
                 if queued > 0 {
                     println!(
                         "{}",

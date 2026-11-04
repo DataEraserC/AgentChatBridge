@@ -14,6 +14,10 @@ use crate::notice::{NoticeEvent, NoticeSink};
 
 const TRANSITION_KEEP: usize = 200;
 
+/// 启动宽限期。配置已登记、但在此期间没有任何观测的条目，才从 `unknown`
+/// 迁到 `down(not_started)`；避免桥先于 harness 启动时误报。
+const STARTUP_GRACE_MS: i64 = 30_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DependencyKind {
     Harness,
@@ -64,6 +68,8 @@ struct Entry {
     last_ok_at: Option<i64>,
     last_attempt_at: Option<i64>,
     attempts: u64,
+    /// 当前打开的连接数。harness 允许同一组会话开多条连接；只有最后一条关闭才 down。
+    open_connections: u64,
     last_error: Option<String>,
     last_class: Option<String>,
 }
@@ -234,6 +240,7 @@ impl DependencyRegistry {
                 last_ok_at: None,
                 last_attempt_at: None,
                 attempts: 0,
+                open_connections: 0,
                 last_error: None,
                 last_class: None,
             });
@@ -252,43 +259,73 @@ impl DependencyRegistry {
                 last_ok_at: None,
                 last_attempt_at: None,
                 attempts: 0,
-                last_error: Some("not configured".to_owned()),
-                last_class: Some("not_configured".to_owned()),
-            });
-        }
-        for id in models {
-            let key = Key {
-                kind: DependencyKind::Model,
-                id,
-            };
-            inner.entries.entry(key.clone()).or_insert(Entry {
-                key,
-                configured: true,
-                expected: true,
-                state: State::Unknown,
-                since: now,
-                last_ok_at: None,
-                last_attempt_at: None,
-                attempts: 0,
+                open_connections: 0,
                 last_error: None,
                 last_class: None,
             });
         }
+        // model 不在启动时预登记：没有轮次就没有观测，预先挂一堆 unknown 只会
+        // 把 /healthz 的 unknown 计数撑大。首次 model_down/model_up 再 upsert。
+        // `models` 集合仍用于裁剪已经存在、但新配置不再引用的 model 条目。
     }
 
-    /// 记一次连接尝试（不改变状态）。成功也是尝试，由 connected 前的 attempt 记一次。
-    pub fn harness_attempt(&self, id: &str, now: i64) {
-        self.mark_attempt(DependencyKind::Harness, id, now);
+    /// harness 建立一条连接：attempts +1，连接计数 +1；第一条连接把状态置 up。
+    ///
+    /// 同一 harness 允许同时开多条连接（协议允许多条连接代表同一组会话）。
+    /// 只要还有连接，状态就保持 up；最后一条关闭才 down。
+    pub fn harness_connection_opened(&self, id: &str, now: i64) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, DependencyKind::Harness, id, now);
+        let key = Key {
+            kind: DependencyKind::Harness,
+            id: id.to_owned(),
+        };
+        {
+            let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
+            entry.attempts = entry.attempts.saturating_add(1);
+            entry.last_attempt_at = Some(now);
+            entry.open_connections = entry.open_connections.saturating_add(1);
+        }
+        let notice = mark_up_locked(&mut inner, &key, now);
+        drop(inner);
+        if let Some(event) = notice {
+            self.emit(event);
+        }
     }
 
-    /// harness 握手成功：up，记录 lastOkAt。
-    pub fn harness_connected(&self, id: &str, now: i64) {
+    /// harness 关闭一条连接：只有最后一条关闭才 down；否则仍保持 up。
+    pub fn harness_connection_closed(&self, id: &str, detail: &str, now: i64) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, DependencyKind::Harness, id, now);
+        let key = Key {
+            kind: DependencyKind::Harness,
+            id: id.to_owned(),
+        };
+        let last = {
+            let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
+            entry.open_connections = entry.open_connections.saturating_sub(1);
+            entry.open_connections == 0
+        };
+        let notice = if last {
+            mark_down_locked(&mut inner, &key, "closed", detail, now)
+        } else {
+            None
+        };
+        drop(inner);
+        if let Some(event) = notice {
+            self.emit(event);
+        }
+    }
+
+    /// 一轮成功：harness 可用。不改变连接计数（这条轮次可能来自已在统计中的连接）。
+    pub fn harness_turn_ok(&self, id: &str, now: i64) {
         self.mark_up(DependencyKind::Harness, id, now);
-    }
-
-    /// harness 连接断开：down，class=closed。
-    pub fn harness_disconnected(&self, id: &str, detail: &str, now: i64) {
-        self.mark_down(DependencyKind::Harness, id, "closed", detail, now);
     }
 
     /// 记一次平台连接尝试（不改变状态）。
@@ -322,54 +359,68 @@ impl DependencyRegistry {
         self.mark_up(DependencyKind::Model, id, now);
     }
 
-    /// 平台连接尚未配置/尚未开始：保持 unknown，不报 down。
-    pub fn platform_unknown(&self, id: &str, class: &str, detail: &str, now: i64) {
+    /// 当前是否 down。turn 失败抑制用它判断「同一依赖故障是否已经发生过」。
+    pub fn is_down(&self, kind: DependencyKind, id: &str) -> bool {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner
+            .entries
+            .get(&Key {
+                kind,
+                id: id.to_owned(),
+            })
+            .is_some_and(|entry| entry.state == State::Down)
+    }
+
+    /// 启动宽限期检查：把从未出现过的 harness 从 `unknown` 迁到 `down(not_started)`。
+    ///
+    /// 只处理 harness：平台是否启动只有适配器知道，core 不能凭「没观测到」就判
+    /// 平台 down，否则不经过 `AdapterStatus` 的载体（如旧 in-process 路径）会被误判。
+    /// 返回本次产生的迁移数。
+    pub fn tick(&self, now: i64) -> usize {
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        upsert(&mut inner, DependencyKind::Platform, id, now);
-        let key = Key {
-            kind: DependencyKind::Platform,
-            id: id.to_owned(),
-        };
-        let (from, notice) = {
-            let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
-            let from = entry.state;
-            entry.last_error = Some(detail.to_owned());
-            entry.last_class = Some(class.to_owned());
-            if from != State::Unknown {
-                entry.state = State::Unknown;
-                entry.since = now;
+        let candidates: Vec<Key> = inner
+            .entries
+            .iter()
+            .filter(|(key, entry)| {
+                key.kind == DependencyKind::Harness
+                    && entry.state == State::Unknown
+                    && now.saturating_sub(entry.since) >= STARTUP_GRACE_MS
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut notices = Vec::new();
+        let mut changed = 0;
+        for key in candidates {
+            let (class, detail) = {
+                let entry = inner.entries.get(&key).expect("候选来自 entries");
+                if entry.attempts == 0 {
+                    (
+                        "not_started",
+                        "no connection attempt within startup grace period",
+                    )
+                } else {
+                    (
+                        "unreachable",
+                        "connection attempt did not complete within startup grace period",
+                    )
+                }
+            };
+            if let Some(notice) = mark_down_locked(&mut inner, &key, class, detail, now) {
+                notices.push(notice);
+                changed += 1;
             }
-            let notice = (from != State::Unknown).then(|| NoticeEvent::DependencyEdge {
-                kind: key.kind.as_str().to_owned(),
-                id: key.id.clone(),
-                from: from.as_str().to_owned(),
-                to: State::Unknown.as_str().to_owned(),
-                since: entry.since,
-                last_ok_at: entry.last_ok_at,
-                class: Some(class.to_owned()),
-                detail: Some(detail.to_owned()),
-                attempts: entry.attempts,
-            });
-            (from, notice)
-        };
-        if from != State::Unknown {
-            push_transition(
-                &mut inner,
-                key,
-                from,
-                State::Unknown,
-                Some(class.to_owned()),
-                Some(detail.to_owned()),
-                now,
-            );
         }
         drop(inner);
-        if let Some(event) = notice {
-            self.emit(event);
+        for notice in notices {
+            self.emit(notice);
         }
+        changed
     }
 
     fn mark_attempt(&self, kind: DependencyKind, id: &str, now: i64) {
@@ -398,32 +449,7 @@ impl DependencyRegistry {
             kind,
             id: id.to_owned(),
         };
-        let (from, notice) = {
-            let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
-            let from = entry.state;
-            entry.last_ok_at = Some(now);
-            entry.last_error = None;
-            entry.last_class = None;
-            if from != State::Up {
-                entry.state = State::Up;
-                entry.since = now;
-            }
-            let notice = (from != State::Up).then(|| NoticeEvent::DependencyEdge {
-                kind: key.kind.as_str().to_owned(),
-                id: key.id.clone(),
-                from: from.as_str().to_owned(),
-                to: State::Up.as_str().to_owned(),
-                since: entry.since,
-                last_ok_at: entry.last_ok_at,
-                class: None,
-                detail: None,
-                attempts: entry.attempts,
-            });
-            (from, notice)
-        };
-        if from != State::Up {
-            push_transition(&mut inner, key, from, State::Up, None, None, now);
-        }
+        let notice = mark_up_locked(&mut inner, &key, now);
         drop(inner);
         if let Some(event) = notice {
             self.emit(event);
@@ -440,39 +466,7 @@ impl DependencyRegistry {
             kind,
             id: id.to_owned(),
         };
-        let (from, notice) = {
-            let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
-            let from = entry.state;
-            entry.last_error = Some(detail.to_owned());
-            entry.last_class = Some(class.to_owned());
-            if from != State::Down {
-                entry.state = State::Down;
-                entry.since = now;
-            }
-            let notice = (from != State::Down).then(|| NoticeEvent::DependencyEdge {
-                kind: key.kind.as_str().to_owned(),
-                id: key.id.clone(),
-                from: from.as_str().to_owned(),
-                to: State::Down.as_str().to_owned(),
-                since: entry.since,
-                last_ok_at: entry.last_ok_at,
-                class: Some(class.to_owned()),
-                detail: Some(detail.to_owned()),
-                attempts: entry.attempts,
-            });
-            (from, notice)
-        };
-        if from != State::Down {
-            push_transition(
-                &mut inner,
-                key,
-                from,
-                State::Down,
-                Some(class.to_owned()),
-                Some(detail.to_owned()),
-                now,
-            );
-        }
+        let notice = mark_down_locked(&mut inner, &key, class, detail, now);
         drop(inner);
         if let Some(event) = notice {
             self.emit(event);
@@ -499,7 +493,10 @@ impl DependencyRegistry {
         })
     }
 
-    /// `/healthz` 的一句话汇总，不要塞完整对象。
+    /// `/healthz` 的逐依赖视图。
+    ///
+    /// 计数、`status`、`seq` 与完整条目一起返回；条目数量由配置决定（harness +
+    /// connection + 已观测 model），不随消息增长。读快照只锁依赖表，不碰适配器。
     pub fn summary(&self) -> Value {
         let inner = self
             .inner
@@ -515,11 +512,29 @@ impl DependencyRegistry {
                 State::Unknown => unknown += 1,
             }
         }
+        let status = if down > 0 { "degraded" } else { "ok" };
         json!({
+            "status": status,
             "up": up,
             "down": down,
             "unknown": unknown,
+            "seq": inner.seq,
+            "items": inner.entries.values().map(entry_json).collect::<Vec<_>>(),
         })
+    }
+
+    /// 只取 platform 类的逐连接状态（`/api/plugins` 的补充视图）。
+    pub fn platform_items(&self) -> Vec<Value> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner
+            .entries
+            .values()
+            .filter(|entry| entry.key.kind == DependencyKind::Platform)
+            .map(entry_json)
+            .collect()
     }
 }
 
@@ -537,9 +552,85 @@ fn upsert(inner: &mut Inner, kind: DependencyKind, id: &str, now: i64) {
         last_ok_at: None,
         last_attempt_at: None,
         attempts: 0,
+        open_connections: 0,
         last_error: None,
         last_class: None,
     });
+}
+
+/// 把条目置为 `up`，必要时写迁移并返回带外事件。调用方持有 `inner` 锁。
+fn mark_up_locked(inner: &mut Inner, key: &Key, now: i64) -> Option<NoticeEvent> {
+    let (from, notice) = {
+        let entry = inner.entries.get_mut(key).expect("调用前已 upsert");
+        let from = entry.state;
+        entry.last_ok_at = Some(now);
+        entry.last_error = None;
+        entry.last_class = None;
+        if from != State::Up {
+            entry.state = State::Up;
+            entry.since = now;
+        }
+        let notice = (from != State::Up).then(|| NoticeEvent::DependencyEdge {
+            kind: key.kind.as_str().to_owned(),
+            id: key.id.clone(),
+            from: from.as_str().to_owned(),
+            to: State::Up.as_str().to_owned(),
+            since: entry.since,
+            last_ok_at: entry.last_ok_at,
+            class: None,
+            detail: None,
+            attempts: entry.attempts,
+        });
+        (from, notice)
+    };
+    if from != State::Up {
+        push_transition(inner, key.clone(), from, State::Up, None, None, now);
+    }
+    notice
+}
+
+/// 把条目置为 `down`，必要时写迁移并返回带外事件。调用方持有 `inner` 锁。
+fn mark_down_locked(
+    inner: &mut Inner,
+    key: &Key,
+    class: &str,
+    detail: &str,
+    now: i64,
+) -> Option<NoticeEvent> {
+    let (from, notice) = {
+        let entry = inner.entries.get_mut(key).expect("调用前已 upsert");
+        let from = entry.state;
+        entry.last_error = Some(detail.to_owned());
+        entry.last_class = Some(class.to_owned());
+        if from != State::Down {
+            entry.state = State::Down;
+            entry.since = now;
+        }
+        let notice = (from != State::Down).then(|| NoticeEvent::DependencyEdge {
+            kind: key.kind.as_str().to_owned(),
+            id: key.id.clone(),
+            from: from.as_str().to_owned(),
+            to: State::Down.as_str().to_owned(),
+            since: entry.since,
+            last_ok_at: entry.last_ok_at,
+            class: Some(class.to_owned()),
+            detail: Some(detail.to_owned()),
+            attempts: entry.attempts,
+        });
+        (from, notice)
+    };
+    if from != State::Down {
+        push_transition(
+            inner,
+            key.clone(),
+            from,
+            State::Down,
+            Some(class.to_owned()),
+            Some(detail.to_owned()),
+            now,
+        );
+    }
+    notice
 }
 
 fn push_transition(
@@ -682,14 +773,14 @@ mod tests {
     }
 
     #[test]
-    fn platform_starts_not_configured_then_connect_disconnect_reconnect() {
+    fn platform_starts_unknown_then_connect_disconnect_reconnect() {
         let registry = DependencyRegistry::from_config(&platform_config());
         let snapshot = registry.snapshot(None);
         let qq = entry(&snapshot, "qq");
         assert_eq!(qq["kind"], "platform");
-        assert_eq!(qq["state"], "unknown");
+        assert_eq!(qq["state"], "unknown", "配置已登记，但还没有观测到连接");
         assert_eq!(qq["neverConnected"], true);
-        assert_eq!(qq["lastErrorClass"], "not_configured");
+        assert_eq!(qq["lastError"], Value::Null, "未连上不等于有错误");
         assert_eq!(qq["attempts"], 0);
 
         let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
@@ -717,9 +808,59 @@ mod tests {
     }
 
     #[test]
+    fn platform_never_connected_then_failure_is_down_not_unknown() {
+        let registry = DependencyRegistry::from_config(&platform_config());
+        let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
+        status.attempt();
+        status.disconnected("unreachable", "connect ECONNREFUSED");
+
+        let snapshot = registry.snapshot(None);
+        let qq = entry(&snapshot, "qq");
+        assert_eq!(qq["state"], "down");
+        assert_eq!(
+            qq["neverConnected"], true,
+            "从未连上仍由 lastOkAt=null 表达"
+        );
+        assert_eq!(qq["lastOkAt"], Value::Null);
+        assert_eq!(qq["lastErrorClass"], "unreachable");
+        assert_eq!(qq["attempts"], 1);
+        assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 1);
+
+        // 平台条目不由 core 的宽限计时器判 down：适配器没上报时保持 unknown。
+        assert_eq!(registry.tick(now_millis() + 60_000), 0);
+    }
+
+    #[test]
+    fn harness_unknown_becomes_not_started_after_grace() {
+        let registry = DependencyRegistry::from_config(&harness_config());
+        let snapshot = registry.snapshot(None);
+        let since = snapshot["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "dsh")
+            .and_then(|item| item["since"].as_i64())
+            .expect("有 since");
+
+        assert_eq!(registry.tick(since + 29_000), 0, "宽限期内保持 unknown");
+        assert_eq!(entry(&registry.snapshot(None), "dsh")["state"], "unknown");
+
+        assert_eq!(registry.tick(since + 30_001), 1, "宽限期后转 down");
+        let snapshot = registry.snapshot(None);
+        let dsh = entry(&snapshot, "dsh");
+        assert_eq!(dsh["state"], "down");
+        assert_eq!(dsh["lastErrorClass"], "not_started");
+        assert_eq!(dsh["neverConnected"], true);
+        assert_eq!(dsh["lastOkAt"], Value::Null);
+        assert_eq!(dsh["attempts"], 0);
+        assert_eq!(registry.tick(since + 60_000), 0, "已经 down 不重复迁移");
+        assert_eq!(registry.summary()["status"], "degraded");
+    }
+
+    #[test]
     fn retain_config_keeps_existing_and_adds_new_entries() {
         let registry = DependencyRegistry::from_config(&harness_config());
-        registry.harness_connected("dsh", 100);
+        registry.harness_connection_opened("dsh", 100);
         let config = Config::parse(
             r#"
             [[harnesses]]
@@ -749,7 +890,7 @@ mod tests {
         );
         assert_eq!(entry(&snapshot, "opencode")["state"], "unknown");
         assert_eq!(entry(&snapshot, "qq")["state"], "unknown");
-        assert_eq!(entry(&snapshot, "qq")["lastErrorClass"], "not_configured");
+        assert_eq!(entry(&snapshot, "qq")["lastError"], Value::Null);
         assert_eq!(
             snapshot["transitions"].as_array().unwrap().len(),
             1,
@@ -778,7 +919,7 @@ mod tests {
         .expect("配置合法");
         let registry = DependencyRegistry::from_config(&config);
         registry.platform_connected("qq", 100);
-        registry.harness_connected("dsh", 100);
+        registry.harness_connection_opened("dsh", 100);
 
         let config = Config::parse(
             r#"
@@ -830,11 +971,10 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         registry.set_notice_sink(Arc::new(RecordingSink(Arc::clone(&events))));
 
-        registry.harness_attempt("dsh", 100);
-        registry.harness_connected("dsh", 101);
-        registry.harness_connected("dsh", 102);
-        registry.harness_disconnected("dsh", "socket closed", 103);
-        registry.harness_attempt("dsh", 104);
+        registry.harness_connection_opened("dsh", 100);
+        registry.harness_connection_opened("dsh", 101);
+        registry.harness_connection_closed("dsh", "socket closed", 102);
+        registry.harness_connection_closed("dsh", "socket closed", 103);
 
         let events = events.lock().expect("没被毒死");
         assert_eq!(events.len(), 2, "只有 unknown→up 与 up→down 两条边");
@@ -852,7 +992,7 @@ mod tests {
                 assert_eq!(id, "dsh");
                 assert_eq!(from, "unknown");
                 assert_eq!(to, "up");
-                assert_eq!(*since, 101);
+                assert_eq!(*since, 100);
                 assert_eq!(*attempts, 1);
             }
             other => panic!("应当是依赖边沿，收到 {other:?}"),
@@ -863,47 +1003,73 @@ mod tests {
                 to,
                 class,
                 detail,
+                attempts,
                 ..
             } => {
                 assert_eq!(from, "up");
                 assert_eq!(to, "down");
                 assert_eq!(class.as_deref(), Some("closed"));
                 assert_eq!(detail.as_deref(), Some("socket closed"));
+                assert_eq!(*attempts, 2, "两条连接都计入 attempts");
             }
             other => panic!("应当是依赖边沿，收到 {other:?}"),
         }
     }
 
     #[test]
-    fn failed_attempts_count_without_connecting() {
+    fn multiple_harness_connections_only_go_down_after_the_last_closes() {
         let registry = DependencyRegistry::from_config(&harness_config());
-        registry.harness_attempt("dsh", 100);
-        registry.harness_attempt("dsh", 101);
-        registry.harness_attempt("dsh", 102);
+        registry.harness_connection_opened("dsh", 100);
+        registry.harness_connection_opened("dsh", 101);
+
         let snapshot = registry.snapshot(None);
         let dsh = entry(&snapshot, "dsh");
-        assert_eq!(dsh["state"], "unknown", "只尝试不算连上或断开");
-        assert_eq!(dsh["neverConnected"], true);
-        assert_eq!(dsh["attempts"], 3, "每次尝试都计数");
-        assert_eq!(dsh["lastAttemptAt"], 102);
+        assert_eq!(dsh["state"], "up");
+        assert_eq!(dsh["attempts"], 2);
+        assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 1);
+
+        registry.harness_connection_closed("dsh", "one of two closed", 102);
+        let snapshot = registry.snapshot(None);
+        let dsh = entry(&snapshot, "dsh");
+        assert_eq!(dsh["state"], "up", "还有一条连接在，不能判 down");
+        assert_eq!(dsh["lastOkAt"], 101);
+        assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 1);
+
+        registry.harness_connection_closed("dsh", "last closed", 103);
+        let snapshot = registry.snapshot(None);
+        assert_eq!(entry(&snapshot, "dsh")["state"], "down");
+        assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn failed_attempts_count_without_connecting() {
+        let registry = DependencyRegistry::from_config(&platform_config());
+        let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
+        status.attempt();
+        status.attempt();
+        status.attempt();
+        let snapshot = registry.snapshot(None);
+        let qq = entry(&snapshot, "qq");
+        assert_eq!(qq["state"], "unknown", "只尝试不算连上或断开");
+        assert_eq!(qq["neverConnected"], true);
+        assert_eq!(qq["attempts"], 3, "每次尝试都计数");
+        assert!(qq["lastAttemptAt"].as_i64().is_some());
         assert!(snapshot["transitions"].as_array().unwrap().is_empty());
     }
 
     #[test]
     fn connect_disconnect_and_reconnect_make_edges() {
         let registry = DependencyRegistry::from_config(&harness_config());
-        registry.harness_attempt("dsh", 99);
-        registry.harness_connected("dsh", 100);
+        registry.harness_connection_opened("dsh", 99);
         let snapshot = registry.snapshot(None);
         let dsh = entry(&snapshot, "dsh");
         assert_eq!(dsh["state"], "up");
-        assert_eq!(dsh["lastOkAt"], 100);
+        assert_eq!(dsh["lastOkAt"], 99);
         assert_eq!(dsh["neverConnected"], false);
         assert_eq!(dsh["attempts"], 1);
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 1);
 
-        registry.harness_attempt("dsh", 101);
-        registry.harness_connected("dsh", 101);
+        registry.harness_connection_opened("dsh", 100);
         let snapshot = registry.snapshot(None);
         assert_eq!(
             snapshot["transitions"].as_array().unwrap().len(),
@@ -911,20 +1077,188 @@ mod tests {
             "已经 up 时不重复打迁移日志"
         );
 
-        registry.harness_disconnected("dsh", "socket closed", 102);
+        // 两条连接，先关一条仍 up；关掉最后一条才 down。
+        registry.harness_connection_closed("dsh", "one of two closed", 101);
+        assert_eq!(
+            entry(&registry.snapshot(None), "dsh")["state"],
+            "up",
+            "还有连接时不能判 down"
+        );
+        registry.harness_connection_closed("dsh", "socket closed", 102);
         let snapshot = registry.snapshot(None);
         let dsh = entry(&snapshot, "dsh");
         assert_eq!(dsh["state"], "down");
-        assert_eq!(dsh["lastOkAt"], 101, "断开不抹掉 lastOkAt");
+        assert_eq!(dsh["lastOkAt"], 100, "断开不抹掉 lastOkAt");
         assert_eq!(dsh["lastError"], "socket closed");
         assert_eq!(dsh["lastErrorClass"], "closed");
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 2);
 
-        registry.harness_attempt("dsh", 103);
-        registry.harness_connected("dsh", 103);
+        registry.harness_connection_opened("dsh", 103);
         let snapshot = registry.snapshot(Some(2));
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 1);
-        assert_eq!(entry(&snapshot, "dsh")["state"], "up");
-        assert_eq!(entry(&snapshot, "dsh")["attempts"], 3);
+        let dsh = entry(&snapshot, "dsh");
+        assert_eq!(dsh["state"], "up");
+        assert_eq!(dsh["since"], 103, "重新连上后 since 重置");
+        assert_eq!(dsh["lastOkAt"], 103);
+        assert_eq!(dsh["attempts"], 3);
+    }
+
+    #[test]
+    fn models_are_registered_only_after_observation() {
+        let config = Config::parse(
+            r#"
+            [[harnesses]]
+            id = "dsh"
+            name = "DSH"
+
+            [[personas]]
+            id = "p"
+            name = "P"
+            text = "x"
+
+            [[sessions]]
+            id = "main"
+            harness = "dsh"
+            persona = "p"
+            token = "t-main"
+            model = "test/model"
+            "#,
+        )
+        .expect("配置合法");
+        let registry = DependencyRegistry::from_config(&config);
+        let snapshot = registry.snapshot(None);
+        assert!(
+            snapshot["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["kind"] != "model"),
+            "没有轮次就没有模型观测：{snapshot}"
+        );
+        assert_eq!(registry.summary()["unknown"], 1, "只有 harness 是 unknown");
+
+        registry.model_down("test/model", "model_unavailable", "gateway refused", 100);
+        let snapshot = registry.snapshot(None);
+        let model = entry(&snapshot, "test/model");
+        assert_eq!(model["kind"], "model");
+        assert_eq!(model["state"], "down");
+        assert_eq!(model["lastErrorClass"], "model_unavailable");
+
+        registry.model_up("test/model", 101);
+        let snapshot = registry.snapshot(None);
+        assert_eq!(entry(&snapshot, "test/model")["state"], "up");
+    }
+
+    #[test]
+    fn retain_config_prunes_observed_model_no_longer_referenced() {
+        let config = Config::parse(
+            r#"
+            [[harnesses]]
+            id = "dsh"
+            name = "DSH"
+
+            [[personas]]
+            id = "p"
+            name = "P"
+            text = "x"
+
+            [[sessions]]
+            id = "main"
+            harness = "dsh"
+            persona = "p"
+            token = "t-main"
+            model = "test/model"
+            "#,
+        )
+        .expect("配置合法");
+        let registry = DependencyRegistry::from_config(&config);
+        registry.model_down("test/model", "model_unavailable", "gateway refused", 100);
+
+        let next = Config::parse(
+            r#"
+            [[harnesses]]
+            id = "dsh"
+            name = "DSH"
+            "#,
+        )
+        .expect("新配置合法");
+        registry.retain_config(&next);
+        let snapshot = registry.snapshot(None);
+        assert!(
+            snapshot["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["kind"] != "model"),
+            "配置不再引用的 model 条目要删除：{snapshot}"
+        );
+    }
+
+    #[test]
+    fn ops_payload_shape_for_healthz_and_dependencies() {
+        let config = Config::parse(
+            r#"
+            [[harnesses]]
+            id = "dsh"
+            name = "DSH"
+
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            url = "ws://127.0.0.1:53001"
+            account = "bot"
+            "#,
+        )
+        .expect("配置合法");
+        let registry = DependencyRegistry::from_config(&config);
+        registry.harness_connection_opened("dsh", 1_793_000_000_000);
+        registry.platform_attempt("qq", 1_793_000_001_000);
+        registry.platform_disconnected(
+            "qq",
+            "unreachable",
+            "connect ECONNREFUSED 127.0.0.1:53001",
+            1_793_000_001_000,
+        );
+        registry.model_down(
+            "new-api/1AgentRouter/gpt-5.6-sol",
+            "model_unavailable",
+            "connect ECONNREFUSED 127.0.0.1:3080",
+            1_793_000_002_000,
+        );
+
+        let healthz_dependencies = registry.summary();
+        let dependencies = registry.snapshot(None);
+        println!("HEALTHZ dependencies = {healthz_dependencies}");
+        println!("API /api/dependencies = {dependencies}");
+
+        assert_eq!(healthz_dependencies["status"], "degraded");
+        assert_eq!(healthz_dependencies["items"].as_array().unwrap().len(), 3);
+        assert_eq!(dependencies["dependencies"].as_array().unwrap().len(), 3);
+        assert_eq!(dependencies["transitions"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn summary_exposes_items_and_degrades_on_down() {
+        let registry = DependencyRegistry::from_config(&platform_config());
+        let summary = registry.summary();
+        assert_eq!(summary["status"], "ok");
+        assert_eq!(summary["unknown"], 1);
+        assert_eq!(
+            summary["items"].as_array().unwrap()[0]["id"],
+            "qq",
+            "summary 必须逐依赖，而不只是计数：{summary}"
+        );
+
+        let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
+        status.attempt();
+        status.disconnected("unreachable", "connection refused");
+        let summary = registry.summary();
+        assert_eq!(summary["status"], "degraded");
+        assert_eq!(summary["down"], 1);
+        assert_eq!(
+            summary["items"].as_array().unwrap()[0]["lastErrorClass"],
+            "unreachable"
+        );
     }
 }

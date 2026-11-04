@@ -128,15 +128,6 @@ impl AdapterStatus {
         self.deps
             .platform_disconnected(&self.connection, class, detail, crate::deps::now_millis());
     }
-
-    pub fn not_configured(&self) {
-        self.deps.platform_unknown(
-            &self.connection,
-            "not_configured",
-            "not configured",
-            crate::deps::now_millis(),
-        );
-    }
 }
 
 impl std::fmt::Debug for AdapterHost {

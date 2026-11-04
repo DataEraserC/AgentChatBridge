@@ -1302,6 +1302,66 @@
 - 证据：`cargo test -p acb-kernel --lib plugin::tests` 39 项通过；workspace
   clippy / test / fmt 全绿。
 
+## 2026-11-04 — connectivity 第①步收口：harness 宽限期、多连接与未认证握手
+
+- 背景：第①步此前把 harness 记为 `unknown` 后完全事件驱动，设计里的 30s 启动宽限
+  未实现；同一 harness 多连接时，任一连接关闭都会误判 `down`。
+- 决策：
+  - `unknown` 固定为「配置已登记但尚无观测」。harness 在启动宽限期（30s）后仍无连接，
+    迁到 `down(class=not_started)`；宽限期只由 core 对 harness 执行。platform 是否启动
+    只有适配器知道，core 不凭「没观测到」判 platform down，避免未上报载体被误判。
+  - 同一 harness 的连接按 open count 管理：第一条连接把状态置 `up`，最后一条关闭才
+    `down`；`attempts` 在每次认证通过的握手上 +1。
+  - 未认证 Hello 不再写依赖表；握手失败不能创建或污染条目。
+  - model 不在启动时预登记，首次 `model_down` / `model_up` 才 upsert，避免 `/healthz`
+    的 unknown 计数被未使用模型撑大；`retain_config` 仍按配置裁剪旧 model 条目。
+- 接线：`crates/kernel/src/deps.rs`、`crates/kernel/src/endpoint.rs`、
+  `crates/bridge/src/main.rs`（时钟线程每秒 `deps.tick`）。
+- 测试：deps 单测新增 unknown 宽限、多连接、未观测 model、model 裁剪；
+  `endpoint_flow` 新增未认证握手不建条目、成功握手 `attempts=1`。
+- 证据：`cargo test --workspace` 62 个 suite 全 ok；clippy `-D warnings`、fmt 全绿。
+- 可回退：从 main 去掉 `deps.tick`；把 open/close 改回单一 connected/disconnected。
+
+## 2026-11-04 — connectivity 第②步收口：平台初始状态与逐连接视图
+
+- 背景：platform 初始 `class=not_configured` 把「配置已存在但尚未连接」误写成
+  「未配置」；`/healthz` 只有计数汇总，`/api/plugins` 仍只有工厂级 health。
+- 决策：
+  - platform 初始保持 `unknown`，`lastError=null`、`attempts=0`；「未启动」由
+    `state=unknown + neverConnected=true + attempts=0` 表达，「连不通」由
+    `state=down + class=unreachable + attempts>0` 表达，「曾经连上后断开」由
+    `lastOkAt` 非空表达。
+  - `AdapterStatus` 删除 `not_configured`：不可用语义由适配器上报的 attempt/up/down
+    承担，core 不替适配器猜。
+  - `/healthz` 的 `dependencies` 改为逐依赖对象
+    `{status, up, down, unknown, seq, items[]}`；`/api/dependencies` 保留完整表 +
+    迁移环；`/api/plugins` 增加 `connections`（逐平台连接状态）。
+- 接线：`crates/kernel/src/deps.rs` 的 `summary` / `platform_items`、
+  `crates/kernel/src/adapter.rs`、`crates/bridge/src/console.rs`。
+- 测试：deps 单测覆盖 `summary` 的 items/status、平台从未连上到失败、成功/断开/
+  重连；`/api/plugins` 的 connections 复用同一份条目。
+- 证据：`cargo test --workspace` 62 个 suite 全 ok；clippy `-D warnings`、fmt 全绿。
+- 可回退：删除 `summary` 的 `items`/`status`、`platform_items` 与 console 两个字段即可。
+
+## 2026-11-04 — connectivity 第③步收口：组件级抑制与 abandon 不算成功
+
+- 背景：第③步只按文本指纹做 10 分钟窗口去重，窗口过后同一依赖故障仍会再刷；
+  连接断开时 `Conn::abandon` 用 `end_turn(None)` 收尾，被当成成功轮次，会把依赖
+  刷回 `up` 并清掉失败历史。
+- 决策：
+  - 结构化 `failure` 在写依赖表之前先查旧状态；依赖已经 `down` 时，后续 turn 失败
+    记为 `component_down` 抑制，只发带外事件，不再发 in-band。首失败仍正常通知一次。
+  - `Conn::abandon` 改走 `Bridge::abandon_turn`：只作废票、写 `ended` 宽限记录、
+    释放会话；不推水位、不发通知、不清失败去重历史、不把依赖置 up。
+  - `/stop` 且没有错误的轮次同样不按成功处理。
+- 接线：`crates/kernel/src/engine.rs`、`crates/kernel/src/endpoint.rs`、
+  `crates/i18n/locales/{zh-CN,en}.json`。
+- 测试：`turn_flow` 覆盖结构化失败第二次走 `component_down`、abandon 不产生 up
+  边沿；既有文本指纹去重/房间限流/成功重置测试保持通过。
+- 证据：`cargo test --workspace` 62 个 suite 全 ok；clippy `-D warnings`、fmt 全绿。
+- 可回退：删除 `ComponentDown` 分支与 `abandon_turn`，恢复 `end_turn(None)` 即可；
+  这会把「断线不算成功」的行为退回旧语义。
+
 ## 部署注意事项（nix-config 打包）
 
 - `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置

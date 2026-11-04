@@ -255,6 +255,7 @@ impl<S: Store + Send + 'static> Console<S> {
             ("GET", "/api/status") => (200, self.status()),
             ("GET", "/api/sessions") => (200, self.sessions()),
             // 插件目录：只读，描述由插件作者声明；不暴露实际 options / 路径 / token。
+            // `connections` 是逐平台的运行时连接状态，补上工厂级 health 看不到的部分。
             ("GET", "/api/plugins") => {
                 let bridge = lock(&self.bridge);
                 let plugins = bridge.plugin_catalog();
@@ -264,6 +265,7 @@ impl<S: Store + Send + 'static> Console<S> {
                     json!({
                         "count": plugins.len(),
                         "plugins": plugins,
+                        "connections": self.deps.platform_items(),
                         "wakeAudit": wake_audit,
                     })
                     .to_string(),
@@ -394,6 +396,7 @@ impl<S: Store + Send + 'static> Console<S> {
     }
 
     fn status(&self) -> String {
+        let dependencies = self.deps.summary();
         let bridge = lock(&self.bridge);
         let config = bridge.config();
         let inbound = self.inbound_stats.snapshot();
@@ -407,6 +410,12 @@ impl<S: Store + Send + 'static> Console<S> {
             "config_version": bridge.config_version(),
             "staged_config": bridge.has_staged_config(),
             "queues": queue_status(&inbound, &route, self.route_worker.busy()),
+            "dependencies": {
+                "status": dependencies["status"],
+                "up": dependencies["up"],
+                "down": dependencies["down"],
+                "unknown": dependencies["unknown"],
+            },
         })
         .to_string()
     }
