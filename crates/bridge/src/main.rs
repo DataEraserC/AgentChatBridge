@@ -19,8 +19,9 @@ use acb_adapter_dynamic::DynamicLoader;
 use acb_adapter_onebot11::OneBotAdapterFactory;
 use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::{
-    AdapterHost, AdapterInstance, Bridge, Config, ControlRegistry, DependencyRegistry, EventQueue,
-    FileRelay, Outbounds, PluginManager, RouteWorker, SqliteStore, drain_events, serve,
+    AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ControlRegistry,
+    DependencyRegistry, EventQueue, FileRelay, Outbounds, PluginManager, RouteWorker, SqliteStore,
+    drain_events, serve,
 };
 use acb_plugin_lua::LuaLoader;
 use acb_plugin_process_tools::ProcessToolLoader;
@@ -175,7 +176,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         outbounds = outbounds
             .with(connection.id.clone(), outbound)
             .with_manifest(connection.id.clone(), manifest);
-        launches.push(launch);
+        launches.push((connection.id.clone(), launch));
     }
 
     let lkg_path = plugins_lkg_path(&config.storage.path);
@@ -217,10 +218,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         });
     }
 
-    for launch in launches {
+    for (connection_id, launch) in launches {
         let host = AdapterHost {
             events: events.clone(),
             shutdown: Arc::clone(&shutdown),
+            status: AdapterStatus::new(connection_id, deps.clone()),
         };
         std::thread::spawn(move || launch(host));
     }

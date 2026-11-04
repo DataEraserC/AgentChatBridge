@@ -96,7 +96,7 @@ impl AdapterFactory for OneBotAdapterFactory {
 
         let connection = connection.clone();
         let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
-            supervise(slot, connection, host.shutdown, host.events);
+            supervise(slot, connection, host.shutdown, host.events, host.status);
         });
 
         Ok(AdapterInstance {

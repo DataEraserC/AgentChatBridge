@@ -94,6 +94,43 @@ pub struct AdapterManifest {
 pub struct AdapterHost {
     pub events: EventQueue,
     pub shutdown: Arc<AtomicBool>,
+    /// 平台连接状态上报口。适配器只报状态，core 负责打时间和写迁移日志。
+    pub status: AdapterStatus,
+}
+
+/// 一条适配器连接的状态上报口。
+#[derive(Clone)]
+pub struct AdapterStatus {
+    connection: String,
+    deps: crate::deps::DependencyRegistry,
+}
+
+impl AdapterStatus {
+    pub fn new(connection: impl Into<String>, deps: crate::deps::DependencyRegistry) -> Self {
+        Self {
+            connection: connection.into(),
+            deps,
+        }
+    }
+
+    pub fn connected(&self) {
+        self.deps
+            .platform_connected(&self.connection, crate::deps::now_millis());
+    }
+
+    pub fn disconnected(&self, class: &str, detail: &str) {
+        self.deps
+            .platform_disconnected(&self.connection, class, detail, crate::deps::now_millis());
+    }
+
+    pub fn not_configured(&self) {
+        self.deps.platform_unknown(
+            &self.connection,
+            "not_configured",
+            "not configured",
+            crate::deps::now_millis(),
+        );
+    }
 }
 
 impl std::fmt::Debug for AdapterHost {
@@ -137,9 +174,10 @@ pub trait AdapterFactory: Send + Sync {
         events: EventQueue,
     ) -> Result<AdapterInstance, AdapterError>;
 
-    /// 工厂级健康状态。默认健康；动态适配器可据此报告「句柄已标死」。
+    /// 工厂级健康状态。默认 Unknown：平台连接状态由 `/api/dependencies` 维护，
+    /// 不能在这里假装 Healthy；动态适配器可覆盖为句柄级健康。
     fn health(&self) -> Health {
-        Health::Healthy
+        Health::Unknown("connection state is reported in /api/dependencies".to_owned())
     }
 }
 

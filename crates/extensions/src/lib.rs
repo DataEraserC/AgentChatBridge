@@ -860,6 +860,7 @@ fn health_json(health: &Health) -> Value {
     match health {
         Health::Healthy => json!({ "state": "healthy" }),
         Health::Degraded(detail) => json!({ "state": "degraded", "detail": detail }),
+        Health::Unknown(detail) => json!({ "state": "unknown", "detail": detail }),
         Health::Unhealthy(detail) => json!({ "state": "unhealthy", "detail": detail }),
     }
 }

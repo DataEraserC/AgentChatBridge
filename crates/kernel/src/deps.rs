@@ -120,22 +120,50 @@ impl DependencyRegistry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for harness in &config.harnesses {
-            let key = Key {
-                kind: DependencyKind::Harness,
-                id: harness.id.clone(),
-            };
-            inner.entries.entry(key.clone()).or_insert(Entry {
-                key,
-                configured: true,
-                expected: true,
-                state: State::Unknown,
-                since: now,
-                last_ok_at: None,
-                last_attempt_at: None,
-                attempts: 0,
-                last_error: None,
-                last_class: None,
-            });
+            inner
+                .entries
+                .entry(Key {
+                    kind: DependencyKind::Harness,
+                    id: harness.id.clone(),
+                })
+                .or_insert(Entry {
+                    key: Key {
+                        kind: DependencyKind::Harness,
+                        id: harness.id.clone(),
+                    },
+                    configured: true,
+                    expected: true,
+                    state: State::Unknown,
+                    since: now,
+                    last_ok_at: None,
+                    last_attempt_at: None,
+                    attempts: 0,
+                    last_error: None,
+                    last_class: None,
+                });
+        }
+        for connection in &config.connections {
+            inner
+                .entries
+                .entry(Key {
+                    kind: DependencyKind::Platform,
+                    id: connection.id.clone(),
+                })
+                .or_insert(Entry {
+                    key: Key {
+                        kind: DependencyKind::Platform,
+                        id: connection.id.clone(),
+                    },
+                    configured: true,
+                    expected: true,
+                    state: State::Unknown,
+                    since: now,
+                    last_ok_at: None,
+                    last_attempt_at: None,
+                    attempts: 0,
+                    last_error: Some("not configured".to_owned()),
+                    last_class: Some("not_configured".to_owned()),
+                });
         }
         drop(inner);
         registry
@@ -159,6 +187,41 @@ impl DependencyRegistry {
     /// 平台适配器上报断开（第②步使用）。
     pub fn platform_disconnected(&self, id: &str, class: &str, detail: &str, now: i64) {
         self.mark_down(DependencyKind::Platform, id, class, detail, now);
+    }
+
+    /// 平台连接尚未配置/尚未开始：保持 unknown，不报 down。
+    pub fn platform_unknown(&self, id: &str, class: &str, detail: &str, now: i64) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, DependencyKind::Platform, id, now);
+        let key = Key {
+            kind: DependencyKind::Platform,
+            id: id.to_owned(),
+        };
+        let from = {
+            let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
+            let from = entry.state;
+            entry.last_error = Some(detail.to_owned());
+            entry.last_class = Some(class.to_owned());
+            if from != State::Unknown {
+                entry.state = State::Unknown;
+                entry.since = now;
+            }
+            from
+        };
+        if from != State::Unknown {
+            push_transition(
+                &mut inner,
+                key,
+                from,
+                State::Unknown,
+                Some(class.to_owned()),
+                Some(detail.to_owned()),
+                now,
+            );
+        }
     }
 
     fn mark_up(&self, kind: DependencyKind, id: &str, now: i64) {
@@ -369,7 +432,7 @@ fn transition_json(item: &Transition) -> Value {
     })
 }
 
-fn now_millis() -> i64 {
+pub fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
@@ -379,6 +442,20 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn platform_config() -> Config {
+        Config::parse(
+            r#"
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            url = "ws://127.0.0.1:3001"
+            account = "bot"
+            "#,
+        )
+        .expect("配置合法")
+    }
 
     fn harness_config() -> Config {
         Config::parse(
@@ -410,6 +487,39 @@ mod tests {
         assert_eq!(dsh["neverConnected"], true);
         assert_eq!(dsh["attempts"], 0);
         assert_eq!(registry.summary()["unknown"], 1);
+    }
+
+    #[test]
+    fn platform_starts_not_configured_then_connect_disconnect_reconnect() {
+        let registry = DependencyRegistry::from_config(&platform_config());
+        let snapshot = registry.snapshot(None);
+        let qq = entry(&snapshot, "qq");
+        assert_eq!(qq["kind"], "platform");
+        assert_eq!(qq["state"], "unknown");
+        assert_eq!(qq["neverConnected"], true);
+        assert_eq!(qq["lastErrorClass"], "not_configured");
+        assert_eq!(qq["attempts"], 0);
+
+        let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
+        status.connected();
+        let snapshot = registry.snapshot(None);
+        let qq = entry(&snapshot, "qq");
+        assert_eq!(qq["state"], "up");
+        assert_eq!(qq["neverConnected"], false);
+
+        status.disconnected("unreachable", "socket closed");
+        let snapshot = registry.snapshot(None);
+        let qq = entry(&snapshot, "qq");
+        assert_eq!(qq["state"], "down");
+        assert_eq!(qq["lastErrorClass"], "unreachable");
+        assert_eq!(qq["lastError"], "socket closed");
+
+        status.connected();
+        let snapshot = registry.snapshot(None);
+        let qq = entry(&snapshot, "qq");
+        assert_eq!(qq["state"], "up");
+        assert_eq!(qq["attempts"], 2);
+        assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 3);
     }
 
     #[test]

@@ -115,6 +115,7 @@ fn dynamic_adapter_loads_and_speaks_the_wire_protocol() {
     let host = AdapterHost {
         events,
         shutdown: Arc::clone(&shutdown),
+        status: acb_kernel::AdapterStatus::new("demo", acb_kernel::DependencyRegistry::new()),
     };
     thread::spawn(move || launch(host));
 

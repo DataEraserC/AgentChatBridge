@@ -1082,6 +1082,26 @@
   unknown→up→down→up 与 since 查询。
 - 可回退：删除 deps 模块与两个接口接线即可，不影响 turn 通道。
 
+## 2026-11-04 — connectivity 第②步：适配器上报平台连接状态
+
+- 做了什么：
+  - `AdapterHost` 增加 `status: AdapterStatus`；适配器只报
+    `connected / disconnected / not_configured`，时间戳、`since`、`lastOkAt`、
+    `neverConnected`、`attempts` 由 core 的依赖表统一维护。
+  - `DependencyRegistry::from_config` 登记 `[[connections]]`，初始 `unknown` +
+    `class=not_configured`，不报 down。
+  - OneBot：连接成功报 `connected`，连接失败/断开报 `disconnected`（class
+    `unreachable`/`closed`），重连成功再报 `connected`。
+  - process：启动成功、重启成功报 `connected`；子进程退出报 `disconnected`；
+    重启失败报 `disconnected(unreachable)`。
+  - `AdapterFactory::health` 默认从 `Healthy` 改为 `Health::Unknown("connection state
+    is reported in /api/dependencies")`；新增 `Health::Unknown` JSON 映射。
+  - 不做任何通知，只更新状态表与 `/api/dependencies`。
+- 测试：deps 单元测试覆盖平台 `not_configured → up → down → up`；workspace 全绿。
+- 偏离：`not_configured` 以初始 `unknown` 状态体现，而不是单独的第四种 state；
+  文档里 30s 宽限期尚未实现。
+- 可回退：去掉 AdapterStatus 上报调用即可，依赖表不影响 turn 通道。
+
 ## 环境状态
 
 - `acb-bridge.service` 曾因上轮中断变为 inactive；2026-11-04 01:19 已重新启动，

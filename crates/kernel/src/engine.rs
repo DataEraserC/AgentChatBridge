@@ -845,7 +845,9 @@ impl<S: Store> Bridge<S> {
             }
             let (unhealthy, detail) = match &info.health {
                 Health::Unhealthy(detail) => (true, detail.clone()),
-                Health::Healthy | Health::Degraded(_) => (false, String::new()),
+                Health::Healthy | Health::Degraded(_) | Health::Unknown(_) => {
+                    (false, String::new())
+                }
             };
             if self.lkg.observe_health(&info.id, unhealthy) {
                 self.note_plugin_failure(&info.id, &detail, now);
