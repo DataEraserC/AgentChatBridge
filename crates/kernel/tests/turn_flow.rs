@@ -1536,8 +1536,7 @@ fn send_message_rechecks_current_room_access() {
     assert_eq!(denied.code, ErrorCode::RoomNotSubscribed);
 
     // 同一房间在默认策略下仍可发送。
-    let (mut allowed, sends) =
-        bridge_with_plugins(config(), PluginManager::with_native_builtins());
+    let (mut allowed, sends) = bridge_with_plugins(config(), PluginManager::with_native_builtins());
     allowed
         .ingest(message("qq:group/123", "10001", "在吗", true))
         .expect("能记下来");
@@ -1551,6 +1550,63 @@ fn send_message_rechecks_current_room_access() {
         )
         .expect("授权房间应通过");
     assert_eq!(sends.lock().expect("没被毒死")[0].0, room("qq:group/123"));
+}
+
+/// system admin 只在私信里有常态授予；群里即使同账号也不自动提权。
+#[test]
+fn system_admin_private_only_and_any_target() {
+    let rule = r#"
+[grants.system_admin]
+connection = "qq"
+account = "10002"
+
+[[grants.rules]]
+subject = "system_admin"
+place = "private"
+scope = "any"
+capability = ["room_read", "room_write", "platform", "destructive", "plugin"]
+"#;
+
+    let private = format!(
+        "{}\n{rule}",
+        config().replace("room = \"group/123\"", "room = \"private/10002\"")
+    );
+    let (mut bridge, sends) = bridge_with_plugins(&private, PluginManager::with_native_builtins());
+    bridge
+        .ingest(message("qq:private/10002", "10002", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message_to",
+            json!({
+                "to": "qq:group/999",
+                "elements": [{"type": "text", "text": "私信管理员可以越界"}]
+            }),
+        )
+        .expect("system admin 私信档允许任意目标");
+    assert_eq!(sends.lock().expect("没被毒死")[0].0, room("qq:group/999"));
+
+    let group = format!("{}\n{rule}", config());
+    let (mut bridge, _sends) = bridge_with_plugins(&group, PluginManager::with_native_builtins());
+    bridge
+        .ingest(message("qq:group/123", "10002", "在群里", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let denied = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message_to",
+            json!({
+                "to": "qq:group/999",
+                "elements": [{"type": "text", "text": "群里越界"}]
+            }),
+        )
+        .expect_err("群里没有常驻提权");
+    assert_eq!(denied.code, ErrorCode::RoomNotSubscribed);
 }
 
 /// 内置 `privileged_origins`：配置声明来源房间，群里的轮次回到订阅边界。

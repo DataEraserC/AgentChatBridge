@@ -33,6 +33,9 @@ use crate::config::{
     ClockPolicy, Config, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy, WakeVerdict,
 };
 use crate::deps::{DependencyKind, DependencyRegistry};
+use crate::grants::{
+    self, GrantCapability, GrantDecision, GrantPlace, GrantSubject, GrantTarget, GrantsConfig,
+};
 use crate::lkg::PluginLkg;
 use crate::memory::{
     MemoryRepo, git_add, git_blame, git_branch, git_commit, git_diff, git_log, git_push,
@@ -43,11 +46,13 @@ use crate::outbound::{
     OutgoingKind, OutgoingRecord, RecordMode, Risk, Scope, Sent, TargetRole, expand_query,
 };
 use crate::plugin::{
-    AccessAction, AccessDecision, AccessRequest, Capability, ClockContext, DefaultDeliveryComposer,
-    DefaultTurnErrorProvider, DeliveryRequest, Health, InterruptScope, PluginError, PluginManager,
-    PromptContext, PromptDraft, PromptProvider, ProviderId, ReceiveDecision, ReceiveRequest,
-    ReloadScope, RouteAction, RouteContext, RouteDecision, SendContext, SendHook, SendOrigin,
-    TurnErrorProvider, TurnErrorRequest, WakeContext, default_delivery_plan, provider_is_external,
+    ALL_ROOMS_ACCESS_PROVIDER, AccessAction, AccessDecision, AccessRequest, Capability,
+    ClockContext, DEFAULT_ACCESS_PROVIDER, DefaultDeliveryComposer, DefaultTurnErrorProvider,
+    DeliveryRequest, ELEVATED_ACCESS_PROVIDER, GRANTS_ACCESS_PROVIDER, Health, InterruptScope,
+    PRIVILEGED_ORIGINS_ACCESS_PROVIDER, PluginError, PluginManager, PromptContext, PromptDraft,
+    PromptProvider, ProviderId, ReceiveDecision, ReceiveRequest, ReloadScope, RouteAction,
+    RouteContext, RouteDecision, SendContext, SendHook, SendOrigin, TurnErrorProvider,
+    TurnErrorRequest, WakeContext, default_delivery_plan, provider_is_external,
 };
 use crate::plugin_meta::{PluginLifecycle, PluginSource};
 use crate::render;
@@ -3873,6 +3878,58 @@ impl<S: Store> Bridge<S> {
             }
         }
 
+        // 平台动作的额外能力（platform / destructive）。只有内置授权 evaluator 生效；
+        // 外部 access provider 已经整体替换了授权判据。
+        if let Some(session) = ctx.config.session(&ctx.session) {
+            let provider_id = session.access.provider.to_string();
+            if Self::is_builtin_access_provider(&provider_id) {
+                let place = GrantsConfig::place_of(&ctx.room, ctx.origin_sender.is_some());
+                let subject = ctx.config.grants.subject_for(
+                    &ctx.room.connection,
+                    ctx.origin_sender.as_deref(),
+                    place,
+                );
+                let capability = if spec.risk == Risk::Destructive {
+                    GrantCapability::Destructive
+                } else {
+                    GrantCapability::Platform
+                };
+                let subscriptions: Vec<RoomId> = session
+                    .subscriptions
+                    .iter()
+                    .map(|subscription| subscription.room.clone())
+                    .collect();
+                let query = grants::GrantQuery {
+                    provider: &provider_id,
+                    policy: &session.access,
+                    subject,
+                    place,
+                    capability,
+                    target: GrantTarget::Room(&room),
+                    subscriptions: &subscriptions,
+                    origin: Some(&ctx.room),
+                };
+                if let Some(decision) = grants::evaluate_platform(&ctx.config.grants, &query) {
+                    if decision.audited() {
+                        self.audit_grant(
+                            &ctx.session,
+                            subject,
+                            place,
+                            capability,
+                            GrantTarget::Room(&room),
+                            &decision,
+                        );
+                    }
+                    if !decision.allow {
+                        return Err(ToolError::new(
+                            ErrorCode::ToolNotAllowed,
+                            format!("[forbidden] {}", decision.reason),
+                        ));
+                    }
+                }
+            }
+        }
+
         // 要写流水的方法必须先知道“我是谁”。放在平台调用之前查：平台已经发出去了
         // 再发现记不了账，那条消息就会在自己的水位上留洞。
         if spec.record != RecordMode::None && config.account_of_room(&room).is_empty() {
@@ -4136,42 +4193,103 @@ impl<S: Store> Bridge<S> {
             .origin_sender
             .as_deref()
             .is_some_and(|sender| ctx.config.is_admin(&ctx.room, sender));
+        let place = GrantsConfig::place_of(&ctx.room, ctx.origin_sender.is_some());
+        let subject = ctx.config.grants.subject_for(
+            &ctx.room.connection,
+            ctx.origin_sender.as_deref(),
+            place,
+        );
         let context = crate::plugin::ToolAccessContext {
             tool,
             args,
             session: &ctx.session,
             room: &ctx.room,
+            subject,
+            place,
             platform,
             origin_sender: ctx.origin_sender.as_deref(),
             is_admin,
             live: ctx.live,
         };
-        let Some((provider, reason, provider_failed)) = self.plugins.check_tool_access(&context)
-        else {
+        // 同一时刻只生效一个实现：配置了外部 ToolAccessProvider 就只用它；
+        // 没有外部实现时才跑内置 grants evaluator。
+        let has_external = self.plugins.descriptors().iter().any(|descriptor| {
+            descriptor.extension_point == crate::plugin::ExtensionPoint::ToolAccess
+        });
+        if has_external {
+            let Some((provider, reason, provider_failed)) =
+                self.plugins.check_tool_access(&context)
+            else {
+                return Ok(());
+            };
+            if provider_failed {
+                self.note_plugin_failure(&provider, &reason, now_millis());
+            }
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.engine.tool_access_denied",
+                    provider = provider,
+                    tool = tool,
+                    session = ctx.session,
+                    room = ctx.room,
+                    reason = reason
+                )
+            );
+            return Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                acb_i18n::t!(
+                    "kernel.engine.tool_access_denied_message",
+                    provider = provider,
+                    reason = reason
+                ),
+            ));
+        }
+
+        if tool != "plugin_tool_call" {
+            return Ok(());
+        }
+        let Some(session) = ctx.config.session(&ctx.session) else {
             return Ok(());
         };
-        if provider_failed {
-            self.note_plugin_failure(&provider, &reason, now_millis());
+        let provider_id = session.access.provider.to_string();
+        if !Self::is_builtin_access_provider(&provider_id) {
+            return Ok(());
         }
-        eprintln!(
-            "{}",
-            acb_i18n::t!(
-                "kernel.engine.tool_access_denied",
-                provider = provider,
-                tool = tool,
-                session = ctx.session,
-                room = ctx.room,
-                reason = reason
-            )
-        );
-        Err(ToolError::new(
-            ErrorCode::ToolNotAllowed,
-            acb_i18n::t!(
-                "kernel.engine.tool_access_denied_message",
-                provider = provider,
-                reason = reason
-            ),
-        ))
+        let subscriptions: Vec<RoomId> = session
+            .subscriptions
+            .iter()
+            .map(|subscription| subscription.room.clone())
+            .collect();
+        let query = grants::GrantQuery {
+            provider: &provider_id,
+            policy: &session.access,
+            subject,
+            place,
+            capability: GrantCapability::Plugin,
+            target: GrantTarget::Room(&ctx.room),
+            subscriptions: &subscriptions,
+            origin: Some(&ctx.room),
+        };
+        let decision = grants::evaluate_tool(&ctx.config.grants, &query);
+        if decision.audited() {
+            self.audit_grant(
+                &ctx.session,
+                subject,
+                place,
+                GrantCapability::Plugin,
+                GrantTarget::Room(&ctx.room),
+                &decision,
+            );
+        }
+        if decision.allow {
+            Ok(())
+        } else {
+            Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                format!("[forbidden] {}", decision.reason),
+            ))
+        }
     }
 
     /// 落盘兜底放在哪：状态库旁边（`state/spill/`），跟库一起备份、一起清。
@@ -4279,81 +4397,122 @@ impl<S: Store> Bridge<S> {
             let Some(session) = config.session(id) else {
                 continue;
             };
-            let provider = match self
-                .plugins
-                .resolve_access(&session.access.provider, &session.access)
-            {
-                Ok(provider) => provider,
-                Err(error) => {
-                    self.note_provider_error(&session.access.provider, &error);
-                    return Err(ToolError::new(
-                        ErrorCode::Internal,
-                        acb_i18n::t!(
-                            "kernel.engine.access_policy_unavailable",
-                            provider = session.access.provider,
-                            session = id,
-                            error = error
-                        ),
-                    ));
-                }
-            };
+            let provider_id = session.access.provider.to_string();
+            let built_in = Self::is_builtin_access_provider(&provider_id);
             let subscriptions: Vec<RoomId> = session
                 .subscriptions
                 .iter()
                 .map(|subscription| subscription.room.clone())
                 .collect();
-            let request = AccessRequest {
-                session: id,
-                connection,
-                room,
-                origin_room: origin,
-                action,
-                subscriptions: &subscriptions,
+            let origin_room = origin.or(room);
+            let (subject, place) = self.subject_place(config, id, origin_room);
+            let capability = match action {
+                AccessAction::Read => GrantCapability::RoomRead,
+                AccessAction::Send => GrantCapability::RoomWrite,
+                AccessAction::Connection => GrantCapability::ConnectionRead,
             };
-            let allowed = if let Some(timeout) = provider_call_timeout(config)
-                .filter(|_| provider_is_external(&session.access.provider))
-            {
-                let provider_id = session.access.provider.clone();
-                let owned_policy = session.access.clone();
-                let owned_session = id.to_string();
-                let owned_connection = connection.to_owned();
-                let owned_room = room.cloned();
-                let owned_origin = origin.cloned();
-                let owned_subscriptions = subscriptions.clone();
-                let provider = Arc::clone(&provider);
-                match self
+            let target = match room {
+                Some(room) => GrantTarget::Room(room),
+                None => GrantTarget::Connection(connection),
+            };
+
+            let (allowed, basis) = if built_in {
+                let query = grants::GrantQuery {
+                    provider: provider_id.as_str(),
+                    policy: &session.access,
+                    subject,
+                    place,
+                    capability,
+                    target,
+                    subscriptions: &subscriptions,
+                    origin: origin_room,
+                };
+                let decision = grants::evaluate_access(&config.grants, &query);
+                if decision.audited() {
+                    self.audit_grant(id, subject, place, capability, target, &decision);
+                }
+                (decision.allow, decision.basis)
+            } else {
+                let provider = match self
                     .plugins
-                    .call_timed(&provider_id, "access.check", timeout, move || {
-                        let request = AccessRequest {
-                            session: &owned_session,
-                            connection: &owned_connection,
-                            room: owned_room.as_ref(),
-                            origin_room: owned_origin.as_ref(),
-                            action,
-                            subscriptions: &owned_subscriptions,
-                        };
-                        provider.check(&owned_policy, &request)
-                    }) {
-                    Ok(decision) => decision == AccessDecision::Allow,
+                    .resolve_access(&session.access.provider, &session.access)
+                {
+                    Ok(provider) => provider,
                     Err(error) => {
-                        self.record_provider_call_failure(&provider_id, "access.check", &error);
+                        self.note_provider_error(&session.access.provider, &error);
                         return Err(ToolError::new(
                             ErrorCode::Internal,
                             acb_i18n::t!(
-                                "kernel.engine.access_provider_timeout",
-                                provider = provider_id,
+                                "kernel.engine.access_policy_unavailable",
+                                provider = session.access.provider,
+                                session = id,
                                 error = error
                             ),
                         ));
                     }
-                }
-            } else {
-                provider.check(&session.access, &request) == AccessDecision::Allow
+                };
+                let request = AccessRequest {
+                    session: id,
+                    connection,
+                    room,
+                    subject,
+                    place,
+                    origin_room: origin,
+                    action,
+                    subscriptions: &subscriptions,
+                };
+                let allowed = if let Some(timeout) = provider_call_timeout(config)
+                    .filter(|_| provider_is_external(&session.access.provider))
+                {
+                    let provider_id = session.access.provider.clone();
+                    let owned_policy = session.access.clone();
+                    let owned_session = id.to_string();
+                    let owned_connection = connection.to_owned();
+                    let owned_room = room.cloned();
+                    let owned_origin = origin.cloned();
+                    let owned_subscriptions = subscriptions.clone();
+                    let provider = Arc::clone(&provider);
+                    match self.plugins.call_timed(
+                        &provider_id,
+                        "access.check",
+                        timeout,
+                        move || {
+                            let request = AccessRequest {
+                                session: &owned_session,
+                                connection: &owned_connection,
+                                room: owned_room.as_ref(),
+                                subject,
+                                place,
+                                origin_room: owned_origin.as_ref(),
+                                action,
+                                subscriptions: &owned_subscriptions,
+                            };
+                            provider.check(&owned_policy, &request)
+                        },
+                    ) {
+                        Ok(decision) => decision == AccessDecision::Allow,
+                        Err(error) => {
+                            self.record_provider_call_failure(&provider_id, "access.check", &error);
+                            return Err(ToolError::new(
+                                ErrorCode::Internal,
+                                acb_i18n::t!(
+                                    "kernel.engine.access_provider_timeout",
+                                    provider = provider_id,
+                                    error = error
+                                ),
+                            ));
+                        }
+                    }
+                } else {
+                    provider.check(&session.access, &request) == AccessDecision::Allow
+                };
+                (allowed, "external".to_owned())
             };
+
             if allowed {
                 return Ok(());
             }
-            denied.push(format!("{} ({})", id, session.access.provider));
+            denied.push(format!("{} ({provider_id} {basis})", id));
         }
 
         let detail = match action {
@@ -4380,6 +4539,77 @@ impl<S: Store> Bridge<S> {
             ErrorCode::RoomNotSubscribed,
             format!("{detail}{policy}"),
         ))
+    }
+
+    fn is_builtin_access_provider(provider: &str) -> bool {
+        matches!(
+            provider,
+            GRANTS_ACCESS_PROVIDER
+                | DEFAULT_ACCESS_PROVIDER
+                | ALL_ROOMS_ACCESS_PROVIDER
+                | ELEVATED_ACCESS_PROVIDER
+                | PRIVILEGED_ORIGINS_ACCESS_PROVIDER
+        )
+    }
+
+    fn subject_place(
+        &self,
+        config: &Config,
+        session: &str,
+        origin: Option<&RoomId>,
+    ) -> (GrantSubject, GrantPlace) {
+        let Some(origin) = origin else {
+            return (GrantSubject::System, GrantPlace::None);
+        };
+        let sender = self.origin_sender_for(session, origin);
+        let place = GrantsConfig::place_of(origin, sender.is_some());
+        let subject = config
+            .grants
+            .subject_for(&origin.connection, sender.as_deref(), place);
+        (subject, place)
+    }
+
+    fn origin_sender_for(&self, session: &str, origin: &RoomId) -> Option<String> {
+        if let Some(turn) = self.active.get(session).filter(|turn| turn.room == *origin) {
+            return turn.origin_sender.clone();
+        }
+        self.ended
+            .values()
+            .filter(|turn| turn.session == session && turn.room == *origin)
+            .max_by_key(|turn| turn.at)
+            .and_then(|turn| turn.origin_sender.clone())
+    }
+
+    fn audit_grant(
+        &self,
+        session: &str,
+        subject: GrantSubject,
+        place: GrantPlace,
+        capability: GrantCapability,
+        target: GrantTarget<'_>,
+        decision: &GrantDecision,
+    ) {
+        let target = match target {
+            GrantTarget::Room(room) => room.to_string(),
+            GrantTarget::Connection(connection) => connection.to_owned(),
+        };
+        // 兼容层映射的是 system 主体的常态授予，审计按 system 记。
+        let subject = if decision.basis.starts_with("compat:") {
+            GrantSubject::System
+        } else {
+            subject
+        };
+        eprintln!(
+            "[access] subject={} place={} capability={} target={} result={} basis={} reason=\"{}\" session={}",
+            subject.as_str(),
+            place.as_str(),
+            capability.as_str(),
+            target,
+            if decision.allow { "allow" } else { "deny" },
+            decision.basis,
+            decision.reason.replace('"', "'"),
+            session,
+        );
     }
 
     /// 能不能对 `room` 做 `action`。
@@ -5792,6 +6022,16 @@ impl<S: Store> Bridge<S> {
 
     /// 按 provider id 查目录；配置引用错误时给明确的 missing 标记。
     fn plugin_info_json(&self, id: &ProviderId) -> Value {
+        if id.to_string() == GRANTS_ACCESS_PROVIDER {
+            return json!({
+                "id": id.to_string(),
+                "source": "native",
+                "metadata": {
+                    "title": "授权规则",
+                    "summary": "内置四元组授权 evaluator：先看常态授予，再退回订阅边界",
+                },
+            });
+        }
         self.plugins
             .info(id)
             .map(|info| info.to_json())

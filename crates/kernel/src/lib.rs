@@ -9,6 +9,7 @@ pub mod deps;
 pub mod endpoint;
 pub mod engine;
 pub mod event_queue;
+pub mod grants;
 pub mod lkg;
 pub mod memory;
 pub mod notice;
@@ -45,6 +46,9 @@ pub use engine::{Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned, TaskRecord, 
 pub use event_queue::{
     EventQueue, EventReceiver, QueueSnapshot, QueueStats, SubmitError, drain_events,
 };
+pub use grants::{
+    GrantCapability, GrantDecision, GrantPlace, GrantScope, GrantSubject, GrantTarget, GrantsConfig,
+};
 pub use lkg::{LkgEntry, LkgInfo, LkgState, PluginLkg};
 pub use notice::{NoticeEvent, NoticeSink};
 pub use outbound::{
@@ -58,7 +62,7 @@ pub use plugin::{
     DEFAULT_CLOCK_PROVIDER, DEFAULT_DELIVERY_PROVIDER, DEFAULT_RECEIVE_PROVIDER,
     DEFAULT_TURN_ERROR_PROVIDER, DefaultDeliveryComposer, DefaultTurnErrorProvider,
     DefaultWakeProvider, DeliveryComposer, DeliveryPlan, DeliveryRequest, ELEVATED_ACCESS_PROVIDER,
-    ElevatedInRoomsAccessProvider, ExtensionPoint, Health, InterruptScope,
+    ElevatedInRoomsAccessProvider, ExtensionPoint, GRANTS_ACCESS_PROVIDER, Health, InterruptScope,
     IntervalIdleClockProvider, LoaderKind, LoaderManifest, MAX_MANAGER_DEPTH, ManagerHealth,
     ManagerManifest, ManagerPlugin, NativeLoader, PLUGIN_API_VERSION, PluginArtifact, PluginError,
     PluginLoader, PluginManager, PromptContext, PromptDraft, PromptProvider, ProviderDescriptor,

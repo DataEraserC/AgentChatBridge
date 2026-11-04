@@ -231,6 +231,11 @@ pub struct WireAccessRequest {
     /// 当前轮次是从哪个房间触发的；旧插件不读这个字段时按 `null` 处理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_room: Option<String>,
+    /// 本轮主体与场所；旧插件不读时按空串处理。
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub place: String,
     pub action: String,
     #[serde(default)]
     pub subscriptions: Vec<String>,

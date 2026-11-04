@@ -104,6 +104,9 @@ pub const DEFAULT_WAKE_PROVIDER: &str = "acb.wake.default";
 /// 内置 access provider 的 id。会话没有显式写 provider 时用它。
 pub const DEFAULT_ACCESS_PROVIDER: &str = "acb.access.subscribed";
 
+/// 内置授权 evaluator 的 id。`[grants]` 生效时用它；没有授予时退回订阅边界。
+pub const GRANTS_ACCESS_PROVIDER: &str = "acb.access.grants";
+
 /// 内置投递 composer 的 id。会话没有显式写 delivery provider 时用它。
 pub const DEFAULT_DELIVERY_PROVIDER: &str = "acb.delivery.default";
 
@@ -184,6 +187,11 @@ impl ProviderId {
     /// 内置 access provider（默认按订阅）。
     pub fn builtin_access() -> Self {
         Self::parse(DEFAULT_ACCESS_PROVIDER).expect("built-in provider id must be valid")
+    }
+
+    /// 内置授权 evaluator。
+    pub fn builtin_grants_access() -> Self {
+        Self::parse(GRANTS_ACCESS_PROVIDER).expect("built-in provider id must be valid")
     }
 
     /// 内置 access provider：所有房间。
@@ -642,6 +650,8 @@ pub struct ToolAccessContext<'a> {
     pub args: &'a Value,
     pub session: &'a str,
     pub room: &'a RoomId,
+    pub subject: crate::grants::GrantSubject,
+    pub place: crate::grants::GrantPlace,
     pub platform: &'a str,
     pub origin_sender: Option<&'a str>,
     pub is_admin: bool,
@@ -747,6 +757,9 @@ pub struct AccessRequest<'a> {
     pub connection: &'a str,
     /// 这次要访问的目标房间；连接级请求为 `None`。
     pub room: Option<&'a RoomId>,
+    /// 本轮主体与场所。外部 provider 可据此做 RBAC/外接策略。
+    pub subject: crate::grants::GrantSubject,
+    pub place: crate::grants::GrantPlace,
     /// 当前轮次是从哪个房间触发的。工具调用时一定有；连接级请求也保留。
     ///
     /// 和目标 `room` 分开：`send_message_to` 的目标可以是别的房间，来源仍是本轮房间。
@@ -2985,17 +2998,25 @@ impl PluginManager {
             .map(|descriptor| &descriptor.id)
             .collect();
         ids.sort();
+        if let Some(second) = ids.get(1) {
+            // 同一时刻只允许一个 tool_access 实现；两套判据并存会让审计无法归因。
+            let reason = acb_i18n::t!(
+                "kernel.plugin.tool_access_multiple",
+                first = ids[0],
+                second = second
+            );
+            eprintln!("{reason}");
+            return Some((ids[0].clone(), reason, true));
+        }
         for id in ids {
             let provider = if let Some(provider) = self.tool_access.get(id) {
                 provider.clone()
             } else {
                 let Some(manager) = self.managers.get(id.namespace()) else {
-                    // descriptor 在、实现不在：加载器自己的健康问题，不影响 core 判定。
-                    eprintln!(
-                        "{}",
-                        acb_i18n::t!("kernel.plugin.tool_access_missing", id = id)
-                    );
-                    continue;
+                    // descriptor 在、实现不在：不能 fail open。
+                    let reason = acb_i18n::t!("kernel.plugin.tool_access_missing", id = id);
+                    eprintln!("{reason}");
+                    return Some((id.clone(), reason, true));
                 };
                 match self.instantiate_safe(manager, id, ProviderOptions::ToolAccess) {
                     Ok(ProviderInstance::ToolAccess(provider)) => provider,
@@ -3031,6 +3052,8 @@ impl PluginManager {
                 let owned_origin = context.origin_sender.map(ToOwned::to_owned);
                 let is_admin = context.is_admin;
                 let live = context.live;
+                let subject = context.subject;
+                let place = context.place;
                 let provider = Arc::clone(&provider);
                 match self.call_timed(id, "tool_access.check", timeout, move || {
                     let context = ToolAccessContext {
@@ -3038,6 +3061,8 @@ impl PluginManager {
                         args: &owned_args,
                         session: &owned_session,
                         room: &owned_room,
+                        subject,
+                        place,
                         platform: &owned_platform,
                         origin_sender: owned_origin.as_deref(),
                         is_admin,
@@ -3670,7 +3695,10 @@ impl PluginManager {
             }
         }
         for session in &config.sessions {
-            self.resolve_access(&session.access.provider, &session.access)?;
+            // 内置授权 evaluator 不是注册在 PluginManager 里的对象；它由 core 直接执行。
+            if session.access.provider.to_string() != GRANTS_ACCESS_PROVIDER {
+                self.resolve_access(&session.access.provider, &session.access)?;
+            }
             self.resolve_delivery(&session.delivery.provider, &session.delivery)?;
             self.resolve_send_hooks(&session.outbound.before)?;
             self.resolve_send_hooks(&session.outbound.after)?;
@@ -4035,6 +4063,8 @@ mod tests {
                 session: "main",
                 connection: "qq",
                 room: Some(room),
+                subject: crate::grants::GrantSubject::User,
+                place: crate::grants::GrantPlace::Group,
                 origin_room: Some(room),
                 action,
                 subscriptions,
@@ -4104,6 +4134,8 @@ mod tests {
             session: "main",
             connection: "qq",
             room: Some(&target),
+            subject: crate::grants::GrantSubject::User,
+            place: crate::grants::GrantPlace::Group,
             origin_room: Some(&origin),
             action: AccessAction::Send,
             subscriptions: &subscriptions,
@@ -4145,6 +4177,8 @@ mod tests {
             session: "main",
             connection: "dc",
             room: None,
+            subject: crate::grants::GrantSubject::User,
+            place: crate::grants::GrantPlace::None,
             origin_room: None,
             action: AccessAction::Connection,
             subscriptions: &subscriptions,
@@ -4486,6 +4520,8 @@ mod tests {
             args: &args,
             session: "main",
             room: &room,
+            subject: crate::grants::GrantSubject::User,
+            place: crate::grants::GrantPlace::Group,
             platform: "qq",
             origin_sender: None,
             is_admin: false,

@@ -1549,6 +1549,8 @@ impl AccessProvider for DylibAccessProvider {
             connection: request.connection.to_owned(),
             room: request.room.map(|room| room.to_string()),
             origin_room: request.origin_room.map(|room| room.to_string()),
+            subject: request.subject.as_str().to_owned(),
+            place: request.place.as_str().to_owned(),
             action: request.action.as_str().to_owned(),
             subscriptions: request
                 .subscriptions

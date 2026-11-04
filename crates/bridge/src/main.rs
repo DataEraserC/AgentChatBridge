@@ -90,6 +90,33 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(&options.config)?;
     let config = Config::parse(&text)?;
     print_summary(&config, &options.config);
+    for session in &config.sessions {
+        if matches!(
+            session.access.provider.to_string().as_str(),
+            "acb.access.all_rooms"
+                | "acb.access.elevated_in_rooms"
+                | "acb.access.privileged_origins"
+        ) {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "bridge.main.deprecated_access_provider",
+                    session = session.id,
+                    provider = session.access.provider
+                )
+            );
+        }
+    }
+    if let Some(admin) = &config.grants.system_admin {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.system_admin_configured",
+                connection = admin.connection,
+                account = admin.account
+            )
+        );
+    }
 
     // 依赖状态表：只读缓存，锁独立于 Bridge。启动时登记 harness 与平台连接；
     // model 条目在第一次轮次观测时按需创建。
