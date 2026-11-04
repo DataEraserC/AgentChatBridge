@@ -26,7 +26,7 @@ pub mod wire;
 
 pub use adapter::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
-    AdapterInstance, AdapterManifest, create_instance, manifest_supports_transport,
+    AdapterInstance, AdapterManifest, AdapterStatus, create_instance, manifest_supports_transport,
     validate_manifest,
 };
 pub use config::{

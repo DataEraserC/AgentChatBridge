@@ -10,7 +10,9 @@
 >   `/healthz.dependencies` 已暴露。表字段为 `state / since / lastOkAt / lastAttemptAt /
 >   neverConnected / lastError / lastErrorClass / attempts`。
 > - 初始状态为 `unknown`；没有“宽限期到点自动标 down”的定时器，等第一次连接/断开事件。
-> - 第②步：适配器上报平台状态（单独提交）。
+> - 第②步：适配器经 `AdapterHost.status` 上报平台 `connected / disconnected /
+>   not_configured`；OneBot 与 process 已接。`AdapterFactory::health` 默认改为
+>   `Health::Unknown`，不再假装 Healthy；平台连接细节看 `/api/dependencies`。
 
 ## 0. 结论
 

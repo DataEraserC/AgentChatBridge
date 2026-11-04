@@ -456,6 +456,8 @@ pub enum ReloadScope {
 pub enum Health {
     Healthy,
     Degraded(String),
+    /// 载体自己无法判断（例如平台连接状态由 `/api/dependencies` 维护）。
+    Unknown(String),
     Unhealthy(String),
 }
 

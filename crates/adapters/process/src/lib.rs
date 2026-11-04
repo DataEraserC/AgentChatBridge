@@ -43,9 +43,9 @@ use acb_adapter_api::{
 use acb_kernel::wire::{call_error, convert_catalog, send_error};
 use acb_kernel::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
-    AdapterInstance, AdapterManifest, CallError, CallOutcome, Connection, Element, EventQueue,
-    MethodSpec, Outbound, OutboundError, OutgoingRecord, PluginEffect, PluginMetadata, RoomId,
-    Sent,
+    AdapterInstance, AdapterManifest, AdapterStatus, CallError, CallOutcome, Connection, Element,
+    EventQueue, MethodSpec, Outbound, OutboundError, OutgoingRecord, PluginEffect, PluginMetadata,
+    RoomId, Sent,
 };
 
 /// 等子进程回一条动作结果的上限。
@@ -301,6 +301,7 @@ fn spawn_process(
     let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
         supervise(
             host.shutdown,
+            host.status,
             config,
             connection_id,
             shared,
@@ -450,12 +451,14 @@ fn start_child(
 /// 守着子进程：退出就按退避重启，桥要停才收尾。
 fn supervise(
     host_shutdown: Arc<AtomicBool>,
+    status: AdapterStatus,
     config: ProcessConfig,
     connection: String,
     shared: Arc<SharedProcess>,
     events: EventQueue,
     mut child: Child,
 ) {
+    status.connected();
     let mut delay = RESTART_DELAY;
     loop {
         let shutdown = wait_for_exit(&host_shutdown, &shared, &mut child, &connection);
@@ -474,8 +477,10 @@ fn supervise(
             let _ = reply.send(Err(acb_i18n::t!("adapter.process.exited")));
         }
         if shutdown {
+            status.disconnected("closed", "adapter shutdown");
             return;
         }
+        status.disconnected("closed", "child process exited");
         let _ = child.wait();
 
         eprintln!(
@@ -519,8 +524,10 @@ fn supervise(
                 shared.alive.store(true, Ordering::Relaxed);
                 child = new_child;
                 delay = RESTART_DELAY;
+                status.connected();
             }
             Err(detail) => {
+                status.disconnected("unreachable", &detail);
                 eprintln!(
                     "{}",
                     acb_i18n::t!(

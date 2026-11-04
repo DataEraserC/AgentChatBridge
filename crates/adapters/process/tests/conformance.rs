@@ -91,6 +91,7 @@ fn process_adapter_speaks_the_wire_protocol() {
     let host = AdapterHost {
         events,
         shutdown: Arc::clone(&shutdown),
+        status: acb_kernel::AdapterStatus::new("proc", acb_kernel::DependencyRegistry::new()),
     };
     thread::spawn(move || launch(host));
 
@@ -161,6 +162,7 @@ fn process_adapter_restarts_after_child_exits() {
     let host = AdapterHost {
         events,
         shutdown: Arc::clone(&shutdown),
+        status: acb_kernel::AdapterStatus::new("proc", acb_kernel::DependencyRegistry::new()),
     };
     thread::spawn(move || launch(host));
 

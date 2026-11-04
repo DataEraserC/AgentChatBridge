@@ -17,7 +17,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acb_kernel::{Connection, EventQueue, Outbound, RoomId};
+use acb_kernel::{AdapterStatus, Connection, EventQueue, Outbound, RoomId};
 use serde_json::{Value, json};
 use tungstenite::error::Error as WsError;
 use tungstenite::{Message, WebSocket};
@@ -404,6 +404,7 @@ pub fn supervise(
     connection: Connection,
     shutdown: Arc<AtomicBool>,
     events: EventQueue,
+    status: AdapterStatus,
 ) {
     let url = connection.url.clone().unwrap_or_default();
     let token = connection.token.clone();
@@ -414,6 +415,7 @@ pub fn supervise(
     while !shutdown.load(Ordering::Relaxed) {
         match connect(&url, token.as_deref(), READ_TICK) {
             Ok(ws) => {
+                status.connected();
                 eprintln!(
                     "{}",
                     acb_i18n::t!("adapter.onebot11.connected", id = id, url = url)
@@ -433,10 +435,12 @@ pub fn supervise(
                 let outcome = pump(ws, actions, &events, &id, &admin_qqs, &slot, &shutdown);
                 slot.clear();
                 if shutdown.load(Ordering::Relaxed) {
+                    status.disconnected("closed", "adapter shutdown");
                     break;
                 }
                 match outcome {
                     Ok(()) => {
+                        status.disconnected("closed", "connection closed");
                         eprintln!(
                             "{}",
                             acb_i18n::t!(
@@ -447,6 +451,7 @@ pub fn supervise(
                         )
                     }
                     Err(error) => {
+                        status.disconnected("unreachable", &error.to_string());
                         eprintln!(
                             "{}",
                             acb_i18n::t!(
@@ -460,6 +465,7 @@ pub fn supervise(
                 }
             }
             Err(error) => {
+                status.disconnected("unreachable", &error.to_string());
                 eprintln!(
                     "{}",
                     acb_i18n::t!("adapter.onebot11.adapter_error", id = id, error = error)
