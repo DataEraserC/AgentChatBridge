@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 3 项、部分实现 12 项、未实现 8 项**。动作级：现有 catalog 暴露 50 个层级 op / 53 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 7 项、部分实现 8 项、未实现 8 项**。动作级：现有 catalog 暴露 68 个层级 op / 71 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -115,8 +115,8 @@
 
 - **连接**：只做正向 WebSocket（`ws-client`）；`ws-server` 未实现，manifest 会让注册表拒绝（[config.rs](../../crates/kernel/src/config.rs#L3145-L3150)）。
 - **鉴权**：`Authorization: Bearer`，地址里的 `?access_token=` 原样保留（[link.rs](../../crates/adapters/onebot11/src/link.rs#L94-L149)）。
-- **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、合并转发发送与读取。
-- **平台方法**：`catalog.rs` 的 `ROUTES` 共 50 个层级 op，映射 53 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
+- **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、自定义收藏表情（`msg.face`）、合并转发发送与读取。
+- **平台方法**：`catalog.rs` 的 `ROUTES` 共 68 个层级 op，映射 71 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
 - **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略（`reportSelfMessage = true` 时不重复记账）；`meta_event/heartbeat` 只刷新平台依赖条目的 `lastOkAt`，生命周期忽略；`bot_status` / `bot_offline` 走账号状态，不再写进私聊房间；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot-snowluma/src/event.rs#L55-L200)）。
 - **账号**：连上后另起线程调 `get_login_info` 核对 `account`，并调 `get_version_info` / `get_status` 采集三层版本与在线状态（[link.rs](../../crates/adapters/onebot-snowluma/src/link.rs)）。
 - **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 写进 `accountOnline` / `accountGood`；`bot_status` 的上下线按失败阈值迁移依赖状态，心跳只刷新 `lastOkAt`。版本信息写进 `version`。
@@ -212,13 +212,13 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 5 | `wss://` | 未成文 | **未实现** | 只接受 `ws://`；TLS 依赖未引入 |
 | 6 | Token 鉴权 | Bearer / query / 每适配器独立 | **已实现** | 单一 `Connection.token`；多 transport 时无法区分不同 token |
 | 7 | `messageFormat` | array / string | **部分** | array 完整；string 被当纯文本，CQ 码不解析（[segment.rs](../../crates/adapters/onebot11/src/segment.rs#L58-L68,L258-L259)） |
-| 8 | 消息收发 | 群/私聊发送、读取、撤回 | **已实现** | 缺 `send_custom_face`；`send_msg` 不需要（桥按房间选动作） |
-| 9 | 合并转发 | 发送、读取、上传 | **部分** | `send_forward_msg` / `get_forward_msg` 有；`upload_forward_msg` 与群/私聊专用别名未暴露 |
-| 10 | 群管理 | 21（中文页）/ 24（英文页） | **部分** | 现有禁言/踢人/管理员/名片/退群/群名/头像/头衔/全员禁言等；缺批量踢、加群选项、群搜索、成员权限、邀请策略、历史可见性、标签、管理设置；匿名相关上游本身未实现 |
-| 11 | 群信息/成员 | 7 + 扩展 | **部分** | 现有群列表/信息/成员信息/成员列表/荣誉/系统消息；缺分享链接、详情扩展、禁言列表、打卡列表 |
-| 12 | 好友 | 3 + 扩展 | **部分** | 现有列表/陌生人/删好友；缺备注、分组、单向好友 |
-| 13 | 请求处理 | 2 + 扩展 | **部分** | 现有好友/加群处理；缺可疑申请、被忽略申请查询 |
-| 14 | 群公告 | 3 | **部分** | 获取/发送有；删除缺 |
+| 8 | 消息收发 | 群/私聊发送、读取、撤回 | **已实现** | 群/私聊文本、图片、语音、视频、文件、自定义收藏表情（`msg.face`）都有；`send_msg` 不需要（桥按房间选动作） |
+| 9 | 合并转发 | 发送、读取、上传 | **部分** | `send_forward_msg` / `get_forward_msg` 有；`upload_forward_msg` 与群/私聊专用别名未暴露（预上传返回 `res_id`，现有发送路径只接受节点数组，且它会是任意大小转发载荷的搬运通道） |
+| 10 | 群管理 | 21（中文页）/ 24（英文页） | **部分** | 现有禁言/踢人/批量踢/管理员/名片/退群/群名/头像/头衔/全员禁言/成员权限/邀请策略/历史可见性/管理设置读取；缺加群选项、群搜索、群分类标签（参数取值语义未成文）；匿名相关上游本身未实现 |
+| 11 | 群信息/成员 | 7 + 扩展 | **已实现** | 群列表/信息/成员信息/成员列表/荣誉/系统消息/分享链接/详情/禁言名单/打卡名单 |
+| 12 | 好友 | 3 + 扩展 | **已实现** | 列表/陌生人/删好友/备注/分组/单向好友 |
+| 13 | 请求处理 | 2 + 扩展 | **已实现** | 好友/加群请求处理、可疑好友申请列表与处理、被过滤加群请求 |
+| 14 | 群公告 | 3 | **已实现** | 获取/发送/删除 |
 | 15 | 群文件 | 12 | **部分** | 根/子目录列表、下载链接、系统信息、群/私聊上传、群删除有；缺文件夹 CRUD、移动/重命名、私聊下载链接、分享链接、转存 |
 | 16 | 流式传输 | 6 | **未实现** | 没有 HTTP 流式通道；现有文件中继（ADR-0025）不是流式 |
 | 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **部分** | 只有 `set_msg_emoji_like`；缺读取/用户列表/群回应/自定义表情/系统表情 |
@@ -231,14 +231,16 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 24 | WebUI 邮件/Webhook | 运维通道 | **不适用** | 不在适配器职责 |
 | 25 | MCP / TypeScript SDK | 独立包 | **不适用** | 不是 OneBot 运行时协议 |
 
-**计数**：25 项中 2 项不适用；适用 23 项 = 已实现 3 + 部分 12 + 未实现 8。
+**计数**：25 项中 2 项不适用；适用 23 项 = 已实现 7 + 部分 8 + 未实现 8。
 批次 1 完成后计数不变：第 19 项仍是「部分」，但缺口从「启动不调用版本/状态」缩小为
 「缺能力查询、资料设置、在线状态设置」。批次 2 完成后计数仍不变：第 20 项仍是「部分」，
 但缺口从「`bot_status` 污染私聊房间、心跳不更新健康」缩小为「`group_upload` / `essence` /
-`notify.*` 的字段未成文，只能显式降级」。其余域不变。
+`notify.*` 的字段未成文，只能显式降级」。批次 3 完成后：#8 补上自定义收藏表情，
+#11 群信息 / #12 好友 / #13 请求 / #14 公告从「部分」升为「已实现」；
+#10 群管理仍是「部分」，缺口缩为加群选项、群搜索、群分类标签。其余域不变。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 50 个层级 op / 53 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 现有 `ROUTES` 68 个层级 op / 71 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。这是「完整实现 SnowLuma 能力」的主要工作量。
 
@@ -508,7 +510,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **前置**：批次 1（元数据字段存在后更好复用）。
 
-### 批次 3：目录扩展——消息 / 群管 / 成员 / 好友 / 请求 / 公告
+### 批次 3：目录扩展——消息 / 群管 / 成员 / 好友 / 请求 / 公告（已完成，2026-11-05）
 
 **能力范围**
 - 消息：`send_custom_face`；合并转发补 `upload_forward_msg` 与专用别名（如果决定暴露）。
@@ -520,17 +522,50 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - 每个方法都要有 `MethodSpec`、`TargetSpec`、risk / effect / record，不能只加一条路由。
 
 **涉及文件**
-- `crates/adapters/onebot11/src/catalog.rs`
-- `crates/adapters/onebot11/src/outbound.rs`（目标参数与特殊 action）
+- `crates/adapters/onebot-snowluma/src/catalog.rs`
+- `crates/adapters/onebot-snowluma/src/outbound.rs`（目标参数、特殊 action 与参数校验）
 - `crates/i18n/locales/{zh-CN,en}.json`
-- `docs/05-adapters.md`（方法表更新）
-- 测试：`catalog` 快照、目标校验、假平台回包
+- 测试：`catalog` 快照、参数校验、目标校验
 
 **验证方式**
-- `cargo test -p acb-adapter-onebot11` 与 `cargo test --workspace`。
+- `cargo test -p acb-adapter-onebot-snowluma` 与 `cargo test --workspace`。
 - 目录快照断言方法存在、参数声明正确。
 - 群/私聊目标错配仍被 core 拒绝。
 - 破坏性方法默认 `allow_destructive = false` 仍然生效。
+
+**实际落地**
+- **新增 18 个 op（50 → 68），映射 18 个新 action（53 → 71）**：
+  - 消息：`msg.face` → `send_custom_face`（Write，按房间补 `group_id` / `user_id`，写入流水）。
+  - 群管理：`member.kick_many` → `set_group_kick_members`；`group.member_permissions` →
+    `set_group_member_permissions`；`group.invite_policy` → `set_group_member_invite_policy`；
+    `group.history_visibility` → `set_group_new_member_history_visibility`；
+    `group.admin_settings` → `get_group_admin_settings`（Read）。
+  - 群信息：`group.share_link` / `group.detail` / `group.shut_list` / `group.signed_list`。
+  - 好友：`friend.remark`、`friend.categories`、`friend.set_category`、`friend.one_way`、
+    `friend.doubt_list`、`friend.doubt_approve`（连接级）。
+  - 请求：`group.ignored_requests` → `get_group_ignored_notifies`（连接级）。
+  - 公告：`group.notice.delete` → `_del_group_notice`（Destructive，`effect = Delete`）。
+- **risk 显式**：所有群管理写操作标 `Risk::Destructive`，继续受 `allow_destructive` 约束；
+  读取类标 `Risk::Read`；好友备注/分组/可疑申请处理标 `Risk::Write`。`requires_admin`
+  只是标签，core 不判断群内角色，权限不足由平台拒绝。
+- **参数校验分两层**：core 校验必填、类型和枚举；适配器在 `validate_call_params` 补
+  数组长度与二选一约束：
+  - `msg.face`：`emoji_id` 非空且不超过 256 字符（仅收平台 id，不收文件内容）。
+  - `member.kick_many`：`user_ids` 非空、最多 20 个整数。
+  - `group.notice.delete`：`fid` / `notice_id` 至少一个非空。
+  - `friend.set_category`：`categoryId` / 非空 `categoryName` 至少一个。
+- **按文档判断不做（记缺口）**：
+  - `upload_forward_msg`（含 `upload_foward_msg` 拼写别名）与群/私聊专用转发别名：现有
+    `msg.send_forward` 已覆盖发送；预上传返回 `res_id`，现有发送路径不接受它，且它会把
+    任意大小的转发节点载荷搬进 core，属媒体/附件类通道，先不暴露。
+  - `set_group_add_option`：`add_type` 的取值语义文档未列，不猜。
+  - `set_group_search`：`no_finger_open` / `no_code_finger_open` 是未文档化的整数开关，
+    不猜 0/1 以外的取值。
+  - `add_group_tag` / `delete_group_tag` / `get_group_tags`：参数是 `group_class`（群分类），
+    不是群号，映射关系未成文，不暴露。
+  - `get_group_ignore_add_request`：与 `get_group_ignored_notifies` 语义重叠的 NapCat 兼容
+    字段，只保留后者，避免两个近似 op。
+- **没有新增 `PlatformTag`，没有第二张 op→risk 表**；全部走 `catalog()` + `ROUTES`。
 
 **前置**：无；可与批次 2 并行。
 
@@ -834,7 +869,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 ### 9.7 迁移路径：现有 52 个 method 怎么收敛
 
-现有 catalog 是 52 个方法 / 53 个 action，方法名本身已经带点号分组（`message.send_group`、`group.ban`）。迁移不是重写实现，而是给每个旧方法补一份目录元数据：
+现有 catalog 当时是 52 个方法 / 53 个 action（批次 3 后为 68 个 op / 71 个 action），方法名本身已经带点号分组（`message.send_group`、`group.ban`）。迁移不是重写实现，而是给每个旧方法补一份目录元数据：
 
 **映射表结构**（先给结构，不逐条列举）：
 
@@ -883,8 +918,8 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   不给 `op` = 列目录（`path` 前缀、`tags` 封闭枚举 AND、`query` 关键词、`all` 连接摘要）。
   MCP 工具名不允许点号，`platform_call.list` 不能作为真实工具名；合并成一个工具位更省上下文。
 - **op 命名**：按照第 9.3 节的层级思路落成短路径（`msg.send`、`msg.history`、`member.list`、
-  `member.kick`、`group.mute`、`group.file.list`…）。原 52 个 method 收敛为 50 个 op：
-  `message.send_group` / `message.send_private` 合并成 `msg.send`，
+  `member.kick`、`group.mute`、`group.file.list`…）。当时原 52 个 method 收敛为 50 个 op
+  （批次 3 后为 68 个）：`message.send_group` / `message.send_private` 合并成 `msg.send`，
   `message.history_group` / `message.history_private` 合并成 `msg.history`，按房间选 OneBot 动作。
 - **策略表**：每个 op 的 `MethodSpec.risk` 是显式值（read / write / destructive），
   不从 tag 推导；不在 catalog 的 op 一律 `unknown_op` 拒绝。`destructive` 仍由

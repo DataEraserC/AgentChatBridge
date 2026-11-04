@@ -26,6 +26,12 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// agent 会重发，群里就出现两条。45 秒留在 harness 的 60 秒工具超时以内。
 pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// 批量踢人的一次上限。SnowLuma 没有文档化上限；core 不替模型无限制搬运名单。
+const MAX_BATCH_KICK: usize = 20;
+
+/// 自定义表情 id 的长度上限：32 位 MD5 加上完整 id 的前缀余量。
+const MAX_EMOJI_ID_LEN: usize = 256;
+
 // 平台方法表在 `catalog.rs`：那里的每一行都是「人也做得到的事」。
 
 /// OneBot 出站通道。一条连接一个。
@@ -155,6 +161,7 @@ impl Outbound for OneBotSnowLumaOutbound {
             })?;
 
         let action = action_of_route(route, room)?;
+        validate_call_params(route.method, params)?;
         let payload = call_payload(route, room, params)?;
         let response = self.dispatch(action, payload, self.upload_timeout)?;
         let value = parse_call_response(method, response)?;
@@ -318,6 +325,83 @@ fn call_payload(route: &Route, room: &RoomId, params: &Value) -> Result<Value, C
     Ok(Value::Object(payload))
 }
 
+/// 平台参数里的「形状对了但值不安全」这一层。
+///
+/// core 只校验必填、类型和枚举；数组长度、二选一这种约束在这里补。
+/// 宁可本地拒绝，也不把任意大的名单或空公告 id 丢给平台。
+fn validate_call_params(method: &str, params: &Value) -> Result<(), CallError> {
+    let empty = serde_json::Map::new();
+    let map = match params {
+        Value::Object(map) => map,
+        Value::Null => &empty,
+        _ => {
+            return Err(CallError::BadParams(acb_i18n::t!(
+                "adapter.onebot11.params_must_be_object"
+            )));
+        }
+    };
+
+    match method {
+        "msg.face" => {
+            let id = map
+                .get("emoji_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if id.is_empty() || id.chars().count() > MAX_EMOJI_ID_LEN {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.emoji_id_invalid",
+                    max = MAX_EMOJI_ID_LEN
+                )));
+            }
+        }
+        "member.kick_many" => {
+            let valid = map
+                .get("user_ids")
+                .and_then(Value::as_array)
+                .is_some_and(|ids| {
+                    !ids.is_empty()
+                        && ids.len() <= MAX_BATCH_KICK
+                        && ids.iter().all(|id| id.is_i64() || id.is_u64())
+                });
+            if !valid {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.batch_kick_invalid",
+                    max = MAX_BATCH_KICK
+                )));
+            }
+        }
+        "group.notice.delete" => {
+            let present = ["fid", "notice_id"].iter().any(|key| {
+                map.get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            });
+            if !present {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.notice_delete_needs_id"
+                )));
+            }
+        }
+        "friend.set_category" => {
+            let has_id = map
+                .get("categoryId")
+                .is_some_and(|value| value.as_i64().is_some() || value.as_u64().is_some());
+            let has_name = map
+                .get("categoryName")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty());
+            if !has_id && !has_name {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.friend_category_needs_target"
+                )));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// 群方法：当前房间必须是 group；params 里给了 group_id 就只能等于当前群。
 fn fill_matching_group_target(
     payload: &mut serde_json::Map<String, Value>,
@@ -447,6 +531,12 @@ fn outgoing_record(method: &str, params: &Value, value: &Value) -> Option<Outgoi
                 at: None,
             }
         }
+        "msg.face" => OutgoingRecord {
+            kind: OutgoingKind::Message,
+            elements: vec![Element::text("[自定义表情]")],
+            platform_id,
+            at: None,
+        },
         "msg.send_forward" => {
             let count = params
                 .get("messages")
@@ -868,11 +958,23 @@ mod tests {
             "group.notice.get",
             "group.file.list",
             "member.kick",
+            "member.kick_many",
             "group.mute",
             "group.mute_all",
+            "group.member_permissions",
+            "group.invite_policy",
+            "group.history_visibility",
+            "group.admin_settings",
+            "group.share_link",
+            "group.detail",
+            "group.shut_list",
+            "group.signed_list",
+            "group.ignored_requests",
+            "group.notice.delete",
             "member.card",
             "group.name",
             "group.file.upload",
+            "msg.face",
             "msg.poke",
             "like.send",
         ] {
@@ -894,7 +996,14 @@ mod tests {
                     | "friend.get_info"
                     | "friend.approve"
                     | "friend.delete"
+                    | "friend.remark"
+                    | "friend.categories"
+                    | "friend.set_category"
+                    | "friend.one_way"
+                    | "friend.doubt_list"
+                    | "friend.doubt_approve"
                     | "group.list"
+                    | "group.ignored_requests"
                     | "like.send"
                     | "system.check_url"
             );
@@ -984,7 +1093,7 @@ mod tests {
     #[test]
     fn every_op_is_hierarchical_tagged_and_routed() {
         let methods = catalog();
-        assert_eq!(methods.len(), 50, "52 个 method 收敛成 50 个 op");
+        assert_eq!(methods.len(), 68, "批次 3 后应有 68 个层级 op");
         assert!(!methods.is_empty());
         for method in methods.iter() {
             let name = method.name.as_ref();
@@ -1201,5 +1310,185 @@ mod tests {
         let recall = method("msg.recall");
         assert_eq!(recall.effect, Effect::Delete);
         assert_eq!(recall.record, RecordMode::None);
+
+        let face = method("msg.face");
+        assert_eq!(face.effect, Effect::Send);
+        assert_eq!(face.record, RecordMode::Message, "收藏表情也是一条消息");
+
+        let notice = method("group.notice.delete");
+        assert_eq!(notice.effect, Effect::Delete);
+        assert_eq!(notice.record, RecordMode::None);
+    }
+
+    /// 批次 3 的新 op 必须逐个显式标 risk，并有确定的路由；破坏性群管理默认被
+    /// `allow_destructive` 挡住，标签只表达「需要管理员」，不在 core 里猜身份。
+    #[test]
+    fn batch_three_ops_have_explicit_risk_and_routes() {
+        let methods = catalog();
+        for (name, risk, action) in [
+            ("msg.face", Risk::Write, "send_custom_face"),
+            (
+                "member.kick_many",
+                Risk::Destructive,
+                "set_group_kick_members",
+            ),
+            (
+                "group.member_permissions",
+                Risk::Destructive,
+                "set_group_member_permissions",
+            ),
+            (
+                "group.invite_policy",
+                Risk::Destructive,
+                "set_group_member_invite_policy",
+            ),
+            (
+                "group.history_visibility",
+                Risk::Destructive,
+                "set_group_new_member_history_visibility",
+            ),
+            (
+                "group.admin_settings",
+                Risk::Read,
+                "get_group_admin_settings",
+            ),
+            ("group.share_link", Risk::Read, "get_group_share_link"),
+            ("group.detail", Risk::Read, "get_group_detail_info"),
+            ("group.shut_list", Risk::Read, "get_group_shut_list"),
+            ("group.signed_list", Risk::Read, "get_group_signed_list"),
+            (
+                "group.ignored_requests",
+                Risk::Read,
+                "get_group_ignored_notifies",
+            ),
+            ("friend.remark", Risk::Write, "set_friend_remark"),
+            ("friend.categories", Risk::Read, "get_friends_with_category"),
+            ("friend.set_category", Risk::Write, "set_friends_category"),
+            (
+                "friend.one_way",
+                Risk::Read,
+                "get_unidirectional_friend_list",
+            ),
+            (
+                "friend.doubt_list",
+                Risk::Read,
+                "get_doubt_friends_add_request",
+            ),
+            (
+                "friend.doubt_approve",
+                Risk::Write,
+                "set_doubt_friends_add_request",
+            ),
+            (
+                "group.notice.delete",
+                Risk::Destructive,
+                "_del_group_notice",
+            ),
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("没有 {name}"));
+            assert_eq!(method.risk, risk, "{name} 的 risk 标错了");
+            if risk == Risk::Destructive {
+                assert!(
+                    method.has_tag(acb_kernel::outbound::tags::REQUIRES_ADMIN),
+                    "{name} 是破坏性群管理，应带 requires_admin 标签"
+                );
+            }
+            let route = ROUTES
+                .iter()
+                .find(|route| route.method == name)
+                .unwrap_or_else(|| panic!("{name} 没有路由"));
+            match route.target {
+                Target::Fixed(target) => assert_eq!(target, action, "{name} 路由不对"),
+                Target::ByRoom { .. } => panic!("{name} 不该按房间分叉"),
+            }
+        }
+    }
+
+    #[test]
+    fn custom_face_rejects_empty_and_oversized_ids() {
+        assert!(validate_call_params("msg.face", &json!({"emoji_id": "  "})).is_err());
+        let long = "a".repeat(MAX_EMOJI_ID_LEN + 1);
+        assert!(validate_call_params("msg.face", &json!({"emoji_id": long})).is_err());
+        assert!(
+            validate_call_params(
+                "msg.face",
+                &json!({"emoji_id": "0123456789abcdef0123456789abcdef"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn batch_kick_rejects_empty_oversized_or_non_integer_lists() {
+        assert!(validate_call_params("member.kick_many", &json!({"user_ids": []})).is_err());
+        let ids: Vec<u32> = (0..=MAX_BATCH_KICK as u32).collect();
+        assert!(validate_call_params("member.kick_many", &json!({"user_ids": ids})).is_err());
+        assert!(validate_call_params("member.kick_many", &json!({"user_ids": ["10001"]})).is_err());
+        assert!(
+            validate_call_params("member.kick_many", &json!({"user_ids": [10001, 10002]})).is_ok()
+        );
+    }
+
+    #[test]
+    fn notice_delete_requires_fid_or_notice_id() {
+        assert!(validate_call_params("group.notice.delete", &json!({})).is_err());
+        assert!(
+            validate_call_params("group.notice.delete", &json!({"fid": " ", "notice_id": ""}))
+                .is_err()
+        );
+        assert!(validate_call_params("group.notice.delete", &json!({"notice_id": "42"})).is_ok());
+    }
+
+    #[test]
+    fn friend_category_requires_a_target() {
+        assert!(validate_call_params("friend.set_category", &json!({"uin": 10000})).is_err());
+        assert!(
+            validate_call_params(
+                "friend.set_category",
+                &json!({"uin": 10000, "categoryId": 1})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_call_params(
+                "friend.set_category",
+                &json!({"uin": 10000, "categoryName": "同学"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn custom_face_uses_the_current_room_as_target() {
+        let route = ROUTES
+            .iter()
+            .find(|route| route.method == "msg.face")
+            .expect("有 msg.face 路由");
+        let group = RoomId::new("qq", "group/456").expect("合法");
+        let payload = call_payload(route, &group, &json!({"emoji_id": "abc"})).expect("能补群号");
+        assert_eq!(payload["group_id"], "456");
+        assert!(payload.get("user_id").is_none());
+
+        let private = RoomId::new("qq", "private/10002").expect("合法");
+        let payload =
+            call_payload(route, &private, &json!({"emoji_id": "abc"})).expect("能补私聊对象");
+        assert_eq!(payload["user_id"], "10002");
+        assert!(payload.get("group_id").is_none());
+    }
+
+    #[test]
+    fn custom_face_is_recorded_as_a_message() {
+        let record = outgoing_record(
+            "msg.face",
+            &json!({"emoji_id": "abc"}),
+            &json!({"message_id": 77}),
+        )
+        .expect("发送要记账");
+        assert_eq!(record.kind, OutgoingKind::Message);
+        assert_eq!(record.platform_id.as_deref(), Some("77"));
+        assert_eq!(record.elements, vec![Element::text("[自定义表情]")]);
     }
 }

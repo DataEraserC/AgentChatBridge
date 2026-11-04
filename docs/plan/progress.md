@@ -1540,6 +1540,56 @@
   `sub_type` 仍按现有兼容写法处理（两种都落到「离线」）；真实字段差异只影响摘要文案，
   不影响「不写房间」。
 
+## 2026-11-05 — 批次 3：目录扩展（消息 / 群管 / 成员 / 好友 / 请求 / 公告）
+
+- 任务编号：adapter-snowluma 批次 3
+- 做了什么：
+  - `crates/adapters/onebot-snowluma/src/catalog.rs`：新增 18 个层级 op、18 条路由，
+    全部有显式 `Risk`、tag、`TargetSpec`、参数声明；50 op / 53 action → 68 op / 71 action。
+  - 消息：`msg.face` → `send_custom_face`（Write；按房间补 `group_id` / `user_id`；
+    `RecordMode::Message`，流水写「[自定义表情]」）。
+  - 群管理：`member.kick_many`、`group.member_permissions`、`group.invite_policy`、
+    `group.history_visibility` 全部 `Risk::Destructive`，继续受 `allow_destructive` 约束；
+    `group.admin_settings` 只读。
+  - 群信息：`group.share_link`、`group.detail`、`group.shut_list`、`group.signed_list`（Read）。
+  - 好友：`friend.remark`、`friend.set_category`（Write）；`friend.categories`、
+    `friend.one_way`、`friend.doubt_list`（Read）；`friend.doubt_approve`（Write）。
+  - 请求：`group.ignored_requests` → `get_group_ignored_notifies`（Read，连接级）。
+  - 公告：`group.notice.delete` → `_del_group_notice`（Destructive，`Effect::Delete`）。
+  - `crates/adapters/onebot-snowluma/src/outbound.rs`：`validate_call_params` 补 core 管不到的
+    约束——`msg.face` 的 `emoji_id` 非空且 ≤ 256 字符；`member.kick_many` 的 `user_ids`
+    非空、≤ 20 个整数；`group.notice.delete` 的 `fid` / `notice_id` 至少一个非空；
+    `friend.set_category` 的 `categoryId` / `categoryName` 至少一个。
+  - `crates/i18n/locales/{zh-CN,en}.json`：新增 4 条参数校验错误文案。
+- 新增 op：**18 个**（全部在 `catalog()` 的 `methods()` 里，catalog 是唯一 op→risk 表）。
+  没有新增 `PlatformTag`，没有第二张 risk 表，没有引入兼容别名。
+- 按文档判断不做（记缺口）：
+  - `upload_forward_msg` / `upload_foward_msg` 与群/私聊专用转发别名：现有
+    `msg.send_forward` 已覆盖发送；预上传返回 `res_id`，现有发送路径不接受它，且会把
+    任意大小的转发节点载荷搬进 core，属媒体/附件类通道，先不暴露。
+  - `set_group_add_option`：`add_type` 取值语义文档未列，不猜。
+  - `set_group_search`：`no_finger_open` / `no_code_finger_open` 是未文档化的整数开关。
+  - `add_group_tag` / `delete_group_tag` / `get_group_tags`：`group_class` 不是群号，
+    映射关系未成文，不暴露。
+  - `get_group_ignore_add_request`：与 `get_group_ignored_notifies` 重叠的 NapCat 兼容字段，
+    只保留后者。
+- 证据：
+  - `batch_three_ops_have_explicit_risk_and_routes`（18 个新 op 的 risk / 路由逐个断言，
+    破坏性群管理带 `requires_admin` 标签）
+  - `custom_face_uses_the_current_room_as_target`、`custom_face_is_recorded_as_a_message`
+  - `custom_face_rejects_empty_and_oversized_ids`
+  - `batch_kick_rejects_empty_oversized_or_non_integer_lists`
+  - `notice_delete_requires_fid_or_notice_id`
+  - `friend_category_requires_a_target`
+  - `every_op_is_hierarchical_tagged_and_routed`（68 op 全部层级名、有 tag、有路由）
+  - `account_level_methods_are_connection_scoped`（新增连接级好友/请求 op 的作用域）
+  - `cargo test --workspace`、clippy `-D warnings`、dsh/opencode 测试、`node --check` 全绿。
+- 能力状态：功能域计数从 **3 完全 / 12 部分 / 8 未实现** 变为
+  **7 完全 / 8 部分 / 8 未实现**；#11 群信息、#12 好友、#13 请求、#14 公告升为「已实现」，
+  #8 消息收口（补 `msg.face`），#10 群管理仍为「部分」，缺口缩为加群选项、群搜索、群分类标签。
+- 未决/风险：没有真实 SnowLuma 实例联调；`get_group_ignored_notifies` 等扩展动作的实际
+  回包形状按文档字段声明，字段差异只会体现在返回内容，不影响 catalog 与风险闸门。
+
 
 
 ## 部署注意事项（nix-config 打包）

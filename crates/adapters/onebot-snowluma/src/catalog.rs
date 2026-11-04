@@ -42,6 +42,9 @@ fn example_for(name: &str) -> &'static str {
         "text" | "message" => "你好",
         "name" | "card" | "nickname" => "新名字",
         "keyword" | "query" | "word" => "关键词",
+        "emoji_id" => "0123456789abcdef0123456789abcdef",
+        "policy" => "require_approval",
+        "categoryId" | "categoryName" => "分组名",
         _ if name == "id" || name.ends_with("_id") => "123456",
         _ => "示例值",
     }
@@ -72,8 +75,26 @@ fn any(name: &'static str, desc: &'static str) -> ParamSpec {
                 "content": [{ "type": "text", "text": "你好" }],
             }
         }])),
+        "user_ids" => param.with_example(serde_json::json!([10000, 10001])),
         _ => param,
     }
+}
+
+/// 先按可选构造，再打上必填：数字/布尔/枚举参数没有现成的必填构造。
+fn require(mut param: ParamSpec) -> ParamSpec {
+    param.required = true;
+    param
+}
+
+/// 必填的枚举字符串参数。
+fn choices(name: &'static str, desc: &'static str, values: &'static [&'static str]) -> ParamSpec {
+    let mut param = ParamSpec::required(name, desc);
+    param.values = values
+        .iter()
+        .map(|value| std::borrow::Cow::Borrowed(*value))
+        .collect::<Vec<_>>()
+        .into();
+    param
 }
 
 fn m(
@@ -186,6 +207,58 @@ fn methods() -> Vec<MethodSpec> {
             Risk::Destructive,
             &[req("user_id", "要删的 QQ 号")],
         ),
+        cm(
+            "friend.remark",
+            "给好友设备注名。空字符串表示清空备注",
+            &[tags::FRIEND, tags::MEMBER],
+            Risk::Write,
+            &[
+                req("user_id", "好友号"),
+                req("remark", "备注名；空字符串 = 清空"),
+            ],
+        ),
+        cm(
+            "friend.categories",
+            "按分组列出好友：分组名和每组里的人",
+            &[tags::FRIEND, tags::MEMBER],
+            Risk::Read,
+            &[],
+        ),
+        cm(
+            "friend.set_category",
+            "把好友移到一个分组。categoryId 和 categoryName 至少给一个",
+            &[tags::FRIEND],
+            Risk::Write,
+            &[
+                req("uin", "好友号"),
+                num("categoryId", "分组 id"),
+                opt("categoryName", "分组名；没有现成分组时用它新建"),
+            ],
+        ),
+        cm(
+            "friend.one_way",
+            "单向好友列表：你加了他、他没加你",
+            &[tags::FRIEND, tags::MEMBER],
+            Risk::Read,
+            &[],
+        ),
+        cm(
+            "friend.doubt_list",
+            "可疑的好友申请列表。判定规则由平台决定，core 不猜",
+            &[tags::FRIEND, tags::APPROVE],
+            Risk::Read,
+            &[num("count", "取多少条，默认 50")],
+        ),
+        cm(
+            "friend.doubt_approve",
+            "处理一条可疑好友申请。flag 从 friend.doubt_list 拿",
+            &[tags::FRIEND, tags::APPROVE],
+            Risk::Write,
+            &[
+                req("flag", "申请 flag，来自 friend.doubt_list"),
+                ParamSpec::optional("approve", ParamType::Bool, "true 同意，false 拒绝"),
+            ],
+        ),
         // ── 群：看 ──
         cm(
             "group.list",
@@ -290,6 +363,56 @@ fn methods() -> Vec<MethodSpec> {
             &[tags::GROUP, tags::REQUIRES_ADMIN],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
+        ),
+        m(
+            "group.admin_settings",
+            "读这个群的群管理设置当前值：加群方式、成员权限、邀请策略等",
+            &[tags::GROUP, tags::SYSTEM],
+            Risk::Read,
+            &[opt("group_id", "群号；在群里调用可以不填")],
+        ),
+        m(
+            "group.share_link",
+            "拿群的分享/邀请链接",
+            &[tags::GROUP],
+            Risk::Read,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                flag("need_short_url", "true = 要短链，默认 true"),
+                num("src_id", "来源 id，默认 73"),
+                opt("additional_param", "附加参数，平台原样带走"),
+            ],
+        ),
+        m(
+            "group.detail",
+            "群详情：群备注、群等级、全员禁言状态等",
+            &[tags::GROUP],
+            Risk::Read,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                flag("no_cache", "true = 不走缓存，默认 false"),
+            ],
+        ),
+        m(
+            "group.shut_list",
+            "群禁言名单：当前被禁言的成员和剩余时间",
+            &[tags::GROUP, tags::MUTE],
+            Risk::Read,
+            &[opt("group_id", "群号；在群里调用可以不填")],
+        ),
+        m(
+            "group.signed_list",
+            "今天的群打卡名单",
+            &[tags::GROUP, tags::MEMBER],
+            Risk::Read,
+            &[opt("group_id", "群号；在群里调用可以不填")],
+        ),
+        cm(
+            "group.ignored_requests",
+            "被平台过滤/忽略的加群请求。列出来只读，处理要走 group.approve",
+            &[tags::GROUP, tags::APPROVE],
+            Risk::Read,
+            &[],
         ),
         // ── 群：写 ──
         m(
@@ -464,6 +587,73 @@ fn methods() -> Vec<MethodSpec> {
                 num("busid", "业务 id，通常 102"),
             ],
         ),
+        m(
+            "group.member_permissions",
+            "设置普通群成员的权限：上传群相册、发起临时会话、建群。仅群主",
+            &[tags::GROUP, tags::MEMBER, tags::REQUIRES_ADMIN],
+            Risk::Destructive,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                flag("allow_member_upload_album", "成员能否上传群相册"),
+                flag("allow_member_temporary_session", "成员能否发起临时会话"),
+                flag("allow_member_create_group", "成员能否建群"),
+            ],
+        ),
+        m(
+            "group.invite_policy",
+            "设置谁能邀请新成员入群",
+            &[tags::GROUP, tags::MEMBER, tags::REQUIRES_ADMIN],
+            Risk::Destructive,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                choices(
+                    "policy",
+                    "邀请策略",
+                    &[
+                        "disabled",
+                        "require_approval",
+                        "no_approval",
+                        "no_approval_under_100",
+                    ],
+                ),
+            ],
+        ),
+        m(
+            "group.history_visibility",
+            "设置新成员能否看到入群前的历史消息",
+            &[tags::GROUP, tags::REQUIRES_ADMIN],
+            Risk::Destructive,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                require(ParamSpec::optional(
+                    "visible",
+                    ParamType::Bool,
+                    "true 可见，false 不可见",
+                )),
+            ],
+        ),
+        m(
+            "member.kick_many",
+            "一次踢掉多个群成员。一次最多 20 个，适合清机器人/清广告",
+            &[tags::GROUP, tags::MEMBER, tags::REQUIRES_ADMIN],
+            Risk::Destructive,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                any("user_ids", "QQ 号数组，一次最多 20 个，如 [10001, 10002]"),
+                flag("reject_add_request", "true = 顺便拒绝他们再次加群"),
+            ],
+        ),
+        m(
+            "group.notice.delete",
+            "删除一条群公告。fid 和 notice_id 至少给一个",
+            &[tags::GROUP, tags::MESSAGE, tags::REQUIRES_ADMIN],
+            Risk::Destructive,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                opt("fid", "公告 fid，来自 group.notice.get"),
+                opt("notice_id", "公告 id，来自 group.notice.get"),
+            ],
+        ),
         // ── 消息 ──
         m(
             "msg.send",
@@ -484,6 +674,16 @@ fn methods() -> Vec<MethodSpec> {
                 "message",
                 "消息段数组，如 [{\"type\":\"text\",\"text\":\"hi\"}]",
             )],
+        ),
+        m(
+            "msg.face",
+            "发送当前账号收藏里的自定义表情。emoji_id 是完整表情 id 或 32 位 MD5",
+            &[tags::SEND, tags::MESSAGE, tags::IMAGE],
+            Risk::Write,
+            &[
+                req("emoji_id", "表情 id：完整 id 或 32 位 MD5"),
+                opt("reply_to", "引用哪条消息（消息 id）；不填 = 不引用"),
+            ],
         ),
         m(
             "msg.send_forward",
@@ -689,13 +889,26 @@ pub static ROUTES: &[Route] = &[
     route("friend.get_info", "get_stranger_info"),
     route("friend.approve", "set_friend_add_request"),
     route("friend.delete", "delete_friend"),
+    route("friend.remark", "set_friend_remark"),
+    route("friend.categories", "get_friends_with_category"),
+    route("friend.set_category", "set_friends_category"),
+    route("friend.one_way", "get_unidirectional_friend_list"),
+    route("friend.doubt_list", "get_doubt_friends_add_request"),
+    route("friend.doubt_approve", "set_doubt_friends_add_request"),
     route("group.list", "get_group_list"),
     group_route("group.info", "get_group_info"),
     group_route("member.info", "get_group_member_info"),
     group_route("member.list", "get_group_member_list"),
     group_route("group.honor", "get_group_honor_info"),
     route("group.system_msg", "get_group_system_msg"),
+    route("group.ignored_requests", "get_group_ignored_notifies"),
     group_route("group.notice.get", "_get_group_notice"),
+    group_route("group.admin_settings", "get_group_admin_settings"),
+    group_route("group.share_link", "get_group_share_link"),
+    group_route("group.detail", "get_group_detail_info"),
+    group_route("group.shut_list", "get_group_shut_list"),
+    group_route("group.signed_list", "get_group_signed_list"),
+    group_route("group.notice.delete", "_del_group_notice"),
     group_route("group.file.list", "get_group_root_files"),
     group_route("group.file.folder", "get_group_files_by_folder"),
     group_route("group.file.url", "get_group_file_url"),
@@ -711,15 +924,23 @@ pub static ROUTES: &[Route] = &[
     group_route("group.sign", "set_group_sign"),
     route("group.approve", "set_group_add_request"),
     group_route("member.kick", "set_group_kick"),
+    group_route("member.kick_many", "set_group_kick_members"),
     group_route("group.mute", "set_group_ban"),
     group_route("group.mute_all", "set_group_whole_ban"),
     group_route("member.admin", "set_group_admin"),
+    group_route("group.member_permissions", "set_group_member_permissions"),
+    group_route("group.invite_policy", "set_group_member_invite_policy"),
+    group_route(
+        "group.history_visibility",
+        "set_group_new_member_history_visibility",
+    ),
     group_route("group.name", "set_group_name"),
     group_route("member.title", "set_group_special_title"),
     group_route("group.avatar", "set_group_portrait"),
     group_route("group.leave", "set_group_leave"),
     group_route("group.file.delete", "delete_group_file"),
     room_route("msg.send", "send_group_msg", "send_private_msg"),
+    both_route("msg.face", "send_custom_face"),
     both_route("msg.send_forward", "send_forward_msg"),
     route("msg.get", "get_msg"),
     route("msg.recall", "delete_msg"),
@@ -841,12 +1062,17 @@ fn effect_of(method: &MethodSpec) -> Effect {
 }
 
 /// 名字里带 delete 但没挂 `recall` 标签的几个。
-const DELETE_METHODS: &[&str] = &["friend.delete", "group.file.delete", "group.essence.delete"];
+const DELETE_METHODS: &[&str] = &[
+    "friend.delete",
+    "group.file.delete",
+    "group.essence.delete",
+    "group.notice.delete",
+];
 
 /// 调用成功后要写进流水的那几个。core 靠它判断“这次调用会不会改变房间”。
 fn record_of(method: &str) -> RecordMode {
     match method {
-        "msg.send" => RecordMode::Message,
+        "msg.send" | "msg.face" => RecordMode::Message,
         "msg.send_forward" | "group.notice.send" => RecordMode::Event,
         _ => RecordMode::None,
     }
