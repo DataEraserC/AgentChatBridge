@@ -107,7 +107,7 @@
   "opencode.turn_end_log": "turn_end {ticket}{error}",
   "opencode.turn_failed": "这一轮跑挂了：{error}",
   "opencode.turn_failed_elapsed": "这一轮失败了 {ticket}：{error}（用时 {seconds} 秒）",
-  "opencode.turn_outcome_failed": "opencode 会话 {sessionId} 以 \"{outcome}\" 结束；模型网关大概率返回了错误（查 opencode 日志；常见原因：额度 429、鉴权、模型不可用）",
+  "opencode.turn_outcome_failed": "opencode 会话 {sessionId} 以 \"{outcome}\" 结束；插件没有拿到上游错误详情，请查看 opencode server 日志中的 provider 错误。",
   "opencode.turn_start": "turn_start {ticket} 会话 {session} 房间 {room}（队列 {queue}）",
   "opencode.turn_started": "开轮 {ticket}：{room}，{count} 条，opencode 会话 {sessionID}，模型 {model}",
   "opencode.unknown_command": "不认识的指令 {command}",

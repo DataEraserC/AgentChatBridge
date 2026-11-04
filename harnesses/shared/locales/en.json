@@ -107,7 +107,7 @@
   "opencode.turn_end_log": "turn_end {ticket}{error}",
   "opencode.turn_failed": "turn failed: {error}",
   "opencode.turn_failed_elapsed": "turn failed {ticket}: {error} (elapsed {seconds}s)",
-  "opencode.turn_outcome_failed": "opencode session {sessionId} ended with outcome \"{outcome}\"; the provider likely returned an error (check the opencode log; common causes: quota 429, auth, unavailable model)",
+  "opencode.turn_outcome_failed": "opencode session {sessionId} ended with outcome \"{outcome}\"; the upstream error was not exposed to the plugin. Check the opencode server log for the provider error.",
   "opencode.turn_start": "turn_start {ticket} session {session} room {room} (queue {queue})",
   "opencode.turn_started": "turn start {ticket}: {room}, {count} record(s), opencode session {sessionID}, model {model}",
   "opencode.unknown_command": "unknown command {command}",
