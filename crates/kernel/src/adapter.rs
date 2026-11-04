@@ -124,6 +124,19 @@ impl AdapterStatus {
             .platform_connected(&self.connection, crate::deps::now_millis());
     }
 
+    /// 载体加载/初始化完成且可用。用于没有远端连接可探测的 in-process 载体
+    /// （例如动态库适配器）；不探测远端，也不代表远端一定在线。
+    pub fn loaded(&self) {
+        self.attempt();
+        self.connected();
+    }
+
+    /// 载体加载/初始化或运行明确失败。`class` 沿用适配器现有的错误分类
+    /// （如 `unavailable` / `closed` / `internal`），不在这里发明新类。
+    pub fn failed(&self, class: &str, detail: &str) {
+        self.disconnected(class, detail);
+    }
+
     pub fn disconnected(&self, class: &str, detail: &str) {
         self.deps
             .platform_disconnected(&self.connection, class, detail, crate::deps::now_millis());

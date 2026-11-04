@@ -39,8 +39,8 @@ use acb_adapter_api::{
 use acb_kernel::wire::{call_error, convert_catalog, send_error};
 use acb_kernel::{
     AccessDecision, AccessPolicy, AccessProvider, AccessRequest, AdapterError, AdapterFactory,
-    AdapterHost, AdapterInstance, AdapterManifest, CallError, CallOutcome, Capability,
-    ClockContext, ClockPolicy, ClockProvider, Connection, DefaultTurnErrorProvider,
+    AdapterHost, AdapterInstance, AdapterManifest, AdapterStatus, CallError, CallOutcome,
+    Capability, ClockContext, ClockPolicy, ClockProvider, Connection, DefaultTurnErrorProvider,
     DeliveryComposer, DeliveryPlan, DeliveryPolicy, DeliveryRequest, Element, EventQueue,
     ExtensionPoint, Health, LoaderKind, LoaderManifest, ManagerManifest, ManagerPlugin, MethodSpec,
     Outbound, OutboundError, OutgoingRecord, PLUGIN_API_VERSION, PluginArtifact, PluginConfig,
@@ -857,6 +857,10 @@ impl DylibAdapterFactory {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&connection.id);
 
+        // 动态适配器没有远端连接可探测：加载/入口校验/provider 实例化成功即 up，
+        // 运行期由 outbound 的句柄失效标记转 down。状态句柄在 launch 时由 core 注入。
+        let dead: DeadCell = Arc::new(OnceLock::new());
+        let status_cell: Arc<OnceLock<AdapterStatus>> = Arc::new(OnceLock::new());
         let outbound: Box<dyn Outbound> = Box::new(DylibOutbound {
             _library: Arc::clone(&self._library),
             _context: Arc::clone(&context),
@@ -866,15 +870,27 @@ impl DylibAdapterFactory {
             catalog,
             seq: 0,
             timeout: self.timeout,
-            dead: Arc::new(OnceLock::new()),
+            dead: Arc::clone(&dead),
             dead_registry: Arc::clone(&self.dead),
+            status: Arc::clone(&status_cell),
         });
 
         let table = self.table;
         let stop = Arc::clone(&context.stop);
         let connection_id = connection.id.clone();
         let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
+            let status = host.status.clone();
+            let _ = status_cell.set(status.clone());
+            status.attempt();
+            match dead.get() {
+                Some(reason) => status.disconnected("unavailable", reason),
+                None => status.connected(),
+            }
             monitor(host.shutdown, stop, table, handle, context, connection_id);
+            // 句柄已标死时保留 down 的原因；正常退出才报 closed。
+            if dead.get().is_none() {
+                status.disconnected("closed", "adapter shutdown");
+            }
         });
 
         Ok(AdapterInstance {
@@ -1928,6 +1944,8 @@ struct DylibOutbound {
     timeout: Duration,
     dead: DeadCell,
     dead_registry: DeadRegistry,
+    /// launch 时由 core 注入的连接状态口；标记句柄失效时直接报 down。
+    status: Arc<OnceLock<AdapterStatus>>,
 }
 
 enum InvokeFailure {
@@ -1946,6 +1964,9 @@ impl DylibOutbound {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .insert(self.connection.clone(), reason.to_owned());
+            if let Some(status) = self.status.get() {
+                status.failed("unavailable", reason);
+            }
             eprintln!(
                 "{}",
                 acb_i18n::t!(
