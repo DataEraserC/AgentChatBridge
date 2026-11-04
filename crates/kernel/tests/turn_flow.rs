@@ -1091,7 +1091,7 @@ fn route_send_goes_through_the_action_worker() {
         })
     };
 
-    queue.submit(message("qq:group/123", "20002", "/send", false));
+    let _ = queue.submit(message("qq:group/123", "20002", "/send", false));
     let got = wait_for_sends(&sends, Duration::from_secs(2));
     assert_eq!(got.len(), 1, "应当由路由 worker 发出一条");
     assert_eq!(got[0].0, room("qq:group/123"));
@@ -1193,7 +1193,7 @@ fn route_task_runs_exec_and_sends_the_file() {
         })
     };
 
-    queue.submit(message("qq:group/123", "20002", "/task", false));
+    let _ = queue.submit(message("qq:group/123", "20002", "/task", false));
     let got = wait_for_sends(&sends, Duration::from_secs(3));
     assert_eq!(got.len(), 1, "任务完成后应当发出一条");
     assert_eq!(
@@ -1283,7 +1283,7 @@ fn task_send_candidates_fall_back_only_on_unsupported() {
         })
     };
 
-    queue.submit(message("qq:group/123", "20002", "/task", false));
+    let _ = queue.submit(message("qq:group/123", "20002", "/task", false));
     let got = wait_for_sends(&sends, Duration::from_secs(3));
     assert_eq!(got.len(), 1, "视频被拒后应当退到文件，且只发一次");
     assert_eq!(
