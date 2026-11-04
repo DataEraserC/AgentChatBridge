@@ -709,6 +709,8 @@
   "kernel.plugin.observer_timeout": "observer {id} did not return in time; skipping this record: {error}",
   "kernel.plugin.provider_timeout": "provider {id} call {call} did not return within {ms} ms; giving up this call",
   "kernel.plugin.provider_busy": "provider {id} is still busy with a previous {call}; refusing to queue",
+  "kernel.plugin.provider_stuck": "provider {id} is stuck (previous {call} timed out and never returned); subsequent calls fail fast until it is unloaded or reloaded",
+  "kernel.plugin.provider_dead": "provider {id} is dead ({detail}); {call} will not run until the bridge process is restarted",
   "kernel.plugin.provider_executor_stopped": "provider {id} call worker stopped: {detail}",
   "kernel.plugin.provider_panicked": "provider call panicked: {panic}",
   "kernel.plugin.provider_no_summary": "provider {provider} declares no summary (the agent needs to know what it does)",

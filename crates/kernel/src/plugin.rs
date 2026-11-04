@@ -520,6 +520,14 @@ pub enum PluginError {
     },
     #[error("{}", acb_i18n::t!("kernel.plugin.provider_busy", id = id, call = call))]
     ProviderBusy { id: String, call: &'static str },
+    #[error("{}", acb_i18n::t!("kernel.plugin.provider_stuck", id = id, call = call))]
+    ProviderStuck { id: String, call: &'static str },
+    #[error("{}", acb_i18n::t!("kernel.plugin.provider_dead", id = id, call = call, detail = detail))]
+    ProviderDead {
+        id: String,
+        call: &'static str,
+        detail: String,
+    },
     #[error("{}", acb_i18n::t!("kernel.plugin.provider_executor_stopped", id = id, detail = detail))]
     ProviderExecutorStopped { id: String, detail: String },
     #[error("{}", acb_i18n::t!("kernel.plugin.manager_depth", namespace = namespace, max = max))]
@@ -530,6 +538,17 @@ pub enum PluginError {
     ToolNameConflict { name: String, id: String },
     #[error("{}", acb_i18n::t!("kernel.plugin.load_failed", detail = .0))]
     Loader(String),
+}
+
+impl PluginError {
+    /// 这次失败是否应当计入 LKG。超时算；已经 stuck/dead 的后续快失败和并发
+    /// busy 不算，避免同一故障被每次调用重复计数。
+    pub fn counts_toward_lkg(&self) -> bool {
+        !matches!(
+            self,
+            Self::ProviderBusy { .. } | Self::ProviderStuck { .. } | Self::ProviderDead { .. }
+        )
+    }
 }
 
 /// 传给 watcher / manager 的上下文。当前只带唤醒判定需要的东西。
@@ -1724,7 +1743,7 @@ pub struct PluginManager {
     loaders: Vec<Arc<dyn PluginLoader>>,
     /// 外部 provider 的同步调用执行器。每个 provider 一个常驻 worker，
     /// 超时后 worker 可能卡住，但不会按调用次数新增线程。
-    timed_executors: Mutex<HashMap<ProviderId, Arc<TimedExecutor>>>,
+    timed_executors: Mutex<HashMap<ProviderId, ExecutorSlot>>,
     /// 外部 provider 调用超时（毫秒）。0 = 关闭。由 Bridge 按配置注入。
     provider_timeout_ms: AtomicU64,
 }
@@ -1797,29 +1816,44 @@ struct TimedTask {
     reply: SyncSender<TimedReply>,
 }
 
+/// 连续卡死的 worker 代数上限；超过后 provider 直接标 dead，不再起新 worker。
+const MAX_STUCK_GENERATIONS: u32 = 2;
+
+/// 一个 provider 的 worker 生命周期。`current` 可以在卸载/重载后换新一代，
+/// 但旧线程如果卡在 provider 里无法取消，只能作为已泄漏的一次性成本留着。
+#[derive(Default)]
+struct ExecutorSlot {
+    current: Option<Arc<TimedExecutor>>,
+    /// 已经被卸载/丢弃的卡死代数。
+    stuck_generations: u32,
+    dead: Option<String>,
+}
+
 /// 一个 provider 的串行调用 worker。调用方用 `busy` 拒绝并发，
-/// 所以卡住的 provider 不会被排队请求继续放大。
+/// `stuck` 表示上一次调用已超时且 worker 还没返回。
 struct TimedExecutor {
     tx: SyncSender<TimedTask>,
     busy: Arc<AtomicBool>,
+    stuck: Arc<AtomicBool>,
 }
 
 impl TimedExecutor {
     fn spawn(id: &ProviderId) -> Self {
         let (tx, rx) = sync_channel::<TimedTask>(1);
         let busy = Arc::new(AtomicBool::new(false));
+        let stuck = Arc::new(AtomicBool::new(false));
         let worker_busy = Arc::clone(&busy);
+        let worker_stuck = Arc::clone(&stuck);
         let name = format!("provider-call:{}", id);
         let _ = thread::Builder::new().name(name).spawn(move || {
             while let Ok(task) = rx.recv() {
                 let result = catch_unwind(AssertUnwindSafe(task.run));
+                worker_stuck.store(false, Ordering::SeqCst);
                 worker_busy.store(false, Ordering::SeqCst);
-                let _ = task
-                    .reply
-                    .send(result.map_err(|payload| panic_text(payload)));
+                let _ = task.reply.send(result.map_err(panic_text));
             }
         });
-        Self { tx, busy }
+        Self { tx, busy, stuck }
     }
 }
 
@@ -1882,7 +1916,7 @@ impl PluginManager {
         timeout: Duration,
         job: impl FnOnce() -> R + Send + 'static,
     ) -> Result<R, PluginError> {
-        let executor = self.timed_executor(id)?;
+        let executor = self.acquire_executor(id, call)?;
         if executor
             .busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1927,11 +1961,14 @@ impl PluginManager {
                 id: id.to_string(),
                 detail: acb_i18n::t!("kernel.plugin.provider_panicked", panic = panic),
             }),
-            Err(RecvTimeoutError::Timeout) => Err(PluginError::ProviderTimeout {
-                id: id.to_string(),
-                call,
-                ms: timeout.as_millis() as u64,
-            }),
+            Err(RecvTimeoutError::Timeout) => {
+                self.note_executor_timeout(id, call, &executor, timeout);
+                Err(PluginError::ProviderTimeout {
+                    id: id.to_string(),
+                    call,
+                    ms: timeout.as_millis() as u64,
+                })
+            }
             Err(RecvTimeoutError::Disconnected) => Err(PluginError::ProviderExecutorStopped {
                 id: id.to_string(),
                 detail: "worker stopped".to_owned(),
@@ -1939,16 +1976,120 @@ impl PluginManager {
         }
     }
 
-    fn timed_executor(&self, id: &ProviderId) -> Result<Arc<TimedExecutor>, PluginError> {
+    fn acquire_executor(
+        &self,
+        id: &ProviderId,
+        call: &'static str,
+    ) -> Result<Arc<TimedExecutor>, PluginError> {
         let mut executors = self
             .timed_executors
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(Arc::clone(
-            executors
-                .entry(id.clone())
-                .or_insert_with(|| Arc::new(TimedExecutor::spawn(id))),
-        ))
+        let slot = executors.entry(id.clone()).or_default();
+        if let Some(detail) = &slot.dead {
+            return Err(PluginError::ProviderDead {
+                id: id.to_string(),
+                call,
+                detail: detail.clone(),
+            });
+        }
+        if let Some(current) = &slot.current {
+            if current.stuck.load(Ordering::SeqCst) {
+                return Err(PluginError::ProviderStuck {
+                    id: id.to_string(),
+                    call,
+                });
+            }
+            return Ok(Arc::clone(current));
+        }
+        let executor = Arc::new(TimedExecutor::spawn(id));
+        slot.current = Some(Arc::clone(&executor));
+        Ok(executor)
+    }
+
+    fn note_executor_timeout(
+        &self,
+        id: &ProviderId,
+        call: &'static str,
+        executor: &Arc<TimedExecutor>,
+        timeout: Duration,
+    ) {
+        executor.stuck.store(true, Ordering::SeqCst);
+        let mut executors = self
+            .timed_executors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(slot) = executors.get_mut(id) else {
+            return;
+        };
+        if !slot
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, executor))
+        {
+            return;
+        }
+        if slot.stuck_generations.saturating_add(1) >= MAX_STUCK_GENERATIONS {
+            let detail = format!("{MAX_STUCK_GENERATIONS} stuck generations");
+            slot.stuck_generations = MAX_STUCK_GENERATIONS;
+            slot.dead = Some(detail.clone());
+            slot.current = None;
+            eprintln!(
+                "provider {id} call {call} timed out after {} ms; marked dead ({detail}); restart required",
+                timeout.as_millis()
+            );
+        } else {
+            eprintln!(
+                "provider {id} call {call} timed out after {} ms; marked stuck; subsequent calls fail fast",
+                timeout.as_millis()
+            );
+        }
+    }
+
+    /// 卸载 / 重载 / 重新注册时调用：丢掉当前 worker，下一次调用起新一代。
+    /// 卡死的旧线程无法取消，只作为一次性泄漏保留；连续卡死超过上限则标 dead。
+    pub fn reset_provider_executor(&self, id: &ProviderId) {
+        let mut executors = self
+            .timed_executors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(slot) = executors.get_mut(id) else {
+            return;
+        };
+        let was_stuck = slot
+            .current
+            .as_ref()
+            .is_some_and(|current| current.stuck.load(Ordering::SeqCst));
+        slot.current = None;
+        if !was_stuck || slot.dead.is_some() {
+            return;
+        }
+        slot.stuck_generations = slot.stuck_generations.saturating_add(1);
+        if slot.stuck_generations >= MAX_STUCK_GENERATIONS {
+            let detail = format!("{MAX_STUCK_GENERATIONS} stuck generations");
+            slot.dead = Some(detail.clone());
+            eprintln!("provider {id} marked dead ({detail}); restart required");
+        } else {
+            eprintln!(
+                "provider {id} executor reset after a stuck generation; next call spawns a new worker"
+            );
+        }
+    }
+
+    /// 整个 namespace 被卸载时，把名下 provider 的执行器一起丢掉；旧卡死线程按代计数，
+    /// 之后重新注册同一 id 时会拿到新 worker（或已经 dead）。
+    fn reset_namespace_executors(&self, namespace: &str) {
+        let ids: Vec<ProviderId> = self
+            .timed_executors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .filter(|id| id.namespace() == namespace)
+            .cloned()
+            .collect();
+        for id in ids {
+            self.reset_provider_executor(&id);
+        }
     }
 
     /// 实例化一个 manager provider；插件 panic 只影响这一个 provider。
@@ -2089,7 +2230,10 @@ impl PluginManager {
         let mut last = None;
         for loader in loaders {
             match loader.unload(self, id) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.reset_provider_executor(id);
+                    return Ok(());
+                }
                 Err(error) => last = Some(error),
             }
         }
@@ -2105,7 +2249,10 @@ impl PluginManager {
         let mut last = None;
         for loader in loaders {
             match loader.reload(self, id) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.reset_provider_executor(id);
+                    return Ok(());
+                }
                 Err(error) => last = Some(error),
             }
         }
@@ -2180,6 +2327,7 @@ impl PluginManager {
                 .retain(|_, (owner, _)| owner.namespace() != namespace);
             self.adapter_providers
                 .retain(|_, id| id.namespace() != namespace);
+            self.reset_namespace_executors(namespace);
         }
         Ok(())
     }
@@ -2822,10 +2970,10 @@ impl PluginManager {
 
     /// 依次询问所有工具访问 provider（按 provider id 排序，保证可复现）。
     ///
-    /// 返回 `None` = 没人拦；`Some((provider, reason, provider_failed))` = 拒绝
+    /// 返回 `None` = 没人拦；`Some((provider, reason, count_failure))` = 拒绝
     /// 本次调用。provider 返回错误或 manager 实例化失败时按**失败关闭**处理：
-    /// 宁可拒绝，也不让一个坏掉的策略插件变成隐式放行。`provider_failed`
-    /// 表示这是 provider 自身出错（超时/panic/实例化失败），不是它主动拒绝。
+    /// 宁可拒绝，也不让一个坏掉的策略插件变成隐式放行。`count_failure`
+    /// 表示这次拒绝是否要计入 LKG（stuck/dead/busy 的快速失败不再重复计数）。
     pub fn check_tool_access(
         &self,
         context: &ToolAccessContext<'_>,
@@ -2867,7 +3015,7 @@ impl PluginManager {
                             error = error
                         );
                         eprintln!("{reason}");
-                        return Some((id.clone(), reason, true));
+                        return Some((id.clone(), reason, error.counts_toward_lkg()));
                     }
                 }
             };
@@ -2905,7 +3053,7 @@ impl PluginManager {
                             error = error
                         );
                         eprintln!("{reason}");
-                        return Some((id.clone(), reason, true));
+                        return Some((id.clone(), reason, error.counts_toward_lkg()));
                     }
                 }
             } else {
@@ -3018,6 +3166,7 @@ impl PluginManager {
                         self.adapter_providers.insert(kind, descriptor.id.clone());
                     }
                 }
+                self.reset_provider_executor(&descriptor.id);
                 self.descriptors.insert(descriptor.id.clone(), descriptor);
             }
             self.manager_order.push(entry.namespace.clone());
@@ -3603,7 +3752,7 @@ mod tests {
         let busy_start = std::time::Instant::now();
         let busy = manager.call_timed(&slow, "test.call", Duration::from_millis(100), || 2usize);
         assert!(
-            matches!(busy, Err(PluginError::ProviderBusy { .. })),
+            matches!(busy, Err(PluginError::ProviderStuck { .. })),
             "{busy:?}"
         );
         assert!(
@@ -3623,12 +3772,176 @@ mod tests {
                     assert_eq!(value, 4);
                     break;
                 }
-                Err(PluginError::ProviderBusy { .. }) if std::time::Instant::now() < deadline => {
+                Err(PluginError::ProviderBusy { .. } | PluginError::ProviderStuck { .. })
+                    if std::time::Instant::now() < deadline =>
+                {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Err(error) => panic!("慢 provider 恢复后应当可用：{error:?}"),
             }
         }
+    }
+
+    #[test]
+    fn stuck_provider_fails_fast_and_reset_starts_a_new_worker() {
+        let manager = PluginManager::with_native_builtins();
+        let slow = ProviderId::parse("test.reset").expect("合法");
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+
+        let first = manager.call_timed(&slow, "test.call", Duration::from_millis(100), move || {
+            let _ = wait.recv();
+            1usize
+        });
+        assert!(
+            matches!(first, Err(PluginError::ProviderTimeout { .. })),
+            "{first:?}"
+        );
+
+        let stuck_start = std::time::Instant::now();
+        let stuck = manager.call_timed(&slow, "test.call", Duration::from_millis(100), || 2usize);
+        assert!(
+            matches!(stuck, Err(PluginError::ProviderStuck { .. })),
+            "{stuck:?}"
+        );
+        assert!(
+            stuck_start.elapsed() < Duration::from_millis(50),
+            "判定卡死后不再让调用方等完整超时"
+        );
+
+        manager.reset_provider_executor(&slow);
+        let fresh = manager.call_timed(&slow, "test.call", Duration::from_millis(100), || 3usize);
+        assert_eq!(fresh.expect("重载后新一代 worker 可用"), 3);
+
+        release.send(()).expect("能释放旧线程");
+    }
+
+    #[test]
+    fn two_stuck_generations_mark_provider_dead() {
+        let manager = PluginManager::with_native_builtins();
+        let slow = ProviderId::parse("test.dead").expect("合法");
+        let timeout = Duration::from_millis(100);
+
+        let (release_first, wait_first) = std::sync::mpsc::channel::<()>();
+        let first = manager.call_timed(&slow, "test.call", timeout, move || {
+            let _ = wait_first.recv();
+            1usize
+        });
+        assert!(
+            matches!(first, Err(PluginError::ProviderTimeout { .. })),
+            "{first:?}"
+        );
+        manager.reset_provider_executor(&slow);
+
+        let (release_second, wait_second) = std::sync::mpsc::channel::<()>();
+        let second = manager.call_timed(&slow, "test.call", timeout, move || {
+            let _ = wait_second.recv();
+            2usize
+        });
+        assert!(
+            matches!(second, Err(PluginError::ProviderTimeout { .. })),
+            "{second:?}"
+        );
+
+        let dead_start = std::time::Instant::now();
+        let dead = manager.call_timed(&slow, "test.call", timeout, || 3usize);
+        assert!(
+            matches!(dead, Err(PluginError::ProviderDead { .. })),
+            "{dead:?}"
+        );
+        assert!(
+            dead_start.elapsed() < Duration::from_millis(50),
+            "dead 后立即失败，不再起新 worker"
+        );
+
+        manager.reset_provider_executor(&slow);
+        let still_dead = manager.call_timed(&slow, "test.call", timeout, || 4usize);
+        assert!(
+            matches!(still_dead, Err(PluginError::ProviderDead { .. })),
+            "dead 只有重启进程才能恢复：{still_dead:?}"
+        );
+
+        release_first.send(()).expect("能释放第一代线程");
+        release_second.send(()).expect("能释放第二代线程");
+    }
+
+    #[test]
+    fn re_registering_a_namespace_after_stuck_gets_a_new_worker() {
+        let mut manager = PluginManager::with_native_builtins();
+        manager
+            .install_manager(Arc::new(DemoManager))
+            .expect("能装 demo manager");
+        let id = ProviderId::parse("demo.slow").expect("合法");
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+
+        let first = manager.call_timed(&id, "test.call", Duration::from_millis(100), move || {
+            let _ = wait.recv();
+            1usize
+        });
+        assert!(
+            matches!(first, Err(PluginError::ProviderTimeout { .. })),
+            "{first:?}"
+        );
+
+        manager.uninstall_manager("demo").expect("能卸载");
+        manager
+            .install_manager(Arc::new(DemoManager))
+            .expect("能重新注册同一 namespace");
+        let fresh = manager.call_timed(&id, "test.call", Duration::from_millis(100), || 2usize);
+        assert_eq!(fresh.expect("重新注册后新一代 worker 可用"), 2);
+
+        release.send(()).expect("能释放旧线程");
+    }
+
+    #[test]
+    fn lkg_only_counts_real_provider_failures() {
+        let id = "test.x".to_owned();
+        let call = "test.call";
+        assert!(
+            PluginError::ProviderTimeout {
+                id: id.clone(),
+                call,
+                ms: 100
+            }
+            .counts_toward_lkg(),
+            "超时是真实故障，算一次失败"
+        );
+        assert!(
+            !PluginError::ProviderBusy {
+                id: id.clone(),
+                call
+            }
+            .counts_toward_lkg()
+        );
+        assert!(
+            !PluginError::ProviderStuck {
+                id: id.clone(),
+                call
+            }
+            .counts_toward_lkg()
+        );
+        assert!(
+            !PluginError::ProviderDead {
+                id: id.clone(),
+                call,
+                detail: "2 stuck generations".to_owned()
+            }
+            .counts_toward_lkg(),
+            "dead 之后的快速失败不能重复累加"
+        );
+        assert!(
+            PluginError::ProviderExecutorStopped {
+                id: id.clone(),
+                detail: "worker stopped".to_owned()
+            }
+            .counts_toward_lkg()
+        );
+        assert!(
+            PluginError::Provider {
+                id,
+                detail: "boom".to_owned()
+            }
+            .counts_toward_lkg()
+        );
     }
 
     fn context(room: &RoomId) -> WakeContext<'_> {

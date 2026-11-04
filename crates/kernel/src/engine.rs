@@ -954,6 +954,25 @@ impl<S: Store> Bridge<S> {
         }
     }
 
+    /// 记一次 provider 调用/解析失败。只有真实故障才进 LKG；stuck / dead / busy
+    /// 是已经计过一次之后的快速失败，再计数只会把同一故障重复累加。
+    fn note_provider_error(&mut self, id: &ProviderId, error: &PluginError) {
+        if error.counts_toward_lkg() {
+            self.note_plugin_failure(id, &error.to_string(), now_millis());
+        }
+    }
+
+    /// `call_timed` 的失败路径：统一打一行日志，再按上面的规则记 LKG。
+    fn record_provider_call_failure(
+        &mut self,
+        id: &ProviderId,
+        call: &'static str,
+        error: &PluginError,
+    ) {
+        log_provider_call_failure(id, call, error);
+        self.note_provider_error(id, error);
+    }
+
     /// 回滚到上一条 LKG：改运行时路径，卸载当前句柄，重新加载旧产物。
     ///
     /// 只在安全点调用，且只做一次；失败就停在 `rolledBack`，不再递归回滚。
@@ -1984,7 +2003,7 @@ impl<S: Store> Bridge<S> {
             let provider = match self.plugins.resolve_route(&policy.provider, policy) {
                 Ok(provider) => provider,
                 Err(error) => {
-                    self.note_plugin_failure(&policy.provider, &error.to_string(), now_millis());
+                    self.note_provider_error(&policy.provider, &error);
                     eprintln!(
                         "{}",
                         acb_i18n::t!(
@@ -2056,8 +2075,7 @@ impl<S: Store> Bridge<S> {
                     }) {
                     Ok(decision) => decision,
                     Err(error) => {
-                        self.note_plugin_failure(&id, &error.to_string(), now_millis());
-                        log_provider_call_failure(&id, "route.decide", &error);
+                        self.record_provider_call_failure(&id, "route.decide", &error);
                         RouteDecision::Pass
                     }
                 }
@@ -2146,11 +2164,7 @@ impl<S: Store> Bridge<S> {
             {
                 Ok(provider) => provider,
                 Err(error) => {
-                    self.note_plugin_failure(
-                        &receive_policy.provider,
-                        &error.to_string(),
-                        now_millis(),
-                    );
+                    self.note_provider_error(&receive_policy.provider, &error);
                     return Err(error.into());
                 }
             };
@@ -2196,8 +2210,7 @@ impl<S: Store> Bridge<S> {
                         }) {
                         Ok(decision) => decision,
                         Err(error) => {
-                            self.note_plugin_failure(&id, &error.to_string(), now_millis());
-                            log_provider_call_failure(&id, "receive.decide", &error);
+                            self.record_provider_call_failure(&id, "receive.decide", &error);
                             return Err(error.into());
                         }
                     }
@@ -2220,11 +2233,7 @@ impl<S: Store> Bridge<S> {
                 {
                     Ok(provider) => wake_providers.push(provider),
                     Err(error) => {
-                        self.note_plugin_failure(
-                            &subscriber.wake.provider,
-                            &error.to_string(),
-                            now_millis(),
-                        );
+                        self.note_provider_error(&subscriber.wake.provider, &error);
                         return Err(error.into());
                     }
                 }
@@ -2337,8 +2346,7 @@ impl<S: Store> Bridge<S> {
                         }) {
                         Ok(verdict) => verdict,
                         Err(error) => {
-                            self.note_plugin_failure(&id, &error.to_string(), now_millis());
-                            log_provider_call_failure(&id, "wake.decide", &error);
+                            self.record_provider_call_failure(&id, "wake.decide", &error);
                             WakeVerdict {
                                 decision: WakeDecision::Stay,
                                 reason: None,
@@ -3179,11 +3187,7 @@ impl<S: Store> Bridge<S> {
         let provider = match self.plugins.resolve_turn_error(&policy.provider, &policy) {
             Ok(provider) => provider,
             Err(resolve_error) => {
-                self.note_plugin_failure(
-                    &policy.provider,
-                    &resolve_error.to_string(),
-                    now_millis(),
-                );
+                self.note_provider_error(&policy.provider, &resolve_error);
                 eprintln!(
                     "{}",
                     acb_i18n::t!(
@@ -3225,8 +3229,7 @@ impl<S: Store> Bridge<S> {
                 }) {
                 Ok(actions) => actions,
                 Err(plugin_error) => {
-                    self.note_plugin_failure(&id, &plugin_error.to_string(), now_millis());
-                    log_provider_call_failure(&id, "turn_error.decide", &plugin_error);
+                    self.record_provider_call_failure(&id, "turn_error.decide", &plugin_error);
                     <DefaultTurnErrorProvider as TurnErrorProvider>::decide(
                         &DefaultTurnErrorProvider,
                         &policy,
@@ -4223,11 +4226,7 @@ impl<S: Store> Bridge<S> {
             {
                 Ok(provider) => provider,
                 Err(error) => {
-                    self.note_plugin_failure(
-                        &session.access.provider,
-                        &error.to_string(),
-                        now_millis(),
-                    );
+                    self.note_provider_error(&session.access.provider, &error);
                     return Err(ToolError::new(
                         ErrorCode::Internal,
                         acb_i18n::t!(
@@ -4278,8 +4277,7 @@ impl<S: Store> Bridge<S> {
                     }) {
                     Ok(decision) => decision == AccessDecision::Allow,
                     Err(error) => {
-                        self.note_plugin_failure(&provider_id, &error.to_string(), now_millis());
-                        log_provider_call_failure(&provider_id, "access.check", &error);
+                        self.record_provider_call_failure(&provider_id, "access.check", &error);
                         return Err(ToolError::new(
                             ErrorCode::Internal,
                             acb_i18n::t!(
@@ -4431,11 +4429,7 @@ impl<S: Store> Bridge<S> {
                 let provider = match self.plugins.resolve_clock(&policy.provider, &policy) {
                     Ok(provider) => provider,
                     Err(error) => {
-                        self.note_plugin_failure(
-                            &policy.provider,
-                            &error.to_string(),
-                            now_millis(),
-                        );
+                        self.note_provider_error(&policy.provider, &error);
                         eprintln!(
                             "{}",
                             acb_i18n::t!(
@@ -4495,8 +4489,7 @@ impl<S: Store> Bridge<S> {
                         }) {
                         Ok(due) => due,
                         Err(error) => {
-                            self.note_plugin_failure(&id, &error.to_string(), now_millis());
-                            log_provider_call_failure(&id, "clock.is_due", &error);
+                            self.record_provider_call_failure(&id, "clock.is_due", &error);
                             false
                         }
                     }
@@ -4606,11 +4599,7 @@ impl<S: Store> Bridge<S> {
         {
             Ok(composer) => composer,
             Err(error) => {
-                self.note_plugin_failure(
-                    &delivery_policy.provider,
-                    &error.to_string(),
-                    now_millis(),
-                );
+                self.note_provider_error(&delivery_policy.provider, &error);
                 eprintln!(
                     "{}",
                     acb_i18n::t!(
@@ -4646,8 +4635,7 @@ impl<S: Store> Bridge<S> {
                 }) {
                 Ok(plan) => plan,
                 Err(error) => {
-                    self.note_plugin_failure(&id, &error.to_string(), now_millis());
-                    log_provider_call_failure(&id, "delivery.compose", &error);
+                    self.record_provider_call_failure(&id, "delivery.compose", &error);
                     default_delivery_plan(&DeliveryRequest {
                         session: &pending.session,
                         room: &pending.room,
@@ -5086,8 +5074,7 @@ impl<S: Store> Bridge<S> {
                         ));
                     }
                     Err(error) => {
-                        self.note_plugin_failure(id, &error.to_string(), now_millis());
-                        log_provider_call_failure(id, "send.before", &error);
+                        self.record_provider_call_failure(id, "send.before", &error);
                         return Err(ToolError::new(
                             ErrorCode::Internal,
                             acb_i18n::t!("kernel.engine.before_hook_timeout", error = error),
@@ -5214,8 +5201,7 @@ impl<S: Store> Bridge<S> {
                     };
                     hook.after_send(&context, &owned_sent);
                 }) {
-                    self.note_plugin_failure(id, &error.to_string(), now_millis());
-                    log_provider_call_failure(id, "send.after", &error);
+                    self.record_provider_call_failure(id, "send.after", &error);
                 }
             } else {
                 hook.after_send(&hook_context, &sent);

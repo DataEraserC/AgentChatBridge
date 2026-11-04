@@ -1268,6 +1268,40 @@
   - 配置测试覆盖默认值、0 关闭、超上限拒绝。
 - 证据：`cargo test --workspace`、clippy、fmt 全绿。
 
+## 2026-11-04 — 外部 provider executor 生命周期（stuck / dead / 重置）
+
+- 背景：`call_timed` 的超时只让调用方放弃，worker 仍卡在 provider 里。旧实现里
+  `unload_provider` / `reload_provider` 不清 `timed_executors`，LKG 回滚后同一 id
+  仍会撞上一个 busy/stuck 的旧 worker；「回滚 → 再卡 → 再回滚」会无限漏线程。
+- 生命周期：
+  - `ExecutorSlot { current, stuck_generations, dead }`；`MAX_STUCK_GENERATIONS = 2`。
+  - 首次超时：把当前 worker 标 `stuck`，后续调用立即返回 `ProviderStuck`，不再
+    让调用方白等一个完整超时。worker 若之后返回，会自行清掉 `stuck`，同一代
+    可以恢复使用。
+  - 卸载 / 重载 / 整 namespace 卸载 / 重新注册同一 id：丢掉 `current`，下一次
+    调用起新一代 worker。旧卡死线程无法取消，只能作为一次性泄漏留着；每代
+    最多一个。
+  - 连续两代卡死（第一次超时后经卸载/重载，下一代再次超时）→ provider 标
+    `dead`：`current = None`，后续调用立即返回 `ProviderDead`，日志明确写
+    `restart required`。dead 不会因为再次卸载/重载而复活，只有重启进程清空
+    内存状态才能恢复。
+- 错误区分：`ProviderBusy`（并发/队列满）、`ProviderStuck`（已判卡死）、
+  `ProviderDead`（代数超限）、`ProviderExecutorStopped`（worker 线程已退出）
+  四个变体各自独立，都有 i18n 文案，不再统一塞进 `ProviderBusy`。
+- LKG：`PluginError::counts_toward_lkg()` 只让真实故障计数——
+  `ProviderTimeout` / `ProviderExecutorStopped` / `Provider` 算；
+  `ProviderBusy` / `ProviderStuck` / `ProviderDead` 不算。引擎侧的
+  `note_provider_error` / `record_provider_call_failure` 统一走这个判定：
+  第一次超时计一次失败，之后 stuck/dead 的快速失败不会把同一故障重复累加。
+- 测试：
+  - 卡死 → 超时 → `ProviderStuck` 快速失败 → 重置后新一代 worker 正常工作；
+  - 卸载 namespace 后重新注册同一 id → 新一代 worker 正常工作；
+  - 连续两代卡死 → `ProviderDead`，重置不复活；
+  - `counts_toward_lkg` 区分 timeout/busy/stuck/dead/stopped/provider；
+  - 原超时测试仍覆盖：恢复后同一 worker 可继续调用、其他 provider 不受影响。
+- 证据：`cargo test -p acb-kernel --lib plugin::tests` 39 项通过；workspace
+  clippy / test / fmt 全绿。
+
 ## 部署注意事项（nix-config 打包）
 
 - `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置
@@ -1278,11 +1312,26 @@
   报 `cannot spawn acb-notifier` 并跳过该层（桥本身继续运行）。
 - 其他第二进制/资源（`process-tool-fixture` 等）仍在各自 crate，不需要进
   生产包。
+- `RLIMIT_AS` 与 glibc malloc arena：每个外部 provider 一个调用线程（默认
+  2 MiB 栈），线程首次分配会触发 glibc 保留 64 MiB 的 per-arena 虚拟地址。
+  实测 128 个外部 provider 时线程数与 VmSize 同步上涨到 GB 级（约 +1.77 GB），
+  但 RSS 只涨约 1.63 MB，空闲线程约 12–16 KB RSS。这些虚拟地址大多不会被
+  commit，也不会进 RSS。
+  - **不要给桥设 `RLIMIT_AS`**（或任何按地址空间记账的限制，包括把
+    `systemd` 的内存限制配成地址空间口径）。它会按 VmSize 记账，会在真实
+    RSS 还很小时就先在这里失败。
+  - 资源限制用 cgroup 的 RSS/anon 口径（如 `MemoryMax`），不要用
+    `RLIMIT_AS`/`ulimit -v`。
 
 ## 待办（用户指定，暂不实现）
 
 - LKG 失败阈值分 class：panic 类失败也许应该 1 次就回滚，不应与 provider 解析
   失败共用 `[lkg] max_failures`。分 class 阈值是后续议题，现在不改行为。
+- 外部 `delivery.compose` 输入快照：每轮把候选记录克隆进调用线程。实测默认
+  30 条约 21 KB/轮，`delivery_limit = 200` 时约 143 KB/轮。触发条件是配置了
+  外部 delivery composer（`namespace != acb`）且启用 provider 超时。当前量级
+  可接受；若调大投递上限或记录元素变重，可改为共享只读快照或先传编号集合，
+  避免每轮深拷贝全部记录。
 
 ## 环境状态
 
