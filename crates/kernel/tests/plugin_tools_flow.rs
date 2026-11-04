@@ -156,7 +156,11 @@ fn plugin_tools_are_discoverable_and_callable() {
             &ticket,
             &["main".to_owned()],
             "plugin_tool_call",
-            json!({"tool": "echo_context", "arguments": {"x": 7}}),
+            json!({
+                "tool": "echo_context",
+                "arguments": {"x": 7},
+                "scope": {"kind": "room", "room": "qq:group/1"},
+            }),
         )
         .expect("调用插件工具");
     assert_eq!(called["tool"], "echo_context");
@@ -175,6 +179,69 @@ fn plugin_tools_are_discoverable_and_callable() {
         missing.expect_err("未知工具").code,
         acb_kernel::ErrorCode::BadRequest
     );
+}
+
+#[test]
+fn plugin_tool_call_requires_an_explicit_scope() {
+    let bridge = bridge();
+    lock(&bridge)
+        .ingest(RecordDraft::message(
+            RoomId::parse("qq:group/1").expect("房间"),
+            Sender {
+                id: "10001".into(),
+                name: "u".into(),
+                role: None,
+            },
+            1,
+            vec![Element::text("在吗")],
+            true,
+        ))
+        .expect("入库");
+    let ticket = lock(&bridge)
+        .poll_turn()
+        .expect("能开轮")
+        .expect("有活")
+        .ticket;
+
+    let missing = lock(&bridge).tool_call(
+        &ticket,
+        &["main".to_owned()],
+        "plugin_tool_call",
+        json!({"tool": "echo_context", "arguments": {"x": 1}}),
+    );
+    assert_eq!(
+        missing.expect_err("没声明 scope 必须拒绝").code,
+        acb_kernel::ErrorCode::BadRequest
+    );
+
+    let unauthorized = lock(&bridge).tool_call(
+        &ticket,
+        &["main".to_owned()],
+        "plugin_tool_call",
+        json!({
+            "tool": "echo_context",
+            "arguments": {"x": 1},
+            "scope": {"kind": "room", "room": "qq:group/999"},
+        }),
+    );
+    assert_eq!(
+        unauthorized.expect_err("未订阅房间必须拒绝").code,
+        acb_kernel::ErrorCode::RoomNotSubscribed
+    );
+
+    let connection = lock(&bridge)
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "plugin_tool_call",
+            json!({
+                "tool": "echo_context",
+                "arguments": {"x": 1},
+                "scope": {"kind": "connection", "connection": "qq"},
+            }),
+        )
+        .expect("连接作用域应通过");
+    assert_eq!(connection["args"]["x"], 1);
 }
 
 #[test]

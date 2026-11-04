@@ -552,6 +552,7 @@
   "kernel.engine.no_params": "这个方法不要参数",
   "kernel.engine.note_kind_invalid": "笔记种类只能是 term / member / topic，收到 {kind}",
   "kernel.engine.nothing_to_send": "没有内容可发",
+  "kernel.engine.plugin_tool_scope_required": "[bad_params] plugin_tool_call 必须声明 scope（房间用 room，连接用 connection）；不声明就拒绝，插件不能默认继承当前房间。",
   "kernel.engine.params_choice_mismatch": "[bad_params] {method} 的参数 {parameter} 只能是 {choices}，给的是 {value}",
   "kernel.engine.params_missing_required": "[bad_params] {method} 少了必填参数 {parameter}（{desc}）",
   "kernel.engine.params_not_object": "[bad_params] {method} 的 params 要给一个对象（map）",

@@ -171,7 +171,11 @@ fn tool_provider_appears_and_disappears_at_turn_boundaries() {
             &first,
             &["main".to_owned()],
             "plugin_tool_call",
-            json!({"tool": "hot_echo", "arguments": {"x": 1}}),
+            json!({
+                "tool": "hot_echo",
+                "arguments": {"x": 1},
+                "scope": {"kind": "connection", "connection": "qq"},
+            }),
         )
         .expect("热装工具能调用");
 
@@ -196,7 +200,11 @@ fn tool_provider_appears_and_disappears_at_turn_boundaries() {
         &second,
         &["main".to_owned()],
         "plugin_tool_call",
-        json!({"tool": "hot_echo", "arguments": {}}),
+        json!({
+            "tool": "hot_echo",
+            "arguments": {},
+            "scope": {"kind": "connection", "connection": "qq"},
+        }),
     );
     assert!(missing.is_err(), "卸载后不能调用");
     // 其它内置工具不受影响。
@@ -220,7 +228,11 @@ fn tool_provider_appears_and_disappears_at_turn_boundaries() {
             &third,
             &["main".to_owned()],
             "plugin_tool_call",
-            json!({"tool": "hot_echo", "arguments": {"x": 2}}),
+            json!({
+                "tool": "hot_echo",
+                "arguments": {"x": 2},
+                "scope": {"kind": "connection", "connection": "qq"},
+            }),
         )
         .expect("重载后能调用");
 }

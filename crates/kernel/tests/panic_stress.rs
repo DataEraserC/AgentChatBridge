@@ -144,7 +144,11 @@ fn one_cycle(bridge: &Arc<Mutex<Bridge<MemoryStore>>>) {
             &ticket,
             &["main".to_owned()],
             "plugin_tool_call",
-            json!({"tool": "stress_panic", "arguments": {}}),
+            json!({
+                "tool": "stress_panic",
+                "arguments": {},
+                "scope": {"kind": "connection", "connection": "qq"},
+            }),
         )
         .expect_err("工具 panic 要返回错误");
     assert!(

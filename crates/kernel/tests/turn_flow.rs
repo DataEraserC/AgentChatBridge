@@ -1492,6 +1492,67 @@ fn access_provider_sees_the_turn_origin_room() {
     assert_eq!(sends.lock().expect("没被毒死")[0].0, room("qq:group/999"));
 }
 
+/// 当前轮房间也要复检 access：不能因为轮次开在这里就默认允许发送。
+#[test]
+fn send_message_rechecks_current_room_access() {
+    struct DenySend;
+    impl AccessProvider for DenySend {
+        fn check(&self, _options: &AccessPolicy, request: &AccessRequest<'_>) -> AccessDecision {
+            if request.action == AccessAction::Connection {
+                AccessDecision::Allow
+            } else {
+                AccessDecision::Deny
+            }
+        }
+    }
+
+    let mut plugins = PluginManager::with_native_builtins();
+    plugins
+        .register_access(
+            ProviderDescriptor::new(
+                ProviderId::parse("test.deny_send").expect("合法"),
+                ExtensionPoint::Access,
+                PLUGIN_API_VERSION,
+                vec![Capability::AccessDecision],
+            ),
+            Arc::new(DenySend),
+        )
+        .expect("能注册自定义 access provider");
+    let text = config_with("        [sessions.access]\n        provider = \"test.deny_send\"");
+    let (mut bridge, _sends) = bridge_with_plugins(&text, plugins);
+
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let denied = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message",
+            json!({"elements": [{"type": "text", "text": "不该发出去"}]}),
+        )
+        .expect_err("当前房间被 access 拒绝时必须拦住");
+    assert_eq!(denied.code, ErrorCode::RoomNotSubscribed);
+
+    // 同一房间在默认策略下仍可发送。
+    let (mut allowed, sends) =
+        bridge_with_plugins(config(), PluginManager::with_native_builtins());
+    allowed
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = allowed.poll_turn().expect("能开轮").expect("有活").ticket;
+    allowed
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message",
+            json!({"elements": [{"type": "text", "text": "可以发"}]}),
+        )
+        .expect("授权房间应通过");
+    assert_eq!(sends.lock().expect("没被毒死")[0].0, room("qq:group/123"));
+}
+
 /// 内置 `privileged_origins`：配置声明来源房间，群里的轮次回到订阅边界。
 #[test]
 fn privileged_origins_policy_is_wired_from_config() {
