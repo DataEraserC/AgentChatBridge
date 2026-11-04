@@ -1364,6 +1364,8 @@
 - commit：`026230a feat(deps): expose per-dependency health and tighten failure edges`
   （第①–③步收口合计）。
 
+- 2026-11-04 — 决策索引：supervisor 平台无关、Nix profile 回滚、测试矩阵、回滚判据、反馈/工单、记忆管家、扩展工厂 → [supervision-packaging-issues.md](supervision-packaging-issues.md)
+
 ## 部署注意事项（nix-config 打包）
 
 - `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置
