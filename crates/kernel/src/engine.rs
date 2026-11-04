@@ -501,6 +501,8 @@ pub struct Bridge<S: Store> {
     pending_interrupts: Vec<PendingInterrupt>,
     /// 路由动作里需要 I/O 的发送/任务；drain 线程交给动作 worker。
     pending_route_actions: Vec<PreparedRouteAction>,
+    /// 已发出的 in-band 失败通知：同一故障在窗口内只发一条，按房间限流。
+    turn_failures: VecDeque<TurnFailureNotice>,
     /// (会话, 房间) → 上次时钟轮时间（Unix 毫秒）。只活在本进程，重启后重新计间隔。
     clock_last: HashMap<(String, RoomId), i64>,
     /// (会话, 房间) → 上次唤醒（任意原因开轮）时间。只活在本进程；
@@ -536,6 +538,38 @@ pub struct Bridge<S: Store> {
     draining: bool,
     /// 配置版本号：每换一次配置 +1，控制台靠它展示「配置换过没有」。
     config_version: u64,
+}
+
+/// in-band 失败通知的去重/限流窗口：同一 (session, room, 错误指纹) 在窗口内只发首条；
+/// 同一房间在窗口内最多发 `TURN_FAILURE_ROOM_LIMIT` 条。
+const TURN_FAILURE_WINDOW_MS: i64 = 10 * 60 * 1000;
+const TURN_FAILURE_ROOM_LIMIT: usize = 3;
+/// 去重表上限：超出丢最旧的，避免长期运行无限增长。
+const TURN_FAILURE_KEEP: usize = 256;
+
+/// 一条已发出的 in-band 失败通知，用于去重与按房间限流。
+#[derive(Debug, Clone)]
+struct TurnFailureNotice {
+    session: String,
+    room: RoomId,
+    fingerprint: u64,
+    at: i64,
+}
+
+enum TurnFailureSuppressed {
+    Duplicate,
+    RoomLimit,
+}
+
+/// 原始错误文本的稳定指纹（64 位 FNV-1a）。只做去重，不解析语义；
+/// 同一故障的不同措辞仍会被当成不同指纹，这是第③步的已知边界。
+fn turn_error_fingerprint(error: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in error.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// 票前缀：进程启动时间 + 进程号 + 进程内桥实例序号。
@@ -628,6 +662,7 @@ impl<S: Store> Bridge<S> {
             pending_notices: Vec::new(),
             pending_interrupts: Vec::new(),
             pending_route_actions: Vec::new(),
+            turn_failures: VecDeque::new(),
             clock_last: HashMap::new(),
             wake_last: HashMap::new(),
             memory,
@@ -2691,8 +2726,41 @@ impl<S: Store> Bridge<S> {
                     )
                 );
             } else {
-                self.notify_turn_error(&turn.config, &turn.session, &turn.room, error);
+                let now = now_millis();
+                let fingerprint = turn_error_fingerprint(error);
+                match self.turn_failure_suppressed(&turn.session, &turn.room, fingerprint, now) {
+                    Some(reason) => {
+                        let key = match reason {
+                            TurnFailureSuppressed::Duplicate => {
+                                "kernel.engine.turn_error_duplicate"
+                            }
+                            TurnFailureSuppressed::RoomLimit => {
+                                "kernel.engine.turn_error_room_limited"
+                            }
+                        };
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                key,
+                                session = turn.session,
+                                room = turn.room,
+                                fingerprint = format!("{fingerprint:016x}"),
+                                limit = TURN_FAILURE_ROOM_LIMIT
+                            )
+                        );
+                    }
+                    None => {
+                        let sent =
+                            self.notify_turn_error(&turn.config, &turn.session, &turn.room, error);
+                        if sent > 0 {
+                            self.record_turn_failure(&turn.session, &turn.room, fingerprint, now);
+                        }
+                    }
+                }
             }
+        } else {
+            // 这一轮恢复正常：清掉这个 (session, room) 的历史失败，下一次故障重新通知。
+            self.clear_turn_failures(&turn.session, &turn.room);
         }
 
         let Some(session) = self.by_ticket.remove(ticket) else {
@@ -2752,16 +2820,61 @@ impl<S: Store> Bridge<S> {
         }
     }
 
+    /// 同一故障是否已被最近一次通知覆盖；返回抑制原因。
+    fn turn_failure_suppressed(
+        &mut self,
+        session: &str,
+        room: &RoomId,
+        fingerprint: u64,
+        now: i64,
+    ) -> Option<TurnFailureSuppressed> {
+        let cutoff = now.saturating_sub(TURN_FAILURE_WINDOW_MS);
+        self.turn_failures.retain(|item| item.at >= cutoff);
+        if self.turn_failures.iter().any(|item| {
+            item.session == session && item.room == *room && item.fingerprint == fingerprint
+        }) {
+            return Some(TurnFailureSuppressed::Duplicate);
+        }
+        if self
+            .turn_failures
+            .iter()
+            .filter(|item| item.room == *room)
+            .count()
+            >= TURN_FAILURE_ROOM_LIMIT
+        {
+            return Some(TurnFailureSuppressed::RoomLimit);
+        }
+        None
+    }
+
+    fn record_turn_failure(&mut self, session: &str, room: &RoomId, fingerprint: u64, now: i64) {
+        self.turn_failures.push_back(TurnFailureNotice {
+            session: session.to_owned(),
+            room: room.clone(),
+            fingerprint,
+            at: now,
+        });
+        while self.turn_failures.len() > TURN_FAILURE_KEEP {
+            self.turn_failures.pop_front();
+        }
+    }
+
+    /// 成功一轮视为恢复：下次同类失败重新通知。
+    fn clear_turn_failures(&mut self, session: &str, room: &RoomId) {
+        self.turn_failures
+            .retain(|item| item.session != session || item.room != *room);
+    }
+
     /// 交给会话的失败通知 provider 选动作，再按顺序执行。默认 provider 保持原行为：
     /// 会话动作非空就用它，否则回退全局 `default_on_turn_error`。
-    /// 一个动作失败不打断后面的。
+    /// 一个动作失败不打断后面的。返回真正排进发送队列的通知数。
     fn notify_turn_error(
         &mut self,
         config: &Arc<Config>,
         session: &str,
         room: &RoomId,
         error: &str,
-    ) {
+    ) -> usize {
         let policy = config
             .session(session)
             .map(|session| session.turn_error.clone())
@@ -2798,6 +2911,7 @@ impl<S: Store> Bridge<S> {
                 default_actions: &config.default_on_turn_error,
             },
         );
+        let mut sent = 0usize;
         for action in actions {
             match action {
                 // `log` 由 endpoint 的 Log 帧负责（见 turn_end 处理），这里无需重复。
@@ -2814,7 +2928,10 @@ impl<S: Store> Bridge<S> {
                         SendOrigin::TurnFailure,
                         vec![Element::text(text)],
                     ) {
-                        Ok(prepared) => self.pending_notices.push(prepared),
+                        Ok(prepared) => {
+                            self.pending_notices.push(prepared);
+                            sent = sent.saturating_add(1);
+                        }
                         Err(err) => eprintln!(
                             "{}",
                             acb_i18n::t!(
@@ -2826,6 +2943,7 @@ impl<S: Store> Bridge<S> {
                 }
             }
         }
+        sent
     }
 
     /// 调工具。

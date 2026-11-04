@@ -555,6 +555,8 @@
   "kernel.engine.session_not_found": "会话 {session} 不存在",
   "kernel.engine.status_invalid": "status 只能是 open 或 closed，收到 {status}",
   "kernel.engine.status_topic_only": "status 只对 topic 有用",
+  "kernel.engine.turn_error_duplicate": "重复失败通知已抑制（同一故障 10 分钟内只发一条）：session={session} room={room} fingerprint={fingerprint}",
+  "kernel.engine.turn_error_room_limited": "失败通知已抑制（房间 {room} 10 分钟内最多 {limit} 条）：session={session} fingerprint={fingerprint}",
   "kernel.engine.turn_error_notice_assemble_failed": "失败通知组装失败：{error}",
   "kernel.engine.turn_error_notice_relay_failed": "失败通知里的文件没能收进中继：{error}",
   "kernel.engine.turn_error_notice_send_failed": "失败通知没发成：{error}",
