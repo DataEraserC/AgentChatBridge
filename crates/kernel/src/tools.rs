@@ -405,12 +405,26 @@ pub struct PluginToolsArgs {
     pub offset: Option<usize>,
 }
 
-/// 调用插件工具：工具名 + 原样参数。
+/// 插件工具调用必须显式声明的权限作用域。
+///
+/// 插件工具不像 `platform_call` 有 `MethodSpec.scope` 可查，所以必须由调用方声明；
+/// core 按声明执行与平台调用同一套房间/连接检查。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginToolScope {
+    Room { room: String },
+    Connection { connection: String },
+}
+
+/// 调用插件工具：工具名 + 原样参数 + 权限作用域。
 #[derive(Debug, Deserialize)]
 pub struct PluginToolCallArgs {
     pub tool: String,
     #[serde(default)]
     pub arguments: serde_json::Value,
+    /// 没声明就拒绝；不能默认成当前房间。
+    #[serde(default)]
+    pub scope: Option<PluginToolScope>,
 }
 
 /// 记忆工具公共参数：操作哪个记忆 + worktree 内的相对路径。

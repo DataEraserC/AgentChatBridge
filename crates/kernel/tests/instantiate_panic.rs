@@ -210,7 +210,11 @@ fn one_manager_panic_does_not_take_down_the_bridge() {
             &ticket,
             &["main".to_owned()],
             "plugin_tool_call",
-            json!({"tool": "good_tool", "arguments": {"x": 1}}),
+            json!({
+                "tool": "good_tool",
+                "arguments": {"x": 1},
+                "scope": {"kind": "connection", "connection": "qq"},
+            }),
         )
         .expect("好插件不受影响");
     lock(&bridge)

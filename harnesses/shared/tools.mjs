@@ -586,14 +586,39 @@ JSON Schema。插件工具不在默认工具表里，先用它发现，再用 pl
   {
     name: "plugin_tool_call",
     description: `调用一个插件工具。tool 必须是 plugin_tools 列出的名字；arguments 原样
-交给插件。插件工具只能拿到当前会话/房间/来源/是否在轮内，不能碰 Store 或水位。`,
+交给插件。必须声明 scope：插件没有 core 的 MethodSpec.scope，core 会按声明的房间或
+连接做与 platform_call 相同的权限检查。插件工具只能拿到当前会话/房间/来源/是否在轮内。`,
     schema: {
       type: "object",
       properties: {
         tool: { type: "string", description: "plugin_tools 返回的工具名" },
         arguments: { type: "object", description: "工具参数，形状看该工具的 schema" },
+        scope: {
+          type: "object",
+          description: "权限作用域；房间作用域按写权限检查，连接作用域按连接可读检查",
+          oneOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { const: "room" },
+                room: { type: "string", description: "房间，如 qq:group/123" },
+              },
+              required: ["kind", "room"],
+              additionalProperties: false,
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { const: "connection" },
+                connection: { type: "string", description: "连接 id，如 qq" },
+              },
+              required: ["kind", "connection"],
+              additionalProperties: false,
+            },
+          ],
+        },
       },
-      required: ["tool"],
+      required: ["tool", "scope"],
       additionalProperties: false,
     },
   },

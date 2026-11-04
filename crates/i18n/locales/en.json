@@ -552,6 +552,7 @@
   "kernel.engine.no_params": "this method takes no parameters",
   "kernel.engine.note_kind_invalid": "note kind must be term / member / topic; got {kind}",
   "kernel.engine.nothing_to_send": "nothing to send",
+  "kernel.engine.plugin_tool_scope_required": "[bad_params] plugin_tool_call requires a scope (room or connection); it is rejected without one, and a plugin cannot inherit the current room by default.",
   "kernel.engine.params_choice_mismatch": "[bad_params] {method} parameter {parameter} must be one of {choices}; got {value}",
   "kernel.engine.params_missing_required": "[bad_params] {method} is missing required parameter {parameter} ({desc})",
   "kernel.engine.params_not_object": "[bad_params] {method} params must be an object (map)",

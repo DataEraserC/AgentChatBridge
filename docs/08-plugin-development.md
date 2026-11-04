@@ -170,8 +170,9 @@ impl ToolProvider for EchoTool {
    extension point 是 `Tool`，能力是 `ToolCall`，id 形如 `example.tools`；
    loader 用 `install_loader_owned` 装进 `PluginManager`。
 3. `Bridge::with_plugins(config, store, outbound, plugins)`。
-4. agent 侧先 `plugin_tools` 发现，再 `plugin_tool_call({tool, arguments})` 调用；
-   `plugin_tools({name})` 可单独查某个工具的完整 schema。
+4. agent 侧先 `plugin_tools` 发现，再 `plugin_tool_call({tool, arguments, scope})` 调用；
+   `scope` 必须显式声明房间或连接，core 按它与 `platform_call` 同一套规则做权限检查；
+   未声明直接拒绝。`plugin_tools({name})` 可单独查某个工具的完整 schema。
 5. 生命周期：`queue_unload("example.tools")` / `queue_reload("example.tools")` 只入队，
    在下一个轮次边界生效；在途轮次继续用旧快照。状态与 `lastError` 在
    `plugin_catalog` 的 `state` / `pending` / `lastError` 字段里可见。
@@ -181,6 +182,8 @@ impl ToolProvider for EchoTool {
 - 工具名不能和内置工具或其它 provider 重名；注册时返回 `ToolNameConflict`，
   错误里带冲突的工具名，并提示换一个名字。
 - `ToolCallContext` 只给 session / room / origin_sender / live；拿不到 Store、票和水位。
+- 插件工具不继承当前房间的权限：`plugin_tool_call` 的 `scope` 必须声明；房间作用域按
+  写权限检查，连接作用域按连接可读检查。插件不能拥有比 core 更大的权限。
 - 工具内部的 I/O 由插件自己负责；core 不做超时，慢工具会占住调用方。
 - 工具权限判定仍是 core 的事（`ToolAccessProvider` 只能再加否决，不能放行）。
 

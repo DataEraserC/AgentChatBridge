@@ -315,7 +315,11 @@ fn tool_panic_returns_error_and_keeps_turn_and_index_usable() {
             &ticket,
             &["main".to_owned()],
             "plugin_tool_call",
-            json!({"tool": "panic_tool", "arguments": {}}),
+            json!({
+                "tool": "panic_tool",
+                "arguments": {},
+                "scope": {"kind": "connection", "connection": "qq"},
+            }),
         )
         .expect_err("panic 要变成工具错误");
     assert_eq!(error.code, ErrorCode::Internal);
@@ -334,7 +338,11 @@ fn tool_panic_returns_error_and_keeps_turn_and_index_usable() {
             &ticket,
             &["main".to_owned()],
             "plugin_tool_call",
-            json!({"tool": "panic_tool", "arguments": {}}),
+            json!({
+                "tool": "panic_tool",
+                "arguments": {},
+                "scope": {"kind": "connection", "connection": "qq"},
+            }),
         )
         .expect_err("再次 panic 仍按错误返回");
     assert_eq!(again.code, ErrorCode::Internal);

@@ -62,8 +62,8 @@ use crate::tools::{
     FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs,
     MemoryBlameArgs, MemoryCommitArgs, MemoryListArgs, MemoryLogArgs, MemorySearchArgs,
     MemoryWriteArgs, NotesArgs, PlatformCallArgs, PlatformMethodsArgs, PluginToolCallArgs,
-    PluginToolsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, TaskGetArgs, TaskListArgs,
-    WaitMessageArgs, is_known,
+    PluginToolScope, PluginToolsArgs, RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs,
+    TaskGetArgs, TaskListArgs, WaitMessageArgs, is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -3381,6 +3381,8 @@ impl<S: Store> Bridge<S> {
             // 不给目标：接着说当前这一轮的房间，用本轮的身份。
             "send_message" => {
                 let args: SendArgs = parse(args)?;
+                // 当前房间也要复检：不能假设「轮次开在这里」就等于 access 永远允许。
+                self.ensure_can_send(&turn_config, &turn_session, &room, &room)?;
                 self.deliver_out(
                     turn_config.clone(),
                     &turn_session,
@@ -3576,7 +3578,7 @@ impl<S: Store> Bridge<S> {
                         "returned": tools.len(),
                         "has_more": offset + tools.len() < total,
                         "tools": tools,
-                        "hint": "给 name 查 schema；用 plugin_tool_call({tool, arguments}) 调用。",
+                        "hint": "给 name 查 schema；用 plugin_tool_call({tool, arguments, scope}) 调用，scope 必须声明房间或连接。",
                     }))
                 }
             }
@@ -3589,6 +3591,13 @@ impl<S: Store> Bridge<S> {
                         acb_i18n::t!("kernel.engine.unknown_tool", tool = args.tool),
                     ));
                 };
+                let Some(scope) = args.scope else {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        acb_i18n::t!("kernel.engine.plugin_tool_scope_required"),
+                    ));
+                };
+                self.check_plugin_tool_scope(&turn_config, &turn_session, &room, scope)?;
                 let context = crate::plugin::ToolCallContext {
                     session: &turn_session,
                     room: &room,
@@ -3722,6 +3731,7 @@ impl<S: Store> Bridge<S> {
             "send_message" => {
                 let args: SendArgs = parse(args)?;
                 let ctx = self.turn_ctx(ticket, tool)?;
+                self.ensure_can_send(&ctx.config, &ctx.session, &ctx.room, &ctx.room)?;
                 let prepared = self.prepare_send(
                     ctx.config.clone(),
                     &ctx.session,
@@ -4433,6 +4443,40 @@ impl<S: Store> Bridge<S> {
             connection,
             Some(origin),
         )
+    }
+
+    /// 插件工具的作用域检查。插件没有 `MethodSpec.scope`，所以调用方必须声明；
+    /// 房间作用域按写操作保守检查，连接作用域按连接可读检查。
+    fn check_plugin_tool_scope(
+        &mut self,
+        config: &Config,
+        session: &str,
+        origin: &RoomId,
+        scope: PluginToolScope,
+    ) -> Result<(), ToolError> {
+        match scope {
+            PluginToolScope::Room { room } => {
+                let target = resolve_room(&room)?;
+                self.ensure_can_send(config, session, &target, origin)
+            }
+            PluginToolScope::Connection { connection } => {
+                if !config
+                    .connections
+                    .iter()
+                    .any(|candidate| candidate.id == connection)
+                {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        acb_i18n::t!(
+                            "kernel.engine.bad_params_no_connection",
+                            connection = connection
+                        ),
+                    ));
+                }
+                let sessions = [session.to_owned()];
+                self.ensure_connection_readable(config, &sessions, &connection, origin)
+            }
+        }
     }
 
     /// 时钟评估：检查每个订阅的时钟策略，到点就把（会话, 房间）排进队列。
