@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use acb_adapter_dynamic::DynamicLoader;
 use acb_kernel::{
-    AdapterHost, AdapterInstance, CallError, Connection, Element, EventQueue, Health, PluginConfig,
-    PluginManager, PluginSource, RoomId, Transport,
+    AdapterHost, AdapterInstance, AdapterStatus, CallError, Connection, DependencyRegistry,
+    Element, EventQueue, Health, PluginConfig, PluginManager, PluginSource, RoomId, Transport,
 };
 use serde_json::json;
 
@@ -36,6 +36,27 @@ fn fixture_path() -> std::path::PathBuf {
         "libacb_adapter_dynamic_fixture.so"
     };
     profile_dir.join(name)
+}
+
+fn dep_entry(deps: &DependencyRegistry) -> Option<serde_json::Value> {
+    deps.snapshot(None)["dependencies"]
+        .as_array()?
+        .iter()
+        .find(|item| item["id"] == "demo")
+        .cloned()
+}
+
+fn wait_for_state(deps: &DependencyRegistry, expected: &str) {
+    for _ in 0..40 {
+        if dep_entry(deps).is_some_and(|item| item["state"] == expected) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "依赖状态没有在 2s 内变成 {expected}：{:?}",
+        deps.snapshot(None)
+    );
 }
 
 fn connection() -> Connection {
@@ -112,12 +133,15 @@ fn dynamic_adapter_loads_and_speaks_the_wire_protocol() {
     );
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let deps = DependencyRegistry::new();
     let host = AdapterHost {
         events,
         shutdown: Arc::clone(&shutdown),
-        status: acb_kernel::AdapterStatus::new("demo", acb_kernel::DependencyRegistry::new()),
+        status: AdapterStatus::new("demo", deps.clone()),
     };
     thread::spawn(move || launch(host));
+
+    wait_for_state(&deps, "up");
 
     let draft = receiver
         .recv_timeout(Duration::from_secs(2))
@@ -168,6 +192,17 @@ fn dynamic_adapter_loads_and_speaks_the_wire_protocol() {
     assert!(
         matches!(&timeout, CallError::Unavailable(detail) if detail.contains("timed out")),
         "{timeout:?}"
+    );
+
+    // 动态适配器没有远端连接可探测：加载成功即 up，句柄标死即 down，并带原因。
+    wait_for_state(&deps, "down");
+    let demo = dep_entry(&deps).expect("依赖表里要有 demo");
+    assert_eq!(demo["lastErrorClass"], "unavailable");
+    assert!(
+        demo["lastError"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("timed out")),
+        "down 要保留句柄失效原因：{demo}"
     );
 
     // 句柄已标死：后续调用立即失败，不再排队等卡住的插件。

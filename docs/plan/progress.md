@@ -1378,6 +1378,25 @@
 - 未做：仓库没有前端测试框架，未加浏览器级渲染测试；未改 supervisor / WASM /
   插件加载区域。
 
+## 2026-11-04 — 动态库平台载体上报 AdapterStatus
+
+- 现状核实：OneBot（内置）与 process 外置适配器已经通过 `AdapterStatus` 上报真实
+  连接状态；Lua 只承载策略扩展点，不提供平台适配器，因此没有平台依赖条目；
+  真正一直 `unknown` 的是 dynamic `.so` 平台适配器。
+- 契约：`AdapterStatus` 增加 `loaded()`（加载/初始化成功 -> `up`，并记
+  `lastOkAt`）与 `failed(class, detail)`（明确失败 -> `down`，沿用现有错误分类，
+  如 `unavailable`/`closed`/`internal`）。未调用这两个入口的载体保持 `unknown`，
+  语义是「未提供状态」，不是「坏了」。
+- 接入：dynamic 适配器在 `launch` 时记录 `attempt` 并置 `up`；`DylibOutbound`
+  标记句柄失效时立即 `failed("unavailable", reason)`；正常 shutdown 报
+  `closed`。不探测远端、不做心跳，不改 process adapter 语义与协议版本。
+- 测试：deps 单测覆盖未上报 `unknown`、`loaded()` 后 `up`、`failed()` 后
+  `down + lastErrorClass`；dynamic fixture 端到端覆盖加载成功 `up` 与句柄超时
+  `down`（`lastErrorClass=unavailable`）。`cargo test --workspace` 63 个 suite
+  全 ok；clippy `-D warnings`、fmt 全绿。
+- 未做：dynamic 在启动期 dlopen/manifest/实例化失败时桥仍按原语义退出，在线健康
+  页不可见；没有网络探测或心跳。
+
 - 2026-11-04 — 决策索引：supervisor 平台无关、Nix profile 回滚、测试矩阵、回滚判据、反馈/工单、记忆管家、扩展工厂 → [supervision-packaging-issues.md](supervision-packaging-issues.md)
 
 ## 部署注意事项（nix-config 打包）

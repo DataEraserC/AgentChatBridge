@@ -831,6 +831,25 @@ mod tests {
     }
 
     #[test]
+    fn carrier_status_contract_covers_up_down_and_unknown() {
+        let registry = DependencyRegistry::from_config(&platform_config());
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "unknown", "未上报的载体保持 unknown");
+
+        let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
+        status.loaded();
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "up", "载体加载/初始化成功 -> up");
+        assert!(!qq["lastOkAt"].is_null(), "up 要带 lastOkAt");
+
+        status.failed("unavailable", "dlopen failed");
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "down", "初始化/运行失败 -> down");
+        assert_eq!(qq["lastErrorClass"], "unavailable");
+        assert_eq!(qq["lastError"], "dlopen failed");
+    }
+
+    #[test]
     fn harness_unknown_becomes_not_started_after_grace() {
         let registry = DependencyRegistry::from_config(&harness_config());
         let snapshot = registry.snapshot(None);
