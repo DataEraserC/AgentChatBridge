@@ -1115,6 +1115,16 @@
 - 证据：`cargo test --workspace`、clippy、fmt 全绿。
 - 可回退：去掉 attempt 调用点即可恢复旧的只在成功时计数。
 
+## 2026-11-04 — fix(queue): count depth before sending
+
+- 问题：深度计数在 `try_send` 成功之后才 +1，接收端可能已经先取走并 -1；
+  计数器被减到 0 以下后下一次入队会溢出（debug 下直接 panic）。
+  `route_send_goes_through_the_action_worker` 稳定复现。
+- 改动：入队前先计数，发送失败/断开时回滚；`dequeued` 用 `fetch_update`
+  检查下界，绝不让深度变成 `usize::MAX`。
+- 证据：该用例与 event_queue 单测全绿；workspace 全量随后统一跑。
+- 可回退：只影响统计口径，不改队列本身。
+
 ## 待办（用户指定，暂不实现）
 
 - LKG 失败阈值分 class：panic 类失败也许应该 1 次就回滚，不应与 provider 解析

@@ -52,15 +52,19 @@ impl RouteWorker {
         let mut rejected = 0usize;
         for action in actions {
             self.busy.fetch_add(1, Ordering::SeqCst);
+            // 先计数再入队：worker 可能立刻取走，不能让它先看到 0 再减。
+            self.stats.enqueued();
             match self.tx.try_send(action) {
-                Ok(()) => self.stats.enqueued(),
+                Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     self.busy.fetch_sub(1, Ordering::SeqCst);
+                    self.stats.dequeued();
                     self.stats.rejected();
                     rejected = rejected.saturating_add(1);
                 }
                 Err(TrySendError::Disconnected(_)) => {
                     self.busy.fetch_sub(1, Ordering::SeqCst);
+                    self.stats.dequeued();
                     rejected = rejected.saturating_add(1);
                     eprintln!("{}", acb_i18n::t!("kernel.route_worker.stopped"));
                     break;
