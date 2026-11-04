@@ -369,7 +369,7 @@ impl Conn {
     pub fn abandon<S: Store>(&mut self, bridge: &mut Bridge<S>) {
         let tickets: Vec<Ticket> = self.tickets.values().cloned().collect();
         for ticket in tickets {
-            let _ = bridge.end_turn(&ticket, None);
+            let _ = bridge.abandon_turn(&ticket);
         }
         self.tickets.clear();
     }
@@ -419,9 +419,7 @@ pub fn run_connection<S: Store>(
             }
         };
         let frame = decode(&line).map_err(|error| EndpointError::Protocol(error.to_string()))?;
-        if let Frame::Hello { harness, .. } = &frame {
-            deps.harness_attempt(harness, now_millis());
-        }
+        // 先握手校验身份，再登记依赖：未认证的 Hello 不能创建或污染依赖条目。
         let guard = lock(bridge);
         let sessions = handshake(&guard, frame)?;
         // 握手已经校验过「这些会话都属于这个 harness」，取第一个会话反查 harness id。
@@ -432,7 +430,7 @@ pub fn run_connection<S: Store>(
         (sessions, harness)
     };
     if let Some(harness) = &harness {
-        deps.harness_connected(harness, now_millis());
+        deps.harness_connection_opened(harness, now_millis());
     }
     // 把这条连接代表会话的已落盘映射带上，让 harness 跨重启复用旧会话（ADR-0018）。
     let maps = {
@@ -650,7 +648,7 @@ pub fn run_connection<S: Store>(
             Ok(()) => "connection closed".to_owned(),
             Err(error) => error.to_string(),
         };
-        deps.harness_disconnected(harness, &detail, now_millis());
+        deps.harness_connection_closed(harness, &detail, now_millis());
     }
 
     // 无论怎么结束，都要把没跑完的轮次放掉。

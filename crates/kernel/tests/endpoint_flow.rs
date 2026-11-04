@@ -469,6 +469,7 @@ fn one_connection_takes_only_one_turn_per_session_at_a_time() {
 struct TestServer {
     address: std::net::SocketAddr,
     bridge: Arc<Mutex<Bridge<MemoryStore>>>,
+    deps: DependencyRegistry,
     shutdown: Arc<AtomicBool>,
     handle: thread::JoinHandle<()>,
 }
@@ -479,16 +480,18 @@ impl TestServer {
         let address = listener.local_addr().expect("有地址");
         let bridge = Arc::new(Mutex::new(bridge()));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let deps = DependencyRegistry::new();
 
         let thread_bridge = Arc::clone(&bridge);
         let thread_shutdown = Arc::clone(&shutdown);
+        let thread_deps = deps.clone();
         let handle = thread::spawn(move || {
             serve(
                 listener,
                 thread_bridge,
                 thread_shutdown,
                 ControlRegistry::new(),
-                DependencyRegistry::new(),
+                thread_deps,
             )
             .expect("服务能跑");
         });
@@ -496,6 +499,7 @@ impl TestServer {
         Self {
             address,
             bridge,
+            deps,
             shutdown,
             handle,
         }
@@ -505,6 +509,34 @@ impl TestServer {
         self.shutdown.store(true, Ordering::SeqCst);
         self.handle.join().expect("服务线程能收工");
     }
+}
+
+#[test]
+fn failed_handshake_does_not_pollute_dependencies() {
+    let server = TestServer::start();
+    let mut stream = TcpStream::connect(server.address).expect("能连上");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("能设超时");
+    let mut reader = BufReader::new(stream.try_clone().expect("能复制"));
+
+    write_frame(
+        &mut stream,
+        &Frame::Hello {
+            version: PROTOCOL_VERSION,
+            harness: "dsh".into(),
+            token: Some("wrong-token".into()),
+        },
+    );
+    // 握手失败时服务端会直接断开；读一次确认它已经处理过这一帧。
+    let _ = read_frame(&mut reader);
+
+    let snapshot = server.deps.snapshot(None);
+    assert!(
+        snapshot["dependencies"].as_array().unwrap().is_empty(),
+        "未认证的 Hello 不能创建依赖条目：{snapshot}"
+    );
+    server.stop();
 }
 
 #[test]
@@ -531,6 +563,15 @@ fn a_real_connection_carries_a_whole_turn() {
         Frame::Ready { sessions, .. } => assert_eq!(sessions, vec!["main".to_owned()]),
         other => panic!("应当是 ready，实际是 {}", other.kind()),
     }
+    let deps = server.deps.snapshot(None);
+    let dsh = deps["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "dsh")
+        .expect("握手成功后要有 harness 条目");
+    assert_eq!(dsh["state"], "up");
+    assert_eq!(dsh["attempts"], 1);
 
     // 平台那边来了条消息（直接喂给桥，等价于适配器解码后调 ingest）。
     {

@@ -32,7 +32,7 @@ use thiserror::Error;
 use crate::config::{
     ClockPolicy, Config, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy, WakeVerdict,
 };
-use crate::deps::DependencyRegistry;
+use crate::deps::{DependencyKind, DependencyRegistry};
 use crate::lkg::PluginLkg;
 use crate::memory::{
     MemoryRepo, git_add, git_blame, git_branch, git_commit, git_diff, git_log, git_push,
@@ -559,6 +559,7 @@ struct TurnFailureNotice {
 #[derive(Debug, Clone, Copy)]
 enum TurnFailureSuppressed {
     Duplicate,
+    ComponentDown,
     RoomLimit,
 }
 
@@ -566,6 +567,7 @@ impl TurnFailureSuppressed {
     fn as_str(self) -> &'static str {
         match self {
             Self::Duplicate => "duplicate",
+            Self::ComponentDown => "component_down",
             Self::RoomLimit => "room_limit",
         }
     }
@@ -600,6 +602,16 @@ fn component_id_for(config: &Config, session: &str, failure: &TurnFailure) -> Op
         "backend" => config
             .session(session)
             .map(|session| session.harness.clone()),
+        _ => None,
+    }
+}
+
+/// 结构化 component 对应的依赖类别。`harness` 是对 `backend` 的兼容别名。
+fn component_kind_for(component: &str) -> Option<DependencyKind> {
+    match component {
+        "model" => Some(DependencyKind::Model),
+        "backend" | "harness" => Some(DependencyKind::Harness),
+        "platform" => Some(DependencyKind::Platform),
         _ => None,
     }
 }
@@ -2894,15 +2906,7 @@ impl<S: Store> Bridge<S> {
         failure: Option<&TurnFailure>,
     ) -> Result<(), BridgeError> {
         // 先把这一轮的信息取出来（room + session），remove 之前要用它做失败通知。
-        let turn = self.active.get(
-            self.by_ticket
-                .get(ticket)
-                .ok_or_else(|| BridgeError::UnknownTicket(ticket.to_string()))?,
-        );
-        let turn = turn.cloned();
-        let Some(turn) = turn else {
-            return Err(BridgeError::UnknownTicket(ticket.to_string()));
-        };
+        let turn = self.active_turn_snapshot(ticket)?;
 
         // 收轮时记下时序：之后若有工具迟到，可与这条日志对齐，判断是传输竞态还是
         // harness 在 turn_end 之后还在调用。
@@ -2937,10 +2941,7 @@ impl<S: Store> Bridge<S> {
                     .as_ref()
                     .map(|notifications| notifications.in_band)
                     .unwrap_or_default();
-                // 结构化失败先落到依赖表；这一步不影响是否发 in-band 通知。
-                if let Some(failure) = failure {
-                    self.note_structured_failure(&turn.config, &turn.session, failure, error, now);
-                }
+                // 抑制判定要看「这一轮之前」组件是否已经 down，所以必须在写依赖表之前。
                 let fingerprint = turn_error_fingerprint(error);
                 let structured = failure.map(|failure| {
                     (
@@ -2952,14 +2953,19 @@ impl<S: Store> Bridge<S> {
                 let structured_key = structured
                     .as_ref()
                     .map(|(component, id, class)| (*component, id.as_deref(), *class));
-                match self.turn_failure_suppressed(
+                let suppressed = self.turn_failure_suppressed(
                     &turn.session,
                     &turn.room,
                     fingerprint,
                     structured_key,
                     in_band,
                     now,
-                ) {
+                );
+                // 不论是否抑制，结构化失败都要落到依赖表；抑制只影响 in-band。
+                if let Some(failure) = failure {
+                    self.note_structured_failure(&turn.config, &turn.session, failure, error, now);
+                }
+                match suppressed {
                     Some(reason) => {
                         self.deps.notice_turn_suppressed(
                             &turn.session,
@@ -2971,6 +2977,9 @@ impl<S: Store> Bridge<S> {
                         let key = match reason {
                             TurnFailureSuppressed::Duplicate => {
                                 "kernel.engine.turn_error_duplicate"
+                            }
+                            TurnFailureSuppressed::ComponentDown => {
+                                "kernel.engine.turn_error_component_down"
                             }
                             TurnFailureSuppressed::RoomLimit => {
                                 "kernel.engine.turn_error_room_limited"
@@ -3003,12 +3012,43 @@ impl<S: Store> Bridge<S> {
                     }
                 }
             }
-        } else {
+        } else if !turn.stop_requested {
             // 这一轮恢复正常：清掉这个 (session, room) 的历史失败，下一次故障重新通知。
             self.clear_turn_failures(&turn.session, &turn.room);
             self.note_turn_success(&turn.config, &turn.session, now_millis());
         }
 
+        self.finish_turn(ticket, &turn)
+    }
+
+    /// 连接断掉：把没交代完的轮次放掉。
+    ///
+    /// 不确认任何消息（它们仍是未读，下一轮重投）；也不把「没收到 turn_end」当成
+    /// 成功——否则 harness 断线会把依赖表刷回 up，并清掉失败去重历史。
+    pub fn abandon_turn(&mut self, ticket: &Ticket) -> Result<(), BridgeError> {
+        let turn = self.active_turn_snapshot(ticket)?;
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "kernel.engine.turn_abandoned",
+                session = turn.session,
+                room = turn.room,
+                ticket = ticket.to_string()
+            )
+        );
+        self.finish_turn(ticket, &turn)
+    }
+
+    fn active_turn_snapshot(&self, ticket: &Ticket) -> Result<ActiveTurn, BridgeError> {
+        self.by_ticket
+            .get(ticket)
+            .and_then(|session| self.active.get(session))
+            .cloned()
+            .ok_or_else(|| BridgeError::UnknownTicket(ticket.to_string()))
+    }
+
+    /// 票作废、写 `ended` 宽限记录、释放会话。成功与放弃共用；两者都不推水位。
+    fn finish_turn(&mut self, ticket: &Ticket, turn: &ActiveTurn) -> Result<(), BridgeError> {
         let Some(session) = self.by_ticket.remove(ticket) else {
             return Err(BridgeError::UnknownTicket(ticket.to_string()));
         };
@@ -3081,6 +3121,15 @@ impl<S: Store> Bridge<S> {
         in_band: InBandNoticeConfig,
         now: i64,
     ) -> Option<TurnFailureSuppressed> {
+        // 依赖已经 down 时，同一依赖的后续 turn 失败只更新状态表，不再刷 in-band。
+        // 首失败发生在 down 之前，因此仍会正常通知一次；这个检查必须在写依赖表之前。
+        if let Some((component, Some(id), _)) = structured {
+            if let Some(kind) = component_kind_for(component) {
+                if self.deps.is_down(kind, id) {
+                    return Some(TurnFailureSuppressed::ComponentDown);
+                }
+            }
+        }
         let cutoff = now.saturating_sub((in_band.window_secs as i64).saturating_mul(1000));
         self.turn_failures.retain(|item| item.at >= cutoff);
         let duplicate = match structured {
@@ -3166,7 +3215,7 @@ impl<S: Store> Bridge<S> {
             self.deps.model_up(&model, now);
         }
         if let Some(session) = config.session(session) {
-            self.deps.harness_connected(&session.harness, now);
+            self.deps.harness_turn_ok(&session.harness, now);
         }
     }
 

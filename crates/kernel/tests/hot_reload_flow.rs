@@ -9,6 +9,7 @@ use acb_kernel::{
     Bridge, Config, DependencyRegistry, Element, Ingest, MemoryStore, Outbound, OutboundError,
     RecordDraft, RoomId, Sender, Sent, TurnReason,
 };
+use serde_json::Value;
 
 const AT: i64 = 1_793_000_000_000;
 
@@ -186,7 +187,7 @@ fn config_reload_prunes_removed_dependencies() {
     let config = Config::parse(&config_base()).expect("配置合法");
     let deps = DependencyRegistry::from_config(&config);
     deps.platform_connected("qq", AT);
-    deps.harness_connected("dsh", AT);
+    deps.harness_connection_opened("dsh", AT);
     let mut bridge =
         Bridge::new(config, MemoryStore::new(), Box::new(Recorder)).with_dependencies(deps.clone());
 
@@ -214,7 +215,7 @@ fn config_reload_prunes_removed_dependencies() {
         .find(|item| item["id"] == "qq2")
         .expect("新连接已登记");
     assert_eq!(added["state"], "unknown");
-    assert_eq!(added["lastErrorClass"], "not_configured");
+    assert_eq!(added["lastError"], Value::Null);
 }
 
 #[test]
