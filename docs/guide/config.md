@@ -227,6 +227,9 @@ capability = ["room_read", "room_write", "connection_read"]
 - 群内临时越权用 `access_request { items }`：一条 = 单张，多条 = 批量（每张独立票据、共享 batch_id）；
   审批消息发到 system admin 私信，管理员用 `/approve <id> <nonce>`、`/deny <id> <nonce>`、
   `/approve <batch_id>` 或 `/revoke <id>` 处理。票据 2 分钟内单次可用，重启后全部失效。
+  批准后 core 按申请时保存的 `params` 快照执行 `send_message` / `send_message_to` / `platform_call`，
+  只读 op 的票据保持 `active` 由会话在有效期内重试。执行结果以系统事件 `ticket_result`
+  写回原房间，完整结果用 `access_ticket_get` 查。
   `[tickets]` 可配申请冷却与管理员消息冷却（默认 60s / 30s）。`access_ticket_get` 只能查本会话的票据。
 - 破坏性操作仍由连接的 `allow_destructive` 单独把关，授权/票据都不能顶替它。
 - 外部 provider 只能落在**配置里存在的连接**上——连接本身没配登录账号，发不出去。

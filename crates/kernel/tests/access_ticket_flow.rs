@@ -5,17 +5,35 @@
 use std::sync::{Arc, Mutex};
 
 use acb_kernel::{
-    Bridge, Config, Element, ErrorCode, Ingest, MemoryStore, Outbound, OutboundError, RecordDraft,
-    RoomId, Sender, Sent,
+    Bridge, CallError, CallOutcome, Config, Effect, Element, ErrorCode, Ingest, MemoryStore,
+    MethodSpec, Outbound, OutboundError, ParamSpec, RecordDraft, RecordKind, RecordMode, Risk,
+    RoomId, Scope, Sender, Sent, TargetSpec, TurnReason,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 const AT: i64 = 1_793_000_000_000;
 
 type Sends = Arc<Mutex<Vec<(RoomId, Vec<Element>)>>>;
+type Calls = Arc<Mutex<Vec<String>>>;
 
 struct Recorder {
     sends: Sends,
+    calls: Calls,
+}
+
+/// 目标连接只声明一个 destructive 方法，用来验证票据不放宽 `allow_destructive`。
+fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
+    std::sync::Arc::from(vec![MethodSpec {
+        name: "group.kick".into(),
+        summary: "踢人".into(),
+        tags: Vec::new().into(),
+        risk: Risk::Destructive,
+        scope: Scope::Room,
+        params: vec![ParamSpec::required("user_id", "要踢的人")].into(),
+        targets: vec![TargetSpec::room("group_id", "group")].into(),
+        effect: Effect::Write,
+        record: RecordMode::None,
+    }])
 }
 
 impl Outbound for Recorder {
@@ -26,6 +44,24 @@ impl Outbound for Recorder {
             platform_id: format!("p-{}", sends.len()),
             at: AT,
         })
+    }
+
+    fn catalog(&self, connection: &str) -> std::sync::Arc<[MethodSpec]> {
+        if connection == "qq" {
+            destructive_catalog()
+        } else {
+            std::sync::Arc::from(Vec::<MethodSpec>::new())
+        }
+    }
+
+    fn call(
+        &mut self,
+        _room: &RoomId,
+        method: &str,
+        _params: &Value,
+    ) -> Result<CallOutcome, CallError> {
+        self.calls.lock().expect("没被毒死").push(method.to_owned());
+        Ok(CallOutcome::value(json!({"done": true})))
     }
 }
 
@@ -92,15 +128,22 @@ fn config() -> &'static str {
 }
 
 fn bridge_with(text: &str) -> (Bridge<MemoryStore>, Sends) {
+    let (bridge, sends, _calls) = bridge_with_calls(text);
+    (bridge, sends)
+}
+
+fn bridge_with_calls(text: &str) -> (Bridge<MemoryStore>, Sends, Calls) {
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let bridge = Bridge::new(
         Config::parse(text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
+            calls: calls.clone(),
         }),
     );
-    (bridge, sends)
+    (bridge, sends, calls)
 }
 
 fn bridge() -> (Bridge<MemoryStore>, Sends) {
@@ -162,7 +205,11 @@ fn single_request_approve_and_use_once() {
             &first,
             &sessions(),
             "access_request",
-            json!({"items": [{"target": "qq:group/999", "ops": ["send_message_to"]}]}),
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["send_message_to"],
+                "params": {"elements": [{"type": "text", "text": "approved"}]}
+            }]}),
         )
         .expect("申请成功");
     assert_eq!(request["batch_id"], serde_json::Value::Null);
@@ -177,13 +224,21 @@ fn single_request_approve_and_use_once() {
             &first,
             &sessions(),
             "access_request",
-            json!({"items": [{"target": "qq:group/999", "ops": ["send_message_to"]}]}),
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["send_message_to"],
+                "params": {"elements": [{"type": "text", "text": "approved"}]}
+            }]}),
         )
         .expect("重复申请");
     assert_eq!(duplicate["tickets"][0]["duplicate"], true);
 
     bridge.end_turn(&first, None).expect("收工");
     let text = approval_dm(&sends);
+    assert!(
+        !text.contains("approved"),
+        "审批私信只列目标/op/能力，不打印参数正文：{text}"
+    );
     let nonce = field(&text, "nonce=");
 
     let handled = bridge
@@ -199,28 +254,76 @@ fn single_request_approve_and_use_once() {
         "私信审批命令由 core 接管，不叫醒 agent"
     );
 
+    let executed = sends
+        .lock()
+        .expect("没被毒死")
+        .iter()
+        .any(|(room, elements)| {
+            room == &RoomId::parse("qq:group/999").expect("房间")
+                && text_of(elements).contains("approved")
+        });
+    assert!(executed, "批准后 core 应直接执行并发出消息");
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有唤醒");
+    assert_eq!(delivery.reason, TurnReason::Wake);
+    assert_eq!(delivery.session, "main");
+    assert_eq!(delivery.wake_reason.as_deref(), Some("ticket_result"));
+    let pointer = delivery
+        .records
+        .iter()
+        .find(|record| {
+            matches!(&record.kind, RecordKind::Event { event, .. } if event == "ticket_result")
+        })
+        .expect("原会话流水里有一条 ticket_result 指针");
+    assert_eq!(pointer.sender.id, "system", "结果指针不能伪装成人类发言");
+    assert!(pointer.sender.role.is_none());
+    assert!(!pointer.at_self && !pointer.reply_to_self);
+    let pointer_text = text_of(&pointer.elements);
+    assert!(pointer_text.contains(&id), "{pointer_text}");
+    assert!(pointer_text.contains("qq:group/999"), "{pointer_text}");
+    assert!(pointer_text.contains("send_message_to"), "{pointer_text}");
+    assert!(pointer_text.contains("succeeded"), "{pointer_text}");
+    assert!(
+        pointer_text.contains(&format!("access_ticket_get {{\"id\":\"{id}\"}}")),
+        "{pointer_text}"
+    );
+
+    let after = delivery.ticket;
+    let queried = bridge
+        .tool_call(&after, &sessions(), "access_ticket_get", json!({"id": id}))
+        .expect("查询自己发起的票据");
+    assert_eq!(queried["state"], "used");
+    assert_eq!(queried["execution_status"], "succeeded");
+    assert!(queried["executed_at"].is_number());
+    assert!(
+        queried["audit_ref"]
+            .as_str()
+            .is_some_and(|value| value.contains(&id))
+    );
+    assert!(
+        queried["result"]["ops"]
+            .as_array()
+            .is_some_and(|ops| !ops.is_empty())
+    );
+
+    // 唤醒轮沿用原票据触发者，不继承管理员身份；有触发者才允许再申请票据。
     bridge
-        .ingest(message("qq:group/123", "user1", "再试一次", true))
-        .expect("能记下来");
-    let second = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
-    let sent = bridge
         .tool_call(
-            &second,
+            &after,
             &sessions(),
-            "send_message_to",
-            json!({"to": "qq:group/999", "elements": [{"type": "text", "text": "approved"}]}),
+            "access_request",
+            json!({"items": [{"target": "qq:group/997", "ops": ["get_history"]}]}),
         )
-        .expect("票据放行一次");
-    assert_eq!(sent["room"], "qq:group/999");
+        .expect("唤醒轮仍以原触发者身份");
 
     let denied = bridge
         .tool_call(
-            &second,
+            &after,
             &sessions(),
             "send_message_to",
             json!({"to": "qq:group/999", "elements": [{"type": "text", "text": "again"}]}),
         )
-        .expect_err("用后即废");
+        .expect_err("执行后票据已消费");
     assert_eq!(denied.code, ErrorCode::RoomNotSubscribed);
 }
 
@@ -237,7 +340,11 @@ fn two_requests_in_one_turn_are_aggregated_into_one_message() {
             &ticket,
             &sessions(),
             "access_request",
-            json!({"items": [{"target": "qq:group/999", "ops": ["send_message_to"]}]}),
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["send_message_to"],
+                "params": {"elements": [{"type": "text", "text": "approved"}]}
+            }]}),
         )
         .expect("第一条");
     let second = bridge
@@ -287,8 +394,10 @@ fn batch_request_approve_by_batch_id_and_query() {
             &sessions(),
             "access_request",
             json!({"items": [
-                {"target": "qq:group/999", "ops": ["send_message_to"]},
-                {"target": "qq:group/998", "ops": ["get_history"]}
+                {"target": "qq:group/999", "ops": ["platform_call:group.kick"],
+                 "params": {"user_id": "10001"}},
+                {"target": "qq:group/998", "ops": ["send_message_to"],
+                 "params": {"elements": [{"type": "text", "text": "batch two"}]}}
             ]}),
         )
         .expect("批量申请");
@@ -313,6 +422,18 @@ fn batch_request_approve_by_batch_id_and_query() {
         .expect("整批批准命令");
     assert!(matches!(handled, Ingest::Handled { .. }));
 
+    assert!(
+        sends
+            .lock()
+            .expect("没被毒死")
+            .iter()
+            .any(|(room, elements)| {
+                room == &RoomId::parse("qq:group/998").expect("房间")
+                    && text_of(elements).contains("batch two")
+            }),
+        "第一条失败不中止整批：第二条 send_message_to 仍由 core 发出"
+    );
+
     bridge
         .ingest(message("qq:group/123", "user1", "查一下", true))
         .expect("能记下来");
@@ -327,9 +448,25 @@ fn batch_request_approve_by_batch_id_and_query() {
         .expect("按 batch 查询");
     assert_eq!(queried["count"], 2);
     for item in queried["tickets"].as_array().expect("tickets") {
-        assert_eq!(item["state"], "active");
         assert_eq!(item["batch_id"], batch_id);
     }
+    let tickets = queried["tickets"].as_array().expect("tickets");
+    assert_eq!(tickets[0]["state"], "used");
+    assert_eq!(tickets[0]["execution_status"], "failed");
+    assert!(
+        tickets[0]["failure_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("[forbidden]")),
+        "{}",
+        tickets[0]["failure_reason"]
+    );
+    assert_eq!(tickets[1]["state"], "used");
+    assert_eq!(tickets[1]["execution_status"], "succeeded");
+    assert!(
+        tickets[1]["result"]["ops"]
+            .as_array()
+            .is_some_and(|ops| !ops.is_empty())
+    );
 }
 
 #[test]
@@ -360,7 +497,8 @@ fn batch_rejects_too_many_items_and_bad_item() {
             &sessions(),
             "access_request",
             json!({"items": [
-                {"target": "qq:group/999", "ops": ["send_message_to"]},
+                {"target": "qq:group/999", "ops": ["send_message_to"],
+                 "params": {"elements": [{"type": "text", "text": "ok"}]}},
                 {"target": "tg:group/999", "ops": ["send_message_to"]}
             ]}),
         )
@@ -382,7 +520,8 @@ fn batch_query_from_another_session_is_rejected() {
             &sessions(),
             "access_request",
             json!({"items": [
-                {"target": "qq:group/999", "ops": ["send_message_to"]},
+                {"target": "qq:group/999", "ops": ["send_message_to"],
+                 "params": {"elements": [{"type": "text", "text": "batch one"}]}},
                 {"target": "qq:group/998", "ops": ["get_history"]}
             ]}),
         )
@@ -427,7 +566,11 @@ fn session_cooldown_rejects_the_next_request() {
             &first,
             &sessions(),
             "access_request",
-            json!({"items": [{"target": "qq:group/999", "ops": ["send_message_to"]}]}),
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["send_message_to"],
+                "params": {"elements": [{"type": "text", "text": "approved"}]}
+            }]}),
         )
         .expect("第一次申请");
     bridge.end_turn(&first, None).expect("收工");
@@ -451,6 +594,111 @@ fn session_cooldown_rejects_the_next_request() {
         blocked.message
     );
     assert!(blocked.message.contains(" 60s") || blocked.message.contains("59s"));
+}
+
+#[test]
+fn destructive_platform_call_is_refused_even_after_approval() {
+    let (mut bridge, sends, calls) = bridge_with_calls(config());
+    bridge
+        .ingest(message("qq:group/123", "user1", "踢个人", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let request = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["platform_call:group.kick"],
+                "params": {"user_id": "10001"}
+            }]}),
+        )
+        .expect("申请成功");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("票据 id")
+        .to_owned();
+    bridge.end_turn(&ticket, None).expect("收工");
+    let text = approval_dm(&sends);
+    assert!(text.contains("[DESTRUCTIVE]"), "{text}");
+    let nonce = field(&text, "nonce=");
+
+    let handled = bridge
+        .ingest(message(
+            "qq:private/admin",
+            "admin",
+            &format!("/approve {id} {nonce}"),
+            false,
+        ))
+        .expect("管理员命令能入库");
+    assert!(matches!(handled, Ingest::Handled { .. }));
+    assert!(
+        calls.lock().expect("没被毒死").is_empty(),
+        "destructive 未被 allow_destructive 放行时，批准后也不能调用平台"
+    );
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有唤醒");
+    let after = delivery.ticket;
+    let queried = bridge
+        .tool_call(&after, &sessions(), "access_ticket_get", json!({"id": id}))
+        .expect("查询执行结果");
+    assert_eq!(queried["state"], "used");
+    assert_eq!(queried["execution_status"], "failed");
+    assert!(
+        queried["failure_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("[forbidden]")),
+        "{}",
+        queried["failure_reason"]
+    );
+    assert_eq!(queried["result"]["ops"][0]["status"], "failed");
+}
+
+#[test]
+fn read_only_ticket_stays_active_for_the_session_to_retry() {
+    let (mut bridge, sends) = bridge();
+    bridge
+        .ingest(message("qq:group/123", "user1", "想读别的群", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let request = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{"target": "qq:group/999", "ops": ["get_history"]}]}),
+        )
+        .expect("申请成功");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("票据 id")
+        .to_owned();
+    bridge.end_turn(&ticket, None).expect("收工");
+    let text = approval_dm(&sends);
+    let nonce = field(&text, "nonce=");
+
+    bridge
+        .ingest(message(
+            "qq:private/admin",
+            "admin",
+            &format!("/approve {id} {nonce}"),
+            false,
+        ))
+        .expect("管理员命令能入库");
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有唤醒");
+    assert!(delivery.records.iter().any(|record| {
+        matches!(&record.kind, RecordKind::Event { event, .. } if event == "ticket_result")
+            && text_of(&record.elements).contains("active")
+    }));
+    let after = delivery.ticket;
+    let queried = bridge
+        .tool_call(&after, &sessions(), "access_ticket_get", json!({"id": id}))
+        .expect("查询票据");
+    assert_eq!(queried["state"], "active", "只读票据不能被 core 执行消费");
+    assert!(queried["execution_status"].is_null());
 }
 
 #[test]

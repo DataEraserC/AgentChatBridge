@@ -107,6 +107,9 @@ pub struct AccessRequestItem {
     /// 要放行的具体操作。形如 `send_message_to`、`get_history`、
     /// `platform_call:group.kick`；不接受模糊的「整个房间」。
     pub ops: Vec<String>,
+    /// 挂起动作的参数快照。发送类给 `elements` / `text`；平台调用给 params 对象。
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
 }
 
 /// 只读查询票据。`id` 与 `batch_id` 必须且只能给一个。
