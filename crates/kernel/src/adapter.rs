@@ -113,6 +113,12 @@ impl AdapterStatus {
         }
     }
 
+    /// 记一次连接尝试；成功/失败都要在尝试前调用。
+    pub fn attempt(&self) {
+        self.deps
+            .platform_attempt(&self.connection, crate::deps::now_millis());
+    }
+
     pub fn connected(&self) {
         self.deps
             .platform_connected(&self.connection, crate::deps::now_millis());

@@ -1,7 +1,8 @@
-//! 全局依赖状态表（connectivity 第①步）。
+//! 全局依赖状态表（connectivity 第①②步）。
 //!
 //! 只记录「这个组件现在可不可用」以及最后一次状态迁移，不做通知、不探测远端。
-//! 当前只接 harness 连接存在性；平台适配器在下一步通过 `mark_platform` 上报。
+//! harness 由接入点上报；平台适配器通过 `AdapterStatus` 上报。
+//! `attempts` 记每一次连接尝试，与是否连上无关；`neverConnected` 只看 `lastOkAt`。
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -169,7 +170,12 @@ impl DependencyRegistry {
         registry
     }
 
-    /// harness 握手成功：up，记录 lastOkAt / attempts。
+    /// 记一次连接尝试（不改变状态）。成功也是尝试，由 connected 前的 attempt 记一次。
+    pub fn harness_attempt(&self, id: &str, now: i64) {
+        self.mark_attempt(DependencyKind::Harness, id, now);
+    }
+
+    /// harness 握手成功：up，记录 lastOkAt。
     pub fn harness_connected(&self, id: &str, now: i64) {
         self.mark_up(DependencyKind::Harness, id, now);
     }
@@ -177,6 +183,11 @@ impl DependencyRegistry {
     /// harness 连接断开：down，class=closed。
     pub fn harness_disconnected(&self, id: &str, detail: &str, now: i64) {
         self.mark_down(DependencyKind::Harness, id, "closed", detail, now);
+    }
+
+    /// 记一次平台连接尝试（不改变状态）。
+    pub fn platform_attempt(&self, id: &str, now: i64) {
+        self.mark_attempt(DependencyKind::Platform, id, now);
     }
 
     /// 平台适配器上报连接成功（第②步使用）。
@@ -224,6 +235,22 @@ impl DependencyRegistry {
         }
     }
 
+    fn mark_attempt(&self, kind: DependencyKind, id: &str, now: i64) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, kind, id, now);
+        let key = Key {
+            kind,
+            id: id.to_owned(),
+        };
+        if let Some(entry) = inner.entries.get_mut(&key) {
+            entry.attempts = entry.attempts.saturating_add(1);
+            entry.last_attempt_at = Some(now);
+        }
+    }
+
     fn mark_up(&self, kind: DependencyKind, id: &str, now: i64) {
         let mut inner = self
             .inner
@@ -237,8 +264,6 @@ impl DependencyRegistry {
         let from = {
             let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
             let from = entry.state;
-            entry.attempts = entry.attempts.saturating_add(1);
-            entry.last_attempt_at = Some(now);
             entry.last_ok_at = Some(now);
             entry.last_error = None;
             entry.last_class = None;
@@ -501,6 +526,7 @@ mod tests {
         assert_eq!(qq["attempts"], 0);
 
         let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
+        status.attempt();
         status.connected();
         let snapshot = registry.snapshot(None);
         let qq = entry(&snapshot, "qq");
@@ -514,6 +540,7 @@ mod tests {
         assert_eq!(qq["lastErrorClass"], "unreachable");
         assert_eq!(qq["lastError"], "socket closed");
 
+        status.attempt();
         status.connected();
         let snapshot = registry.snapshot(None);
         let qq = entry(&snapshot, "qq");
@@ -523,8 +550,24 @@ mod tests {
     }
 
     #[test]
+    fn failed_attempts_count_without_connecting() {
+        let registry = DependencyRegistry::from_config(&harness_config());
+        registry.harness_attempt("dsh", 100);
+        registry.harness_attempt("dsh", 101);
+        registry.harness_attempt("dsh", 102);
+        let snapshot = registry.snapshot(None);
+        let dsh = entry(&snapshot, "dsh");
+        assert_eq!(dsh["state"], "unknown", "只尝试不算连上或断开");
+        assert_eq!(dsh["neverConnected"], true);
+        assert_eq!(dsh["attempts"], 3, "每次尝试都计数");
+        assert_eq!(dsh["lastAttemptAt"], 102);
+        assert!(snapshot["transitions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn connect_disconnect_and_reconnect_make_edges() {
         let registry = DependencyRegistry::from_config(&harness_config());
+        registry.harness_attempt("dsh", 99);
         registry.harness_connected("dsh", 100);
         let snapshot = registry.snapshot(None);
         let dsh = entry(&snapshot, "dsh");
@@ -534,6 +577,7 @@ mod tests {
         assert_eq!(dsh["attempts"], 1);
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 1);
 
+        registry.harness_attempt("dsh", 101);
         registry.harness_connected("dsh", 101);
         let snapshot = registry.snapshot(None);
         assert_eq!(
@@ -551,6 +595,7 @@ mod tests {
         assert_eq!(dsh["lastErrorClass"], "closed");
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 2);
 
+        registry.harness_attempt("dsh", 103);
         registry.harness_connected("dsh", 103);
         let snapshot = registry.snapshot(Some(2));
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 1);

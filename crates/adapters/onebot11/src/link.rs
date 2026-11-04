@@ -413,6 +413,7 @@ pub fn supervise(
     let account = connection.account.clone();
 
     while !shutdown.load(Ordering::Relaxed) {
+        status.attempt();
         match connect(&url, token.as_deref(), READ_TICK) {
             Ok(ws) => {
                 status.connected();
