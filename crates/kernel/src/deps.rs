@@ -97,6 +97,17 @@ struct Entry {
     /// 三层版本信息。`None` = 还没采集。
     version: Option<PlatformVersionInfo>,
     version_observed_at: Option<i64>,
+    /// 窗口内的失败记录。只用于阈值判定，不是第二个 `attempts`：`attempts`
+    /// 仍然是「连接尝试总次数」，这里只保留最近窗口内的失败。
+    failures: VecDeque<FailureRecord>,
+    /// 迁到 `down` 时给排障看的一句话；成功一次就清掉。
+    hint: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FailureRecord {
+    at: i64,
+    class: String,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +129,8 @@ struct Inner {
     entries: BTreeMap<Key, Entry>,
     transitions: VecDeque<Transition>,
     seq: u64,
+    failure_threshold: u64,
+    failure_window_ms: i64,
 }
 
 /// 可克隆的依赖注册表。锁独立于 `Bridge` 的大锁，读快照不碰任何 I/O。
@@ -135,6 +148,9 @@ impl Default for DependencyRegistry {
                 entries: BTreeMap::new(),
                 transitions: VecDeque::new(),
                 seq: 0,
+                failure_threshold: crate::config::DEFAULT_DEPS_FAILURE_THRESHOLD,
+                failure_window_ms: (crate::config::DEFAULT_DEPS_FAILURE_WINDOW_SECS as i64)
+                    .saturating_mul(1000),
             })),
             sink: Arc::new(RwLock::new(None)),
         }
@@ -235,6 +251,8 @@ impl DependencyRegistry {
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.failure_threshold = config.deps.failure_threshold;
+        inner.failure_window_ms = (config.deps.failure_window_secs as i64).saturating_mul(1000);
 
         let stale: Vec<Key> = inner
             .entries
@@ -272,6 +290,8 @@ impl DependencyRegistry {
                 account_good: None,
                 version: None,
                 version_observed_at: None,
+                failures: VecDeque::new(),
+                hint: None,
             });
         }
         for connection in &config.connections {
@@ -295,6 +315,8 @@ impl DependencyRegistry {
                 account_good: None,
                 version: None,
                 version_observed_at: None,
+                failures: VecDeque::new(),
+                hint: None,
             });
         }
         // model 不在启动时预登记：没有轮次就没有观测，预先挂一堆 unknown 只会
@@ -329,7 +351,8 @@ impl DependencyRegistry {
         }
     }
 
-    /// harness 关闭一条连接：只有最后一条关闭才 down；否则仍保持 up。
+    /// harness 关闭一条连接：只有最后一条关闭才记失败；否则仍保持 up。
+    /// 单次关闭只累计，达到阈值才迁 `down`。
     pub fn harness_connection_closed(&self, id: &str, detail: &str, now: i64) {
         let mut inner = self
             .inner
@@ -346,7 +369,7 @@ impl DependencyRegistry {
             entry.open_connections == 0
         };
         let notice = if last {
-            mark_down_locked(&mut inner, &key, "closed", detail, now)
+            record_failure_locked(&mut inner, &key, "closed", detail, now)
         } else {
             None
         };
@@ -372,10 +395,30 @@ impl DependencyRegistry {
         self.mark_up(DependencyKind::Platform, id, now);
     }
 
-    /// 平台适配器上报断开（第②步使用）。
+    /// 平台适配器上报断开（第②步使用）。连接断开是瞬时故障，走阈值。
     pub fn platform_disconnected(&self, id: &str, class: &str, detail: &str, now: i64) {
         self.clear_account_observation(DependencyKind::Platform, id);
         self.mark_down(DependencyKind::Platform, id, class, detail, now);
+    }
+
+    /// 载体明确失效（加载失败、句柄已标死）。这是硬失败，不适用「再等两次」：
+    /// 句柄已经不可用，继续显示 up 只会误导排障。
+    pub fn platform_failed(&self, id: &str, class: &str, detail: &str, now: i64) {
+        self.clear_account_observation(DependencyKind::Platform, id);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, DependencyKind::Platform, id, now);
+        let key = Key {
+            kind: DependencyKind::Platform,
+            id: id.to_owned(),
+        };
+        let notice = mark_down_locked(&mut inner, &key, class, detail, now);
+        drop(inner);
+        if let Some(event) = notice {
+            self.emit(event);
+        }
     }
 
     /// 账号在线状态。连接建立不等于账号在线：SnowLuma 能在 WS 还通着的时候
@@ -404,7 +447,7 @@ impl DependencyRegistry {
         let notice = if online {
             mark_up_locked(&mut inner, &key, now)
         } else {
-            mark_down_locked(&mut inner, &key, "account_offline", detail, now)
+            record_failure_locked(&mut inner, &key, "account_offline", detail, now)
         };
         drop(inner);
         if let Some(event) = notice {
@@ -567,7 +610,7 @@ impl DependencyRegistry {
             kind,
             id: id.to_owned(),
         };
-        let notice = mark_down_locked(&mut inner, &key, class, detail, now);
+        let notice = record_failure_locked(&mut inner, &key, class, detail, now);
         drop(inner);
         if let Some(event) = notice {
             self.emit(event);
@@ -660,6 +703,8 @@ fn upsert(inner: &mut Inner, kind: DependencyKind, id: &str, now: i64) {
         account_good: None,
         version: None,
         version_observed_at: None,
+        failures: VecDeque::new(),
+        hint: None,
     });
 }
 
@@ -671,6 +716,8 @@ fn mark_up_locked(inner: &mut Inner, key: &Key, now: i64) -> Option<NoticeEvent>
         entry.last_ok_at = Some(now);
         entry.last_error = None;
         entry.last_class = None;
+        entry.failures.clear();
+        entry.hint = None;
         if from != State::Up {
             entry.state = State::Up;
             entry.since = now;
@@ -692,6 +739,53 @@ fn mark_up_locked(inner: &mut Inner, key: &Key, now: i64) -> Option<NoticeEvent>
         push_transition(inner, key.clone(), from, State::Up, None, None, now);
     }
     notice
+}
+
+/// 记一次失败：更新最近错误；只有同一 class 在窗口内累计到阈值才迁到 `down`。
+/// 单次失败不改变状态，避免一次网络抖动就把整条依赖标红。
+fn record_failure_locked(
+    inner: &mut Inner,
+    key: &Key,
+    class: &str,
+    detail: &str,
+    now: i64,
+) -> Option<NoticeEvent> {
+    let threshold = inner.failure_threshold;
+    let window_ms = inner.failure_window_ms;
+    let count = {
+        let entry = inner.entries.get_mut(key).expect("调用前已 upsert");
+        entry.last_error = Some(detail.to_owned());
+        entry.last_class = Some(class.to_owned());
+        while let Some(front) = entry.failures.front() {
+            if now.saturating_sub(front.at) > window_ms {
+                entry.failures.pop_front();
+            } else {
+                break;
+            }
+        }
+        entry.failures.push_back(FailureRecord {
+            at: now,
+            class: class.to_owned(),
+        });
+        entry
+            .failures
+            .iter()
+            .filter(|failure| failure.class == class)
+            .count() as u64
+    };
+    if count < threshold {
+        return None;
+    }
+    let hint = acb_i18n::t!(
+        "kernel.deps.failure_hint",
+        class = class,
+        threshold = threshold,
+        window = window_ms / 1000,
+    );
+    if let Some(entry) = inner.entries.get_mut(key) {
+        entry.hint = Some(hint);
+    }
+    mark_down_locked(inner, key, class, detail, now)
 }
 
 /// 把条目置为 `down`，必要时写迁移并返回带外事件。调用方持有 `inner` 锁。
@@ -806,6 +900,7 @@ fn entry_json(entry: &Entry) -> Value {
         "accountGood": entry.account_good,
         "version": entry.version.as_ref().map(version_json),
         "versionObservedAt": entry.version_observed_at,
+        "hint": entry.hint,
     })
 }
 
@@ -931,9 +1026,15 @@ mod tests {
         status.disconnected("unreachable", "socket closed");
         let snapshot = registry.snapshot(None);
         let qq = entry(&snapshot, "qq");
-        assert_eq!(qq["state"], "down");
+        assert_eq!(qq["state"], "up", "单次失败只累计，不迁 down");
         assert_eq!(qq["lastErrorClass"], "unreachable");
         assert_eq!(qq["lastError"], "socket closed");
+
+        status.disconnected("unreachable", "socket closed");
+        status.disconnected("unreachable", "socket closed");
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "down", "同一 class 第 3 次才 down");
+        assert!(qq["hint"].as_str().is_some(), "down 要附 hint");
 
         status.attempt();
         status.connected();
@@ -949,6 +1050,8 @@ mod tests {
         let registry = DependencyRegistry::from_config(&platform_config());
         let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
         status.attempt();
+        status.disconnected("unreachable", "connect ECONNREFUSED");
+        status.disconnected("unreachable", "connect ECONNREFUSED");
         status.disconnected("unreachable", "connect ECONNREFUSED");
 
         let snapshot = registry.snapshot(None);
@@ -981,7 +1084,7 @@ mod tests {
 
         status.failed("unavailable", "dlopen failed");
         let qq = entry(&registry.snapshot(None), "qq");
-        assert_eq!(qq["state"], "down", "初始化/运行失败 -> down");
+        assert_eq!(qq["state"], "down", "硬失败立即 down，不等阈值");
         assert_eq!(qq["lastErrorClass"], "unavailable");
         assert_eq!(qq["lastError"], "dlopen failed");
     }
@@ -1131,9 +1234,15 @@ mod tests {
         registry.harness_connection_opened("dsh", 101);
         registry.harness_connection_closed("dsh", "socket closed", 102);
         registry.harness_connection_closed("dsh", "socket closed", 103);
+        registry.harness_connection_closed("dsh", "socket closed", 104);
+        registry.harness_connection_closed("dsh", "socket closed", 105);
 
         let events = events.lock().expect("没被毒死");
-        assert_eq!(events.len(), 2, "只有 unknown→up 与 up→down 两条边");
+        assert_eq!(
+            events.len(),
+            2,
+            "只有 unknown→up 与第 3 次失败后的 up→down 两条边"
+        );
         match &events[0] {
             NoticeEvent::DependencyEdge {
                 kind,
@@ -1192,6 +1301,13 @@ mod tests {
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 1);
 
         registry.harness_connection_closed("dsh", "last closed", 103);
+        assert_eq!(
+            entry(&registry.snapshot(None), "dsh")["state"],
+            "up",
+            "单次断开只累计"
+        );
+        registry.harness_connection_closed("dsh", "last closed", 104);
+        registry.harness_connection_closed("dsh", "last closed", 105);
         let snapshot = registry.snapshot(None);
         assert_eq!(entry(&snapshot, "dsh")["state"], "down");
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 2);
@@ -1241,6 +1357,13 @@ mod tests {
             "还有连接时不能判 down"
         );
         registry.harness_connection_closed("dsh", "socket closed", 102);
+        assert_eq!(
+            entry(&registry.snapshot(None), "dsh")["state"],
+            "up",
+            "单次断开只累计"
+        );
+        registry.harness_connection_closed("dsh", "socket closed", 103);
+        registry.harness_connection_closed("dsh", "socket closed", 104);
         let snapshot = registry.snapshot(None);
         let dsh = entry(&snapshot, "dsh");
         assert_eq!(dsh["state"], "down");
@@ -1249,13 +1372,13 @@ mod tests {
         assert_eq!(dsh["lastErrorClass"], "closed");
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 2);
 
-        registry.harness_connection_opened("dsh", 103);
+        registry.harness_connection_opened("dsh", 105);
         let snapshot = registry.snapshot(Some(2));
         assert_eq!(snapshot["transitions"].as_array().unwrap().len(), 1);
         let dsh = entry(&snapshot, "dsh");
         assert_eq!(dsh["state"], "up");
-        assert_eq!(dsh["since"], 103, "重新连上后 since 重置");
-        assert_eq!(dsh["lastOkAt"], 103);
+        assert_eq!(dsh["since"], 105, "重新连上后 since 重置");
+        assert_eq!(dsh["lastOkAt"], 105);
         assert_eq!(dsh["attempts"], 3);
     }
 
@@ -1294,6 +1417,10 @@ mod tests {
         assert_eq!(registry.summary()["unknown"], 1, "只有 harness 是 unknown");
 
         registry.model_down("test/model", "model_unavailable", "gateway refused", 100);
+        let model = entry(&registry.snapshot(None), "test/model");
+        assert_eq!(model["state"], "unknown", "单次失败只累计");
+        registry.model_down("test/model", "model_unavailable", "gateway refused", 101);
+        registry.model_down("test/model", "model_unavailable", "gateway refused", 102);
         let snapshot = registry.snapshot(None);
         let model = entry(&snapshot, "test/model");
         assert_eq!(model["kind"], "model");
@@ -1370,18 +1497,20 @@ mod tests {
         let registry = DependencyRegistry::from_config(&config);
         registry.harness_connection_opened("dsh", 1_793_000_000_000);
         registry.platform_attempt("qq", 1_793_000_001_000);
-        registry.platform_disconnected(
-            "qq",
-            "unreachable",
-            "connect ECONNREFUSED 127.0.0.1:53001",
-            1_793_000_001_000,
-        );
-        registry.model_down(
-            "new-api/1AgentRouter/gpt-5.6-sol",
-            "model_unavailable",
-            "connect ECONNREFUSED 127.0.0.1:3080",
-            1_793_000_002_000,
-        );
+        for offset in 0..3 {
+            registry.platform_disconnected(
+                "qq",
+                "unreachable",
+                "connect ECONNREFUSED 127.0.0.1:53001",
+                1_793_000_001_000 + offset,
+            );
+            registry.model_down(
+                "new-api/1AgentRouter/gpt-5.6-sol",
+                "model_unavailable",
+                "connect ECONNREFUSED 127.0.0.1:3080",
+                1_793_000_002_000 + offset,
+            );
+        }
 
         let healthz_dependencies = registry.summary();
         let dependencies = registry.snapshot(None);
@@ -1463,6 +1592,64 @@ mod tests {
     }
 
     #[test]
+    fn failures_count_by_class_within_the_window_and_success_clears() {
+        let config = Config::parse(
+            r#"
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            url = "ws://127.0.0.1:3001"
+            account = "bot"
+
+            [deps]
+            failure_threshold = 3
+            failure_window_secs = 10
+            "#,
+        )
+        .expect("配置合法");
+        let registry = DependencyRegistry::from_config(&config);
+        registry.platform_attempt("qq", 0);
+        registry.platform_connected("qq", 0);
+
+        registry.platform_disconnected("qq", "unreachable", "first", 100);
+        registry.platform_disconnected("qq", "closed", "other class", 200);
+        registry.platform_disconnected("qq", "unreachable", "second", 300);
+        assert_eq!(
+            entry(&registry.snapshot(None), "qq")["state"],
+            "up",
+            "不同 class 各自计数，不能凑成 3 次"
+        );
+
+        registry.platform_disconnected("qq", "unreachable", "third", 400);
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "down");
+        assert!(
+            qq["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("unreachable")),
+            "down 要说明是哪个 class 触发的：{qq}"
+        );
+
+        registry.platform_connected("qq", 5_000);
+        let qq = entry(&registry.snapshot(None), "qq");
+        assert_eq!(qq["state"], "up");
+        assert_eq!(qq["hint"], Value::Null, "成功一次清零");
+
+        // 窗口外的旧失败不参与计数。
+        registry.platform_disconnected("qq", "unreachable", "old", 5_100);
+        registry.platform_disconnected("qq", "unreachable", "window 1", 20_000);
+        registry.platform_disconnected("qq", "unreachable", "window 2", 20_100);
+        assert_eq!(
+            entry(&registry.snapshot(None), "qq")["state"],
+            "up",
+            "5_100 那条已滑出 10s 窗口，只有窗口内两条"
+        );
+        registry.platform_disconnected("qq", "unreachable", "window 3", 20_200);
+        assert_eq!(entry(&registry.snapshot(None), "qq")["state"], "down");
+    }
+
+    #[test]
     fn summary_exposes_items_and_degrades_on_down() {
         let registry = DependencyRegistry::from_config(&platform_config());
         let summary = registry.summary();
@@ -1476,6 +1663,8 @@ mod tests {
 
         let status = crate::adapter::AdapterStatus::new("qq", registry.clone());
         status.attempt();
+        status.disconnected("unreachable", "connection refused");
+        status.disconnected("unreachable", "connection refused");
         status.disconnected("unreachable", "connection refused");
         let summary = registry.summary();
         assert_eq!(summary["status"], "degraded");

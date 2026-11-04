@@ -80,6 +80,8 @@ pub struct Config {
     pub retention: RetentionConfig,
     /// 入站/路由动作队列容量。两个队列默认都有界；0 在解析期拒绝。
     pub queues: QueueConfig,
+    /// 依赖表的失败阈值与观察窗口。
+    pub deps: DepsConfig,
     /// 插件 LKG 的失败阈值与观察窗口。
     pub lkg: LkgConfig,
     /// 策略 provider 同步调用的通用超时。
@@ -355,6 +357,27 @@ pub struct PluginConfig {
     pub timeout_ms: Option<u64>,
     /// 给人和 LKG 看的版本标签。不参与加载校验；未写时 LKG 记 `"unknown"`。
     pub version: Option<String>,
+}
+
+/// 依赖表默认失败次数：同一 id 同一 class 在窗口内累计到 3 次才 down。
+pub const DEFAULT_DEPS_FAILURE_THRESHOLD: u64 = 3;
+/// 依赖表默认观察窗口（秒）。
+pub const DEFAULT_DEPS_FAILURE_WINDOW_SECS: u64 = 600;
+
+/// 依赖表失败阈值配置。`[deps]` 省略时用默认值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepsConfig {
+    pub failure_threshold: u64,
+    pub failure_window_secs: u64,
+}
+
+impl Default for DepsConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: DEFAULT_DEPS_FAILURE_THRESHOLD,
+            failure_window_secs: DEFAULT_DEPS_FAILURE_WINDOW_SECS,
+        }
+    }
 }
 
 /// 插件 LKG 默认失败次数。
@@ -1134,6 +1157,8 @@ pub enum ConfigError {
     BadToolPluginTimeout { id: String, timeout_ms: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_queue_limit", field = field, value = value))]
     BadQueueLimit { field: String, value: u64 },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_deps_config", field = field, value = value))]
+    BadDepsConfig { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_lkg_config", field = field, value = value))]
     BadLkgConfig { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_provider_calls_timeout", timeout_ms = timeout_ms, max = MAX_PROVIDER_CALL_TIMEOUT_MS))]
@@ -1278,6 +1303,22 @@ impl Config {
                 QueueConfig { inbound, route }
             }
             None => QueueConfig::default(),
+        };
+
+        let deps = match raw.deps {
+            Some(raw) => DepsConfig {
+                failure_threshold: deps_limit(
+                    "failure_threshold",
+                    raw.failure_threshold,
+                    DEFAULT_DEPS_FAILURE_THRESHOLD,
+                )?,
+                failure_window_secs: deps_limit(
+                    "failure_window_secs",
+                    raw.failure_window_secs,
+                    DEFAULT_DEPS_FAILURE_WINDOW_SECS,
+                )?,
+            },
+            None => DepsConfig::default(),
         };
 
         let lkg = match raw.lkg {
@@ -1761,6 +1802,7 @@ impl Config {
             storage,
             retention,
             queues,
+            deps,
             lkg,
             provider_calls,
             notifications,
@@ -2332,6 +2374,20 @@ fn check_not_blank(value: &str, field: &'static str) -> Result<(), &'static str>
     Ok(())
 }
 
+/// 依赖表阈值：省略用默认值，0 拒绝。
+fn deps_limit(field: &str, value: Option<u64>, default: u64) -> Result<u64, ConfigError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    if value == 0 {
+        return Err(ConfigError::BadDepsConfig {
+            field: field.to_owned(),
+            value,
+        });
+    }
+    Ok(value)
+}
+
 /// LKG 阈值：省略用默认值，0 拒绝。
 fn lkg_limit(field: &str, value: Option<u64>, default: u64) -> Result<u64, ConfigError> {
     let Some(value) = value else {
@@ -2442,6 +2498,7 @@ struct RawConfig {
     storage: Option<RawStorage>,
     retention: Option<RawRetention>,
     queues: Option<RawQueue>,
+    deps: Option<RawDeps>,
     lkg: Option<RawLkg>,
     provider_calls: Option<RawProviderCalls>,
     notifications: Option<RawNotifications>,
@@ -2600,6 +2657,14 @@ struct RawInBand {
 
 fn default_enabled() -> bool {
     true
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDeps {
+    #[serde(default)]
+    failure_threshold: Option<u64>,
+    #[serde(default)]
+    failure_window_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3151,6 +3216,38 @@ mod tests {
         );
         let config = Config::parse(&config_with(&text, ONE_SESSION)).expect("config 层不拦");
         assert_eq!(config.connections[0].transport, Transport::WsServer);
+    }
+
+    #[test]
+    fn deps_thresholds_default_and_validate() {
+        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        assert_eq!(
+            config.deps.failure_threshold,
+            DEFAULT_DEPS_FAILURE_THRESHOLD
+        );
+        assert_eq!(
+            config.deps.failure_window_secs,
+            DEFAULT_DEPS_FAILURE_WINDOW_SECS
+        );
+
+        let text = format!(
+            "{}\n[deps]\nfailure_threshold = 5\nfailure_window_secs = 60\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&text).expect("能解析");
+        assert_eq!(config.deps.failure_threshold, 5);
+        assert_eq!(config.deps.failure_window_secs, 60);
+
+        for field in ["failure_threshold", "failure_window_secs"] {
+            let text = format!(
+                "{}\n[deps]\n{field} = 0\n",
+                config_with(ONE_CONNECTION, ONE_SESSION)
+            );
+            assert!(
+                matches!(Config::parse(&text), Err(ConfigError::BadDepsConfig { .. })),
+                "{field} = 0 要拒绝"
+            );
+        }
     }
 
     #[test]
