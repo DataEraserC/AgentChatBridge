@@ -1,6 +1,6 @@
 # 失联提示与带外通知（设计提案）
 
-状态：提案（2026-11-04）；第①步已实现、第②步进行中。
+状态：提案（2026-11-04）；第①②③步已实现、第④步待做。
 范围：turn 级失败通知、组件级连通性状态、`/healthz`、`/api/plugins`、带外通知（log / pull / ntfy）。
 非目标：自动拉起 dsh/opencode、自动切换平台、在 core 里探测平台、为每个平台写特例。
 
@@ -13,6 +13,10 @@
 > - 第②步：适配器经 `AdapterHost.status` 上报平台 `connected / disconnected /
 >   not_configured`；OneBot 与 process 已接。`AdapterFactory::health` 默认改为
 >   `Health::Unknown`，不再假装 Healthy；平台连接细节看 `/api/dependencies`。
+> - 第③步：`Bridge::end_turn` 对 `error` 文本取 FNV-1a 指纹，按
+>   `(session, room, fingerprint)` 在 10 分钟窗口内只发首条；同一房间窗口内最多
+>   3 条；一轮成功清空该 `(session, room)` 的历史失败。组件级抑制仍等第④步的
+>   结构化 `component`，现在不猜。
 
 ## 0. 结论
 

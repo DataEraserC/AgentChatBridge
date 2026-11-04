@@ -2358,6 +2358,80 @@ fn turn_failure_falls_back_to_default_when_session_has_no_override() {
     assert!(text.contains("content-blocked"), "要带原始错误：{text}");
 }
 
+/// 同一 (session, room, 错误文本) 在去重窗口内只发一条 in-band 通知。
+#[test]
+fn repeated_identical_turn_failure_notifies_once() {
+    let (mut bridge, sends) = group_bridge(fallback_config());
+
+    for _ in 0..3 {
+        bridge
+            .ingest(message("qq:group/123", "10001", "在吗", true))
+            .expect("能记下来");
+        let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+        bridge
+            .end_turn(&delivery.ticket, Some("模型 400 content-blocked"))
+            .expect("能收工");
+        bridge.flush_notices();
+    }
+
+    let sends = sends.lock().expect("没被毒死");
+    assert_eq!(sends.len(), 1, "同一故障只发首条：{sends:?}");
+}
+
+/// 一轮成功视为恢复：清掉历史失败，下一次同一故障重新通知。
+#[test]
+fn successful_turn_resets_failure_dedupe() {
+    let (mut bridge, sends) = group_bridge(fallback_config());
+
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+    bridge
+        .end_turn(&delivery.ticket, Some("模型 400 content-blocked"))
+        .expect("能收工");
+    bridge.flush_notices();
+
+    bridge
+        .ingest(message("qq:group/123", "10001", "再来", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+    bridge.end_turn(&delivery.ticket, None).expect("成功收工");
+    bridge.flush_notices();
+
+    bridge
+        .ingest(message("qq:group/123", "10001", "又失败", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+    bridge
+        .end_turn(&delivery.ticket, Some("模型 400 content-blocked"))
+        .expect("能收工");
+    bridge.flush_notices();
+
+    let sends = sends.lock().expect("没被毒死");
+    assert_eq!(sends.len(), 2, "恢复后同一故障应重新通知：{sends:?}");
+}
+
+/// 不同错误文本是不同指纹，但同一房间 10 分钟内最多 3 条。
+#[test]
+fn room_failure_notices_are_rate_limited() {
+    let (mut bridge, sends) = group_bridge(fallback_config());
+
+    for index in 0..4 {
+        bridge
+            .ingest(message("qq:group/123", "10001", "又一条", true))
+            .expect("能记下来");
+        let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+        bridge
+            .end_turn(&delivery.ticket, Some(&format!("failure {index}")))
+            .expect("能收工");
+        bridge.flush_notices();
+    }
+
+    let sends = sends.lock().expect("没被毒死");
+    assert_eq!(sends.len(), 3, "同一房间 3 条/10 分钟上限：{sends:?}");
+}
+
 /// 会话显式配了 on_turn_error 时，用会话自己的，不用全局默认。
 #[test]
 fn turn_failure_prefers_session_override_over_default() {
