@@ -18,8 +18,8 @@ use crate::grants::{GrantCapability, GrantPlace, GrantSubject, truncate_target};
 
 /// 申请后等管理员批准的默认上限：10 分钟。
 pub const PENDING_TTL_MS: i64 = 10 * 60 * 1000;
-/// 批准后可用的默认上限：5 分钟。
-pub const ACTIVE_TTL_MS: i64 = 5 * 60 * 1000;
+/// 批准后可用的默认上限：2 分钟。
+pub const ACTIVE_TTL_MS: i64 = 2 * 60 * 1000;
 /// 一个轮次最多申请几张票据。
 pub const MAX_REQUESTS_PER_TURN: usize = 3;
 /// 一个会话同时最多持有几张（pending + active）。
@@ -514,6 +514,65 @@ mod tests {
                 )
                 .is_none(),
             "用后即废"
+        );
+    }
+
+    #[test]
+    fn used_and_expired_tickets_are_rejected() {
+        let mut tickets = AccessTickets::new();
+        let used = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        tickets
+            .approve(&used.id, &used.nonce, "ref", "system_admin", 2000)
+            .expect("批准");
+        tickets
+            .authorize(
+                "main",
+                &target(),
+                GrantCapability::RoomWrite,
+                "send_message_to",
+                2100,
+            )
+            .expect("第一次使用");
+        assert!(
+            tickets
+                .authorize(
+                    "main",
+                    &target(),
+                    GrantCapability::RoomWrite,
+                    "send_message_to",
+                    2101
+                )
+                .is_none(),
+            "used 后再次使用必须拒绝"
+        );
+        assert_eq!(
+            tickets.get(&used.id).expect("还在簿上").state,
+            TicketState::Used
+        );
+
+        let expired = tickets
+            .request(request(3000, &["send_message_to"]))
+            .expect("申请");
+        tickets
+            .approve(&expired.id, &expired.nonce, "ref", "system_admin", 4000)
+            .expect("批准");
+        assert!(
+            tickets
+                .authorize(
+                    "main",
+                    &target(),
+                    GrantCapability::RoomWrite,
+                    "send_message_to",
+                    4000 + ACTIVE_TTL_MS + 1
+                )
+                .is_none(),
+            "active 过期后必须拒绝"
+        );
+        assert_eq!(
+            tickets.get(&expired.id).expect("还在簿上").state,
+            TicketState::Expired
         );
     }
 

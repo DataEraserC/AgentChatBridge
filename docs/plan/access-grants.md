@@ -273,7 +273,7 @@ AccessTicket {
 - **具体 op 列表**：只放行列出的 op；`platform_call` 必须写成 `platform_call:<method>`。
 - **用后即废**：命中一次 `ensure_room_access` 就置 `used`。即使随后被
   `allow_destructive` 拒绝，也不退回票据（fail closed）。
-- **过期**：pending 10 分钟；批准后 active 5 分钟。到点即 `expired`。
+- **过期**：pending 10 分钟；批准后 active 2 分钟。到点即 `expired`。
 - **可撤销**：私信管理员可以 `/revoke <id>`，立刻置 `revoked`。
 - **只放宽房间目标**：票据不绕过 `allow_destructive`，不授予 `plugin` 全权，
   也不改变连接级或订阅边界之外的其它闸门。
@@ -388,7 +388,7 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 ## 10. 风险与未知
 
 1. **旧策略已移除**：`all_rooms` / `privileged_origins` / `elevated_in_rooms` 从 schema 删除，旧配置在启动期直接失败；无主体轮次因此不存在"继承旧豁免"的问题。
-2. **票据与轮次生命周期**：票据改为会话级而不是绑定申请轮——审批需要人等，绑定轮次会让批准回来时票据已死。代价是批准后同一会话的有效期内还能用一次；用 5 分钟 TTL + 单目标 + 单次使用限制影响面。
+2. **票据与轮次生命周期**：票据改为会话级而不是绑定申请轮——审批需要人等，绑定轮次会让批准回来时票据已死。代价是批准后同一会话的有效期内还能用一次；用 2 分钟 TTL + 单目标 + 单次使用限制影响面。
 3. **多 op 票据**：一次使用即废，意味着多步操作要多次申请；这是安全取舍，不是遗漏。
 4. **外部 evaluator**：第三方 RBAC 必须自行实现 place/subject 规则；core 只能在接口层要求，无法证明其内部正确。
 5. **系统管理员配置**：只有一条，避免多个全局管理员扩大攻击面；如果未来需要多人，必须新增显式审批设计。
