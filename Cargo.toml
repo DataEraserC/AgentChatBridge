@@ -11,6 +11,7 @@ members = [
     "crates/adapters/dynamic-fixture",
     "crates/plugins/trusted",
     "crates/plugins/lua",
+    "crates/plugins/process-tools",
     "crates/plugins/wake-fixture",
     "crates/extensions",
     "crates/bridge",

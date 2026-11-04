@@ -72,6 +72,8 @@ pub struct Config {
     /// 动态库插件声明。启动时加载这些 `.so` / `.dylib`，manifest 由插件自己报；
     /// 插件可以是平台适配器，也可以是 wake/access 等策略 provider。
     pub plugins: Vec<PluginConfig>,
+    /// 外置进程工具插件声明。只承载第三方工具；第一方工具仍走进程内 ToolLoader。
+    pub tool_plugins: Vec<ToolPluginConfig>,
     /// 状态存哪。流水、水位、笔记、投递计数都在这里，重启不改。
     pub storage: StorageConfig,
     /// 流水保留：旧记录什么时候可以删。
@@ -345,6 +347,31 @@ pub struct PluginConfig {
     pub timeout_ms: Option<u64>,
     /// 给人和 LKG 看的版本标签。不参与加载校验；未写时 LKG 记 `"unknown"`。
     pub version: Option<String>,
+}
+
+/// 外置进程工具插件的默认单次调用超时（毫秒）。
+pub const DEFAULT_TOOL_PLUGIN_TIMEOUT_MS: u64 = 5000;
+/// 允许配置的最小/最大超时，避免误配成 0 或几分钟。
+pub const MIN_TOOL_PLUGIN_TIMEOUT_MS: u64 = 100;
+pub const MAX_TOOL_PLUGIN_TIMEOUT_MS: u64 = 60_000;
+
+/// 一个外置进程工具插件声明。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPluginConfig {
+    /// ProviderId（必须含 namespace，且不能是 `acb`）。
+    pub id: String,
+    /// 受信配置给出的可执行文件。
+    pub command: String,
+    /// 传给可执行文件的参数。
+    pub args: Vec<String>,
+    /// 单次调用超时；`None` 用默认 5 秒。
+    pub timeout_ms: Option<u64>,
+}
+
+impl ToolPluginConfig {
+    pub fn timeout(&self) -> u64 {
+        self.timeout_ms.unwrap_or(DEFAULT_TOOL_PLUGIN_TIMEOUT_MS)
+    }
 }
 
 /// 目前认识的记忆存储形式。加新形式时在这里登记。
@@ -970,6 +997,16 @@ pub enum ConfigError {
     EmptyPluginPath,
     #[error("{}", acb_i18n::t!("kernel.config.duplicate_plugin_path", path = path))]
     DuplicatePluginPath { path: String },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_tool_plugin_id", id = id))]
+    BadToolPluginId { id: String },
+    #[error("{}", acb_i18n::t!("kernel.config.reserved_tool_plugin_id", id = id))]
+    ReservedToolPluginId { id: String },
+    #[error("{}", acb_i18n::t!("kernel.config.duplicate_tool_plugin_id", id = id))]
+    DuplicateToolPluginId { id: String },
+    #[error("{}", acb_i18n::t!("kernel.config.empty_tool_plugin_command", id = id))]
+    EmptyToolPluginCommand { id: String },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_tool_plugin_timeout", id = id, timeout_ms = timeout_ms))]
+    BadToolPluginTimeout { id: String, timeout_ms: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_receive_provider", connection = connection, provider = provider, detail = detail))]
     BadReceiveProvider {
         connection: String,
@@ -1213,6 +1250,41 @@ impl Config {
                 kind,
                 timeout_ms: raw_plugin.timeout_ms,
                 version,
+            });
+        }
+
+        let mut tool_plugins: Vec<ToolPluginConfig> = Vec::with_capacity(raw.tool_plugins.len());
+        for raw_plugin in raw.tool_plugins {
+            let id = raw_plugin.id.trim().to_owned();
+            let parsed = ProviderId::parse(&id)
+                .map_err(|_| ConfigError::BadToolPluginId { id: id.clone() })?;
+            if parsed.namespace() == "acb" {
+                return Err(ConfigError::ReservedToolPluginId { id });
+            }
+            if tool_plugins.iter().any(|plugin| plugin.id == id) {
+                return Err(ConfigError::DuplicateToolPluginId { id });
+            }
+            let command = raw_plugin.command.trim().to_owned();
+            if command.is_empty() {
+                return Err(ConfigError::EmptyToolPluginCommand { id });
+            }
+            if let Some(timeout_ms) = raw_plugin.timeout_ms {
+                if !(MIN_TOOL_PLUGIN_TIMEOUT_MS..=MAX_TOOL_PLUGIN_TIMEOUT_MS).contains(&timeout_ms)
+                {
+                    return Err(ConfigError::BadToolPluginTimeout { id, timeout_ms });
+                }
+            }
+            let args = raw_plugin
+                .args
+                .into_iter()
+                .map(|arg| arg.trim().to_owned())
+                .filter(|arg| !arg.is_empty())
+                .collect();
+            tool_plugins.push(ToolPluginConfig {
+                id,
+                command,
+                args,
+                timeout_ms: raw_plugin.timeout_ms,
             });
         }
 
@@ -1462,6 +1534,7 @@ impl Config {
             file_relay,
             connections,
             plugins,
+            tool_plugins,
             storage,
             retention,
             worktrees_root,
@@ -2092,6 +2165,9 @@ struct RawConfig {
     /// 动态库插件声明。
     #[serde(default)]
     plugins: Vec<RawPlugin>,
+    /// 外置进程工具插件声明。
+    #[serde(default)]
+    tool_plugins: Vec<RawToolPlugin>,
     storage: Option<RawStorage>,
     retention: Option<RawRetention>,
     worktrees_root: Option<String>,
@@ -2220,6 +2296,16 @@ struct RawPlugin {
     timeout_ms: Option<u64>,
     #[serde(default)]
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawToolPlugin {
+    id: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2748,9 +2834,66 @@ mod tests {
     }
 
     #[test]
+    fn tool_plugins_are_parsed_and_validated() {
+        let text = format!(
+            "{}\n[[tool_plugins]]\nid = \"echo.tools\"\ncommand = \"/usr/bin/node\"\nargs = [\"/opt/echo.js\"]\ntimeout_ms = 500\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&text).expect("能解析");
+        assert_eq!(config.tool_plugins.len(), 1);
+        assert_eq!(config.tool_plugins[0].id, "echo.tools");
+        assert_eq!(config.tool_plugins[0].command, "/usr/bin/node");
+        assert_eq!(config.tool_plugins[0].args, vec!["/opt/echo.js"]);
+        assert_eq!(config.tool_plugins[0].timeout(), 500);
+
+        let defaults = format!(
+            "{}\n[[tool_plugins]]\nid = \"echo.tools\"\ncommand = \"/bin/echo\"\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse(&defaults).expect("能解析");
+        assert_eq!(config.tool_plugins[0].timeout(), 5000);
+
+        let duplicate =
+            format!("{text}\n[[tool_plugins]]\nid = \"echo.tools\"\ncommand = \"/bin/echo\"\n");
+        assert!(matches!(
+            Config::parse(&duplicate),
+            Err(ConfigError::DuplicateToolPluginId { .. })
+        ));
+
+        let empty = format!(
+            "{}\n[[tool_plugins]]\nid = \"echo.tools\"\ncommand = \"  \"\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        assert!(matches!(
+            Config::parse(&empty),
+            Err(ConfigError::EmptyToolPluginCommand { .. })
+        ));
+
+        let reserved = format!(
+            "{}\n[[tool_plugins]]\nid = \"acb.tools\"\ncommand = \"/bin/echo\"\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        assert!(matches!(
+            Config::parse(&reserved),
+            Err(ConfigError::ReservedToolPluginId { .. })
+        ));
+
+        for timeout_ms in [1, 50, 70_000] {
+            let text = format!(
+                "{}\n[[tool_plugins]]\nid = \"echo.tools\"\ncommand = \"/bin/echo\"\ntimeout_ms = {timeout_ms}\n",
+                config_with(ONE_CONNECTION, ONE_SESSION)
+            );
+            assert!(matches!(
+                Config::parse(&text),
+                Err(ConfigError::BadToolPluginTimeout { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn dynamic_adapter_plugins_are_parsed_and_deduplicated() {
         let text = format!(
-            "{}\n[[plugins]]\npath = \"/tmp/libdemo.so\"\nkind = \"demo\"\ntimeout_ms = 300\n",
+            "{}\n[[plugins]]\npath = \"/tmp/libdemo.so\"\nkind = \"demo\"\ntimeout_ms = 300\nversion = \"1.2.3\"\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         let config = Config::parse(&text).expect("能解析");
@@ -2758,6 +2901,7 @@ mod tests {
         assert_eq!(config.plugins[0].path, "/tmp/libdemo.so");
         assert_eq!(config.plugins[0].kind.as_deref(), Some("demo"));
         assert_eq!(config.plugins[0].timeout_ms, Some(300));
+        assert_eq!(config.plugins[0].version.as_deref(), Some("1.2.3"));
 
         let duplicate = format!("{text}\n[[plugins]]\npath = \"/tmp/libdemo.so\"\n");
         assert!(matches!(
