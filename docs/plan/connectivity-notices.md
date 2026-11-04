@@ -1,6 +1,6 @@
 # 失联提示与带外通知（设计提案）
 
-状态：提案（2026-11-04）；第①②③④步已实现。
+状态：提案（2026-11-04）；第①②③④⑤步已实现。
 范围：turn 级失败通知、组件级连通性状态、`/healthz`、`/api/plugins`、带外通知（log / pull / ntfy）。
 非目标：自动拉起 dsh/opencode、自动切换平台、在 core 里探测平台、为每个平台写特例。
 
@@ -21,6 +21,10 @@
 >   `model` 写进 `DependencyKind::Model`，`backend` 写进对应 harness；一轮成功
 >   把该会话的模型与 harness 标回 `up`。有结构化分类时 in-band 去重键改为
 >   `(session, component, id, class)`，不再看错误文本。
+> - 第⑤步：`crates/plugins/process-tools` 新增 `ProcessNotifier`（kernel
+>   `NoticeSink` 的进程实现），`crates/notifier-process` 的 `acb-notifier`
+>   负责 ntfy 兼容 HTTP、去重、恢复配对和有界重试。`[notifications]` 不完整时
+>   整层不 spawn；`[notifications.in_band]` 接管第③步的三个常量。
 
 ## 0. 结论
 
@@ -259,61 +263,66 @@ core 在每次状态迁移时写**一行**，不是每次重试都写：
 
 #### 3.3.3 ntfy / 同类 HTTP 推送：位置与边界
 
-**结论：不属于 core。** 作为独立的带外通知 sidecar（可视为外置进程插件的一种，
-但不是平台适配器），消费 core 的只读依赖 API。
+**结论：不属于 core。** 实现为 bridge 管理的独立通知子进程 `acb-notifier`：
+bridge 用 stdio 行 JSON-RPC 把依赖边沿与 turn 抑制事件交给它，HTTP 推送、去重、
+重试全在子进程里。
 
 理由：
 
 - core 当前不做外部 I/O；在 core 里加 HTTP 客户端、重试队列、凭据管理，会把新的
   失败模式和锁外等待带进核心。
-- sidecar 独立进程可以把「ntfy 挂了」与「桥挂了」隔离；ntfy 故障不会拖累消息处理。
-- sidecar 还能检测「桥本身不可达」——这是 core 自己发不出的告警。
+- 子进程独立崩溃/网络失败与桥隔离；ntfy 故障不会拖累消息处理。
+- 复用 `process-tools` 的 stdio 子进程形态，但**不注册成 ToolProvider**：通知没有
+  工具面，且依赖边沿发生在多个线程，不能走同步工具调用路径。
 
-建议形态：
+形态：
 
 ```text
-acb-notify.service（独立 systemd 用户服务）
-  └─ 轮询 http://127.0.0.1:3100/api/dependencies?since=<last_seq>
-       ├─ 有迁移 → POST {ntfy_url}/{topic}
-       └─ 连续 3 次拉取失败 → POST「bridge unreachable」一次
+acb-bridge
+  └─ ProcessNotifier（kernel NoticeSink 的进程实现，有界队列 128）
+       └─ acb-notifier（stdio 行 JSON-RPC，只收 notify）
+            ├─ 去重：同一依赖边沿 / 抑制事件 min_interval_secs 内只推一次
+            ├─ 恢复配对：只有推过 down 才推 up，且带 down_since + duration
+            └─ POST {url}/{topic}（ntfy 兼容，首次失败后最多重试 3 次，退避 250/500/1000ms）
 ```
 
-配置（sidecar 自己的文件，例如 `state/notify.toml`；token 走环境变量/agenix，
-不写进仓库）：
+配置放在桥的 `config.toml`，不再单独起 sidecar 配置文件：
 
 ```toml
-[bridge]
-health_url = "http://127.0.0.1:3100"
-token_file = "${XDG_RUNTIME_DIR}/acb-health.token"
-poll_interval_secs = 10
-timeout_secs = 5
-bridge_down_after_failures = 3
-
-[ntfy]
-url = "https://ntfy.sh"
+[notifications]
+enabled = true
+url = "http://127.0.0.1:8080"
 topic = "acb-ops"
-token_env = "NTFY_TOKEN"
-cooldown_secs = 600
-recover_after_secs = 60
-max_per_10min = 6
+token = "${NTFY_TOKEN}"
+min_interval_secs = 600
+
+[notifications.in_band]
+window_secs = 600
+room_limit = 3
+max_entries = 256
 ```
 
-如果希望和桥共用一份 `config.toml`：`RawConfig` 目前不拒绝未知键，sidecar 可以只读
-`[notify]` 段；但建议仍放在独立文件，避免把运维凭据混进桥的配置视图。
+- `url` / `topic` 任一为空或 `enabled = false` 时，bridge **完全不注册**这一层：
+  不 spawn、不建线程、不打启动日志；`/api/dependencies` 等其余行为不变。
+- 需要把 `acb-notifier` 与 `acb-bridge` 一起部署（同目录）；测试/特殊部署可用
+  `ACB_NOTIFIER_BIN` 覆盖路径。
+- `[notifications.in_band]` 接管了原先 in-band 失败通知的三个硬编码常量；
+  省略时默认值与旧行为一致。
 
 消息格式（字段稳定，值为数据）：
 
 ```text
-Title: [acb] platform/qq down · unreachable
+Title: [acb] platform/qq is down
 Priority: high
 Tags: acb,platform,down
 
 component=platform/qq
-platform=qq kind=onebot11
-state=down since=2026-11-04T03:12:00+08:00
-last_ok=2026-11-04T03:01:00+08:00
-class=unreachable attempts=12
-detail=connect ECONNREFUSED 127.0.0.1:53001
+transition=up->down
+state=down since=2026-11-04T03:12:00Z
+last_ok=2026-11-04T03:01:00Z
+class=unreachable
+lastError=connect ECONNREFUSED 127.0.0.1:53001
+attempts=12
 ```
 
 恢复：
@@ -324,28 +333,35 @@ Priority: default
 Tags: acb,platform,up
 
 component=platform/qq
-state=up since=2026-11-04T03:20:00+08:00
-down_since=2026-11-04T03:12:00+08:00 duration=8m
+transition=down->up
+state=up since=2026-11-04T03:20:00Z
+last_ok=2026-11-04T03:20:00Z
+attempts=12
+down_since=2026-11-04T03:12:00Z
+duration=8m0s
+down_class=unreachable
+down_lastError=connect ECONNREFUSED 127.0.0.1:53001
 ```
 
 去重与限流：
 
-- sidecar 只消费 `transitions[]` 的边沿，并持久化 `last_seq`；重启后从持久化 seq 续读。
-- 同组件 down 的冷却窗口（默认 600s）内不重复推送；`up` 只有在 down 已被推送过时
-  才推送，且同样受全局速率上限约束。
-- 全局上限（默认 6 条/10 分钟）用于防止平台批量掉线时刷屏；超限的迁移仍留在
-  `/api/dependencies` 里，只是不推送。
-- 若 sidecar 重启后发现 seq 断档（桥重启导致序号重置），**不重放历史**；只推一条
-  「当前状态快照」，然后重置 `last_seq`。
-- 429/`Retry-After`：按响应退避（2s → 30s），最多重试 3 次；仍失败则丢弃本条并
-  记日志，下一次轮询继续，不阻塞、不无限重试。
+- notifier 只消费 `NoticeSink` 送来的迁移边沿与 turn 抑制事件，不轮询状态、不读
+  harness 内部状态；重启后**不重放历史**。
+- 同一依赖边沿（`component + from + to + class`）在 `min_interval_secs`（默认 600s）
+  内只推一次；turn 抑制事件按 `(session, room, component, class, reason)` 同样去重。
+- `up` 只有在该组件 `down` **成功推送过**时才配对推送；`down` 没推出去就不推 `up`。
+  恢复正文固定带 `down_since`、`duration`、`down_class`、`down_lastError`。
+- 连续抖动由边沿去重吸收：`down → up → down` 的第二次 down 若仍在窗口内不会重复。
+- HTTP 4xx/5xx/网络错误：首次失败后最多重试 3 次，退避 250/500/1000ms；仍失败只记日志与失败计数，
+  丢弃本条，不阻塞后续事件，不无限重试。
+- 没有全局 6 条/10 分钟速率上限；按边沿去重 + 恢复配对已经能限制刷屏。若后续需要，
+  再加独立的总量上限。
 
 失败降级：
 
-- sidecar 与桥是两个进程；ntfy 失败不影响桥的任何路径。
-- core 不维护“待推送队列”，也不等待 sidecar；sidecar 的队列有界（例如 64 条），
-  满则丢最旧并记录。
-- 如果 sidecar 停止，log 与 `/healthz` 仍然可用；这是可接受的降级。
+- 子进程与桥是两个进程；ntfy 失败不影响桥的任何路径。
+- core 只做有界队列（128 条）`try_send`，满了丢弃并计数；不等待网络、不建重试队列。
+- 如果子进程停止，log 与 `/healthz` 仍然可用；这是可接受的降级。
 
 #### 3.3.4 平台断开时的完整路径
 
@@ -353,8 +369,9 @@ down_since=2026-11-04T03:12:00+08:00 duration=8m
 2. core 生成迁移：写一行结构化日志、更新依赖表、把迁移放进有界环。
 3. `/healthz` 立即返回 `state=degraded` 与 `dependencies` 中的该连接；
    `/api/dependencies?since=N` 可拉到迁移。
-4. 若部署了 ntfy sidecar，它在下一个轮询周期推送一条 down。
-5. 平台恢复后，适配器上报 `up`；core 再写一行、更新状态；sidecar 推送一条 up。
+4. 若配置了 `[notifications]`，事件立即进入 notifier 子进程并推送一条 down。
+5. 平台恢复后，适配器上报 `up`；core 再写一行、更新状态；notifier 推送一条带
+   `down_since` / `duration` 的恢复。
 6. **默认不向原房间补发**。若显式开启 `in_band_backfill`，只在恢复后发**一条**
    汇总，且必须带 `down_since` 与 `duration`，明确标注为补发；不得把积压的
    down 消息逐条重放。
@@ -537,14 +554,14 @@ down_since=2026-11-04T03:12:00+08:00 duration=8m
 | 2 | **core + adapter** | `AdapterHost` 增加健康上报句柄；OneBot/process/dynamic 适配器在连接建立/断开/重启失败时上报；`/healthz` 与依赖接口展示逐连接状态 | 停 snowluma：平台条目 `down` + `lastError`，不再显示 `Healthy`；恢复后 `up`；无任何 in-band 消息 | 删除上报字段与适配器调用即可；适配器其余行为不变 |
 | 3 | **core** | turn 失败去重/抑制：按 `(session, room, 错误指纹)` 首失败；错误指纹是原始 `error` 文本的稳定哈希，不做语义解析；组件级抑制在拿到第 4 步的 `component` 信号后才启用；in-band 限流 | 连续 10 次相同故障：每会话最多 1 条 in-band；第 4 步落地后组件级只留 1 条状态迁移；无刷屏 | 去掉去重表与抑制分支即可恢复现有行为 |
 | 4 | **protocol + harness** | `turn_end` 增加可选结构化 `failure { component, id, class }`；dsh/opencode 在模型/后端失败时填；core 消费并更新 `model`/`backend` 状态 | 模型网关断开：首轮 in-band 1 条，状态迁移 1 条；恢复后 1 条 up；`model_unconfigured` 与 `model_unavailable` 可区分 | 字段可选，但需协议版本过渡（v6 harness 无 `failure` 时走现有路径）；去掉字段即回退 |
-| 5 | **外置 sidecar（非 core）** | ntfy 转发器：轮询 `/api/dependencies?since=seq`，边沿推送，持久化 seq，429 退避，桥不可达检测 | 平台断开 → 一个轮询周期内 ntfy 收到 down；恢复 → up；ntfy 停止 → 桥不受影响；桥停止 → sidecar 推 bridge unreachable | 停掉 sidecar 即可；core 无改动 |
+| 5 | **外置子进程（非 core）** | `ProcessNotifier` + `acb-notifier`：stdio 行 JSON-RPC 收依赖边沿与 turn 抑制事件；ntfy 兼容 POST；按边沿去重、恢复配对、3 次有界重试 | 平台断开 → 立即收到 down；恢复 → 带 down_since/duration 的 up；同一故障 10 分钟内只推一次；ntfy 停止 → 桥不受影响 | 不配置 `[notifications]` 或 `enabled=false` 即可整层不加载 |
 
 可选的后续（不阻塞前五步）：
 
 - 控制台依赖面板（读 `/api/dependencies`）。
 - `in_band_backfill` 配置（默认 off；仅平台恢复后一条带时间区间的补发）。
 - 迁移历史持久化到 state（跨重启保留 `lastOkAt` 与迁移）；当前建议内存即可。
-- 若将来需要第三方推送通道，再评估 `NoticeSink` 扩展点；首期用 sidecar 足够。
+- 若将来需要第三方推送通道，可复用已落地的 `NoticeSink` 扩展点，不再改 core。
 
 ### 5.1 为什么是这个顺序
 

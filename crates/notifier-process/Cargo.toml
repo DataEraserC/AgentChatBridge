@@ -1,0 +1,17 @@
+[package]
+name = "acb-notifier-process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "带外通知子进程：stdio JSON-RPC 输入，ntfy 兼容 HTTP 推送"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# HTTP 客户端只存在于这个子进程 crate；core / bridge 不依赖它。
+ureq = "=3.5.0"
+
+[[bin]]
+name = "acb-notifier"
+path = "src/main.rs"

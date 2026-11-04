@@ -5,8 +5,10 @@
 //! 每调用有超时；崩溃按退避重启并标记 Unhealthy；Unhealthy 期间调用立即失败。
 
 mod loader;
+mod notifier;
 mod protocol;
 mod provider;
 
 pub use loader::ProcessToolLoader;
+pub use notifier::ProcessNotifier;
 pub use provider::{Backoff, ProcessToolProvider};

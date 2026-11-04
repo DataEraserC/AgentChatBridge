@@ -24,7 +24,7 @@ use acb_kernel::{
     drain_events, serve,
 };
 use acb_plugin_lua::LuaLoader;
-use acb_plugin_process_tools::ProcessToolLoader;
+use acb_plugin_process_tools::{ProcessNotifier, ProcessToolLoader};
 use acb_plugin_trusted::TrustedLoader;
 
 mod config_patch;
@@ -93,6 +93,27 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     // 依赖状态表：只读缓存，锁独立于 Bridge。第①步只登记 harness。
     let deps = DependencyRegistry::from_config(&config);
+    // 带外通知：只有 [notifications] 完整配置时才启动子进程；否则不注册、
+    // 不建线程、不打日志。
+    if let Some(notifications) = config.notifications.as_ref().filter(|n| n.active()) {
+        match ProcessNotifier::spawn(notifications) {
+            Ok(notifier) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "bridge.main.notifications_enabled",
+                        url = notifications.url.as_deref().unwrap_or_default(),
+                        topic = notifications.topic.as_deref().unwrap_or_default()
+                    )
+                );
+                deps.set_notice_sink(std::sync::Arc::new(notifier));
+            }
+            Err(error) => eprintln!(
+                "{}",
+                acb_i18n::t!("bridge.main.notifications_disabled", error = error)
+            ),
+        }
+    }
 
     // 有些配置是用户故意这么写的（两个会话订同一个房间）。不拦，但要说清楚它意味着什么，
     // 并且停三秒——刚启动时人还在看屏幕。

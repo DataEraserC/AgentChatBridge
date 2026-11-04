@@ -11,6 +11,7 @@ pub mod engine;
 pub mod event_queue;
 pub mod lkg;
 pub mod memory;
+pub mod notice;
 pub mod outbound;
 pub mod plugin;
 pub mod plugin_meta;
@@ -32,10 +33,11 @@ pub use adapter::{
 pub use config::{
     AccessPolicy, ClockPolicy, Config, Connection, ConsoleConfig, DEFAULT_MAX_AGE_DAYS,
     DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH, DEFAULT_WORKTREES_ROOT, DeliveryPolicy,
-    EndpointConfig, Harness, KNOWN_MEMORY_KINDS, LkgConfig, Memory, OutboundPolicy, Persona,
-    PluginConfig, QueueConfig, ReceivePolicy, RetentionConfig, RoutePolicy, Session, StorageConfig,
-    Subscription, ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy,
-    WakeDecision, WakeInput, WakePolicy, WakeVerdict,
+    EndpointConfig, Harness, InBandNoticeConfig, KNOWN_MEMORY_KINDS, LkgConfig, Memory,
+    NotificationsConfig, OutboundPolicy, Persona, PluginConfig, QueueConfig, ReceivePolicy,
+    RetentionConfig, RoutePolicy, Session, StorageConfig, Subscription, ToolPluginConfig,
+    Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput,
+    WakePolicy, WakeVerdict,
 };
 pub use deps::{DependencyKind, DependencyRegistry};
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
@@ -44,6 +46,7 @@ pub use event_queue::{
     EventQueue, EventReceiver, QueueSnapshot, QueueStats, SubmitError, drain_events,
 };
 pub use lkg::{LkgEntry, LkgInfo, LkgState, PluginLkg};
+pub use notice::{NoticeEvent, NoticeSink};
 pub use outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, Outbounds, OutgoingKind,
     OutgoingRecord, ParamSpec, ParamType, RecordMode, Risk, Scope, Sent, TargetRole, TargetSpec,
