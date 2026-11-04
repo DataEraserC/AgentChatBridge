@@ -23,7 +23,7 @@ use tungstenite::error::Error as WsError;
 use tungstenite::{Message, WebSocket};
 
 use crate::event::{self, Parsed};
-use crate::outbound::OneBotOutbound;
+use crate::outbound::OneBotSnowLumaOutbound;
 
 /// 一条 WebSocket 连接。
 pub type Ws = WebSocket<TcpStream>;
@@ -358,7 +358,7 @@ fn spawn_poke_lookup(raw: Value, slot: LinkSlot, ctx: PokeContext, group: String
     std::thread::spawn(move || {
         let mut enriched = raw.clone();
         if let Ok(room) = RoomId::new(&ctx.connection, format!("group/{group}")) {
-            let mut outbound = OneBotOutbound::new(slot, &ctx.connection);
+            let mut outbound = OneBotSnowLumaOutbound::new(slot, &ctx.connection);
             let params = json!({
                 "group_id": number_value(&group),
                 "user_id": number_value(&user),

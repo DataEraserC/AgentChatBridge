@@ -1568,6 +1568,7 @@ mod tests {
         assert_eq!(qq["version"]["protocol"]["source"], "get_version_info");
         assert_eq!(qq["version"]["impl"]["name"], "snowluma");
         assert_eq!(qq["version"]["impl"]["version"], "2.4.0");
+        assert_eq!(qq["version"]["impl"]["source"], "get_version_info");
         assert_eq!(qq["version"]["adapter"]["version"], "0.1.0");
         assert_eq!(qq["version"]["adapter"]["source"], "crate");
         assert_eq!(qq["versionObservedAt"], 100);

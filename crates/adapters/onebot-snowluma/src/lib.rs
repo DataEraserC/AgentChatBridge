@@ -20,7 +20,7 @@ pub mod outbound;
 pub mod segment;
 
 pub use event::{EventError, Parsed};
-pub use factory::{MANIFEST, OneBotAdapterFactory};
+pub use factory::{MANIFEST, OneBotSnowLumaAdapterFactory};
 pub use link::{Action, LinkError, LinkSlot, connect, supervise};
-pub use outbound::OneBotOutbound;
+pub use outbound::OneBotSnowLumaOutbound;
 pub use segment::{PLATFORM, SegmentError};

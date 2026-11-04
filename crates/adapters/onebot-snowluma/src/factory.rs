@@ -1,6 +1,6 @@
-//! OneBot 11 适配器的注册入口（ADR-0027）。
+//! OneBot SnowLuma 适配器的注册入口（ADR-0027）。
 //!
-//! core 不需要知道 `LinkSlot` / `OneBotOutbound` / `supervise` 怎么拼；它只按
+//! core 不需要知道 `LinkSlot` / `OneBotSnowLumaOutbound` / `supervise` 怎么拼；它只按
 //! `kind = "onebot11"` 从 Root 取一个 `AdapterInstance`。连接线程仍然由适配器
 //! 自己启动（`launch`），core 不持有 socket，也不把 `Bridge` 交出去。
 
@@ -11,7 +11,7 @@ use acb_kernel::{
     AdapterInstance, AdapterManifest, Connection, EventQueue, PluginEffect, PluginMetadata,
 };
 
-use crate::{LinkSlot, OneBotOutbound, supervise};
+use crate::{LinkSlot, OneBotSnowLumaOutbound, supervise};
 
 static TRANSPORTS: &[Cow<'static, str>] = &[Cow::Borrowed("ws-client")];
 static CAPABILITIES: &[AdapterCapability] = &[
@@ -61,7 +61,7 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
     // QQ 客户端/协议实现的长消息上限不统一，不谎报一个数字；等有可验证来源再填。
     text_limit: None,
     metadata: PluginMetadata {
-        title: Some(Cow::Borrowed("OneBot 11")),
+        title: Some(Cow::Borrowed("OneBot SnowLuma")),
         summary: Some(Cow::Borrowed("QQ 群与私聊：收消息、发消息、平台方法目录")),
         description: None,
         tags: Cow::Borrowed(&[]),
@@ -71,11 +71,11 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
     },
 };
 
-/// OneBot 11 的工厂。一个连接一个 `LinkSlot`，`launch` 里起守护线程。
+/// OneBot SnowLuma 的工厂。一个连接一个 `LinkSlot`，`launch` 里起守护线程。
 #[derive(Debug, Default)]
-pub struct OneBotAdapterFactory;
+pub struct OneBotSnowLumaAdapterFactory;
 
-impl AdapterFactory for OneBotAdapterFactory {
+impl AdapterFactory for OneBotSnowLumaAdapterFactory {
     fn manifest(&self) -> AdapterManifest {
         MANIFEST.clone()
     }
@@ -92,7 +92,10 @@ impl AdapterFactory for OneBotAdapterFactory {
             ));
         }
         let slot = LinkSlot::new();
-        let outbound = Box::new(OneBotOutbound::new(slot.clone(), connection.id.clone()));
+        let outbound = Box::new(OneBotSnowLumaOutbound::new(
+            slot.clone(),
+            connection.id.clone(),
+        ));
 
         let connection = connection.clone();
         let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
@@ -104,5 +107,18 @@ impl AdapterFactory for OneBotAdapterFactory {
             launch,
             manifest: MANIFEST.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_keeps_persistent_ids_and_uses_the_snowluma_display_name() {
+        assert_eq!(MANIFEST.id.as_ref(), "acb.adapter.onebot11");
+        assert_eq!(MANIFEST.kind.as_ref(), "onebot11");
+        assert_eq!(MANIFEST.platform.as_ref(), "qq");
+        assert_eq!(MANIFEST.metadata.title.as_deref(), Some("OneBot SnowLuma"));
     }
 }

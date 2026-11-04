@@ -5,7 +5,7 @@ members = [
     "crates/proto",
     "crates/adapter-api",
     "crates/kernel",
-    "crates/adapters/onebot11",
+    "crates/adapters/onebot-snowluma",
     "crates/adapters/process",
     "crates/adapters/dynamic",
     "crates/adapters/dynamic-fixture",

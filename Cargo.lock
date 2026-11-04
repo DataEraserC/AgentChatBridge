@@ -35,7 +35,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "acb-adapter-onebot11"
+name = "acb-adapter-onebot-snowluma"
 version = "0.1.0"
 dependencies = [
  "acb-i18n",
@@ -73,7 +73,7 @@ name = "acb-bridge"
 version = "0.1.0"
 dependencies = [
  "acb-adapter-dynamic",
- "acb-adapter-onebot11",
+ "acb-adapter-onebot-snowluma",
  "acb-adapter-process",
  "acb-extensions",
  "acb-i18n",

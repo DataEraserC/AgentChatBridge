@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acb_adapter_dynamic::DynamicLoader;
-use acb_adapter_onebot11::OneBotAdapterFactory;
+use acb_adapter_onebot_snowluma::OneBotSnowLumaAdapterFactory;
 use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::{
     AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ControlRegistry,
@@ -188,7 +188,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         plugins.install_manager(Arc::new(extensions))?;
     }
     // 平台适配器也登记在 Root 里：内置 OneBot、外置进程、动态库走同一张表。
-    plugins.register_adapter(Arc::new(OneBotAdapterFactory))?;
+    plugins.register_adapter(Arc::new(OneBotSnowLumaAdapterFactory))?;
     plugins.register_adapter(Arc::new(ProcessAdapterFactory))?;
 
     // 入站队列：适配器只往里丢记录，core 的 drain 线程统一 ingest。
