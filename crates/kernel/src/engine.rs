@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::config::{ClockPolicy, Config, TurnErrorAction, WakeDecision, WakePolicy};
+use crate::lkg::PluginLkg;
 use crate::memory::{
     MemoryRepo, git_add, git_blame, git_branch, git_commit, git_diff, git_log, git_push,
     git_status, list_dir, read_file, search, write_file,
@@ -40,7 +41,7 @@ use crate::outbound::{
 };
 use crate::plugin::{
     AccessAction, AccessDecision, AccessRequest, Capability, ClockContext, DefaultDeliveryComposer,
-    DefaultTurnErrorProvider, DeliveryRequest, InterruptScope, PluginError, PluginManager,
+    DefaultTurnErrorProvider, DeliveryRequest, Health, InterruptScope, PluginError, PluginManager,
     PromptContext, PromptDraft, PromptProvider, ProviderId, ReceiveDecision, ReceiveRequest,
     ReloadScope, RouteAction, RouteContext, RouteDecision, SendContext, SendHook, SendOrigin,
     TurnErrorRequest, WakeContext,
@@ -479,6 +480,8 @@ pub struct Bridge<S: Store> {
     outbound: Outbounds,
     /// 扩展宿主（ADR-0026）。Phase 1 只承载 wake provider。
     plugins: PluginManager,
+    /// 可回滚插件的 last-known-good 状态（运行时文件，不进 Nix）。
+    lkg: PluginLkg,
     pending: VecDeque<Pending>,
     /// 键是会话 id：一个会话同时只跑一轮。
     active: HashMap<String, ActiveTurn>,
@@ -567,7 +570,32 @@ impl<S: Store> Bridge<S> {
         outbound: Box<dyn Outbound>,
         plugins: PluginManager,
     ) -> Self {
-        // 单实现调用点（测试/单适配器）走兜底；生产 main 传进来的本身就是 Outbounds，
+        // 测试/嵌入式默认不写 LKG 文件；生产 main 用 with_plugins_lkg。
+        Self::with_plugins_inner(config, store, outbound, plugins, PluginLkg::disabled())
+    }
+
+    /// 带 LKG 状态文件的桥。生产 main 用这个；状态文件放在存储目录旁。
+    pub fn with_plugins_lkg(
+        config: Config,
+        store: S,
+        outbound: Box<dyn Outbound>,
+        plugins: PluginManager,
+        lkg_path: PathBuf,
+    ) -> Self {
+        let mut bridge =
+            Self::with_plugins_inner(config, store, outbound, plugins, PluginLkg::new(lkg_path));
+        bridge.register_startup_lkg_candidates();
+        bridge
+    }
+
+    fn with_plugins_inner(
+        config: Config,
+        store: S,
+        outbound: Box<dyn Outbound>,
+        plugins: PluginManager,
+        lkg: PluginLkg,
+    ) -> Self {
+        // 单实现调用点（测试/单 adapter）走兜底；生产 main 传进来的本身就是 Outbounds，
         // 再包一层兜底只是多一次转发，不改变按连接分发。
         let outbound = Outbounds::fallback(outbound);
         let memory = MemoryRepo::new(config.worktrees_root.clone());
@@ -580,6 +608,7 @@ impl<S: Store> Bridge<S> {
             store,
             outbound,
             plugins,
+            lkg,
             pending: VecDeque::new(),
             active: HashMap::new(),
             by_ticket: HashMap::new(),
@@ -659,6 +688,7 @@ impl<S: Store> Bridge<S> {
                     .cloned()
                     .or_else(|| self.manager_errors.get(info.id.namespace()).cloned())
                     .or_else(|| self.plugins.provider_error(&info.id));
+                let lkg = self.lkg.info(&info.id);
                 let mut value = info.to_json();
                 if let Value::Object(fields) = &mut value {
                     fields.insert("state".into(), json!(state));
@@ -668,10 +698,213 @@ impl<S: Store> Bridge<S> {
                         "lastError".into(),
                         error.map(|error| json!(error)).unwrap_or(Value::Null),
                     );
+                    fields.insert(
+                        "lkgState".into(),
+                        lkg.as_ref()
+                            .map(|lkg| json!(lkg.state.as_str()))
+                            .unwrap_or(Value::Null),
+                    );
+                    fields.insert(
+                        "lkgReason".into(),
+                        lkg.as_ref()
+                            .and_then(|lkg| lkg.reason.as_deref())
+                            .map(|reason| json!(reason))
+                            .unwrap_or(Value::Null),
+                    );
+                    fields.insert(
+                        "lkgVersion".into(),
+                        lkg.as_ref()
+                            .and_then(|lkg| lkg.version.as_deref())
+                            .map(|version| json!(version))
+                            .unwrap_or(Value::Null),
+                    );
+                    fields.insert(
+                        "lkgDigest".into(),
+                        lkg.as_ref()
+                            .and_then(|lkg| lkg.digest.as_deref())
+                            .map(|digest| json!(digest))
+                            .unwrap_or(Value::Null),
+                    );
+                    fields.insert(
+                        "lkgPromotedAt".into(),
+                        lkg.as_ref()
+                            .and_then(|lkg| lkg.promoted_at)
+                            .map(|at| json!(at))
+                            .unwrap_or(Value::Null),
+                    );
                 }
                 value
             })
             .collect()
+    }
+
+    /// 启动时把可回滚的动态插件登记为候选。只有 Dynamic + Unloadable 才有回滚路径。
+    fn register_startup_lkg_candidates(&mut self) {
+        if !self.lkg.is_enabled() {
+            return;
+        }
+        let ids: Vec<ProviderId> = self
+            .plugins
+            .catalog()
+            .into_iter()
+            .filter(|info| {
+                info.source == PluginSource::Dynamic
+                    && info.lifecycle == PluginLifecycle::Unloadable
+            })
+            .map(|info| info.id)
+            .collect();
+        for id in ids {
+            self.register_lkg_candidate(&id);
+        }
+    }
+
+    /// 登记/刷新一个候选：记录 loader 暴露的路径、版本与文件内容摘要。
+    fn register_lkg_candidate(&mut self, id: &ProviderId) {
+        if !self.lkg.is_enabled() {
+            return;
+        }
+        let Some(artifact) = self.plugins.artifact_of(id) else {
+            return;
+        };
+        let Some(digest) = crate::lkg::digest_file(Path::new(&artifact.path)) else {
+            eprintln!(
+                "plugin-lkg: cannot digest {} for {id}; leaving it untracked",
+                artifact.path
+            );
+            return;
+        };
+        let version = artifact
+            .version
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned());
+        eprintln!("plugin-lkg: candidate {id} version={version} digest={digest}");
+        self.lkg
+            .register_candidate(id.clone(), version, digest, artifact.path);
+    }
+
+    /// 安全点：观察健康、提升候选、执行已挂起的回滚。调用方必须保证无在途轮次。
+    fn maybe_promote_lkg(&mut self) {
+        if !self.lkg.is_enabled() || !self.active.is_empty() {
+            return;
+        }
+        let now = now_millis();
+        self.scan_lkg_health(now);
+
+        for id in self.lkg.promotable() {
+            if self.plugin_errors.contains_key(&id)
+                || self.manager_errors.contains_key(id.namespace())
+            {
+                eprintln!("plugin-lkg: promotion blocked {id} reason=boundary error");
+                continue;
+            }
+            if self.plugins.provider_error(&id).is_some() {
+                eprintln!("plugin-lkg: promotion blocked {id} reason=provider error");
+                continue;
+            }
+            let loaded = self
+                .plugins
+                .info(&id)
+                .map(|info| info.lifecycle != PluginLifecycle::Unloaded)
+                .unwrap_or(false);
+            if !loaded {
+                eprintln!("plugin-lkg: promotion blocked {id} reason=unloaded");
+                continue;
+            }
+            let version = self
+                .lkg
+                .current_artifact(&id)
+                .map(|(version, _, _)| version)
+                .unwrap_or_else(|| "unknown".to_owned());
+            let digest = self
+                .lkg
+                .current_artifact(&id)
+                .map(|(_, digest, _)| digest)
+                .unwrap_or_default();
+            if self.lkg.promote(&id, now) {
+                eprintln!("plugin-lkg: promoted {id} version={version} digest={digest}");
+            }
+        }
+
+        if let Some((id, reason)) = self.lkg.take_rollback_request() {
+            self.rollback_lkg(&id, &reason);
+        }
+    }
+
+    /// 把 catalog 的 Healthy→Unhealthy 转换记成一次失败（动态适配器超时/标死也走这里）。
+    fn scan_lkg_health(&mut self, now: i64) {
+        let catalog = self.plugins.catalog();
+        for info in catalog {
+            if !self.lkg.is_tracked(&info.id) {
+                continue;
+            }
+            let (unhealthy, detail) = match &info.health {
+                Health::Unhealthy(detail) => (true, detail.clone()),
+                Health::Healthy | Health::Degraded(_) => (false, String::new()),
+            };
+            if self.lkg.observe_health(&info.id, unhealthy) {
+                self.note_plugin_failure(&info.id, &detail, now);
+            }
+        }
+    }
+
+    /// 记录一次 provider 失败。只对已登记 LKG 的 provider 生效。
+    fn note_plugin_failure(&mut self, id: &ProviderId, reason: &str, now: i64) {
+        if !self.lkg.is_tracked(id) {
+            return;
+        }
+        if let Some(count) = self.lkg.note_failure(id, reason, now) {
+            eprintln!("plugin-lkg: failure {id} count={count} reason={reason}");
+        }
+    }
+
+    /// 回滚到上一条 LKG：改运行时路径，卸载当前句柄，重新加载旧产物。
+    ///
+    /// 只在安全点调用，且只做一次；失败就停在 `rolledBack`，不再递归回滚。
+    fn rollback_lkg(&mut self, id: &ProviderId, reason: &str) {
+        let Some((_, digest, path)) = self.lkg.current_artifact(id) else {
+            return;
+        };
+        let Some(previous) = self.lkg.previous_lkg(id, &digest, &path) else {
+            self.lkg
+                .mark_rollback_failed(id, "no previous LKG".to_owned());
+            eprintln!("plugin-lkg: rollback failed {id} reason=no previous LKG");
+            return;
+        };
+        if let Err(error) = self.plugins.set_artifact_path(id, &previous.path) {
+            let detail = format!("cannot set artifact path: {error}");
+            self.lkg.mark_rollback_failed(id, detail.clone());
+            eprintln!("plugin-lkg: rollback failed {id} reason={detail}");
+            return;
+        }
+        let loaded = self
+            .plugins
+            .info(id)
+            .map(|info| info.lifecycle != PluginLifecycle::Unloaded)
+            .unwrap_or(false);
+        if loaded {
+            if let Err(error) = self.plugins.unload_provider(id) {
+                let detail = format!("cannot unload current plugin: {error}");
+                self.lkg.mark_rollback_failed(id, detail.clone());
+                eprintln!("plugin-lkg: rollback failed {id} reason={detail}");
+                return;
+            }
+        }
+        match self.plugins.reload_provider(id) {
+            Ok(()) => {
+                self.plugin_errors.remove(id);
+                self.lkg.record_rollback(id, &previous, reason.to_owned());
+                eprintln!(
+                    "plugin-lkg: rolled back {id} to version={} digest={} reason={reason}",
+                    previous.version, previous.digest
+                );
+            }
+            Err(error) => {
+                self.plugin_errors.insert(id.clone(), error.to_string());
+                let detail = format!("reload failed: {error}");
+                self.lkg.mark_rollback_failed(id, detail.clone());
+                eprintln!("plugin-lkg: rollback failed {id} reason={detail}");
+            }
+        }
     }
 
     /// 一个 provider 被当前生效配置引用的位置。引用中的插件不能卸载，
@@ -1389,10 +1622,12 @@ impl<S: Store> Bridge<S> {
             match self.plugins.reload_provider(&id) {
                 Ok(()) => {
                     self.plugin_errors.remove(&id);
+                    self.register_lkg_candidate(&id);
                     eprintln!("{}", acb_i18n::t!("kernel.engine.reload_applied", id = id));
                 }
                 Err(error) => {
                     self.plugin_errors.insert(id.clone(), error.to_string());
+                    self.note_plugin_failure(&id, &error.to_string(), now_millis());
                     eprintln!(
                         "{}",
                         acb_i18n::t!("kernel.engine.reload_failed", id = id, error = error)
@@ -1648,6 +1883,7 @@ impl<S: Store> Bridge<S> {
             let provider = match self.plugins.resolve_route(&policy.provider, policy) {
                 Ok(provider) => provider,
                 Err(error) => {
+                    self.note_plugin_failure(&policy.provider, &error.to_string(), now_millis());
                     eprintln!(
                         "{}",
                         acb_i18n::t!(
@@ -1681,13 +1917,19 @@ impl<S: Store> Bridge<S> {
                     Err(payload) => {
                         // 路由是命令/匹配层，不是安全闸门：panic 按 Pass 处理，避免静默丢消息。
                         // core 在收到完整 decision 前不会写 pending 动作，这里没有半成品要回滚。
+                        let panic = crate::plugin::panic_text(payload);
+                        self.note_plugin_failure(
+                            &policy.provider,
+                            &format!("panic: {panic}"),
+                            now_millis(),
+                        );
                         eprintln!(
                             "{}",
                             acb_i18n::t!(
                                 "kernel.engine.route_panicked",
                                 provider = policy.provider,
                                 room = room,
-                                panic = crate::plugin::panic_text(payload)
+                                panic = panic
                             )
                         );
                         RouteDecision::Pass
@@ -1747,9 +1989,20 @@ impl<S: Store> Bridge<S> {
                 .connection(&room.connection)
                 .map(|connection| connection.receive.clone())
                 .unwrap_or_default();
-            let receive_provider = self
+            let receive_provider = match self
                 .plugins
-                .resolve_receive(&receive_policy.provider, &receive_policy)?;
+                .resolve_receive(&receive_policy.provider, &receive_policy)
+            {
+                Ok(provider) => provider,
+                Err(error) => {
+                    self.note_plugin_failure(
+                        &receive_policy.provider,
+                        &error.to_string(),
+                        now_millis(),
+                    );
+                    return Err(error.into());
+                }
+            };
             let receive_context = ReceiveRequest {
                 connection: &room.connection,
                 platform: &platform,
@@ -1770,10 +2023,20 @@ impl<S: Store> Bridge<S> {
         let mut wake_providers = Vec::with_capacity(subscribers.len());
         if !self.draining {
             for subscriber in &subscribers {
-                wake_providers.push(
-                    self.plugins
-                        .resolve_wake(&subscriber.wake.provider, &subscriber.wake)?,
-                );
+                match self
+                    .plugins
+                    .resolve_wake(&subscriber.wake.provider, &subscriber.wake)
+                {
+                    Ok(provider) => wake_providers.push(provider),
+                    Err(error) => {
+                        self.note_plugin_failure(
+                            &subscriber.wake.provider,
+                            &error.to_string(),
+                            now_millis(),
+                        );
+                        return Err(error.into());
+                    }
+                }
             }
         }
 
@@ -2328,6 +2591,7 @@ impl<S: Store> Bridge<S> {
         }
         self.apply_pending_plugin_actions();
         self.apply_staged_config();
+        self.maybe_promote_lkg();
         let now = now_millis();
         let index = (0..self.pending.len()).find(|&index| {
             let pending = &self.pending[index];
@@ -2347,6 +2611,7 @@ impl<S: Store> Bridge<S> {
         }
         self.apply_pending_plugin_actions();
         self.apply_staged_config();
+        self.maybe_promote_lkg();
         let now = now_millis();
         let index = (0..self.pending.len()).find(|&index| {
             let pending = &self.pending[index];
@@ -2430,6 +2695,7 @@ impl<S: Store> Bridge<S> {
         self.ended
             .retain(|_, ended| ended.at.elapsed() < TURN_GRACE);
         self.active.remove(&session);
+        self.maybe_promote_lkg();
         Ok(())
     }
 
@@ -2483,6 +2749,11 @@ impl<S: Store> Bridge<S> {
         let provider = match self.plugins.resolve_turn_error(&policy.provider, &policy) {
             Ok(provider) => provider,
             Err(resolve_error) => {
+                self.note_plugin_failure(
+                    &policy.provider,
+                    &resolve_error.to_string(),
+                    now_millis(),
+                );
                 eprintln!(
                     "{}",
                     acb_i18n::t!(
@@ -2794,6 +3065,11 @@ impl<S: Store> Bridge<S> {
                     Ok(result) => result,
                     Err(payload) => {
                         let panic = crate::plugin::panic_text(payload);
+                        self.note_plugin_failure(
+                            &provider_id,
+                            &format!("panic: {panic}"),
+                            now_millis(),
+                        );
                         eprintln!(
                             "{}",
                             acb_i18n::t!(
@@ -3434,7 +3710,7 @@ impl<S: Store> Bridge<S> {
     /// provider 只回答允许/拒绝；拒绝的形状（错误码、文案）由 core 统一组织。
     /// `sessions` 取并集：任何一个会话被允许就算通过（工具面目前只传当前会话一个）。
     fn check_access(
-        &self,
+        &mut self,
         config: &Config,
         sessions: &[String],
         action: AccessAction,
@@ -3447,11 +3723,18 @@ impl<S: Store> Bridge<S> {
             let Some(session) = config.session(id) else {
                 continue;
             };
-            let provider = self
+            let provider = match self
                 .plugins
                 .resolve_access(&session.access.provider, &session.access)
-                .map_err(|error| {
-                    ToolError::new(
+            {
+                Ok(provider) => provider,
+                Err(error) => {
+                    self.note_plugin_failure(
+                        &session.access.provider,
+                        &error.to_string(),
+                        now_millis(),
+                    );
+                    return Err(ToolError::new(
                         ErrorCode::Internal,
                         acb_i18n::t!(
                             "kernel.engine.access_policy_unavailable",
@@ -3459,8 +3742,9 @@ impl<S: Store> Bridge<S> {
                             session = id,
                             error = error
                         ),
-                    )
-                })?;
+                    ));
+                }
+            };
             let subscriptions: Vec<RoomId> = session
                 .subscriptions
                 .iter()
@@ -3508,7 +3792,7 @@ impl<S: Store> Bridge<S> {
 
     /// 能不能对 `room` 做 `action`。
     fn ensure_room_access(
-        &self,
+        &mut self,
         config: &Config,
         sessions: &[String],
         action: AccessAction,
@@ -3527,7 +3811,7 @@ impl<S: Store> Bridge<S> {
 
     /// 读的工具默认要求「能读这个房间」。具体边界由会话的访问策略决定。
     fn ensure_readable(
-        &self,
+        &mut self,
         config: &Config,
         sessions: &[String],
         room: &RoomId,
@@ -3538,7 +3822,7 @@ impl<S: Store> Bridge<S> {
 
     /// 当前会话能不能往这个房间发。`send_message_to` 的边界。
     fn ensure_can_send(
-        &self,
+        &mut self,
         config: &Config,
         session: &str,
         room: &RoomId,
@@ -3553,7 +3837,7 @@ impl<S: Store> Bridge<S> {
     /// 好友列表、账号资料这类方法跟房间无关，所以不要求模型报出一个具体房间；
     /// 但也不能凭空调一个自己完全够不着的号。
     fn ensure_connection_readable(
-        &self,
+        &mut self,
         config: &Config,
         sessions: &[String],
         connection: &str,
@@ -3612,6 +3896,11 @@ impl<S: Store> Bridge<S> {
                 let provider = match self.plugins.resolve_clock(&policy.provider, &policy) {
                     Ok(provider) => provider,
                     Err(error) => {
+                        self.note_plugin_failure(
+                            &policy.provider,
+                            &error.to_string(),
+                            now_millis(),
+                        );
                         eprintln!(
                             "{}",
                             acb_i18n::t!(
@@ -3751,6 +4040,11 @@ impl<S: Store> Bridge<S> {
         {
             Ok(composer) => composer,
             Err(error) => {
+                self.note_plugin_failure(
+                    &delivery_policy.provider,
+                    &error.to_string(),
+                    now_millis(),
+                );
                 eprintln!(
                     "{}",
                     acb_i18n::t!(
@@ -4614,7 +4908,7 @@ impl<S: Store> Bridge<S> {
     }
 
     fn read_notes(
-        &self,
+        &mut self,
         config: &Config,
         sessions: &[String],
         turn_room: &RoomId,
@@ -4916,7 +5210,7 @@ impl<S: Store> Bridge<S> {
     /// 为什么清单不砍成「只有组名」：多一次往返就是多一整轮推理和几秒延迟，
     /// 而一张清单在四五十个方法时也就一千来 token，只花在模型主动查的那一轮。
     fn platform_methods(
-        &self,
+        &mut self,
         config: &Config,
         sessions: &[String],
         turn_room: &RoomId,
@@ -5062,7 +5356,7 @@ impl<S: Store> Bridge<S> {
     ///
     /// 只做发现，不倒方法表——方法表按连接查，免得一次把几个平台的目录都塞进上下文。
     fn connection_summaries(
-        &self,
+        &mut self,
         config: &Config,
         sessions: &[String],
         origin: &RoomId,

@@ -81,6 +81,7 @@ fn dynamic_adapter_loads_and_speaks_the_wire_protocol() {
             kind: Some("demo".into()),
             // 测试里把超时压到 300ms，避免 demo.slow 的 2.5s 阻塞拖慢整套测试。
             timeout_ms: Some(300),
+            version: None,
         }]))
         .expect("能装载动态库");
 

@@ -466,7 +466,9 @@ mod tests {
                 let url = relay.publish(&source).expect("并发发布应当成功");
                 let rest = url.strip_prefix("http://x/f/").expect("前缀对");
                 let (token, name) = rest.split_once('/').expect("URL 含 token 和文件名");
-                let (path, size) = relay.lookup(token, name).expect("发布返回时文件必须完整可见");
+                let (path, size) = relay
+                    .lookup(token, name)
+                    .expect("发布返回时文件必须完整可见");
                 assert_eq!(size, expected.len() as u64, "不能是半写文件");
                 assert_eq!(fs::read(path).expect("能读"), expected);
                 url
@@ -485,7 +487,11 @@ mod tests {
                 .expect("能读 token 目录")
                 .map(|item| item.expect("文件项").file_name())
                 .collect();
-            assert_eq!(files.len(), 1, "每个 token 目录只应有一个最终文件：{files:?}");
+            assert_eq!(
+                files.len(),
+                1,
+                "每个 token 目录只应有一个最终文件：{files:?}"
+            );
             assert!(
                 !files[0].to_string_lossy().ends_with(".part"),
                 "不能留下临时文件：{:?}",

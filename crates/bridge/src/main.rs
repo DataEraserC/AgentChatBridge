@@ -9,7 +9,7 @@
 //! 6. 起一个清理线程，定时削旧流水（只削读过的）；
 //! 7. 起接入点，等 harness 连进来。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -170,11 +170,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         launches.push(launch);
     }
 
-    let bridge = Arc::new(Mutex::new(Bridge::with_plugins(
+    let lkg_path = plugins_lkg_path(&config.storage.path);
+    let bridge = Arc::new(Mutex::new(Bridge::with_plugins_lkg(
         config.clone(),
         store,
         Box::new(outbounds),
         plugins,
+        lkg_path,
     )));
 
     // provider id 写错要在启动时死，不能等第一轮才报。
@@ -349,6 +351,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let exit_code = wait_for_stop(&bridge, &route_worker, &shutdown);
     shutdown.store(true, Ordering::SeqCst);
     Ok(exit_code)
+}
+
+/// 插件 LKG 状态文件：跟存储同目录，不归 Nix 所有，也不需要 root。
+fn plugins_lkg_path(storage_path: &str) -> PathBuf {
+    Path::new(storage_path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join("plugins-lkg.toml")
 }
 
 /// 主循环：等退出信号。SIGTERM = 排空后正常退出；SIGHUP = 排空后请求重启（75）。

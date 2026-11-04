@@ -8,6 +8,7 @@ pub mod config;
 pub mod endpoint;
 pub mod engine;
 pub mod event_queue;
+pub mod lkg;
 pub mod memory;
 pub mod outbound;
 pub mod plugin;
@@ -38,6 +39,7 @@ pub use config::{
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
 pub use engine::{Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned, TaskRecord, TaskStatus};
 pub use event_queue::{EventQueue, EventReceiver, drain_events};
+pub use lkg::{LkgEntry, LkgInfo, LkgState, PluginLkg};
 pub use outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, Outbounds, OutgoingKind,
     OutgoingRecord, ParamSpec, ParamType, RecordMode, Risk, Scope, Sent, TargetRole, TargetSpec,
@@ -51,11 +53,11 @@ pub use plugin::{
     DefaultWakeProvider, DeliveryComposer, DeliveryPlan, DeliveryRequest, ELEVATED_ACCESS_PROVIDER,
     ElevatedInRoomsAccessProvider, ExtensionPoint, Health, InterruptScope,
     IntervalIdleClockProvider, LoaderKind, LoaderManifest, MAX_MANAGER_DEPTH, ManagerHealth,
-    ManagerManifest, ManagerPlugin, NativeLoader, PLUGIN_API_VERSION, PluginError, PluginLoader,
-    PluginManager, PromptContext, PromptDraft, PromptProvider, ProviderDescriptor, ProviderId,
-    ProviderInstance, ProviderOptions, ReceiveDecision, ReceiveProvider, ReceiveRequest,
-    RecordObserver, ReloadScope, RouteAction, RouteContext, RouteDecision, RouteProvider,
-    SendContext, SendHook, SendOrigin, SubscribedAccessProvider, ToolAccessContext,
+    ManagerManifest, ManagerPlugin, NativeLoader, PLUGIN_API_VERSION, PluginArtifact, PluginError,
+    PluginLoader, PluginManager, PromptContext, PromptDraft, PromptProvider, ProviderDescriptor,
+    ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision, ReceiveProvider,
+    ReceiveRequest, RecordObserver, ReloadScope, RouteAction, RouteContext, RouteDecision,
+    RouteProvider, SendContext, SendHook, SendOrigin, SubscribedAccessProvider, ToolAccessContext,
     ToolAccessProvider, ToolAccessVerdict, ToolCallContext, ToolLoader, ToolProvider, ToolSpec,
     TurnErrorProvider, TurnErrorRequest, WakeContext, WakeProvider, default_delivery_plan,
 };

@@ -39,6 +39,7 @@ fn load(path: &Path) -> PluginManager {
             path: path.to_string_lossy().into_owned(),
             kind: None,
             timeout_ms: None,
+            version: None,
         }]))
         .expect("能装载策略插件");
     plugins
