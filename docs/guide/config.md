@@ -58,10 +58,26 @@ model = "${ACB_MODEL_DSH:-provider/model}"
 
 控制台的保存目标固定为 `<config_dir>/90-console.toml`，不再改写 `--config` 指向的文件；
 `config.d/` 不存在时会自动创建，旧覆盖层备份成 `90-console.toml.bak`。
-`90-console.toml` 是控制台专用的最高优先级整份文档覆盖层，最后加载，覆盖它包含的顶层键；
-因此部署侧重新生成 base 不会冲掉控制台改动。runtime 策略分片仍按上面的规则合并。
 
-手工排查时可以直接看 `config.d/`：`90-console.toml` 是控制台写的，其余文件是部署/运维写的。
+`90-console.toml` 是**覆盖层（overlay layer）**，与普通分片不同：
+
+- 它按**顶层 key 整体替换**下层（不做按 key 合并，也不做数组追加）。
+- 它**豁免** `connections` / `sessions` 的跨文件重复 id 检查。必须豁免，否则控制台
+  保存一份包含已有条目的完整文档时，会立刻和 base/分片里的同名 id 冲突，控制台就
+  无法编辑已有 connection/session。
+- 它最后加载，所以部署侧重新生成 base 不会冲掉控制台改动。
+
+runtime 策略分片仍按上面的普通合并规则处理。手工排查时可以直接看 `config.d/`：
+`90-console.toml` 是控制台写的，其余文件是部署/运维写的。
+
+### 已知限制
+
+- 分片**无法给已有 connection 追加 `admin_qqs`**：`[[connections]]` 按 id 全局唯一，
+  重复 id 会启动失败；只能在定义该连接的文件里维护它的 `admin_qqs`。
+- `[[grants.rules]]` 追加但**不去重**：同一规则在两层各写一份会得到两条。启动摘要会
+  对完全相同的跨层规则提示一次，但不会降级为错误，也不会自动去重。
+- `/api/status` 的 `config_fragments` 来源列表是**启动时**加载的文件；控制台保存产生/
+  更新 `90-console.toml` 后，要重启桥才会出现在这个列表里（`rules` 取的是当前暂存配置）。
 
 ## 热重载：改了什么时候生效
 

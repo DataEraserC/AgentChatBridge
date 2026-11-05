@@ -291,6 +291,7 @@
   "bridge.main.config_path": "config: {path}",
   "bridge.main.config_source": "  config source: {path} (connections {connections}, sessions {sessions}, rules {rules})",
   "bridge.main.config_rules_total": "  effective rules: {count}",
+  "bridge.main.duplicate_rules_warning": "  warning: identical [[grants.rules]] entries appear in more than one config layer; they are appended without deduplication.",
   "bridge.main.config_warning": "warning: {warning}",
   "bridge.main.connection_line": "    - {id} ({platform}, {kind}, {transport}) -> {url}, account {account}",
   "bridge.main.connections_count": "  connections: {count}",
