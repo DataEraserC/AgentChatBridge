@@ -9,3 +9,20 @@
               transport: streamable-http
               serverName: acb
               url: http://127.0.0.1:@PORT@/mcp
+          # dsh 的 host plane 禁用了 compaction-basic / command-compact /
+          # tool-result-pruner，这三个插件只能由 agent preset 挂载；缺这组时
+          # ACB 会话既没有 /compact 命令，也不会自动压缩。与内置 standard
+          # preset 的 compaction group 等价。
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
