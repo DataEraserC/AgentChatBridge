@@ -76,6 +76,8 @@ pub enum GrantCapability {
     ConnectionRead,
     Platform,
     Destructive,
+    /// 最高风险档。只由 `access_request` 票据携带，配置里的常驻授予一律拒绝。
+    Critical,
     Plugin,
 }
 
@@ -87,6 +89,7 @@ impl GrantCapability {
             Self::ConnectionRead => "connection_read",
             Self::Platform => "platform",
             Self::Destructive => "destructive",
+            Self::Critical => "critical",
             Self::Plugin => "plugin",
         }
     }
@@ -169,6 +172,12 @@ impl GrantsConfig {
             }
             let mut seen = std::collections::BTreeSet::new();
             for capability in &rule.capability {
+                if *capability == GrantCapability::Critical {
+                    return Err(format!(
+                        "grants.rules[{index}] capability critical cannot be granted by config; \
+                         critical operations require an access_request ticket approved in private"
+                    ));
+                }
                 if !seen.insert(*capability) {
                     return Err(format!(
                         "grants.rules[{index}] capability declared twice: {capability:?}"

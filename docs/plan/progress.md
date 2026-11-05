@@ -1861,6 +1861,50 @@
   - 验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode、`node --check` 全绿。
 - 下一步入口：按新口径做 `critical` 风险档位与媒体/文件 op 补全（独立提交）。
 
+## 2026-11-05 — critical 风险档与媒体/文件能力补全
+
+- 目标：按新口径「任何平台功能都必须有 op，风险靠分级和审批管住」，补回此前按
+  安全理由拒掉的媒体/文件动作，并把账号凭据/进程运维收进 `critical` 档。
+- 做了什么：
+  - `Risk::Critical`：默认拒绝，`allow_destructive` 不放行；新增
+    `GrantCapability::Critical`，配置常驻授予会在启动期报错，只能由票据携带。
+  - 直接 `platform_call` 命中 critical 一律 `ToolNotAllowed`；票据执行路径
+    `execute_ticket_platform` 允许 connection-scope critical 并携带票据能力校验。
+  - 审批私信显示 `[CRITICAL]` + op/目标 + 脱敏参数摘要（cookie/token/secret/
+    password/clientkey/db_key/db_path/authorization/headers，send_packet 的 data
+    也脱敏）；结果只进票据存储，`access_ticket_get` 显式查询可见。
+  - 新增 27 个 op（91 → 118）/ 27 个 action（94 → 121）：
+    - critical 9：`account.credentials` / `account.cookies` / `account.csrf_token` /
+      `account.clientkey` / `account.decrypt_key` / `system.send_packet` /
+      `system.bot_exit` / `system.restart` / `system.clean_cache`；
+    - `file.download`：只收 http/https 或 base64，二选一；`max_bytes` 默认 8 MiB、
+      上限 32 MiB（base64 本地预检），只回平台路径/元信息；
+    - 流式 6：`stream.upload_file` / `download_image` / `download_record` /
+      `download_file` / `test_download` / `clean`；单块 1 MiB、总大小 256 MiB；
+      多帧/无逐请求取消/WS 无背压写进 op 描述，下载流当前只能拿首帧；
+    - 转发 4：`msg.forward_upload` / `forward_upload_alias` /
+      `send_group_forward` / `send_private_forward`；载荷上限 256 KiB / 100 节点；
+    - 群相册 7：`qun_list` / `upload_image` / `upload_video` / `delete_media` /
+      `comment` / `like` / `unlike`；删除为 Destructive + `Effect::Delete`。
+  - 覆盖矩阵：新增 `docs/plan/snowluma-action-coverage.md`。SnowLuma 中文索引 200 个
+    唯一动作，已暴露 121，未暴露 79（外部约束 16、未排期 63）。
+- 取舍：
+  - critical 也允许从目录发现；发现成本靠分页/risk，执行成本靠票据审批。
+  - `file.download` 的 URL 大小无法预检（平台下载、文档无上限），`max_bytes` 只对
+    base64 强制；跟随重定向由平台决定，已写进 op 描述。
+  - 下载流不做多帧收集：现有 `Outbound::call` 是单响应语义，收集所有帧会把文件字节
+    搬进 core；先暴露 op + 首帧，完整文件走 HTTP/SDK。
+  - `get_csrf_token` 不在用户必列清单里，但它同样是凭据，按 critical 一并收进来。
+- 证据：
+  - `critical_is_refused_by_allow_destructive_and_runs_only_via_ticket`
+  - `config_cannot_grant_critical_capability`
+  - `media_and_critical_ops_are_routed_with_limits`
+  - `batch_seven_album_ops_are_read_only_and_routed`（已扩写）
+  - `every_op_is_hierarchical_tagged_and_routed`（118 op）
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode、
+    `node --check` 全绿。
+- 下一步入口：QQ 空间 10 个动作 + 收藏/闪传 115 个 extended；按新档位另起批次。
+
 
 ## 部署注意事项（nix-config 打包）
 

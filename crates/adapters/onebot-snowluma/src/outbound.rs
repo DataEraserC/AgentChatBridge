@@ -35,6 +35,29 @@ const MAX_EMOJI_ID_LEN: usize = 256;
 /// OCR 的图片地址/缓存 id 上限：只收标识，不替模型搬运图片内容。
 const MAX_OCR_SOURCE_LEN: usize = 2048;
 
+/// 下载类动作的 ACB 侧默认/最大大小：平台文档没有大小上限，core 不替它兜底。
+const DEFAULT_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_DOWNLOAD_URL_LEN: usize = 4096;
+const MAX_DOWNLOAD_NAME_LEN: usize = 255;
+
+/// 流式上传：单块 1 MiB、总大小 256 MiB（平台单块上限 1 MiB）。
+const MAX_STREAM_CHUNK_BYTES: u64 = 1024 * 1024;
+const MAX_STREAM_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_STREAM_ID_LEN: usize = 64;
+const MAX_STREAM_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// 合并转发载荷：不让 core 变成任意大小转发载荷的搬运通道。
+const MAX_FORWARD_BYTES: usize = 256 * 1024;
+const MAX_FORWARD_NODES: usize = 100;
+
+/// 群相册长文本/文件标识上限。
+const MAX_ALBUM_TEXT_CHARS: usize = 4096;
+const MAX_ALBUM_FILE_LEN: usize = 4096;
+
+/// SSO 包体（hex 字符串）上限。
+const MAX_PACKET_HEX_CHARS: usize = 64 * 1024;
+
 // 平台方法表在 `catalog.rs`：那里的每一行都是「人也做得到的事」。
 
 /// OneBot 出站通道。一条连接一个。
@@ -486,7 +509,292 @@ fn validate_call_params(method: &str, params: &Value) -> Result<(), CallError> {
         "group.album.media" => {
             required_text(map, "album_id")?;
         }
+        "account.credentials" | "account.cookies" | "account.csrf_token" => {
+            if let Some(domain) = optional_text(map, "domain")
+                && domain.chars().count() > 253
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "domain",
+                    max = 253
+                )));
+            }
+        }
+        "account.decrypt_key" => {
+            let path = required_text(map, "db_path")?;
+            if path.chars().count() > 1024 {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "db_path",
+                    max = 1024
+                )));
+            }
+        }
+        "system.send_packet" => {
+            let cmd = required_text(map, "cmd")?;
+            if cmd.chars().count() > 128 {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "cmd",
+                    max = 128
+                )));
+            }
+            if let Some(data) = optional_text(map, "data") {
+                if data.chars().count() > MAX_PACKET_HEX_CHARS {
+                    return Err(CallError::BadParams(acb_i18n::t!(
+                        "adapter.onebot11.value_too_long",
+                        field = "data",
+                        max = MAX_PACKET_HEX_CHARS
+                    )));
+                }
+                if !data.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                    return Err(CallError::BadParams(acb_i18n::t!(
+                        "adapter.onebot11.packet_data_invalid"
+                    )));
+                }
+            }
+        }
+        "file.download" => {
+            let url = optional_text(map, "url");
+            let base64 = optional_text(map, "base64");
+            match (url, base64) {
+                (Some(url), None) => {
+                    let lower = url.to_ascii_lowercase();
+                    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                        return Err(CallError::BadParams(acb_i18n::t!(
+                            "adapter.onebot11.download_scheme"
+                        )));
+                    }
+                    if url.chars().count() > MAX_DOWNLOAD_URL_LEN {
+                        return Err(CallError::BadParams(acb_i18n::t!(
+                            "adapter.onebot11.value_too_long",
+                            field = "url",
+                            max = MAX_DOWNLOAD_URL_LEN
+                        )));
+                    }
+                }
+                (None, Some(base64)) => {
+                    let limit = download_limit(map)?;
+                    let encoded_limit = limit.saturating_mul(4) / 3 + 4;
+                    if base64.len() as u64 > encoded_limit {
+                        return Err(CallError::BadParams(acb_i18n::t!(
+                            "adapter.onebot11.download_too_large",
+                            max = limit
+                        )));
+                    }
+                }
+                (Some(_), Some(_)) | (None, None) => {
+                    return Err(CallError::BadParams(acb_i18n::t!(
+                        "adapter.onebot11.download_source_required"
+                    )));
+                }
+            }
+            if let Some(name) = optional_text(map, "name")
+                && name.chars().count() > MAX_DOWNLOAD_NAME_LEN
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "name",
+                    max = MAX_DOWNLOAD_NAME_LEN
+                )));
+            }
+        }
+        "stream.upload_file" => {
+            let stream_id = required_text(map, "stream_id")?;
+            if stream_id.chars().count() > MAX_STREAM_ID_LEN
+                || !stream_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.stream_id_invalid",
+                    max = MAX_STREAM_ID_LEN
+                )));
+            }
+            if let Some(chunk) = optional_text(map, "chunk_data")
+                && chunk.len() as u64 > MAX_STREAM_CHUNK_BYTES.saturating_mul(4) / 3 + 4
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.stream_chunk_too_large",
+                    max = MAX_STREAM_CHUNK_BYTES
+                )));
+            }
+            if let Some(size) = map.get("file_size").and_then(Value::as_u64)
+                && size > MAX_STREAM_FILE_BYTES
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.stream_file_too_large",
+                    max = MAX_STREAM_FILE_BYTES
+                )));
+            }
+            if let Some(total) = map.get("total_chunks").and_then(Value::as_u64) {
+                if total == 0 || total > 65_536 {
+                    return Err(CallError::BadParams(acb_i18n::t!(
+                        "adapter.onebot11.value_too_long",
+                        field = "total_chunks",
+                        max = 65_536
+                    )));
+                }
+                if let Some(index) = map.get("chunk_index").and_then(Value::as_u64)
+                    && index >= total
+                {
+                    return Err(CallError::BadParams(acb_i18n::t!(
+                        "adapter.onebot11.stream_index_invalid"
+                    )));
+                }
+            }
+            if let Some(retention) = map.get("file_retention").and_then(Value::as_u64)
+                && retention > MAX_STREAM_RETENTION_MS
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "file_retention",
+                    max = MAX_STREAM_RETENTION_MS
+                )));
+            }
+        }
+        "stream.download_image" | "stream.download_record" | "stream.download_file" => {
+            if ["file", "file_id"]
+                .iter()
+                .all(|key| optional_text(map, key).is_none())
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.stream_source_required"
+                )));
+            }
+            if let Some(file) = optional_text(map, "file")
+                && file.chars().count() > MAX_DOWNLOAD_URL_LEN
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "file",
+                    max = MAX_DOWNLOAD_URL_LEN
+                )));
+            }
+            if let Some(size) = map.get("chunk_size").and_then(Value::as_u64)
+                && (size == 0 || size > MAX_STREAM_CHUNK_BYTES)
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "chunk_size",
+                    max = MAX_STREAM_CHUNK_BYTES
+                )));
+            }
+        }
+        "msg.forward_upload"
+        | "msg.forward_upload_alias"
+        | "msg.send_group_forward"
+        | "msg.send_private_forward" => {
+            validate_forward_payload(map)?;
+        }
+        "group.album.qun_list" => {
+            if let Some(attach) = optional_text(map, "attach_info")
+                && attach.chars().count() > MAX_ALBUM_FILE_LEN
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "attach_info",
+                    max = MAX_ALBUM_FILE_LEN
+                )));
+            }
+        }
+        "group.album.upload_image" | "group.album.upload_video" => {
+            let album_id = required_text(map, "album_id")?;
+            required_text(map, "album_name")?;
+            let file = required_text(map, "file")?;
+            if album_id.chars().count() > MAX_ALBUM_FILE_LEN
+                || file.chars().count() > MAX_ALBUM_FILE_LEN
+            {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "album_id/file",
+                    max = MAX_ALBUM_FILE_LEN
+                )));
+            }
+        }
+        "group.album.delete_media" => {
+            required_text(map, "album_id")?;
+            let lloc = required_text(map, "lloc")?;
+            if lloc.chars().count() > MAX_ALBUM_FILE_LEN {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "lloc",
+                    max = MAX_ALBUM_FILE_LEN
+                )));
+            }
+        }
+        "group.album.comment" => {
+            required_text(map, "album_id")?;
+            required_text(map, "lloc")?;
+            let content = required_text(map, "content")?;
+            if content.chars().count() > MAX_ALBUM_TEXT_CHARS {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.album_text_too_long",
+                    max = MAX_ALBUM_TEXT_CHARS
+                )));
+            }
+        }
+        "group.album.like" | "group.album.unlike" => {
+            required_text(map, "album_id")?;
+            required_text(map, "batch_id")?;
+        }
         _ => {}
+    }
+    Ok(())
+}
+
+fn optional_text<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
+    map.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn download_limit(map: &serde_json::Map<String, Value>) -> Result<u64, CallError> {
+    let limit = map
+        .get("max_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_DOWNLOAD_BYTES);
+    if limit == 0 || limit > MAX_DOWNLOAD_BYTES {
+        return Err(CallError::BadParams(acb_i18n::t!(
+            "adapter.onebot11.download_limit_invalid",
+            max = MAX_DOWNLOAD_BYTES
+        )));
+    }
+    Ok(limit)
+}
+
+/// 转发预上传/专用发送的载荷上限：节点数 + 序列化字节数。
+fn validate_forward_payload(map: &serde_json::Map<String, Value>) -> Result<(), CallError> {
+    let nodes = ["messages", "message"]
+        .iter()
+        .find_map(|key| map.get(*key).filter(|value| !value.is_null()));
+    let Some(nodes) = nodes else {
+        return Err(CallError::BadParams(acb_i18n::t!(
+            "adapter.onebot11.forward_payload_invalid",
+            max = MAX_FORWARD_NODES
+        )));
+    };
+    let Some(items) = nodes.as_array() else {
+        return Err(CallError::BadParams(acb_i18n::t!(
+            "adapter.onebot11.forward_payload_invalid",
+            max = MAX_FORWARD_NODES
+        )));
+    };
+    if items.is_empty() || items.len() > MAX_FORWARD_NODES {
+        return Err(CallError::BadParams(acb_i18n::t!(
+            "adapter.onebot11.forward_payload_invalid",
+            max = MAX_FORWARD_NODES
+        )));
+    }
+    let bytes = serde_json::to_string(nodes)
+        .map(|text| text.len())
+        .unwrap_or(usize::MAX);
+    if bytes > MAX_FORWARD_BYTES {
+        return Err(CallError::BadParams(acb_i18n::t!(
+            "adapter.onebot11.forward_payload_too_large",
+            max = MAX_FORWARD_BYTES
+        )));
     }
     Ok(())
 }
@@ -1141,6 +1449,22 @@ mod tests {
                     | "face.entity"
                     | "like.send"
                     | "system.check_url"
+                    | "account.credentials"
+                    | "account.cookies"
+                    | "account.csrf_token"
+                    | "account.clientkey"
+                    | "account.decrypt_key"
+                    | "system.send_packet"
+                    | "system.bot_exit"
+                    | "system.restart"
+                    | "system.clean_cache"
+                    | "file.download"
+                    | "stream.upload_file"
+                    | "stream.download_image"
+                    | "stream.download_record"
+                    | "stream.download_file"
+                    | "stream.test_download"
+                    | "stream.clean"
             );
             let expected = if account_level {
                 Scope::Connection
@@ -1228,7 +1552,7 @@ mod tests {
     #[test]
     fn every_op_is_hierarchical_tagged_and_routed() {
         let methods = catalog();
-        assert_eq!(methods.len(), 91, "批次 7 后应有 91 个层级 op");
+        assert_eq!(methods.len(), 118, "critical/媒体批次后应有 118 个层级 op");
         assert!(!methods.is_empty());
         for method in methods.iter() {
             let name = method.name.as_ref();
@@ -1238,7 +1562,9 @@ mod tests {
                 method.has_tag(match method.risk {
                     Risk::Read => acb_kernel::outbound::tags::READ,
                     Risk::Write => acb_kernel::outbound::tags::WRITE,
-                    Risk::Destructive => acb_kernel::outbound::tags::DESTRUCTIVE,
+                    Risk::Destructive | Risk::Critical => {
+                        acb_kernel::outbound::tags::DESTRUCTIVE
+                    }
                 }),
                 "{name} 缺少风险标签"
             );
@@ -1950,13 +2276,14 @@ mod tests {
         assert_eq!(record.elements, vec![Element::text("[AI 语音]")]);
     }
 
-    /// 批次 7 只暴露群相册的只读主路径；上传/删除/评论/点赞都不接。
+    /// 批次 7 的只读主路径仍在；新一批把相册写操作补进 catalog（风险分档）。
     #[test]
     fn batch_seven_album_ops_are_read_only_and_routed() {
         let methods = catalog();
         for (name, action) in [
             ("group.album.list", "get_group_album_list"),
             ("group.album.media", "get_group_album_media_list"),
+            ("group.album.qun_list", "get_qun_album_list"),
         ] {
             let method = methods
                 .iter()
@@ -1973,12 +2300,131 @@ mod tests {
                 Target::ByRoom { .. } => panic!("{name} 不该按房间分叉"),
             }
         }
-        assert!(
-            !methods
+        for (name, action, risk) in [
+            (
+                "group.album.upload_image",
+                "upload_image_to_qun_album",
+                Risk::Write,
+            ),
+            (
+                "group.album.upload_video",
+                "upload_video_to_qun_album",
+                Risk::Write,
+            ),
+            ("group.album.comment", "do_group_album_comment", Risk::Write),
+            (
+                "group.album.like",
+                "set_group_album_media_like",
+                Risk::Write,
+            ),
+            (
+                "group.album.unlike",
+                "cancel_group_album_media_like",
+                Risk::Write,
+            ),
+            (
+                "group.album.delete_media",
+                "del_group_album_media",
+                Risk::Destructive,
+            ),
+        ] {
+            let method = methods
                 .iter()
-                .any(|method| method.name.as_ref().contains("album.upload")
-                    || method.name.as_ref().contains("album.delete")),
-            "相册写操作不应进 catalog"
+                .find(|method| method.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("没有 {name}"));
+            assert_eq!(method.risk, risk, "{name} 风险档不对");
+            let route = ROUTES
+                .iter()
+                .find(|route| route.method == name)
+                .unwrap_or_else(|| panic!("{name} 没有路由"));
+            match route.target {
+                Target::Fixed(target) => assert_eq!(target, action, "{name} 路由不对"),
+                Target::ByRoom { .. } => panic!("{name} 不该按房间分叉"),
+            }
+        }
+    }
+
+    #[test]
+    fn media_and_critical_ops_are_routed_with_limits() {
+        let methods = catalog();
+        let find = |name: &str| {
+            methods
+                .iter()
+                .find(|method| method.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("没有 {name}"))
+        };
+        assert_eq!(find("account.cookies").risk, Risk::Critical);
+        assert_eq!(find("file.download").risk, Risk::Destructive);
+        assert_eq!(find("stream.download_file").risk, Risk::Read);
+        assert_eq!(find("msg.send_private_forward").risk, Risk::Write);
+        assert_eq!(find("group.album.delete_media").effect, Effect::Delete);
+        for (name, action) in [
+            ("account.cookies", "get_cookies"),
+            ("account.csrf_token", "get_csrf_token"),
+            ("file.download", "download_file"),
+            ("stream.upload_file", "upload_file_stream"),
+            ("stream.download_image", "download_file_image_stream"),
+            ("stream.download_record", "download_file_record_stream"),
+            ("stream.download_file", "download_file_stream"),
+            ("stream.test_download", "test_download_stream"),
+            ("stream.clean", "clean_stream_temp_file"),
+            ("msg.forward_upload", "upload_forward_msg"),
+            ("msg.forward_upload_alias", "upload_foward_msg"),
+            ("msg.send_group_forward", "send_group_forward_msg"),
+            ("msg.send_private_forward", "send_private_forward_msg"),
+            ("group.album.upload_image", "upload_image_to_qun_album"),
+            ("group.album.upload_video", "upload_video_to_qun_album"),
+            ("group.album.delete_media", "del_group_album_media"),
+            ("group.album.comment", "do_group_album_comment"),
+            ("group.album.like", "set_group_album_media_like"),
+            ("group.album.unlike", "cancel_group_album_media_like"),
+        ] {
+            let route = ROUTES
+                .iter()
+                .find(|route| route.method == name)
+                .unwrap_or_else(|| panic!("{name} 没有路由"));
+            match route.target {
+                Target::Fixed(target) => assert_eq!(target, action, "{name} 路由不对"),
+                Target::ByRoom { .. } => panic!("{name} 不该按房间分叉"),
+            }
+        }
+
+        assert!(
+            validate_call_params("file.download", &json!({"url": "ftp://x/a"})).is_err(),
+            "file.download 不接受非 http(s) scheme"
+        );
+        assert!(validate_call_params("file.download", &json!({"url": "https://x/a"})).is_ok());
+        assert!(
+            validate_call_params(
+                "file.download",
+                &json!({"base64": "AAAAAAAA", "max_bytes": 1})
+            )
+            .is_err(),
+            "base64 超过 max_bytes 必须在本地拒绝"
+        );
+        assert!(
+            validate_call_params("msg.forward_upload", &json!({"messages": []})).is_err(),
+            "空转发载荷拒绝"
+        );
+        let too_many: Vec<Value> = (0..=MAX_FORWARD_NODES)
+            .map(|index| json!({"type": "node", "data": {"content": index}}))
+            .collect();
+        assert!(
+            validate_call_params("msg.forward_upload", &json!({ "messages": too_many })).is_err(),
+            "超过节点上限拒绝"
+        );
+        assert!(
+            validate_call_params("stream.upload_file", &json!({"stream_id": "id with space"}))
+                .is_err(),
+            "stream_id 非法字符拒绝"
+        );
+        assert!(
+            validate_call_params(
+                "stream.upload_file",
+                &json!({"stream_id": "ok", "file_size": MAX_STREAM_FILE_BYTES + 1})
+            )
+            .is_err(),
+            "流式总大小超限拒绝"
         );
     }
 

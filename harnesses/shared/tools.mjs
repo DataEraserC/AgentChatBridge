@@ -90,7 +90,8 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
 批准后 core 按申请时保存的 params 快照直接执行 send_message / send_message_to / platform_call:<method>；
 快照必须完整（例如 send 的 elements、平台方法的全部参数），批准后不能再改。
 只读 op（get_history 等）不由 core 执行：批准后票据保持 active，由会话在有效期内自己重试一次。
-票据只放宽「能不能碰这个房间」的目标判定：不绕过连接的 allow_destructive，也不授予 plugin 全权。
+票据不放宽 destructive 的 allow_destructive 闸门；critical 则相反：只能靠票据 + 私信审批放行，
+结果默认只进 access_ticket_get，不进房间流水或投递正文。
 同一个会话的审批消息会聚合成一条，在本轮结束时发出；冷却期内的申请会被明确拒绝并给出剩余秒数。
 op 列表要具体：send_message，send_message_to，get_history，fetch_records，get_notes，set_note，del_note，
 get_platform_events，wait_message，或 platform_call:<op>（如 platform_call:member.kick）。
@@ -269,6 +270,8 @@ kind=term 记词，member 记人，topic 记还没聊完的事（topic 有状态
 **执行**：op 用层级名，如 msg.send、member.list、group.mute；params 的形状先用不带 op 的调用查。
 risk 由 op→risk 策略表决定，未知 op 直接拒绝；破坏性 op 默认不开放（报 forbidden），
 连接配置 allow_destructive 打开后才会真的执行。
+critical op（账号凭据、原始 SSO 包、进程运维）不接受 allow_destructive，直接调用一定 forbidden；
+先申请 platform_call:<op> 票据、私信审批后由 core 执行，结果用 access_ticket_get 查。
 room 决定目标房间：不给就是当前轮次；给别的房间必须在本会话订阅内。
 不要在 params 里改 group_id/user_id 换目标——params 里的 user_id 只表示「踢谁/拍谁」这类成员目标。
 

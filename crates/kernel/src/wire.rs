@@ -336,6 +336,7 @@ fn parse_risk(text: &str) -> Result<Risk, String> {
         "read" => Ok(Risk::Read),
         "write" => Ok(Risk::Write),
         "destructive" => Ok(Risk::Destructive),
+        "critical" => Ok(Risk::Critical),
         other => Err(acb_i18n::t!("kernel.wire.unknown_risk_level", risk = other)),
     }
 }

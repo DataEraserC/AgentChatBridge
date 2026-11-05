@@ -80,6 +80,22 @@ fn any(name: &'static str, desc: &'static str) -> ParamSpec {
     }
 }
 
+/// 形状不固定、可选的参数（转发节点数组）。
+fn maybe_any(name: &'static str, desc: &'static str) -> ParamSpec {
+    let param = ParamSpec::maybe_any(name, desc);
+    match name {
+        "messages" => param.with_example(serde_json::json!([{
+            "type": "node",
+            "data": {
+                "name": "某人",
+                "uin": "10000",
+                "content": [{ "type": "text", "text": "你好" }],
+            }
+        }])),
+        _ => param,
+    }
+}
+
 /// 先按可选构造，再打上必填：数字/布尔/枚举参数没有现成的必填构造。
 fn require(mut param: ParamSpec) -> ParamSpec {
     param.required = true;
@@ -1028,6 +1044,305 @@ fn methods() -> Vec<MethodSpec> {
             Risk::Read,
             &[req("url", "要检查的链接")],
         ),
+        // ── 账号凭据 / 进程运维（critical：只能走票据 + 审批） ──
+        cm(
+            "account.credentials",
+            "获取账号 Cookie、token、csrf_token。凭据类结果只走票据查询，不进流水；\
+             必须由 access_request 批准后执行",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Critical,
+            &[opt(
+                "domain",
+                "Cookie 所属域名；不填由平台默认（qun.qq.com）",
+            )],
+        ),
+        cm(
+            "account.cookies",
+            "获取指定域名的 Cookie 字符串。凭据类结果只走票据查询，不进流水；\
+             必须由 access_request 批准后执行",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Critical,
+            &[opt(
+                "domain",
+                "Cookie 所属域名；不填由平台默认（qun.qq.com）",
+            )],
+        ),
+        cm(
+            "account.csrf_token",
+            "获取指定域名的 CSRF 令牌。凭据类结果只走票据查询，不进流水；\
+             必须由 access_request 批准后执行",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Critical,
+            &[opt(
+                "domain",
+                "Cookie 所属域名；不填由平台默认（qun.qq.com）",
+            )],
+        ),
+        cm(
+            "account.clientkey",
+            "获取 clientkey、过期时间与索引。凭据类结果只走票据查询，不进流水；\
+             必须由 access_request 批准后执行",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Critical,
+            &[],
+        ),
+        cm(
+            "account.decrypt_key",
+            "请求本地数据库解密密钥。密钥只走票据查询，不进流水；\
+             必须由 access_request 批准后执行",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Critical,
+            &[req("db_path", "要解密的数据库文件路径")],
+        ),
+        cm(
+            "system.send_packet",
+            "发送原始 SSO 包（cmd + hex data）。绕过 OneBot 语义，结果只走票据查询；\
+             必须由 access_request 批准后执行",
+            &[tags::SYSTEM],
+            Risk::Critical,
+            &[
+                req("cmd", "SSO 命令名"),
+                opt("data", "hex 编码的包体；不填为空包"),
+                flag("rsp", "是否等待平台回包，默认 true"),
+            ],
+        ),
+        cm(
+            "system.bot_exit",
+            "让平台进程退出。会中断这条连接；必须由 access_request 批准后执行",
+            &[tags::SYSTEM],
+            Risk::Critical,
+            &[],
+        ),
+        cm(
+            "system.restart",
+            "请求平台重启。SnowLuma 文档标注该动作不支持；必须由 access_request 批准后执行",
+            &[tags::SYSTEM],
+            Risk::Critical,
+            &[],
+        ),
+        cm(
+            "system.clean_cache",
+            "清理平台缓存。可能影响平台侧媒体缓存；必须由 access_request 批准后执行",
+            &[tags::SYSTEM],
+            Risk::Critical,
+            &[],
+        ),
+        // ── 文件下载 / 流式 ──
+        cm(
+            "file.download",
+            "把 http(s) URL 或 base64 下载到平台侧 data/downloads，只返回平台路径与元信息，\
+             不回传文件字节。url 必须是 http/https；max_bytes 默认 8 MiB（仅对 base64 和\
+             本地上限生效；平台是否跟随重定向不可控）",
+            &[tags::FILE, tags::DOWNLOAD],
+            Risk::Destructive,
+            &[
+                opt("url", "http/https 下载地址"),
+                opt("base64", "base64 内容；与 url 二选一"),
+                opt("name", "保存文件名；不填由平台推断"),
+                num("max_bytes", "ACB 侧大小上限（字节），默认 8 MiB"),
+            ],
+        ),
+        cm(
+            "stream.upload_file",
+            "流式分块上传：每次调用发一块并等一块确认（type=stream），最后一块带 \
+             is_complete=true 得到 type=response。协议无逐请求取消，未完成的分块由平台\
+             空闲超时清理；ACB 限制单块 1 MiB、总大小 256 MiB",
+            &[tags::FILE, tags::UPLOAD],
+            Risk::Write,
+            &[
+                req("stream_id", "客户端生成的流 ID，限 [A-Za-z0-9_-]"),
+                opt("chunk_data", "本块 base64 数据"),
+                num("chunk_index", "分块索引，从 0 开始"),
+                num("total_chunks", "总分块数；新流必填"),
+                num("file_size", "文件总大小（字节）"),
+                opt("expected_sha256", "期望的整文件 SHA256"),
+                flag("is_complete", "是否最后一块 / 触发合并"),
+                opt("filename", "文件名"),
+                flag("reset", "丢弃该流"),
+                flag("verify_only", "只查当前流状态"),
+                num("file_retention", "合并文件保留毫秒；0 = 不回收"),
+            ],
+        ),
+        cm(
+            "stream.download_image",
+            "以流式方式下载图片。首帧 file_info 会返回，后续 file_chunk 在当前 WS 单响应\
+             语义下不会进入 core；要完整文件请用 HTTP/SDK。无逐请求取消、WS 无背压",
+            &[tags::FILE, tags::DOWNLOAD, tags::IMAGE, tags::MEDIA],
+            Risk::Read,
+            &[
+                opt("file", "stream 临时目录路径或 http(s) URL"),
+                opt("file_id", "缓存的图片 id"),
+                num("chunk_size", "分块字节数，默认 64 KiB"),
+            ],
+        ),
+        cm(
+            "stream.download_record",
+            "以流式方式下载语音。首帧 file_info 会返回，后续 file_chunk 在当前 WS 单响应\
+             语义下不会进入 core；要完整文件请用 HTTP/SDK。无逐请求取消、WS 无背压",
+            &[tags::FILE, tags::DOWNLOAD, tags::VOICE, tags::MEDIA],
+            Risk::Read,
+            &[
+                opt("file", "stream 临时目录路径或 http(s) URL"),
+                opt("file_id", "缓存的语音 id"),
+                num("chunk_size", "分块字节数，默认 64 KiB"),
+            ],
+        ),
+        cm(
+            "stream.download_file",
+            "以流式方式下载任意文件。首帧 file_info 会返回，后续 file_chunk 在当前 WS \
+             单响应语义下不会进入 core；要完整文件请用 HTTP/SDK。无逐请求取消、WS 无背压",
+            &[tags::FILE, tags::DOWNLOAD, tags::MEDIA],
+            Risk::Read,
+            &[
+                opt("file", "stream 临时目录路径或 http(s) URL"),
+                opt("file_id", "缓存的媒体 id"),
+                num("chunk_size", "分块字节数，默认 64 KiB"),
+            ],
+        ),
+        cm(
+            "stream.test_download",
+            "测试下载流：平台推 10 个数据帧，不触达 QQ。当前 WS 单响应语义只拿到首帧；\
+             完整多帧需要 HTTP/SDK",
+            &[tags::SYSTEM, tags::FILE],
+            Risk::Read,
+            &[flag("error", "true 时用错误帧结束，默认 false")],
+        ),
+        cm(
+            "stream.clean",
+            "清理流式上传/下载临时目录，返回 removed / freed_bytes / skipped_active。\
+             只删 stream 目录，不碰其它缓存",
+            &[tags::FILE, tags::SYSTEM],
+            Risk::Destructive,
+            &[],
+        ),
+        // ── 合并转发预上传 / 专用发送别名 ──
+        m(
+            "msg.forward_upload",
+            "把转发节点上传成 res_id，供后续发送引用。载荷上限 256 KiB / 100 个节点，\
+             不让 core 变成大文件搬运通道",
+            &[tags::FORWARD, tags::MESSAGE, tags::UPLOAD],
+            Risk::Write,
+            &[
+                maybe_any("messages", "转发节点数组"),
+                maybe_any("message", "转发节点数组（与 messages 二选一）"),
+            ],
+        ),
+        m(
+            "msg.forward_upload_alias",
+            "upload_forward_msg 的拼写别名（平台同时提供 upload_foward_msg）。\
+             与 msg.forward_upload 相同的载荷上限",
+            &[tags::FORWARD, tags::MESSAGE, tags::UPLOAD],
+            Risk::Write,
+            &[
+                maybe_any("messages", "转发节点数组"),
+                maybe_any("message", "转发节点数组（与 messages 二选一）"),
+            ],
+        ),
+        m(
+            "msg.send_group_forward",
+            "发送群合并转发（send_group_forward_msg）。与 msg.send_forward 的差别是\
+             专用群接口；载荷上限 256 KiB / 100 个节点",
+            &[tags::FORWARD, tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[
+                maybe_any("messages", "转发节点数组"),
+                maybe_any("message", "转发节点数组（与 messages 二选一）"),
+                opt("source", "转发来源标识"),
+                opt("summary", "转发摘要"),
+                opt("prompt", "转发提示"),
+                maybe_any("news", "新闻/卡片节点"),
+            ],
+        ),
+        m(
+            "msg.send_private_forward",
+            "发送私聊合并转发（send_private_forward_msg）。与 msg.send_forward 的差别是\
+             专用私聊接口；载荷上限 256 KiB / 100 个节点",
+            &[tags::FORWARD, tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[
+                maybe_any("messages", "转发节点数组"),
+                maybe_any("message", "转发节点数组（与 messages 二选一）"),
+                opt("source", "转发来源标识"),
+                opt("summary", "转发摘要"),
+                opt("prompt", "转发提示"),
+                maybe_any("news", "新闻/卡片节点"),
+            ],
+        ),
+        // ── 群相册写操作 ──
+        m(
+            "group.album.qun_list",
+            "NapCat 风格相册列表封套：album_list / attach_info / has_more。只读",
+            &[tags::GROUP, tags::IMAGE, tags::READ],
+            Risk::Read,
+            &[opt("attach_info", "上一页返回的分页游标")],
+        ),
+        m(
+            "group.album.upload_image",
+            "上传图片到群相册。file 是平台侧路径或 http(s) URL，ACB 不搬运文件字节；\
+             写操作，发布后可见",
+            &[tags::GROUP, tags::IMAGE, tags::UPLOAD],
+            Risk::Write,
+            &[
+                req("album_id", "相册 id"),
+                req("album_name", "相册名称"),
+                req("file", "平台侧文件路径或 http(s) URL"),
+            ],
+        ),
+        m(
+            "group.album.upload_video",
+            "上传视频到群相册。file 是平台侧路径或 http(s) URL，ACB 不搬运文件字节；\
+             写操作，发布后可见",
+            &[tags::GROUP, tags::VIDEO, tags::UPLOAD],
+            Risk::Write,
+            &[
+                req("album_id", "相册 id"),
+                req("album_name", "相册名称"),
+                req("file", "平台侧文件路径或 http(s) URL"),
+            ],
+        ),
+        m(
+            "group.album.delete_media",
+            "删除群相册里的图片或视频。lloc 是图片长定位标识或视频 id；不可恢复",
+            &[tags::GROUP, tags::IMAGE, tags::VIDEO],
+            Risk::Destructive,
+            &[
+                req("album_id", "相册 id"),
+                req("lloc", "图片长定位标识或视频 id"),
+            ],
+        ),
+        m(
+            "group.album.comment",
+            "在群相册图片/视频下发表评论。content 非空，最多 4096 字符",
+            &[tags::GROUP, tags::TEXT],
+            Risk::Write,
+            &[
+                req("album_id", "相册 id"),
+                req("lloc", "图片长定位标识或视频 id"),
+                req("content", "评论内容"),
+            ],
+        ),
+        m(
+            "group.album.like",
+            "给群相册图片/视频点赞。batch_id 必填，lloc 可选",
+            &[tags::GROUP, tags::IMAGE, tags::VIDEO],
+            Risk::Write,
+            &[
+                req("album_id", "相册 id"),
+                req("batch_id", "相册媒体批次 id"),
+                opt("lloc", "图片长定位标识或视频 id"),
+            ],
+        ),
+        m(
+            "group.album.unlike",
+            "取消对群相册图片/视频的点赞。batch_id 必填，lloc 可选",
+            &[tags::GROUP, tags::IMAGE, tags::VIDEO],
+            Risk::Write,
+            &[
+                req("album_id", "相册 id"),
+                req("batch_id", "相册媒体批次 id"),
+                opt("lloc", "图片长定位标识或视频 id"),
+            ],
+        ),
     ]
 }
 
@@ -1088,6 +1403,16 @@ const fn group_route(method: &'static str, action: &'static str) -> Route {
         target: Target::Fixed(action),
         from_group: Some("group_id"),
         from_private: None,
+    }
+}
+
+/// 私聊参数 `user_id` 由房间补上。
+const fn private_route(method: &'static str, action: &'static str) -> Route {
+    Route {
+        method,
+        target: Target::Fixed(action),
+        from_group: None,
+        from_private: Some("user_id"),
     }
 }
 
@@ -1210,6 +1535,37 @@ pub static ROUTES: &[Route] = &[
     room_route("msg.poke", "group_poke", "friend_poke"),
     route("like.send", "send_like"),
     route("system.check_url", "check_url_safely"),
+    // critical：只能由已批准的票据执行，直接 platform_call 会在 core 拒绝。
+    route("account.credentials", "get_credentials"),
+    route("account.cookies", "get_cookies"),
+    route("account.csrf_token", "get_csrf_token"),
+    route("account.clientkey", "get_clientkey"),
+    route("account.decrypt_key", "request_decrypt_key"),
+    route("system.send_packet", "send_packet"),
+    route("system.bot_exit", "bot_exit"),
+    route("system.restart", "set_restart"),
+    route("system.clean_cache", "clean_cache"),
+    // 文件下载 / 流式。
+    route("file.download", "download_file"),
+    route("stream.upload_file", "upload_file_stream"),
+    route("stream.download_image", "download_file_image_stream"),
+    route("stream.download_record", "download_file_record_stream"),
+    route("stream.download_file", "download_file_stream"),
+    route("stream.test_download", "test_download_stream"),
+    route("stream.clean", "clean_stream_temp_file"),
+    // 转发预上传与专用别名。
+    group_route("msg.forward_upload", "upload_forward_msg"),
+    group_route("msg.forward_upload_alias", "upload_foward_msg"),
+    group_route("msg.send_group_forward", "send_group_forward_msg"),
+    private_route("msg.send_private_forward", "send_private_forward_msg"),
+    // 群相册写操作。
+    group_route("group.album.qun_list", "get_qun_album_list"),
+    group_route("group.album.upload_image", "upload_image_to_qun_album"),
+    group_route("group.album.upload_video", "upload_video_to_qun_album"),
+    group_route("group.album.delete_media", "del_group_album_media"),
+    group_route("group.album.comment", "do_group_album_comment"),
+    group_route("group.album.like", "set_group_album_media_like"),
+    group_route("group.album.unlike", "cancel_group_album_media_like"),
 ];
 
 /// 方法表 + 从路由推导出的目标参数声明。
@@ -1273,7 +1629,7 @@ fn tags_for(method: &MethodSpec) -> Vec<PlatformTag> {
         match method.risk {
             Risk::Read => tags::READ,
             Risk::Write => tags::WRITE,
-            Risk::Destructive => tags::DESTRUCTIVE,
+            Risk::Destructive | Risk::Critical => tags::DESTRUCTIVE,
         },
     );
     push_tag(
@@ -1286,7 +1642,8 @@ fn tags_for(method: &MethodSpec) -> Vec<PlatformTag> {
     if method.risk == Risk::Read {
         push_tag(&mut tags, tags::IDEMPOTENT);
     }
-    if (method.risk == Risk::Destructive && matches!(method.group(), "group" | "member"))
+    if (matches!(method.risk, Risk::Destructive | Risk::Critical)
+        && matches!(method.group(), "group" | "member"))
         || method.name.as_ref() == "msg.recall"
     {
         push_tag(&mut tags, tags::REQUIRES_ADMIN);
@@ -1309,7 +1666,7 @@ fn effect_of(method: &MethodSpec) -> Effect {
     } else {
         match method.risk {
             Risk::Read => Effect::Read,
-            Risk::Write | Risk::Destructive => Effect::Write,
+            Risk::Write | Risk::Destructive | Risk::Critical => Effect::Write,
         }
     }
 }
@@ -1322,13 +1679,18 @@ const DELETE_METHODS: &[&str] = &[
     "group.essence.delete",
     "group.notice.delete",
     "face.custom_delete",
+    "group.album.delete_media",
+    "stream.clean",
 ];
 
 /// 调用成功后要写进流水的那几个。core 靠它判断“这次调用会不会改变房间”。
 fn record_of(method: &str) -> RecordMode {
     match method {
         "msg.send" | "msg.face" | "group.ai_voice_send" => RecordMode::Message,
-        "msg.send_forward" | "group.notice.send" => RecordMode::Event,
+        "msg.send_forward"
+        | "msg.send_group_forward"
+        | "msg.send_private_forward"
+        | "group.notice.send" => RecordMode::Event,
         _ => RecordMode::None,
     }
 }

@@ -4133,6 +4133,20 @@ impl<S: Store> Bridge<S> {
         }
         let spec = find_platform_op(&methods, &args.op)?;
 
+        // critical 不接受任何常驻授权或 allow_destructive：直接调用一律拒绝，
+        // 只允许由已批准的 access_request 票据在 core 内执行。
+        if spec.risk == Risk::Critical {
+            return Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                format!(
+                    "[forbidden] {} is a critical operation; allow_destructive does not apply. \
+                     File an access_request with op \"platform_call:{}\" and wait for private \
+                     approval before retrying",
+                    spec.name, spec.name
+                ),
+            ));
+        }
+
         match spec.scope {
             Scope::Room => {
                 // 只读方法和写方法分开判：策略可以只放开读（或只放开写）。
@@ -4198,10 +4212,10 @@ impl<S: Store> Bridge<S> {
             }
         }
 
-        self.assemble_platform_call(config, room, spec.clone(), args)
+        self.assemble_platform_call(config, room, spec.clone(), args, None)
     }
 
-    /// `platform_call` 的校验尾巴：参数、destructive 闸门、账号与出站句柄。
+    /// `platform_call` 的校验尾巴：参数、critical / destructive 闸门、账号与出站句柄。
     /// 普通工具入口和「批准即执行」共用这一段，避免两套校验漂移。
     fn assemble_platform_call(
         &mut self,
@@ -4209,6 +4223,7 @@ impl<S: Store> Bridge<S> {
         room: RoomId,
         spec: MethodSpec,
         args: PlatformCallArgs,
+        approved: Option<&crate::tickets::AccessTicket>,
     ) -> Result<PreparedPlatformCall, ToolError> {
         // 要写流水的方法必须先知道“我是谁”。放在平台调用之前查：平台已经发出去了
         // 再发现记不了账，那条消息就会在自己的水位上留洞。
@@ -4219,19 +4234,36 @@ impl<S: Store> Bridge<S> {
             ));
         }
 
-        if spec.risk == Risk::Destructive
-            && !Self::allows_destructive(&config, &room.connection, spec.name.as_ref())
-        {
-            return Err(ToolError::new(
-                ErrorCode::ToolNotAllowed,
-                format!(
-                    "[forbidden] {} is a destructive operation and connection {} does not allow it \
-                     by default. Enable it in the [[connections]] section of config.toml with \
-                     allow_destructive = true (or list only the methods to enable, e.g. \
-                     allow_destructive = [\"{}\"])",
-                    spec.name, room.connection, spec.name
-                ),
-            ));
+        match spec.risk {
+            Risk::Critical => {
+                let approved_critical = approved
+                    .is_some_and(|ticket| ticket.capabilities.contains(&GrantCapability::Critical));
+                if !approved_critical {
+                    return Err(ToolError::new(
+                        ErrorCode::ToolNotAllowed,
+                        format!(
+                            "[forbidden] {} is a critical operation; it requires an approved \
+                             access_request ticket and cannot be enabled by allow_destructive",
+                            spec.name
+                        ),
+                    ));
+                }
+            }
+            Risk::Destructive
+                if !Self::allows_destructive(&config, &room.connection, spec.name.as_ref()) =>
+            {
+                return Err(ToolError::new(
+                    ErrorCode::ToolNotAllowed,
+                    format!(
+                        "[forbidden] {} is a destructive operation and connection {} does not allow it \
+                         by default. Enable it in the [[connections]] section of config.toml with \
+                         allow_destructive = true (or list only the methods to enable, e.g. \
+                         allow_destructive = [\"{}\"])",
+                        spec.name, room.connection, spec.name
+                    ),
+                ));
+            }
+            _ => {}
         }
 
         check_params(&spec, &args.params)?;
@@ -4886,18 +4918,19 @@ impl<S: Store> Bridge<S> {
             let Some(op_name) = op.strip_prefix("platform_call:") else {
                 continue;
             };
-            let Some(params) = params else {
-                return Err(format!("{op} requires params"));
-            };
             let methods = self.outbound.catalog(&target.connection);
             let spec = find_platform_op(&methods, op_name).map_err(|error| error.message)?;
-            if spec.scope != Scope::Room {
+            if spec.scope != Scope::Room && spec.risk != Risk::Critical {
                 return Err(format!(
                     "{op_name} is connection-scope; tickets can only carry room actions"
                 ));
             }
+            let empty = Value::Null;
+            let params = params.unwrap_or(&empty);
             check_params(spec, params).map_err(|error| error.message)?;
-            check_target_params(spec, target, params).map_err(|error| error.message)?;
+            if spec.scope == Scope::Room {
+                check_target_params(spec, target, params).map_err(|error| error.message)?;
+            }
         }
         Ok(())
     }
@@ -4928,11 +4961,20 @@ impl<S: Store> Bridge<S> {
                     let methods = self.outbound.catalog(&target.connection);
                     let spec = find_platform_op(&methods, op_name)?;
                     capabilities.insert(GrantCapability::Platform);
-                    if spec.risk == Risk::Destructive {
-                        capabilities.insert(GrantCapability::Destructive);
+                    match spec.risk {
+                        Risk::Critical => {
+                            capabilities.insert(GrantCapability::Critical);
+                        }
+                        Risk::Destructive => {
+                            capabilities.insert(GrantCapability::Destructive);
+                        }
+                        _ => {}
                     }
-                    // platform_call 之前先过房间访问检查，所以票据还必须带上
-                    // 这次平台动作对应的房间读/写能力。
+                    // critical 由审批本身放行，不再需要房间读写能力；其余平台动作
+                    // 之前先过房间访问检查，所以票据必须带上对应的房间能力。
+                    if spec.risk == Risk::Critical {
+                        continue;
+                    }
                     if spec.effect == Effect::Read {
                         capabilities.insert(GrantCapability::RoomRead);
                     } else {
@@ -5146,19 +5188,13 @@ impl<S: Store> Bridge<S> {
         params: Option<Value>,
         config: Arc<Config>,
     ) -> (&'static str, Option<Value>, Option<String>) {
-        let Some(params) = params else {
-            return (
-                "failed",
-                None,
-                Some("platform_call has no params snapshot".to_owned()),
-            );
-        };
+        let params = params.unwrap_or_else(|| json!({}));
         let methods = self.outbound.catalog(&ticket.target.connection);
         let spec = match find_platform_op(&methods, method) {
             Ok(spec) => spec.clone(),
             Err(error) => return ("failed", None, Some(error.message)),
         };
-        if spec.scope != Scope::Room {
+        if spec.scope != Scope::Room && spec.risk != Risk::Critical {
             return (
                 "skipped",
                 None,
@@ -5173,11 +5209,16 @@ impl<S: Store> Bridge<S> {
             params: params.clone(),
             ..Default::default()
         };
-        let mut prepared =
-            match self.assemble_platform_call(config, ticket.target.clone(), spec, args) {
-                Ok(prepared) => prepared,
-                Err(error) => return ("failed", None, Some(error.message)),
-            };
+        let mut prepared = match self.assemble_platform_call(
+            config,
+            ticket.target.clone(),
+            spec,
+            args,
+            Some(ticket),
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return ("failed", None, Some(error.message)),
+        };
         if let Err(error) = prepared.relay() {
             return ("failed", None, Some(error.message));
         }
@@ -8072,13 +8113,15 @@ fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
             .map(|capability| capability.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        let destructive = if ticket.capabilities.contains(&GrantCapability::Destructive) {
+        let destructive = if ticket.capabilities.contains(&GrantCapability::Critical) {
+            " [CRITICAL]"
+        } else if ticket.capabilities.contains(&GrantCapability::Destructive) {
             " [DESTRUCTIVE]"
         } else {
             ""
         };
         text.push_str(&format!(
-            "{}. ticket={} batch={} nonce={}{}\n   目标：{}\n   动作：{}\n   能力：{}\n   申请：session={} principal={} place={} turn={}\n",
+            "{}. ticket={} batch={} nonce={}{}\n   目标：{}\n   动作：{}\n   参数：{}\n   能力：{}\n   申请：session={} principal={} place={} turn={}\n",
             index + 1,
             ticket.id,
             ticket.batch_id.as_deref().unwrap_or("-"),
@@ -8086,18 +8129,77 @@ fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
             destructive,
             ticket.target,
             ticket.ops.join(", "),
+            ticket_params_summary(&ticket.ops, ticket.params.as_ref()),
             capabilities,
             ticket.session,
             ticket.principal.as_str(),
             ticket.place.as_str(),
             ticket.request_turn,
         ));
+        if ticket.capabilities.contains(&GrantCapability::Critical) {
+            text.push_str(
+                "   注意：critical 结果只在 access_ticket_get 中可见，不进入房间流水或投递正文。\n",
+            );
+        }
     }
     text.push_str("批准整批：/approve <batch_id>\n");
     text.push_str("批准单张：/approve <ticket-id> <nonce>\n");
     text.push_str("拒绝：/deny <batch_id> 或 /deny <ticket-id> <nonce>\n");
     text.push_str("撤销单张：/revoke <ticket-id>");
     text
+}
+
+/// 审批私信里的参数摘要：凭证类字段脱敏，整段截断。原始 params 不进日志/私信。
+fn ticket_params_summary(ops: &[String], params: Option<&Value>) -> String {
+    let Some(params) = params else {
+        return "-".to_owned();
+    };
+    let mut value = params.clone();
+    let sender_packet = ops
+        .iter()
+        .any(|op| op == "platform_call:system.send_packet");
+    redact_value(&mut value, "", sender_packet);
+    let text =
+        serde_json::to_string(&value).unwrap_or_else(|_| "{\"unserializable\":true}".to_owned());
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(400).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+fn redact_value(value: &mut Value, key: &str, sender_packet: bool) {
+    let lower = key.to_ascii_lowercase();
+    let sensitive = lower.contains("cookie")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("clientkey")
+        || lower.contains("client_key")
+        || lower.contains("db_key")
+        || lower.contains("db_path")
+        || lower == "authorization"
+        || lower == "headers"
+        || (sender_packet && lower == "data");
+    if sensitive {
+        *value = Value::String("***".to_owned());
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            for (child_key, child) in map.iter_mut() {
+                redact_value(child, child_key, sender_packet);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_value(item, "", sender_packet);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 校验/归一列名，返回按文档顺序排好的列名列表。

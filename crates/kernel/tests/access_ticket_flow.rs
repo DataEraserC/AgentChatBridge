@@ -21,19 +21,37 @@ struct Recorder {
     calls: Calls,
 }
 
-/// 目标连接只声明一个 destructive 方法，用来验证票据不放宽 `allow_destructive`。
+/// 目标连接声明一个 destructive + 一个 critical 方法，用来验证两道闸门。
 fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
-    std::sync::Arc::from(vec![MethodSpec {
-        name: "member.kick".into(),
-        summary: "踢人".into(),
-        tags: Vec::new().into(),
-        risk: Risk::Destructive,
-        scope: Scope::Room,
-        params: vec![ParamSpec::required("user_id", "要踢的人")].into(),
-        targets: vec![TargetSpec::room("group_id", "group")].into(),
-        effect: Effect::Write,
-        record: RecordMode::None,
-    }])
+    std::sync::Arc::from(vec![
+        MethodSpec {
+            name: "member.kick".into(),
+            summary: "踢人".into(),
+            tags: Vec::new().into(),
+            risk: Risk::Destructive,
+            scope: Scope::Room,
+            params: vec![ParamSpec::required("user_id", "要踢的人")].into(),
+            targets: vec![TargetSpec::room("group_id", "group")].into(),
+            effect: Effect::Write,
+            record: RecordMode::None,
+        },
+        MethodSpec {
+            name: "account.cookies".into(),
+            summary: "获取 Cookies".into(),
+            tags: Vec::new().into(),
+            risk: Risk::Critical,
+            scope: Scope::Connection,
+            params: vec![
+                ParamSpec::optional("domain", acb_kernel::ParamType::String, "域名"),
+                ParamSpec::optional("token", acb_kernel::ParamType::String, "token"),
+                ParamSpec::optional("cookies", acb_kernel::ParamType::String, "cookies"),
+            ]
+            .into(),
+            targets: Vec::new().into(),
+            effect: Effect::Read,
+            record: RecordMode::None,
+        },
+    ])
 }
 
 impl Outbound for Recorder {
@@ -61,6 +79,9 @@ impl Outbound for Recorder {
         _params: &Value,
     ) -> Result<CallOutcome, CallError> {
         self.calls.lock().expect("没被毒死").push(method.to_owned());
+        if method == "account.cookies" {
+            return Ok(CallOutcome::value(json!({"cookies": "SECRET-COOKIE"})));
+        }
         Ok(CallOutcome::value(json!({"done": true})))
     }
 }
@@ -236,8 +257,12 @@ fn single_request_approve_and_use_once() {
     bridge.end_turn(&first, None).expect("收工");
     let text = approval_dm(&sends);
     assert!(
-        !text.contains("approved"),
-        "审批私信只列目标/op/能力，不打印参数正文：{text}"
+        text.contains("参数："),
+        "审批私信要显示脱敏后的参数摘要：{text}"
+    );
+    assert!(
+        text.contains("approved"),
+        "非凭证参数应出现在摘要里：{text}"
     );
     let nonce = field(&text, "nonce=");
 
@@ -654,6 +679,120 @@ fn destructive_platform_call_is_refused_even_after_approval() {
         queried["failure_reason"]
     );
     assert_eq!(queried["result"]["ops"][0]["status"], "failed");
+}
+
+#[test]
+fn critical_is_refused_by_allow_destructive_and_runs_only_via_ticket() {
+    let text = config().replace(
+        "account = \"bot\"",
+        "account = \"bot\"\n        allow_destructive = true",
+    );
+    let (mut bridge, sends, calls) = bridge_with_calls(&text);
+    bridge
+        .ingest(message("qq:group/123", "user1", "查凭据", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let direct = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"op": "account.cookies", "params": {"domain": "qun.qq.com"}}),
+        )
+        .expect_err("critical 不能直接调用");
+    assert_eq!(direct.code, ErrorCode::ToolNotAllowed);
+    assert!(
+        direct.message.contains("critical"),
+        "错误要说清是 critical：{}",
+        direct.message
+    );
+    assert!(
+        calls.lock().expect("没被毒死").is_empty(),
+        "allow_destructive 不能放行 critical，平台一次都不该被调用"
+    );
+
+    let request = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["platform_call:account.cookies"],
+                "params": {
+                    "domain": "qun.qq.com",
+                    "token": "SECRET-TOKEN",
+                    "cookies": "SECRET-COOKIE"
+                }
+            }]}),
+        )
+        .expect("critical 票据能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("票据 id")
+        .to_owned();
+    bridge.end_turn(&ticket, None).expect("收工");
+
+    let approval = approval_dm(&sends);
+    assert!(approval.contains("[CRITICAL]"), "{approval}");
+    assert!(approval.contains("参数："), "{approval}");
+    assert!(
+        !approval.contains("SECRET-COOKIE") && !approval.contains("SECRET-TOKEN"),
+        "审批私信不能打印凭据明文：{approval}"
+    );
+    assert!(
+        approval.contains("\"cookies\":\"***\"") || approval.contains("\"token\":\"***\""),
+        "凭据字段要替换成 ***：{approval}"
+    );
+    let nonce = field(&approval, "nonce=");
+
+    let handled = bridge
+        .ingest(message(
+            "qq:private/admin",
+            "admin",
+            &format!("/approve {id} {nonce}"),
+            false,
+        ))
+        .expect("管理员命令能入库");
+    assert!(matches!(handled, Ingest::Handled { .. }));
+    assert_eq!(
+        calls.lock().expect("没被毒死").len(),
+        1,
+        "批准后 core 必须真的调用平台"
+    );
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有唤醒");
+    let after = delivery.ticket;
+    let queried = bridge
+        .tool_call(&after, &sessions(), "access_ticket_get", json!({"id": id}))
+        .expect("查询执行结果");
+    assert_eq!(queried["state"], "used");
+    assert_eq!(queried["execution_status"], "succeeded");
+    assert_eq!(
+        queried["result"]["ops"][0]["result"]["cookies"], "SECRET-COOKIE",
+        "显式查询 access_ticket_get 才能看到结果"
+    );
+
+    let leaked = sends
+        .lock()
+        .expect("没被毒死")
+        .iter()
+        .any(|(_, elements)| text_of(elements).contains("SECRET-COOKIE"));
+    assert!(!leaked, "critical 结果不能进入投递正文");
+}
+
+#[test]
+fn config_cannot_grant_critical_capability() {
+    let text = format!(
+        "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"any\"\n        capability = [\"critical\"]\n",
+        config()
+    );
+    let error = Config::parse(&text).expect_err("critical 常驻授予必须启动失败");
+    assert!(
+        format!("{error:?}").contains("critical"),
+        "错误要说清 critical 只能走票据：{error:?}"
+    );
 }
 
 #[test]
