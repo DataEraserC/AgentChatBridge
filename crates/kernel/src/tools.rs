@@ -56,6 +56,143 @@ pub const TOOL_NAMES: &[&str] = &[
     "memory_git",
 ];
 
+/// 常驻工具：**显式白名单**，每条 harness 都永远注入这一层。
+///
+/// 只放高频路径与「能力入口」：收发消息、列房间、能力自检、平台调用、票据申请/查询、
+/// 结束轮次确认、投递溢出回看。长尾工具走 [`TOOL_CATALOG`]，不在这里。
+/// 新增工具时不要写成「除长尾外都常驻」——反向定义会让常驻层自动膨胀。
+pub const RESIDENT_TOOLS: &[&str] = &[
+    "send_message",
+    "send_message_to",
+    "list_rooms",
+    "capabilities",
+    "platform_call",
+    "access_request",
+    "access_ticket_get",
+    "ack_messages",
+    "fetch_records",
+    "get_history",
+];
+
+/// 目录层的一条索引：名字 + 一句话用途 + 何时用。
+///
+/// 长尾工具的完整 schema 仍在 harness 的 `TOOLS` 里；core 只给索引与权限判定。
+pub struct ToolCatalogEntry {
+    pub name: &'static str,
+    pub purpose: &'static str,
+    pub when: &'static str,
+}
+
+/// 非驻留工具的目录索引。覆盖 `TOOL_NAMES` 里所有不在 [`RESIDENT_TOOLS`] 的条目；
+/// 测试会锁住这个覆盖关系。
+pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
+    ToolCatalogEntry {
+        name: "wait_message",
+        purpose: "阻塞等这个房间的下一条新消息",
+        when: "当前没事、想等同房间下一条消息时",
+    },
+    ToolCatalogEntry {
+        name: "notes",
+        purpose: "房间共享笔记（op = list / set / del）",
+        when: "需要跨轮记住某个房间的约定或状态时",
+    },
+    ToolCatalogEntry {
+        name: "get_platform_events",
+        purpose: "查最近的平台事件（拍一拍、入群、撤回等）",
+        when: "投递里只有事件摘要、需要原始载荷时",
+    },
+    ToolCatalogEntry {
+        name: "describe_plugins",
+        purpose: "看本会话实际用了哪些 wake/access/delivery 策略",
+        when: "怀疑唤醒、访问或投递被插件改写时",
+    },
+    ToolCatalogEntry {
+        name: "extensions_list",
+        purpose: "列动态扩展模块",
+        when: "管理员排查扩展目录时",
+    },
+    ToolCatalogEntry {
+        name: "extensions_read",
+        purpose: "读一个扩展模块的源码",
+        when: "管理员审查扩展实现时",
+    },
+    ToolCatalogEntry {
+        name: "extensions_write",
+        purpose: "写一个扩展模块的源码",
+        when: "管理员授权修改扩展时",
+    },
+    ToolCatalogEntry {
+        name: "extensions_reload",
+        purpose: "热重载动态扩展目录",
+        when: "管理员改完扩展、需要下一轮生效时",
+    },
+    ToolCatalogEntry {
+        name: "tasks",
+        purpose: "查后台任务记录（op = list / get）",
+        when: "异步任务跑完、想知道结果时",
+    },
+    ToolCatalogEntry {
+        name: "report_feedback",
+        purpose: "把卡住的地方写成反馈",
+        when: "工具反复失败、需要人跟进时",
+    },
+    ToolCatalogEntry {
+        name: "feedback",
+        purpose: "查反馈记录（op = list / get）",
+        when: "想确认问题是否已被记录时",
+    },
+    ToolCatalogEntry {
+        name: "feedback_reply",
+        purpose: "回复一条反馈",
+        when: "问题有补充或已解决时",
+    },
+    ToolCatalogEntry {
+        name: "plugin_tools",
+        purpose: "列插件提供的工具",
+        when: "需要调用第三方插件工具时",
+    },
+    ToolCatalogEntry {
+        name: "plugin_tool_call",
+        purpose: "调用插件工具",
+        when: "已从 plugin_tools 拿到名字和参数后",
+    },
+    ToolCatalogEntry {
+        name: "memory_read",
+        purpose: "读记忆文件",
+        when: "需要长期记忆里的原文时",
+    },
+    ToolCatalogEntry {
+        name: "memory_write",
+        purpose: "写记忆文件",
+        when: "需要把结论落进长期记忆时",
+    },
+    ToolCatalogEntry {
+        name: "memory_list",
+        purpose: "列记忆目录",
+        when: "不知道记忆里有哪些文件时",
+    },
+    ToolCatalogEntry {
+        name: "memory_search",
+        purpose: "搜记忆文本",
+        when: "只记得关键词、不记得文件名时",
+    },
+    ToolCatalogEntry {
+        name: "memory_git",
+        purpose: "记忆仓库的 git 操作（status/log/diff/blame/add/commit/push/branch）",
+        when: "需要提交、推送或查看记忆历史时",
+    },
+];
+
+/// 这个工具是否在常驻白名单里。
+pub fn is_resident(tool: &str) -> bool {
+    RESIDENT_TOOLS.contains(&tool)
+}
+
+/// 查目录层的索引；常驻工具或未知工具返回 `None`。
+pub fn catalog_entry(tool: &str) -> Option<&'static ToolCatalogEntry> {
+    TOOL_CATALOG.iter().find(|entry| entry.name == tool)
+}
+
 /// 元素数组的包装：解析走 proto 的人话通道（别名兼容 + 报错带原文），
 /// 不用 serde 的干巴巴缺字段报错。
 #[derive(Debug)]
@@ -632,4 +769,39 @@ pub struct MemoryGitToolArgs {
 /// 工具的真假判定：这个名字认识不认识。
 pub fn is_known(tool: &str) -> bool {
     TOOL_NAMES.contains(&tool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resident_set_is_explicit_and_bounded() {
+        assert_eq!(
+            RESIDENT_TOOLS.len(),
+            10,
+            "常驻层固定 10 个，别让反向定义膨胀"
+        );
+        for tool in RESIDENT_TOOLS {
+            assert!(TOOL_NAMES.contains(tool), "常驻工具 {tool} 不在 TOOL_NAMES");
+            assert!(
+                !TOOL_CATALOG.iter().any(|entry| entry.name == *tool),
+                "常驻工具 {tool} 不能再进目录层"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_covers_every_non_resident_tool() {
+        for tool in TOOL_NAMES {
+            if RESIDENT_TOOLS.contains(tool) {
+                continue;
+            }
+            let entry = catalog_entry(tool).unwrap_or_else(|| {
+                panic!("长尾工具 {tool} 没有目录索引；新增工具必须显式决定放哪一层")
+            });
+            assert!(!entry.purpose.trim().is_empty(), "{tool} purpose 为空");
+            assert!(!entry.when.trim().is_empty(), "{tool} when 为空");
+        }
+    }
 }

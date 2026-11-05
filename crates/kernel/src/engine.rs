@@ -74,8 +74,8 @@ use crate::tools::{
     MemoryBlameArgs, MemoryCommitArgs, MemoryGitToolArgs, MemoryListArgs, MemoryLogArgs,
     MemorySearchArgs, MemoryWriteArgs, NotesArgs, NotesToolArgs, PlatformCallArgs,
     PlatformListArgs, PlatformToolArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs,
-    RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, TOOL_NAMES, TasksToolArgs, WaitMessageArgs,
-    is_known,
+    RECORD_COLUMNS, RESIDENT_TOOLS, SendArgs, SendToArgs, SetNoteArgs, TOOL_NAMES, TasksToolArgs,
+    WaitMessageArgs, catalog_entry, is_known, is_resident,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -5071,6 +5071,10 @@ impl<S: Store> Bridge<S> {
     }
 
     /// 只读能力自检：回答「此刻能不能用」，不改变任何判定、不消费票据。
+    ///
+    /// `scope=session` 列全部工具；`scope=catalog` 只列长尾索引；`scope=surface`
+    /// 给 harness 算本轮可见集（常驻 + 直接可执行的长尾）。过滤只影响可见性，
+    /// 被过滤的工具仍在 `session` / `catalog` 里，仍可按 `TICKET_OPS` 申请票据。
     fn capabilities(
         &mut self,
         ctx: &TurnCtx,
@@ -5100,10 +5104,12 @@ impl<S: Store> Bridge<S> {
                     })?;
                 self.cap_tool(ctx, config, session, name)
             }
+            "catalog" => self.cap_catalog(ctx, config, session),
+            "surface" => self.cap_surface(ctx, config, session),
             other => Err(ToolError::new(
                 ErrorCode::BadRequest,
                 format!(
-                    "[bad_params] capabilities scope must be session / room / tool; got {other}"
+                    "[bad_params] capabilities scope must be session / room / tool / catalog / surface; got {other}"
                 ),
             )),
         }
@@ -5120,14 +5126,7 @@ impl<S: Store> Bridge<S> {
 
         let tools: Vec<Value> = TOOL_NAMES
             .iter()
-            .map(|tool| {
-                let reason = self.tool_unavailable_reason(ctx, config, session, tool);
-                json!({
-                    "tool": tool,
-                    "available": reason.is_none(),
-                    "reason": reason,
-                })
-            })
+            .map(|tool| self.tool_catalog_json(ctx, config, session, tool))
             .collect();
         let tools_available = tools
             .iter()
@@ -5334,14 +5333,10 @@ impl<S: Store> Bridge<S> {
         name: &str,
     ) -> Result<Value, ToolError> {
         if TOOL_NAMES.contains(&name) {
-            let reason = self.tool_unavailable_reason(ctx, config, session, name);
-            return Ok(json!({
-                "scope": "tool",
-                "kind": "tool",
-                "tool": name,
-                "available": reason.is_none(),
-                "reason": reason,
-            }));
+            let mut value = self.tool_catalog_json(ctx, config, session, name);
+            value["scope"] = json!("tool");
+            value["kind"] = json!("tool");
+            return Ok(value);
         }
 
         let methods = self.outbound.catalog(&ctx.room.connection);
@@ -5387,6 +5382,114 @@ impl<S: Store> Bridge<S> {
         value["scope"] = json!("tool");
         value["kind"] = json!("op");
         Ok(value)
+    }
+
+    /// 目录层：只列非驻留工具的名字、一句话用途、何时用，以及当前可见性。
+    ///
+    /// 这是索引，不是 permission 判定；`requestable` / `ticket_required` 只是把
+    /// 现有 `TICKET_OPS` 与 `tool_unavailable_reason` 的结果摊开。
+    fn cap_catalog(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+    ) -> Result<Value, ToolError> {
+        let (subject, place) = self.subject_place(config, session, Some(&ctx.room));
+        let tools: Vec<Value> = TOOL_NAMES
+            .iter()
+            .filter(|tool| !is_resident(tool))
+            .map(|tool| self.tool_catalog_json(ctx, config, session, tool))
+            .collect();
+        Ok(json!({
+            "scope": "catalog",
+            "session": session,
+            "room": ctx.room.to_string(),
+            "subject": subject.as_str(),
+            "place": place.as_str(),
+            "resident": RESIDENT_TOOLS,
+            "tools": tools,
+            "count": tools.len(),
+            "note": "名字 + 用途 + 何时用；完整 schema 用 capabilities scope=tool name=... 查。",
+        }))
+    }
+
+    /// 三层视图：常驻（永远注入）/ 目录（长尾索引）/ 可见（本轮可直接执行）。
+    ///
+    /// `visible` 始终包含全部常驻工具；过滤只决定长尾工具进不进 `visible`，
+    /// 不会把它们从 `catalog` / `scope=session` / 票据申请里删掉。
+    fn cap_surface(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+    ) -> Result<Value, ToolError> {
+        let (subject, place) = self.subject_place(config, session, Some(&ctx.room));
+        let entries: Vec<Value> = TOOL_NAMES
+            .iter()
+            .map(|tool| self.tool_catalog_json(ctx, config, session, tool))
+            .collect();
+        let resident: Vec<&str> = RESIDENT_TOOLS.to_vec();
+        let catalog: Vec<Value> = entries
+            .iter()
+            .filter(|entry| entry["layer"] == "catalog")
+            .cloned()
+            .collect();
+        let visible: Vec<String> = entries
+            .iter()
+            .filter(|entry| entry["layer"] == "resident" || entry["direct_executable"] == true)
+            .filter_map(|entry| entry["tool"].as_str().map(str::to_owned))
+            .collect();
+        let hidden: Vec<Value> = catalog
+            .iter()
+            .filter(|entry| entry["direct_executable"] == false)
+            .cloned()
+            .collect();
+        Ok(json!({
+            "scope": "surface",
+            "session": session,
+            "room": ctx.room.to_string(),
+            "subject": subject.as_str(),
+            "place": place.as_str(),
+            "allow_destructive": destructive_state(config, &ctx.room.connection),
+            "resident": resident,
+            "catalog": catalog,
+            "visible": visible,
+            "hidden": hidden,
+            "counts": {
+                "tools_total": TOOL_NAMES.len(),
+                "resident": resident.len(),
+                "catalog": catalog.len(),
+                "visible": visible.len(),
+                "hidden": hidden.len(),
+            },
+        }))
+    }
+
+    /// 一个工具的公共索引形状；权限判定全部来自既有 helper。
+    fn tool_catalog_json(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+        tool: &str,
+    ) -> Value {
+        let reason = self.tool_unavailable_reason(ctx, config, session, tool);
+        let available = reason.is_none();
+        let requestable = tool_requestable(tool);
+        let ticket_required = requestable && !available;
+        let resident = is_resident(tool);
+        let entry = catalog_entry(tool);
+        json!({
+            "tool": tool,
+            "layer": if resident { "resident" } else { "catalog" },
+            "purpose": entry.map(|entry| entry.purpose).unwrap_or("常驻高频工具"),
+            "when": entry.map(|entry| entry.when).unwrap_or("高频路径"),
+            "available": available,
+            "direct_executable": available,
+            "requestable": requestable,
+            "ticket_required": ticket_required,
+            "reason": reason,
+        })
     }
 
     /// 单个内置工具此刻不可用的稳定原因；能用返回 `None`。
@@ -9260,7 +9363,11 @@ fn page_catalog(response: &mut Value, total: usize, offset: usize, limit: Option
 fn tool_cap_index(item: &Value) -> Value {
     json!({
         "tool": item["tool"],
+        "layer": item["layer"],
         "available": item["available"],
+        "direct_executable": item["direct_executable"],
+        "requestable": item["requestable"],
+        "ticket_required": item["ticket_required"],
         "reason": item["reason"],
     })
 }
@@ -9332,6 +9439,20 @@ fn destructive_state(config: &Config, connection: &str) -> Value {
         },
         None => json!("none"),
     }
+}
+
+/// 这个工具是否有票据可申请的入口。
+///
+/// 这是 `TICKET_OPS` 的展示映射，不是第二份权限逻辑：`notes` 对应 `notes:*` 词表，
+/// `platform_call` 对应文档里的 `platform_call:<op>` 模式，其余按精确名字匹配。
+fn tool_requestable(tool: &str) -> bool {
+    if tool == "platform_call" {
+        return true;
+    }
+    if tool == "notes" {
+        return TICKET_OPS.iter().any(|(op, _)| op.starts_with("notes:"));
+    }
+    TICKET_OPS.iter().any(|(op, _)| *op == tool)
 }
 
 fn cap_op_json(

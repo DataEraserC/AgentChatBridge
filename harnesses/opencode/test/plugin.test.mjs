@@ -14,7 +14,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 
 import plugin from "../plugin/index.js"
-import { TOOLS } from "../../shared/tools.mjs"
+import { RESIDENT_TOOL_NAMES, TOOLS } from "../../shared/tools.mjs"
 import { FakeBridge, TICKET, delivery, waitFor } from "./fake-bridge.mjs"
 
 const TOKEN = "t-main"
@@ -146,19 +146,44 @@ async function openTurn(bridge, host, payload = delivery()) {
   )
 }
 
-test("装上之后工具面齐全，名字和桥上的对得上", async (t) => {
+test("装上之后只挂常驻白名单，schema 仍在", async (t) => {
   const { host } = await boot(t)
 
-  // 拿 shared/tools.mjs 当唯一真相：手抄一份清单迟早漂（之前就漏过 fetch_records）。
+  // 常驻层是显式白名单；长尾工具等开轮拿到 surface 后再加，不在启动时灌满。
   assert.deepEqual(
     [...host.tools.keys()].sort(),
-    TOOLS.map((spec) => spec.name).sort(),
+    [...RESIDENT_TOOL_NAMES].sort(),
+  )
+  assert.ok(
+    RESIDENT_TOOL_NAMES.every((name) => TOOLS.some((spec) => spec.name === name)),
+    "常驻名单必须都在 shared/tools.mjs 里",
   )
   // v2 的参数是 JSON Schema，不是 zod。
   const send = host.tools.get("send_message")
   assert.equal(send.input.type, "object")
   assert.ok(send.input.properties.elements)
   assert.match(send.description, /内容段数组/)
+})
+
+test("开轮后按 surface 补长尾工具，隐藏工具不进来", async (t) => {
+  const { bridge, host } = await boot(t)
+  await openTurn(bridge, host)
+
+  await waitFor(() => host.tools.has("notes"), "surface 里的长尾工具应该被加上")
+  assert.ok(host.tools.has("notes"), "notes 在 visible 里")
+  assert.ok(host.tools.has("memory_git"), "memory_git 在 visible 里")
+  assert.equal(host.tools.has("extensions_list"), false, "hidden 工具不能注入")
+  const notes = host.tools.get("notes")
+  assert.match(notes.description, /capabilities scope=tool/, "长尾描述要指向完整 schema")
+  assert.equal(notes.input.additionalProperties, true, "长尾用占位 schema")
+})
+
+test("capabilities scope=tool 在 harness 侧补完整 schema", async (t) => {
+  const { bridge, host } = await boot(t)
+  await openTurn(bridge, host)
+  const result = await host.tools.get("capabilities").execute({ scope: "tool", name: "notes" })
+  assert.match(result.content, /"schema"/, "本地 schema 要拼进 capabilities 结果")
+  assert.match(result.content, /"requestable": true/)
 })
 
 test("一轮走完：建会话 → 提问 → 等它说完 → 收工", async (t) => {

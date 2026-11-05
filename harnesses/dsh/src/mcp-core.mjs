@@ -16,8 +16,9 @@ const PROTOCOL_VERSION = "2024-11-05"
 /**
  * 处理一条 JSON-RPC 请求，返回要回给客户端的响应数组（大多数是一条，通知回空数组）。
  *
- * `tools` 是 [{ name, description, inputSchema }]；`onCall(name, args)` 收到
- * tools/call 时被调（异步），返回结果对象或抛错。
+ * `tools` 是 [{ name, description, inputSchema }]，也可以是返回这份数组的同步函数
+ * （按轮次/会话算可见面时用）。`onCall(name, args)` 收到 tools/call 时被调（异步），
+ * 返回结果对象或抛错。
  */
 export function dispatch(message, { name = "acb", version = "0.1.0", tools = [], onCall }) {
   // 通知（没有 id）不回复。
@@ -37,14 +38,17 @@ export function dispatch(message, { name = "acb", version = "0.1.0", tools = [],
       })]
     case "ping":
       return [ok(message.id, {})]
-    case "tools/list":
+    case "tools/list": {
+      const current = typeof tools === "function" ? tools() : tools
+      const list = Array.isArray(current) ? current : []
       return [ok(message.id, {
-        tools: tools.map((t) => ({
+        tools: list.map((t) => ({
           name: t.name,
           description: t.description ?? "",
           inputSchema: t.inputSchema ?? { type: "object", properties: {} },
         })),
       })]
+    }
     case "tools/call":
       return [callResult(message.id, message.params, onCall)]
     default:

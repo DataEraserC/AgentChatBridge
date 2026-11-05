@@ -144,7 +144,7 @@ export class BridgeLink {
    *
    * 参数形状和协议一致（`docs/04-protocol.md` 的工具表），失败抛 {@link BridgeError}。
    */
-  async call(tool, args = {}, { timeout = CALL_TIMEOUT_MS } = {}) {
+  async call(tool, args = {}, { timeout = CALL_TIMEOUT_MS, internal = false } = {}) {
     if (!this.socket || this.closed) {
       throw new BridgeError("internal", t("opencode.connection_gone"))
     }
@@ -152,7 +152,8 @@ export class BridgeLink {
       throw new BridgeError("unauthorized", t("opencode.no_active_turn"))
     }
     const id = `c-${++this.seq}`
-    this.turnCalls += 1
+    // 内部动作（例如开轮前拉 surface）不算「模型调了桥工具」；否则空轮会被误报。
+    if (!internal) this.turnCalls += 1
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)

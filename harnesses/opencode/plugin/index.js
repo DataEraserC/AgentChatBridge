@@ -23,7 +23,11 @@ import {
   renderTurn,
   roomText,
 } from "./acb-wire.mjs"
-import { TOOLS } from "../../shared/tools.mjs"
+import {
+  RESIDENT_TOOL_NAMES,
+  toolsForSurface,
+  withLocalSchema,
+} from "../../shared/tools.mjs"
 import { t } from "../../shared/i18n.mjs"
 import fs from "node:fs"
 import path from "node:path"
@@ -123,19 +127,39 @@ export default {
       onControl: (frame) => driver.handleControl(frame, link),
     })
 
-    // 工具面先挂上：轮次来之前模型就该看得见它们。
+    // 工具面先挂常驻白名单：长尾工具开轮后按桥的 surface 再加，避免启动时
+    // 把 20 多个长尾 schema 一次塞进 Code Mode 目录。
+    const makeSpec = (spec) => ({
+      ...spec,
+      execute: async (input) => ({
+        content: await callBridge(link, spec.name, input ?? {}),
+      }),
+    })
+    const residentSpecs = toolSpecsForSurface({
+      resident: RESIDENT_TOOL_NAMES,
+      visible: RESIDENT_TOOL_NAMES,
+      catalog: [],
+    })
     const registration = await ctx.tool.transform((editor) => {
-      for (const spec of TOOL_SPECS) {
-        editor.add({
-          name: spec.name,
-          description: spec.description,
-          input: spec.input,
-          execute: async (input) => ({
-            content: await callBridge(link, spec.name, input ?? {}),
-          }),
-        })
+      for (const spec of residentSpecs) {
+        editor.add(makeSpec(spec))
       }
     })
+    driver.visibleNames = new Set(residentSpecs.map((spec) => spec.name))
+    driver.applySurface = async (surface) => {
+      const desired = toolSpecsForSurface(surface)
+      const desiredNames = new Set(desired.map((spec) => spec.name))
+      await ctx.tool.transform((editor) => {
+        for (const name of driver.visibleNames) {
+          if (!desiredNames.has(name)) editor.remove(name)
+        }
+        for (const spec of desired) {
+          if (!driver.visibleNames.has(spec.name)) editor.add(makeSpec(spec))
+        }
+      })
+      driver.visibleNames = desiredNames
+      driver.surface = surface
+    }
 
     void link
       .connect()
@@ -180,6 +204,9 @@ const CODE_MODE_HINT = [
   '  发消息 `await tools.send_message({ text: "收到" })`；',
   "  不带 `to` 就是发到本轮房间；不要因为上下文里聊过别的群，就自己补一个 `to`。",
   "  确认 `await tools.ack_messages({ ids: [1, 2] })`；",
+  "  长尾工具（记忆、笔记、任务、反馈、扩展、插件）不常驻：先",
+  '  `await tools.capabilities({ scope: "catalog" })` 看索引；',
+  '  要看完整参数用 `await tools.capabilities({ scope: "tool", name: "..." })`。',
   "  先想清楚要发什么，再一次调用，别先用原生工具名硬调。",
   "",
   "  平台特有的能力（读合并转发正文、查群成员、发图、审批入群）从目录查，别自己猜：",
@@ -201,6 +228,56 @@ class TurnDriver {
     this.personas = new Map()
     /** 串行链：同一会话本来就串行，这里再兜一层，免得两轮叠在一起。 */
     this.chain = Promise.resolve()
+    /** 本轮可见工具面；启动时只有常驻白名单，开轮后按桥的 surface 更新。 */
+    this.surface = {
+      resident: RESIDENT_TOOL_NAMES,
+      visible: RESIDENT_TOOL_NAMES,
+      catalog: [],
+    }
+    /** setup 里注入：用新的 surface 调 ctx.tool.transform 增删工具。 */
+    this.applySurface = null
+    /** 当前已注册的工具名，避免重复 add / 漏 remove。 */
+    this.visibleNames = new Set(RESIDENT_TOOL_NAMES)
+  }
+
+  /**
+   * 开轮后、投话前向桥要一次 surface。失败只记日志并沿用上一次的工具面：
+   * 工具面是辅助信息，不能因为它把一轮对话拖死。
+   */
+  async #refreshSurface(link, session) {
+    try {
+      const result = await callBridge(
+        link,
+        "capabilities",
+        { scope: "surface" },
+        { internal: true },
+      )
+      const surface = JSON.parse(result)
+      if (
+        !surface ||
+        !Array.isArray(surface.resident) ||
+        !Array.isArray(surface.visible) ||
+        !Array.isArray(surface.catalog)
+      ) {
+        throw new Error("tool surface shape is invalid")
+      }
+      await this.applySurface?.(surface)
+      this.surface = surface
+      this.log(
+        "info",
+        t("opencode.tool_surface_loaded", {
+          session,
+          resident: surface.counts?.resident ?? surface.resident.length,
+          visible: surface.counts?.visible ?? surface.visible.length,
+          hidden: surface.counts?.hidden ?? surface.hidden?.length ?? 0,
+        }),
+      )
+    } catch (error) {
+      this.log(
+        "warn",
+        t("opencode.tool_surface_failed", { error: error?.message ?? String(error) }),
+      )
+    }
   }
 
   /**
@@ -308,6 +385,7 @@ class TurnDriver {
     const started = Date.now()
     try {
       let sessionID = await this.#session(delivery.session)
+      await this.#refreshSurface(link, delivery.session)
       // 映射（新建或接上的）报给桥，控制台才看得到 harness 侧映射。
       this.#reportMap(delivery.session, sessionID, link)
       let text = renderTurn(delivery) + CODE_MODE_HINT
@@ -511,7 +589,7 @@ class TurnDriver {
 // 工具面：名字和参数跟桥上的工具一一对应
 // ---------------------------------------------------------------------------
 
-async function callBridge(link, name, args) {
+async function callBridge(link, name, args, options = {}) {
   let wire
   try {
     wire = normalizeToolArgs(name, args)
@@ -520,7 +598,12 @@ async function callBridge(link, name, args) {
     throw new Error(error.message)
   }
   try {
-    const result = await link.call(name, wire)
+    const raw = await link.call(name, wire, options)
+    // capabilities scope=tool 的完整 schema 在 harness 本地；桥只返回权限判定。
+    const result =
+      name === "capabilities" && wire.scope === "tool" && wire.name
+        ? withLocalSchema(wire.name, raw)
+        : raw
     // 空结果只代表平台没给数据，返回机器可读的成功标记，不编人话。
     if (result === null || result === undefined) return JSON.stringify({ ok: true })
     return typeof result === "string"
@@ -533,18 +616,19 @@ async function callBridge(link, name, args) {
 }
 
 
-// 工具面只在 shared/tools.mjs 维护一份（dsh 也从那里拿），这边只把 `schema` 改名成
-// opencode 认的 `input`。
-//
-// 以前这里是一份手抄的副本，实测已经漂移：共享版早就加了 fetch_records，这边没有，
-// 而投递文本里却在提示模型「用 fetch_records 抓剩下的」——模型照着调只会撞一个
-// 不存在的工具。别再抄第二份。
-const TOOL_SPECS = TOOLS.map(({ name, description, schema }) => ({
-  name,
-  description,
-  input: schema,
-}))
+/** 按 surface 选 opencode 工具定义；dsh 与 opencode 共用 shared/tools.mjs 的选择逻辑。 */
+export function toolSpecsForSurface(surface = {}) {
+  return toolsForSurface(surface).map(({ name, description, schema }) => ({
+    name,
+    description,
+    input: schema,
+  }))
+}
 
+
+// 工具面只在 shared/tools.mjs 维护一份（dsh 也从那里拿）；这里只把 `schema` 改名成
+// opencode 认的 `input`，并按桥下发的 surface 选常驻 + 可见子集。以前这里是一份手抄
+// 的副本，实测已经漂移（共享版加了 fetch_records，这边没有），别再抄第二份。
 
 function readConfig(ctx) {
   const options = ctx?.options ?? {}

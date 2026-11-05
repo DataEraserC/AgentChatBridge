@@ -803,6 +803,20 @@ fn critical_is_refused_by_allow_destructive_and_runs_only_via_ticket() {
         .expect("能记下来");
     let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
 
+    // 先证明过滤只影响可见性：critical op 不可直接执行，但仍可申请票据。
+    let capability = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "tool", "name": "account.cookies"}),
+        )
+        .expect("能查");
+    assert_eq!(capability["direct_executable"], false);
+    assert_eq!(capability["requestable"], true);
+    assert_eq!(capability["ticket_required"], true);
+    assert_eq!(capability["reason"], "critical_requires_ticket");
+
     let direct = bridge
         .tool_call(
             &ticket,
