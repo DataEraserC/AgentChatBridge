@@ -1,0 +1,43 @@
+# acb-supervisor 的示例配置。复制到 `state/supervisor.toml` 后按部署环境改路径。
+# 语义见 docs/plan/supervisor-policy-interface.md 第 9 节。
+
+[supervisor]
+# 当前版本：supervisor 启动时拉起它。
+program = "/绝对路径/acb-bridge"
+args = ["--config", "/绝对路径/config.toml"]
+
+# 部署时已知的 LKG；只有状态目录里没有 lkg.json 时才用它。
+# 首次部署可以先不写，等稳定窗口自动提升。
+# lkg = { program = "/绝对路径/acb-bridge-prev", args = ["--config", "/绝对路径/config.toml"] }
+
+# 桥的健康端点。启用 console 时才有；不配置则「进程存活即健康」。
+health_url = "http://127.0.0.1:3100/healthz"
+
+# LKG 指针与审计都在这个目录：lkg.json、supervisor.log。
+state_dir = "state/supervisor"
+probe_interval_secs = 5
+# 连续健康这么久才把当前版本提升为 LKG；回滚成功后也要重新等满这个窗口。
+stable_window_secs = 60
+
+[supervisor.policy]
+# acb.supervisor.default = 内置策略；command = 外部进程（stdin/stdout JSON）。
+provider = "acb.supervisor.default"
+# 仅 command provider 使用。
+# command = "/绝对路径/policy-binary"
+
+# 周期触发的策略超时；到点按 policy_error 处理，不等待策略自行返回。
+decision_timeout_ms = 1000
+policy_error_fail_after = 3
+# 目前只接受 "hold"：策略出错先保持当前版本，不自动回退内置策略。
+on_policy_error = "hold"
+
+startup_grace_secs = 30
+consecutive_failures = 3
+window_failures = 5
+window_secs = 600
+panic_classes = ["panic"]
+panic_rollback = true
+provider_parse_uses_window = true
+unhealthy_secs = 60
+unhealthy_probes = 3
+restart_backoff_secs = [1, 2, 4, 8, 30]

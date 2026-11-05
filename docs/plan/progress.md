@@ -1823,6 +1823,43 @@
     `"attempts":1,"lastErrorClass":"carrier","lastError":"dlopen failed","neverConnected":true}`
 - 验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode、`node --check` 全绿。
 
+## 2026-11-05 — supervisor 自动回滚接进真实循环
+
+- 目标：让 `acb-supervisor-policy::decide` 真正被监督循环消费，回滚落到「切回 LKG」
+  并可审计、可证明执行。
+- 做了什么：
+  - 新增 crate `crates/supervisor`（binary `acb-supervisor`）：
+    - `Supervisor::tick()` 按 probe 间隔采样 → 构造 `Snapshot` → `evaluate_periodic`
+      （`Arc<dyn Policy>`，`recv_timeout(decision_timeout_ms)`）→ `execute`；
+    - 进程退出走内置策略同步决策（`process_exit`），故障路径不调用外部策略、不等待；
+    - `execute` 真正执行 `Fail`/`Hold`/`Rollback`：Hold 按退避重启当前版本，
+      Fail 停止自动恢复，Rollback 停当前进程并启动 LKG；
+    - 审计 JSONL `state_dir/supervisor.log`：`decision` / `execute` / `failure` /
+      `probe` / `policy_error` / `lkg_promoted` / `lkg_write_failed`，每条带决策依据、
+      目标与结果；
+    - LKG 指针 `state_dir/lkg.json`（program + args + promoted_at_ms），临时文件 +
+      rename；稳定窗口（默认 60s）健康才提升；回滚成功后内存指针清空，等重新稳定
+      再提升。
+  - 策略可替换：`[supervisor.policy].provider` 默认 `acb.supervisor.default`
+    （直接调用 `decide`）；`command` 走 stdin/stdout JSON；外部策略只用于周期触发。
+  - `deploy/systemd/acb-supervisor.service` + `deploy/supervisor.example.toml`：
+    systemd 只拉起/重启 supervisor，不碰 NixOS generation、不做健康门禁、不切版本。
+- 取舍（保守侧）：
+  - 回滚 stop/start 失败都直接 `failed` 并停止自动恢复，不在两个版本之间来回切；
+  - 回滚后 LKG 置空，回滚版本需再稳定 `stable_window_secs` 才重新成为 LKG；
+    若它再次失败则 `fail`（不尝试更早版本）；
+  - `fail` 不杀正在运行的进程，supervisor 进程保持存活供检查；systemd 不重启它；
+  - `policy_error_fail_after=3` 按文档语义：单次错误 `hold`，连续 3 次 `fail`。
+    用户口述的「3 次转 hold」与参数名/文档冲突，按参数名和文档落地，并在
+    `supervisor-policy-interface.md` §9.2 写明。
+- 证据：
+  - `crates/supervisor/tests/rollback.rs` 8 个测试：回滚成功/失败、超时按
+    `policy_error`、连续错误先 hold 后 fail、启动宽限、`unhealthy_secs` 窗口、
+    backoff 序列、稳定窗口提升。断言读真实审计与 runner 调用次数，不是只看 `Decision`。
+  - 实际回滚日志：
+    `{"event":"execute","decision":"rollback","result":"rolled_back","target":{"program":"/lkg"}}`
+  - 验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode、`node --check` 全绿。
+- 下一步入口：按新口径做 `critical` 风险档位与媒体/文件 op 补全（独立提交）。
 
 
 ## 部署注意事项（nix-config 打包）

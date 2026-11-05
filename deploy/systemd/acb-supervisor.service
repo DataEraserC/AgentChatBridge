@@ -1,0 +1,27 @@
+[Unit]
+Description=ACB supervisor
+After=network.target
+# supervisor 自身崩溃才重启它；版本回滚由 supervisor 决策，systemd 不参与。
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch
+Environment=PATH=/run/current-system/sw/bin:/etc/profiles/per-user/nixos/bin:/run/wrappers/bin
+# 本地测试用 target/debug；部署时替换成固定的二进制路径或启动包装器。
+# 单元不引用 NixOS generation，也不改 current/last-good 指针。
+ExecStart=/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/target/debug/acb-supervisor --config /home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/state/supervisor.toml
+# 只有异常退出才拉起 supervisor；78 = 配置错误，等人修。
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=5
+# 默认 KillMode=control-group：supervisor 崩溃/重启时，先把同一 cgroup 里遗留的被监督
+# 进程一起停掉，避免 systemd 拉起新 supervisor 后出现两个 bridge。不要改成 process。
+# bridge 自己排空约需 30s；留余量。
+TimeoutStopSec=45
+StandardOutput=append:/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/state/logs/supervisor.log
+StandardError=append:/home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/state/logs/supervisor.log
+
+[Install]
+WantedBy=default.target
