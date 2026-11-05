@@ -279,6 +279,15 @@ pub struct CapabilitiesArgs {
     /// scope=tool 时的工具名或平台 op 名。
     #[serde(default)]
     pub name: Option<String>,
+    /// scope=surface 的投影：visible（默认）/ all / hidden。只给 view 不给 scope 时按 surface。
+    #[serde(default)]
+    pub view: Option<String>,
+    /// view=all / hidden 的分页偏移；visible 不使用。
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// view=all / hidden 的页大小；visible 不使用。
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// 确认这批消息处理完了。
