@@ -33,7 +33,7 @@ flowchart LR
 3. **唤醒判定**：按订阅条目的唤醒策略决定「什么时候为会话开一轮」。默认唤醒策略：@ 我就醒 + 叫昵称就醒 + 攒够 N 条就醒（来源：用户裁定）。
 4. **未读、水位、流水**：每个房间各自累积未读、各自记水位；完整消息流水永久保存。开轮次时只投递触发那一轮的房间的未读（用户裁定：选项二）。
 5. **消息内容模型**：跨平台中立的标准内容元素表（text / at / quote / image / audio / video / file / 表情），适配器对每个标准元素做最大程度适配，不支持时降级或明确报错，绝不悄悄丢弃；平台特有内容以不透明载荷原样透传。参考 Koishi 的 element 体系与 NoneBot 的 MessageSegment，不照搬 OneBot 的消息链概念（来源：用户裁定，具体元素表待架构文档定稿）。
-6. **工具面**：不止发送，还要有读取（来源：用户裁定）。发送类：`send_message`（回当前轮次的房间）、`send_message_to`（`to` 受订阅范围限制，可被访问策略放宽）。读取类已实现 `get_history`、`fetch_records`、`list_rooms`、`get_notes` / `set_note` / `del_note`、`get_platform_events`、`platform_methods`、`platform_call`、`describe_plugins`、`memory_*`；当前完整清单见[术语表的工具面](02-glossary.md#工具面)。发送类工具参数形状一致。
+6. **工具面**：不止发送，还要有读取（来源：用户裁定）。发送类：`send_message`（回当前轮次的房间）、`send_message_to`（`to` 受订阅范围限制，可被访问策略放宽）。读取类已实现 `get_history`、`fetch_records`、`list_rooms`、`notes`（op=list/set/del）、`get_platform_events`、`platform_call`、`describe_plugins`、`memory_*`；当前完整清单见[术语表的工具面](02-glossary.md#工具面)。发送类工具参数形状一致。
 7. **串行轮次**：一个会话同一时刻只跑一轮，像人一样一次处理一件事（串行键 = 会话 id，配置里全局唯一；串行单位 = harness × 会话，ADR-0017）。记忆独立成仓库，一个会话可引用多份、多份记忆也可被多个会话引用——但记忆不是锁，并发按会话走。
 8. **平台事件承载**：房间里的非消息事情（拍一拍、成员变动、频道创建）解成通用形状记录进流水；默认记录，但只对会话订阅的房间记（来源：用户裁定）。核心不解释事件内容。
 
@@ -82,5 +82,5 @@ flowchart LR
 ## 待决问题
 
 1. **唤醒策略的其它条件**：默认策略只有 @ / 昵称 / 攒 N 条（用户裁定）。关键词触发、免打扰名单、睡眠时段、概率唤醒这些，是做成默认策略的可选开关，还是不做进默认、完全交给用户自定义策略？
-2. **读取类工具第一版范围**：`get_history` / `list_rooms` / `get_notes` / `set_note` / `del_note` / `get_platform_events` 里，哪些进第一版？
+2. **读取类工具第一版范围**：`get_history` / `list_rooms` / `notes`（op=list/set/del）/ `get_platform_events` 里，哪些进第一版？（已解决：全部进第一版，后续合并为 28 工具清单）
 3. **标准元素表定稿**：8 个标准元素够不够？要不要加 markdown 之类的富文本元素？

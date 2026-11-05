@@ -796,6 +796,47 @@ fn config_cannot_grant_critical_capability() {
 }
 
 #[test]
+fn ticket_ops_use_the_notes_entry_names() {
+    let (mut bridge, _sends) = bridge();
+    bridge
+        .ingest(message("qq:group/123", "user1", "想读笔记", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let accepted = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{"target": "qq:group/999", "ops": ["notes:list"]}]}),
+        )
+        .expect("新 op 名可以申请票据");
+    assert_eq!(accepted["tickets"][0]["state"], "pending_approval");
+
+    for old in ["get_notes", "set_note", "del_note"] {
+        let error = bridge
+            .tool_call(
+                &ticket,
+                &sessions(),
+                "access_request",
+                json!({"items": [{"target": "qq:group/999", "ops": [old]}]}),
+            )
+            .expect_err("旧工具名不再被接受");
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert!(
+            error.message.contains("unsupported op"),
+            "错误要指出旧名不再支持：{}",
+            error.message
+        );
+        assert!(
+            error.message.contains(old),
+            "错误里要出现提交的旧名：{}",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn read_only_ticket_stays_active_for_the_session_to_retry() {
     let (mut bridge, sends) = bridge();
     bridge

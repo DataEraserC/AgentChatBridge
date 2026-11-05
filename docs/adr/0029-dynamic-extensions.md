@@ -88,7 +88,7 @@ write → 语法/清单/能力校验 → 旁路编译 → 暂存（staged）
 - 增加 `task` 扩展点：`exec`、`process` 以及第三方 task handler 都通过注册表解析，
   不再写死 `match handler { "exec" => ... }`。
 - 任务记录包含：`task_id`、origin room、handler、参数摘要、状态、开始/结束时间、
-  结果摘要、错误、产物。至少可被 `task_list` / `task_get` 查询。
+  结果摘要、错误、产物。至少可被 `tasks`（op=list/get）查询。
 - 任务完成可以产生一条合成事件（`kind = task`，带 tags / payload / summary），
   由现有 wake / clock 策略决定是否开轮；`wake_on = "never" | "error" | "always"`
   是常用条件的快捷方式，不是绕过策略的直通开关。
@@ -131,7 +131,7 @@ Lua / process / native）、内容哈希、mtime、加载错误、health、被�
 对外入口：
 
 - AI 工具：`extensions_list`、`extensions_read`、`extensions_write`、
-  `extensions_reload`、`task_list`、`task_get`；
+  `extensions_reload`、`tasks`（op=list/get）；
 - `describe_plugins`：按会话 / global 展示模块级信息，而非只有 manager 一条；
 - 控制台：`/api/extensions`（目录、健康、审批待办），与 `/api/plugins` 并列。
 
@@ -207,7 +207,7 @@ worker 协议；这属于 D5 / D2 的落地范围，不是重写 core。
 | Lua 新增/删除 provider | 拒绝，要求重启 | 运行时替换 dynamic namespace |
 | 脚本内容热重载 | 代码存在，生产未接线 | 轮次边界接线 + 显式 reload |
 | AI 写扩展 | 无 | extensions_* 工具 + 路径/能力约束 |
-| task 结果查询 | 无 | task 记录 + task_list/task_get |
+| task 结果查询 | 无 | task 记录 + `tasks` op=list/get |
 | task 结果唤醒 | 无 | 合成事件 + wake 策略 + wake_on |
 | 模块级信息 | 仅 manager 级 | manifest + health + usage + mtime/hash |
 | 外置进程做 route/task | 不支持 | process carrier 扩展 |
@@ -217,7 +217,7 @@ worker 协议；这属于 D5 / D2 的落地范围，不是重写 core。
 
 1. **P1 动态扩展闭环**：扩展目录、manifest、稳定分派器、dynamic namespace 替换、
    `extensions_*` 工具、模块级目录信息。
-2. **P2 任务结果闭环**：task 注册表、task 记录、`task_list` / `task_get`、合成事件与
+2. **P2 任务结果闭环**：task 注册表、task 记录、`tasks` op=list/get、合成事件与
    `wake_on`。
 3. **P3 外置进程扩展**：process carrier 支持 route / task / 常驻 worker，包含生命周期、
    重启、限时与能力白名单。

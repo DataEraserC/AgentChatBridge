@@ -42,7 +42,7 @@
 | `get_history` | `total` / `returned` / `has_more` / `next_before`（往更早翻传 `before`） |
 | `fetch_records` | `total` / `returned` / `missing` |
 | `get_platform_events` | `total` / `offset` / `returned` / `has_more` / `next_offset` |
-| `get_notes` / `list_rooms` | `total` |
+| `notes` / `list_rooms` | `total`（notes list 另有 `offset` / `returned` / `has_more` / `next_offset`） |
 | `platform_methods` | `total` / `returned` / `matched` |
 | `memory_list` / `memory_search` | `total` / `offset` / `returned` / `has_more` / `next_offset` |
 | `platform_call` | `_page`（见上） |
