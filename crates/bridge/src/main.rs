@@ -20,8 +20,12 @@ use acb_adapter_onebot_snowluma::OneBotSnowLumaAdapterFactory;
 use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::{
     AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ControlRegistry,
-    DependencyRegistry, EventQueue, FileRelay, Outbounds, PluginManager, RouteWorker, SqliteStore,
-    carrier_create_failed, drain_events, run_adapter, serve,
+    DependencyRegistry, Element, EventQueue, FileRelay, Outbounds, PluginManager, RecordDraft,
+    RecordKind, RouteWorker, Sender, SqliteStore, carrier_create_failed, drain_events, run_adapter,
+    serve,
+};
+use acb_memory_steward::{
+    Notifier as MemoryNotifier, Steward, StewardConfig, SyncNotice, Target as MemoryTarget,
 };
 use acb_plugin_lua::LuaLoader;
 use acb_plugin_process_tools::{ProcessNotifier, ProcessToolLoader};
@@ -89,6 +93,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     let text = std::fs::read_to_string(&options.config)?;
     let config = Config::parse(&text)?;
+    // 记忆管家的配置独立校验：开关、调度器、合并策略都在这里定，core 不硬编码。
+    let steward_config = StewardConfig::from_toml(&text)?;
     print_summary(&config, &options.config);
     if let Some(admin) = &config.grants.system_admin {
         eprintln!(
@@ -269,6 +275,27 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         });
     }
 
+    // 记忆管家：后台线程按调度器做 fetch/merge/push。它只读配置与 worktree，
+    // 不碰 core 的轮次逻辑；失败/冲突写状态并通过入站队列通知会话。
+    let steward_status = if steward_config.enabled {
+        let targets = memory_targets(&config);
+        let target_count = targets.len();
+        let notifier = Arc::new(MemorySyncNotifier {
+            events: events.clone(),
+        });
+        let steward = Steward::new(steward_config, targets, notifier)?;
+        let status = steward.status_path().to_path_buf();
+        let shutdown = Arc::clone(&shutdown);
+        std::thread::spawn(move || steward.run_forever(shutdown.as_ref()));
+        println!(
+            "memory-steward: enabled, {target_count} target(s), status={}",
+            status.display()
+        );
+        Some(status)
+    } else {
+        None
+    };
+
     for (connection_id, launch) in launches {
         let host = AdapterHost {
             events: events.clone(),
@@ -313,6 +340,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 inbound_stats.clone(),
                 route_worker.clone(),
                 deps.clone(),
+                steward_status.clone(),
             ));
             let shutdown = Arc::clone(&shutdown);
             std::thread::spawn(move || {
@@ -591,6 +619,109 @@ fn prune_once(bridge: &Mutex<Bridge<SqliteStore>>) {
                 "{}",
                 acb_i18n::t!("bridge.main.prune_failed", error = error)
             )
+        }
+    }
+}
+
+/// 把配置里的「会话 × 记忆」展开成管家的同步目标。
+///
+/// 路径必须与 `MemoryRepo::worktree_path` 一致：`worktrees_root/<记忆id>/<会话id>`。
+fn memory_targets(config: &Config) -> Vec<MemoryTarget> {
+    let root = Path::new(&config.worktrees_root);
+    let mut targets = Vec::new();
+    for session in &config.sessions {
+        let room = session
+            .subscriptions
+            .first()
+            .map(|subscription| subscription.room.clone());
+        for memory in &session.memories {
+            targets.push(MemoryTarget {
+                memory: memory.clone(),
+                session: session.id.clone(),
+                room: room.clone(),
+                worktree: root.join(memory).join(&session.id),
+            });
+        }
+    }
+    targets
+}
+
+/// 管家通知：写一条合成事件进入站队列，由 drain 线程照常入库并唤醒会话。
+///
+/// 不直接锁 `Bridge`，也不在管家线程里做投递；队列满/关闭只打日志，
+/// 下一次同步会继续写状态文件，轮次不受影响。
+struct MemorySyncNotifier {
+    events: EventQueue,
+}
+
+impl MemoryNotifier for MemorySyncNotifier {
+    fn notify(&self, target: &MemoryTarget, notice: &SyncNotice) {
+        let Some(room) = target.room.clone() else {
+            eprintln!(
+                "memory-steward: {} has no subscribed room; notice={notice:?}",
+                target.key()
+            );
+            return;
+        };
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+        let (event, tag, text, payload) = match notice {
+            SyncNotice::Conflict { files } => (
+                "memory_sync_conflict",
+                "conflict",
+                format!(
+                    "记忆 {}/{} 同步冲突，已停下且未自动选边。冲突文件（{}）：{}",
+                    target.memory,
+                    target.session,
+                    files.len(),
+                    files.join(", ")
+                ),
+                serde_json::json!({
+                    "memory": target.memory,
+                    "session": target.session,
+                    "conflict_files": files,
+                }),
+            ),
+            SyncNotice::Failure { reason } => (
+                "memory_sync_failed",
+                "failure",
+                format!(
+                    "记忆 {}/{} 同步失败（轮次不受影响）：{reason}",
+                    target.memory, target.session
+                ),
+                serde_json::json!({
+                    "memory": target.memory,
+                    "session": target.session,
+                    "reason": reason,
+                }),
+            ),
+        };
+        let mut draft = RecordDraft::event(
+            room,
+            Sender {
+                id: "acb.memory-steward".into(),
+                name: "memory-steward".into(),
+                role: None,
+            },
+            at,
+            event,
+            vec![Element::text(text)],
+            true,
+        );
+        if let RecordKind::Event {
+            tags,
+            payload: slot,
+            ..
+        } = &mut draft.kind
+        {
+            tags.push("memory_sync".into());
+            tags.push(tag.into());
+            *slot = Some(payload);
+        }
+        if let Err(error) = self.events.submit(draft) {
+            eprintln!("memory-steward: cannot enqueue notice: {error}");
         }
     }
 }

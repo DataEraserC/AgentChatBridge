@@ -11,6 +11,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -74,9 +75,13 @@ pub struct Console<S: Store> {
     route_worker: RouteWorker,
     /// 依赖状态表（只读缓存）。
     deps: DependencyRegistry,
+    /// 记忆管家状态文件；未启用时 `None`。
+    memory_steward: Option<PathBuf>,
 }
 
 impl<S: Store + Send + 'static> Console<S> {
+    // 控制台把桥的各个只读视图都拼在一个服务里；拆成结构体只会让 main 更难读。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         bridge: Arc<Mutex<Bridge<S>>>,
         controls: ControlRegistry,
@@ -85,6 +90,7 @@ impl<S: Store + Send + 'static> Console<S> {
         inbound_stats: QueueStats,
         route_worker: RouteWorker,
         deps: DependencyRegistry,
+        memory_steward: Option<PathBuf>,
     ) -> Self {
         Self {
             bridge,
@@ -94,6 +100,7 @@ impl<S: Store + Send + 'static> Console<S> {
             inbound_stats,
             route_worker,
             deps,
+            memory_steward,
         }
     }
 
@@ -254,6 +261,9 @@ impl<S: Store + Send + 'static> Console<S> {
             }
             ("GET", "/api/status") => (200, self.status()),
             ("GET", "/api/sessions") => (200, self.sessions()),
+            // 记忆管家：最近一次同步时间、结果、冲突文件数与失败原因。
+            // 管家线程写 status.json，这里只读，不阻塞任何同步动作。
+            ("GET", "/api/memory-steward") => (200, self.memory_steward_status()),
             // 插件目录：只读，描述由插件作者声明；不暴露实际 options / 路径 / token。
             // `connections` 是逐平台的运行时连接状态，补上工厂级 health 看不到的部分。
             ("GET", "/api/plugins") => {
@@ -305,6 +315,21 @@ impl<S: Store + Send + 'static> Console<S> {
                 404,
                 json!({"error": acb_i18n::t!("bridge.console.no_endpoint")}).to_string(),
             ),
+        }
+    }
+
+    /// 记忆管家状态。读的是管家自己原子替换的 status.json；读不到就如实报错。
+    fn memory_steward_status(&self) -> String {
+        let Some(path) = &self.memory_steward else {
+            return json!({"enabled": false}).to_string();
+        };
+        match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => json!({
+                "enabled": true,
+                "error": format!("cannot read {}: {error}", path.display()),
+            })
+            .to_string(),
         }
     }
 

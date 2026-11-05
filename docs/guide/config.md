@@ -357,6 +357,31 @@ max_age_days = 90             # 已读记录最多留多少天
 一轮对话超过这个时长才会被 agent 侧主动打断（dsh 支持打断），打断算这一轮失败、
 照常走失败通知。需要限制长任务时再打开，例如 `turn_timeout_secs = 3600`。
 
+## 记忆管家：后台同步
+
+`[memory_steward]` 把「会话 × 记忆」的 git worktree 同步从对话轮次里拆出去：
+后台线程按调度器做 `fetch → merge/rebase → push`，失败只记状态并通知会话。
+默认关闭；详细设计见 [memory-steward.md](../plan/memory-steward.md)。
+
+```toml
+[memory_steward]
+enabled = true
+interval_secs = 300       # 时间触发；0 = 关闭
+commit_threshold = 5      # 本地新增提交数触发；0 = 关闭（两者至少开一个）
+poll_secs = 30            # 后台检查间隔，不是同步周期
+merge_strategy = "merge"  # merge | rebase
+auto_resolve = "none"     # none：冲突停下并列文件；local / remote 必须显式开启
+state_dir = "state/memory-steward"
+git_timeout_secs = 120
+```
+
+- 时间与提交量两个触发器可以组合，**先到者触发**。
+- 默认 `auto_resolve = "none"`：冲突时 abort 合并、列出冲突文件、通知会话，
+  不会静默取一侧。
+- 状态写在 `state_dir/status.json`，控制台 `GET /api/memory-steward` 只读暴露；
+  字段包括最近一次同步时间、结果、冲突文件数与失败原因。
+- 远端就是普通的 `origin`；没有远端、worktree 尚不存在都只记状态/跳过，不影响轮次。
+
 ## dsh 侧的环境变量
 
 `deploy/start-drivers.sh` 里给驱动设了两个环境变量，控制 dsh 网页里的工作目录和分组：

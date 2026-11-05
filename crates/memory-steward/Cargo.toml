@@ -1,0 +1,13 @@
+[package]
+name = "acb-memory-steward"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "记忆管家：后台 git fetch/merge/push 与冲突状态"
+
+[dependencies]
+acb-proto = { path = "../proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
