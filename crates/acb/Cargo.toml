@@ -1,0 +1,18 @@
+[package]
+name = "acb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "ACB 运维 CLI：从模板渲染并安装 systemd unit"
+
+[[bin]]
+name = "acbctl"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
