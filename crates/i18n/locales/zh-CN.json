@@ -291,6 +291,7 @@
   "bridge.main.config_path": "配置：{path}",
   "bridge.main.config_source": "  配置来源：{path}（连接 {connections}，会话 {sessions}，规则 {rules}）",
   "bridge.main.config_rules_total": "  生效规则总数：{count}",
+  "bridge.main.duplicate_rules_warning": "  注意：多个配置层里出现了完全相同的 [[grants.rules]] 条目；规则按原样追加，不去重。",
   "bridge.main.config_warning": "注意：{warning}",
   "bridge.main.connection_line": "    - {id}（{platform} / {kind}，{transport}）连 {url}，登录账号 {account}",
   "bridge.main.connections_count": "  连接：{count} 条",

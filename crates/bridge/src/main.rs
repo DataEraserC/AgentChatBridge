@@ -96,12 +96,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let loaded = Config::load(Path::new(&options.config), Some(&config_dir))?;
     let config = loaded.config;
     let sources = loaded.sources;
+    let duplicate_rules = loaded.duplicate_rules;
     // 记忆管家的配置独立校验：开关、调度器、合并策略都在这里定，core 不硬编码。
     // 分片模式下用合并后的 TOML，保证 fragment 里的段也能被这些独立解析器看到。
     let steward_config = StewardConfig::from_toml(&loaded.merged_toml)?;
     // 外置进程 provider 同样独立校验；列表为空就不启动任何子进程。
     let process_providers = ProcessProviderConfig::from_toml(&loaded.merged_toml)?;
-    print_summary(&config, &options.config, &sources);
+    print_summary(&config, &options.config, &sources, duplicate_rules);
     if let Some(admin) = &config.grants.system_admin {
         eprintln!(
             "{}",
@@ -808,7 +809,7 @@ impl Options {
     }
 }
 
-fn print_summary(config: &Config, path: &str, sources: &[ConfigSource]) {
+fn print_summary(config: &Config, path: &str, sources: &[ConfigSource], duplicate_rules: bool) {
     println!("{}", acb_i18n::t!("bridge.main.config_path", path = path));
     for source in sources {
         println!(
@@ -829,6 +830,9 @@ fn print_summary(config: &Config, path: &str, sources: &[ConfigSource]) {
             count = config.grants.rules.len()
         )
     );
+    if duplicate_rules {
+        println!("{}", acb_i18n::t!("bridge.main.duplicate_rules_warning"));
+    }
 
     println!(
         "{}",

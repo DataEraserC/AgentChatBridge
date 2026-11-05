@@ -130,6 +130,9 @@ pub struct LoadedConfig {
     /// 合并后的 TOML（无分片时就是 base 原文）。供 memory-steward / process-provider
     /// 这类独立解析器复用同一份生效文本。
     pub merged_toml: String,
+    /// 是否在不同层里出现了完全相同的 `[[grants.rules]]` 条目。
+    /// 只用于启动摘要提示；规则仍然按原样追加，不降级为错误、不自动去重。
+    pub duplicate_rules: bool,
 }
 
 /// 配置里对某个 provider 的一次引用：id + 稳定位置串。
@@ -1400,21 +1403,37 @@ impl Config {
         }
         check_duplicate_ids(&files)?;
 
+        let console_layer = match console {
+            Some(path) => {
+                let text = read_config_file(&path)?;
+                Some(parse_config_file(&path, &text)?)
+            }
+            None => None,
+        };
+        // 90-console 若自带 [grants]，它会整体替换下层 grants，只有它自己的规则
+        // 生效，因此不存在跨层重复；否则比较 base + 普通分片。
+        let duplicate_rules = if console_layer
+            .as_ref()
+            .is_some_and(|overlay| overlay.has_grants)
+        {
+            false
+        } else {
+            duplicate_rules_across_files(&files)
+        };
+
         let mut merged = files[0].value.clone();
         for file in files.iter().skip(1) {
             merge_document(&mut merged, file.value.clone());
         }
         let mut sources: Vec<ConfigSource> = files.iter().map(|file| file.source.clone()).collect();
 
-        if let Some(path) = console {
-            let text = read_config_file(&path)?;
-            let overlay = parse_config_file(&path, &text)?;
+        if let Some(overlay) = console_layer {
             check_duplicate_ids(std::slice::from_ref(&overlay))?;
             apply_console_overlay(&mut merged, overlay.value.clone());
             sources.push(overlay.source);
         }
 
-        finish_loaded(merged, sources)
+        finish_loaded(merged, sources, duplicate_rules)
     }
 
     /// 用一段控制台文本作为 `90-console.toml` 的覆盖层，合并出最终配置。
@@ -1444,19 +1463,25 @@ impl Config {
         }
         check_duplicate_ids(&files)?;
 
+        let overlay_path = config_dir.join(CONSOLE_CONFIG_FILENAME);
+        let overlay = parse_config_file(&overlay_path, overlay_text)?;
+        let duplicate_rules = if overlay.has_grants {
+            false
+        } else {
+            duplicate_rules_across_files(&files)
+        };
+
         let mut merged = files[0].value.clone();
         for file in files.iter().skip(1) {
             merge_document(&mut merged, file.value.clone());
         }
         let mut sources: Vec<ConfigSource> = files.iter().map(|file| file.source.clone()).collect();
 
-        let overlay_path = config_dir.join(CONSOLE_CONFIG_FILENAME);
-        let overlay = parse_config_file(&overlay_path, overlay_text)?;
         check_duplicate_ids(std::slice::from_ref(&overlay))?;
         apply_console_overlay(&mut merged, overlay.value.clone());
         sources.push(overlay.source);
 
-        finish_loaded(merged, sources)
+        finish_loaded(merged, sources, duplicate_rules)
     }
 
     fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
@@ -2997,6 +3022,8 @@ struct RawWake {
 struct ParsedConfigFile {
     value: toml::Value,
     source: ConfigSource,
+    rules: Vec<toml::Value>,
+    has_grants: bool,
 }
 
 fn read_config_file(path: &Path) -> Result<String, ConfigError> {
@@ -3054,7 +3081,19 @@ fn parse_config_file(path: &Path, text: &str) -> Result<ParsedConfigFile, Config
         sessions: array_count(&value, "sessions"),
         rules: rules_count(&value),
     };
-    Ok(ParsedConfigFile { value, source })
+    let rules = value
+        .get("grants")
+        .and_then(|grants| grants.get("rules"))
+        .and_then(toml::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let has_grants = value.get("grants").is_some();
+    Ok(ParsedConfigFile {
+        value,
+        source,
+        rules,
+        has_grants,
+    })
 }
 
 fn load_single(base_path: &Path, text: &str) -> Result<LoadedConfig, ConfigError> {
@@ -3068,12 +3107,30 @@ fn load_single(base_path: &Path, text: &str) -> Result<LoadedConfig, ConfigError
         }],
         config,
         merged_toml: text.to_owned(),
+        duplicate_rules: false,
     })
+}
+
+fn duplicate_rules_across_files(files: &[ParsedConfigFile]) -> bool {
+    let mut seen: Vec<(usize, &toml::Value)> = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        for rule in &file.rules {
+            if seen
+                .iter()
+                .any(|(seen_index, seen_rule)| *seen_index != index && seen_rule == &rule)
+            {
+                return true;
+            }
+            seen.push((index, rule));
+        }
+    }
+    false
 }
 
 fn finish_loaded(
     mut merged: toml::Value,
     sources: Vec<ConfigSource>,
+    duplicate_rules: bool,
 ) -> Result<LoadedConfig, ConfigError> {
     dedupe_admin_lists(&mut merged);
     let merged_toml = toml::to_string(&merged).map_err(|error| ConfigError::ParseFailed {
@@ -3087,6 +3144,7 @@ fn finish_loaded(
         config: Config::from_raw(raw)?,
         sources,
         merged_toml,
+        duplicate_rules,
     })
 }
 
@@ -4760,6 +4818,44 @@ approval_route = ["qq:group/456"]
         assert_eq!(loaded.sources[1].connections, 1);
         assert_eq!(loaded.sources[0].rules, 1);
         assert_eq!(loaded.sources[1].rules, 1);
+    }
+
+    #[test]
+    fn drop_in_identical_rules_across_layers_set_warning_flag() {
+        let duplicate_rule = r#"
+[[grants.rules]]
+subject = "user"
+place = "group"
+scope = "subscribed"
+capability = ["room_read"]
+"#;
+        let (_dir, loaded) = load_with_fragments(
+            "identical-rule",
+            &drop_in_base(),
+            &[("10-same-rule.toml", duplicate_rule)],
+        );
+        let loaded = loaded.expect("分片应能加载");
+        assert_eq!(loaded.config.grants.rules.len(), 2, "规则仍然追加");
+        assert!(loaded.duplicate_rules, "跨层相同规则应置告警标记");
+    }
+
+    #[test]
+    fn drop_in_different_rules_do_not_set_warning_flag() {
+        let unique_rule = r#"
+[[grants.rules]]
+subject = "user"
+place = "group"
+scope = "subscribed"
+capability = ["room_write"]
+"#;
+        let (_dir, loaded) = load_with_fragments(
+            "different-rule",
+            &drop_in_base(),
+            &[("10-other-rule.toml", unique_rule)],
+        );
+        let loaded = loaded.expect("分片应能加载");
+        assert_eq!(loaded.config.grants.rules.len(), 2);
+        assert!(!loaded.duplicate_rules, "不同规则不应误报");
     }
 
     #[test]

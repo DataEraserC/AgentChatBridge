@@ -1202,4 +1202,42 @@ mod tests {
         assert_eq!(decision.basis, "admin:no_plugin_grant");
         assert!(decision.audited());
     }
+
+    #[test]
+    fn rule_array_order_first_matching_allow_wins_not_deny_priority() {
+        // 固定当前真实行为：rules 按数组顺序扫描，第一个授予所查 capability 的
+        // 规则立即 allow；后面的匹配规则即使形成 deny 候选，也不会覆盖它。
+        // 这不是 “deny 优先”，而是 “数组顺序首个授予生效”。
+        let inside = RoomId::parse("qq:group/1").expect("房间");
+        let place = Place::Room(RoomScope::MultiParty);
+        let grants = config(vec![
+            rule(
+                GrantSubject::User,
+                place,
+                GrantScope::Subscribed,
+                None,
+                &[GrantCapability::RoomRead],
+            ),
+            rule(
+                GrantSubject::User,
+                place,
+                GrantScope::Subscribed,
+                None,
+                &[GrantCapability::RoomWrite],
+            ),
+        ]);
+        let decision = eval_access(
+            &grants,
+            GrantSubject::User,
+            place,
+            GrantCapability::RoomRead,
+            &AccessTarget::room(&inside),
+            std::slice::from_ref(&inside),
+        );
+        assert!(
+            decision.allow,
+            "数组顺序首个授予规则生效；后面的 deny 候选不能覆盖它"
+        );
+        assert_eq!(decision.basis, "rule:0");
+    }
 }
