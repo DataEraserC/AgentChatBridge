@@ -16,6 +16,7 @@ members = [
     "crates/notifier-process",
     "crates/extensions",
     "crates/supervisor-policy",
+    "crates/supervisor",
     "crates/bridge",
 ]
 

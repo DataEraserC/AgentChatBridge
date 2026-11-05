@@ -1,0 +1,889 @@
+//! ACB 进程监督器。
+//!
+//! 边界：systemd 只负责拉起/重启 supervisor 进程；版本切换与回滚由 supervisor
+//! 决策并执行。supervisor 不依赖 NixOS generation：LKG 是一个命令（program + args），
+//! 指针写在 `state_dir/lkg.json`。
+//!
+//! 决策循环：
+//! 采样进程/健康/失败 → 构造 `Snapshot` → 调策略 → 执行 `fail / hold / rollback`。
+//! 即时触发（进程退出）走内置策略，不在故障路径上等待外部策略。
+
+#![forbid(unsafe_code)]
+
+use std::collections::VecDeque;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::Duration;
+
+use acb_supervisor_policy::{
+    Decision, DecisionKind, FailureRecord, PolicyConfig, Snapshot, VersionInfo, decide,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+pub const DEFAULT_PROBE_INTERVAL_SECS: u64 = 5;
+pub const DEFAULT_STABLE_WINDOW_SECS: u64 = 60;
+pub const DEFAULT_DECISION_TIMEOUT_MS: u64 = 1000;
+pub const DEFAULT_POLICY_ERROR_FAIL_AFTER: u32 = 3;
+pub const MAX_DECISION_DELAY_MS: u64 = 300_000;
+
+/// 一条可执行的命令。LKG 指针保存的就是这个形状。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandSpec {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl CommandSpec {
+    pub fn new(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+        }
+    }
+
+    fn id(&self) -> String {
+        if self.args.is_empty() {
+            self.program.clone()
+        } else {
+            format!("{} {}", self.program, self.args.join(" "))
+        }
+    }
+}
+
+/// 策略配置。`options` 原样交给策略实现；`provider` 决定用哪个实现。
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolicySettings {
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default = "default_decision_timeout")]
+    pub decision_timeout_ms: u64,
+    #[serde(default = "default_policy_error_fail_after")]
+    pub policy_error_fail_after: u32,
+    #[serde(default = "default_on_policy_error")]
+    pub on_policy_error: String,
+    #[serde(flatten)]
+    pub options: PolicyConfig,
+}
+
+impl Default for PolicySettings {
+    fn default() -> Self {
+        Self {
+            provider: default_provider(),
+            command: None,
+            decision_timeout_ms: DEFAULT_DECISION_TIMEOUT_MS,
+            policy_error_fail_after: DEFAULT_POLICY_ERROR_FAIL_AFTER,
+            on_policy_error: default_on_policy_error(),
+            options: PolicyConfig::default(),
+        }
+    }
+}
+
+fn default_provider() -> String {
+    "acb.supervisor.default".to_owned()
+}
+fn default_decision_timeout() -> u64 {
+    DEFAULT_DECISION_TIMEOUT_MS
+}
+fn default_policy_error_fail_after() -> u32 {
+    DEFAULT_POLICY_ERROR_FAIL_AFTER
+}
+fn default_on_policy_error() -> String {
+    "hold".to_owned()
+}
+fn default_probe_interval() -> u64 {
+    DEFAULT_PROBE_INTERVAL_SECS
+}
+fn default_stable_window() -> u64 {
+    DEFAULT_STABLE_WINDOW_SECS
+}
+fn default_state_dir() -> String {
+    "state/supervisor".to_owned()
+}
+
+/// supervisor 配置文件的 `[supervisor]` 段。
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 部署时已知的 LKG。状态文件里没有指针时才用它。
+    #[serde(default)]
+    pub lkg: Option<CommandSpec>,
+    /// 桥的健康端点，如 `http://127.0.0.1:7700/healthz`。
+    #[serde(default)]
+    pub health_url: Option<String>,
+    #[serde(default = "default_state_dir")]
+    pub state_dir: String,
+    #[serde(default = "default_probe_interval")]
+    pub probe_interval_secs: u64,
+    #[serde(default = "default_stable_window")]
+    pub stable_window_secs: u64,
+    #[serde(default)]
+    pub policy: PolicySettings,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigFile {
+    supervisor: Config,
+}
+
+pub fn load_config(path: &Path) -> Result<Config, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read supervisor config {}: {error}", path.display()))?;
+    let file: ConfigFile = toml::from_str(&text)
+        .map_err(|error| format!("cannot parse supervisor config: {error}"))?;
+    if file.supervisor.program.trim().is_empty() {
+        return Err("supervisor.program must not be empty".to_owned());
+    }
+    if file.supervisor.policy.on_policy_error != "hold" {
+        return Err("supervisor.policy.on_policy_error only supports \"hold\"".to_owned());
+    }
+    Ok(file.supervisor)
+}
+
+pub trait Clock {
+    fn now_ms(&self) -> i64;
+}
+
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> i64 {
+        now_millis()
+    }
+}
+
+pub trait Sleeper {
+    fn sleep_ms(&mut self, millis: u64);
+}
+
+pub struct SystemSleeper;
+
+impl Sleeper for SystemSleeper {
+    fn sleep_ms(&mut self, millis: u64) {
+        if millis > 0 {
+            std::thread::sleep(Duration::from_millis(millis));
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitInfo {
+    pub code: Option<i32>,
+    pub signal: Option<String>,
+}
+
+pub trait Runner {
+    fn start(&mut self, spec: &CommandSpec) -> Result<(), String>;
+    fn stop(&mut self) -> Result<(), String>;
+    fn running(&mut self) -> bool;
+    /// 上一次观察到的退出信息；没有退出记录返回 `None`。
+    fn last_exit(&mut self) -> Option<ExitInfo>;
+}
+
+#[derive(Default)]
+pub struct ProcessRunner {
+    child: Option<Child>,
+    last_exit: Option<ExitInfo>,
+}
+
+impl Runner for ProcessRunner {
+    fn start(&mut self, spec: &CommandSpec) -> Result<(), String> {
+        self.stop()?;
+        let mut command = Command::new(&spec.program);
+        command
+            .args(&spec.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        let child = command
+            .spawn()
+            .map_err(|error| format!("cannot start {}: {error}", spec.program))?;
+        self.child = Some(child);
+        self.last_exit = None;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        let _ = child.kill();
+        let status = child
+            .wait()
+            .map_err(|error| format!("cannot wait for child: {error}"))?;
+        self.last_exit = Some(exit_of(status));
+        Ok(())
+    }
+
+    fn running(&mut self) -> bool {
+        let Some(child) = self.child.as_mut() else {
+            return false;
+        };
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                self.last_exit = Some(exit_of(status));
+                self.child = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        }
+    }
+
+    fn last_exit(&mut self) -> Option<ExitInfo> {
+        self.last_exit.clone()
+    }
+}
+
+fn exit_of(status: std::process::ExitStatus) -> ExitInfo {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        ExitInfo {
+            code: status.code(),
+            signal: status.signal().map(|signal| signal.to_string()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ExitInfo {
+            code: status.code(),
+            signal: None,
+        }
+    }
+}
+
+pub trait Probe {
+    fn healthy(&mut self) -> bool;
+}
+
+pub struct HttpProbe {
+    url: String,
+    timeout: Duration,
+}
+
+impl HttpProbe {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            timeout: Duration::from_millis(500),
+        }
+    }
+}
+
+impl Probe for HttpProbe {
+    fn healthy(&mut self) -> bool {
+        http_ok(&self.url, self.timeout)
+    }
+}
+
+fn http_ok(url: &str, timeout: Duration) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_owned()),
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &match authority.parse() {
+            Ok(address) => address,
+            Err(_) => return false,
+        },
+        timeout,
+    ) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut head = [0u8; 64];
+    let Ok(count) = stream.read(&mut head) else {
+        return false;
+    };
+    let line = String::from_utf8_lossy(&head[..count]);
+    line.starts_with("HTTP/1.") && line.contains(" 200")
+}
+
+pub trait Policy: Send + Sync {
+    fn id(&self) -> &str;
+    fn evaluate(&self, snapshot: &Snapshot, options: &PolicyConfig) -> Result<Decision, String>;
+}
+
+pub struct BuiltinPolicy;
+
+impl Policy for BuiltinPolicy {
+    fn id(&self) -> &str {
+        "acb.supervisor.default"
+    }
+
+    fn evaluate(&self, snapshot: &Snapshot, options: &PolicyConfig) -> Result<Decision, String> {
+        Ok(decide(options, snapshot))
+    }
+}
+
+/// 外部策略：stdin 收 `{"snapshot":...,"options":...}`，stdout 回一份 `Decision` JSON。
+/// 超时由 supervisor 侧统一执行；这里只负责一次调用。
+pub struct CommandPolicy {
+    program: String,
+}
+
+impl CommandPolicy {
+    pub fn new(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+        }
+    }
+}
+
+impl Policy for CommandPolicy {
+    fn id(&self) -> &str {
+        "command"
+    }
+
+    fn evaluate(&self, snapshot: &Snapshot, options: &PolicyConfig) -> Result<Decision, String> {
+        let mut child = Command::new(&self.program)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| format!("cannot start policy {}: {error}", self.program))?;
+        let request = json!({"snapshot": snapshot, "options": options});
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(request.to_string().as_bytes())
+                .map_err(|error| format!("cannot write policy request: {error}"))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("cannot read policy output: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("policy exited with {}", output.status));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("policy returned invalid decision: {error}"))
+    }
+}
+
+pub struct Parts {
+    pub clock: Box<dyn Clock>,
+    pub runner: Box<dyn Runner>,
+    pub probe: Box<dyn Probe>,
+    pub sleeper: Box<dyn Sleeper>,
+    pub policy: Arc<dyn Policy>,
+}
+
+pub struct Supervisor {
+    config: Config,
+    clock: Box<dyn Clock>,
+    runner: Box<dyn Runner>,
+    probe: Box<dyn Probe>,
+    sleeper: Box<dyn Sleeper>,
+    policy: Arc<dyn Policy>,
+    builtin: BuiltinPolicy,
+    current: CommandSpec,
+    lkg: Option<CommandSpec>,
+    startup_at_ms: i64,
+    last_probe_at_ms: Option<i64>,
+    ever_healthy: bool,
+    healthy_since_ms: Option<i64>,
+    consecutive_unhealthy: u32,
+    unhealthy_since_ms: Option<i64>,
+    failures: VecDeque<FailureRecord>,
+    consecutive_failures: u32,
+    consecutive_holds: u32,
+    policy_errors: u32,
+    failed: Option<String>,
+    audit: PathBuf,
+}
+
+impl Supervisor {
+    pub fn new(config: Config, parts: Parts) -> Result<Self, String> {
+        let state_dir = PathBuf::from(&config.state_dir);
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|error| format!("cannot create {}: {error}", state_dir.display()))?;
+        let audit = state_dir.join("supervisor.log");
+        let current = CommandSpec {
+            program: config.program.clone(),
+            args: config.args.clone(),
+        };
+        let mut lkg = load_lkg(&state_dir).or_else(|| config.lkg.clone());
+        if lkg.as_ref() == Some(&current) {
+            lkg = None;
+        }
+        let now = parts.clock.now_ms();
+        let mut supervisor = Self {
+            config,
+            clock: parts.clock,
+            runner: parts.runner,
+            probe: parts.probe,
+            sleeper: parts.sleeper,
+            policy: parts.policy,
+            builtin: BuiltinPolicy,
+            current: current.clone(),
+            lkg,
+            startup_at_ms: now,
+            last_probe_at_ms: None,
+            ever_healthy: false,
+            healthy_since_ms: None,
+            consecutive_unhealthy: 0,
+            unhealthy_since_ms: None,
+            failures: VecDeque::new(),
+            consecutive_failures: 0,
+            consecutive_holds: 0,
+            policy_errors: 0,
+            failed: None,
+            audit,
+        };
+        supervisor.runner.start(&current).map_err(|error| {
+            format!("cannot start current version {}: {error}", current.program)
+        })?;
+        supervisor.audit(json!({
+            "event": "start",
+            "at_ms": now,
+            "current": current,
+            "lkg": supervisor.lkg,
+        }));
+        Ok(supervisor)
+    }
+
+    pub fn current(&self) -> &CommandSpec {
+        &self.current
+    }
+
+    pub fn lkg(&self) -> Option<&CommandSpec> {
+        self.lkg.as_ref()
+    }
+
+    pub fn failed(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+
+    pub fn audit_path(&self) -> &Path {
+        &self.audit
+    }
+
+    /// 一个采样周期。主循环按固定间隔调用。
+    pub fn tick(&mut self) {
+        if self.failed.is_some() {
+            return;
+        }
+        let now = self.clock.now_ms();
+        if !self.runner.running() {
+            let class = self
+                .runner
+                .last_exit()
+                .map(|exit| {
+                    if exit.code == Some(101) {
+                        "panic".to_owned()
+                    } else {
+                        "exit".to_owned()
+                    }
+                })
+                .unwrap_or_else(|| "exit".to_owned());
+            self.record_failure(now, &class);
+            let snapshot = self.snapshot(now);
+            let decision = self
+                .builtin
+                .evaluate(&snapshot, &self.config.policy.options);
+            if let Ok(decision) = decision {
+                self.execute("process_exit", decision);
+            }
+            return;
+        }
+
+        let interval_ms = self.config.probe_interval_secs.max(1).saturating_mul(1000);
+        let due = self
+            .last_probe_at_ms
+            .is_none_or(|last| now.saturating_sub(last) >= interval_ms as i64);
+        if due {
+            self.last_probe_at_ms = Some(now);
+            let healthy = self.config.health_url.is_none() || self.probe.healthy();
+            if healthy {
+                self.ever_healthy = true;
+                self.healthy_since_ms.get_or_insert(now);
+                self.consecutive_unhealthy = 0;
+                self.unhealthy_since_ms = None;
+                self.consecutive_failures = 0;
+                self.consecutive_holds = 0;
+            } else {
+                self.consecutive_unhealthy = self.consecutive_unhealthy.saturating_add(1);
+                if self.unhealthy_since_ms.is_none() {
+                    self.unhealthy_since_ms = Some(now);
+                }
+            }
+            self.audit(json!({
+                "event": "probe",
+                "at_ms": now,
+                "healthy": healthy,
+                "consecutive_unhealthy": self.consecutive_unhealthy,
+            }));
+            self.maybe_promote(now);
+
+            let snapshot = self.snapshot(now);
+            let decision = self.evaluate_periodic(&snapshot);
+            self.execute("health_probe", decision);
+        }
+    }
+
+    fn evaluate_periodic(&mut self, snapshot: &Snapshot) -> Decision {
+        let timeout = Duration::from_millis(self.config.policy.decision_timeout_ms.max(1));
+        match evaluate_with_timeout(
+            Arc::clone(&self.policy),
+            snapshot.clone(),
+            self.config.policy.options.clone(),
+            timeout,
+        ) {
+            Ok(decision) if valid_decision(&decision, self.lkg.is_some()) => {
+                self.policy_errors = 0;
+                decision
+            }
+            Ok(decision) => {
+                self.note_policy_error(&format!("invalid decision {:?}", decision.decision));
+                self.policy_error_decision()
+            }
+            Err(error) => {
+                self.note_policy_error(&error);
+                self.policy_error_decision()
+            }
+        }
+    }
+
+    fn note_policy_error(&mut self, detail: &str) {
+        self.policy_errors = self.policy_errors.saturating_add(1);
+        self.audit(json!({
+            "event": "policy_error",
+            "at_ms": self.clock.now_ms(),
+            "policy": self.policy.id(),
+            "detail": detail,
+            "consecutive": self.policy_errors,
+        }));
+        eprintln!(
+            "supervisor policy error: {detail} (consecutive {})",
+            self.policy_errors
+        );
+    }
+
+    fn policy_error_decision(&self) -> Decision {
+        if self.policy_errors >= self.config.policy.policy_error_fail_after.max(1) {
+            Decision {
+                decision: DecisionKind::Fail,
+                reason_code: "policy_error_fail_after".to_owned(),
+                reason: format!(
+                    "policy failed {} consecutive times; stopping automatic recovery",
+                    self.policy_errors
+                ),
+                delay_ms: None,
+            }
+        } else {
+            Decision {
+                decision: DecisionKind::Hold,
+                reason_code: "policy_error".to_owned(),
+                reason: "policy failed; holding current version".to_owned(),
+                delay_ms: Some(backoff_ms(
+                    &self.config.policy.options,
+                    self.consecutive_holds,
+                )),
+            }
+        }
+    }
+
+    fn snapshot(&self, now: i64) -> Snapshot {
+        let grace_ms = self
+            .config
+            .policy
+            .options
+            .startup_grace_secs
+            .saturating_mul(1000) as i64;
+        Snapshot {
+            observed_at_ms: now,
+            startup_at_ms: Some(self.startup_at_ms),
+            grace_elapsed: Some(now.saturating_sub(self.startup_at_ms) >= grace_ms),
+            consecutive_failures: self.consecutive_failures,
+            failures: self.failures.iter().cloned().collect(),
+            consecutive_unhealthy_probes: self.consecutive_unhealthy,
+            unhealthy_since_ms: self.unhealthy_since_ms,
+            lkg: self.lkg.as_ref().map(|spec| VersionInfo { id: spec.id() }),
+            consecutive_holds: self.consecutive_holds,
+        }
+    }
+
+    fn record_failure(&mut self, now: i64, class: &str) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.failures.push_back(FailureRecord {
+            at_ms: now,
+            class: class.to_owned(),
+        });
+        while self.failures.len() > 64 {
+            self.failures.pop_front();
+        }
+        self.audit(json!({
+            "event": "failure",
+            "at_ms": now,
+            "class": class,
+            "consecutive": self.consecutive_failures,
+        }));
+    }
+
+    fn maybe_promote(&mut self, now: i64) {
+        let Some(since) = self.healthy_since_ms else {
+            return;
+        };
+        let window_ms = self.config.stable_window_secs.saturating_mul(1000) as i64;
+        if now.saturating_sub(since) < window_ms {
+            return;
+        }
+        if self.lkg.as_ref() == Some(&self.current) {
+            return;
+        }
+        if let Err(error) = save_lkg(&PathBuf::from(&self.config.state_dir), &self.current, now) {
+            self.audit(json!({"event": "lkg_write_failed", "at_ms": now, "error": error}));
+            return;
+        }
+        self.lkg = Some(self.current.clone());
+        self.audit(json!({
+            "event": "lkg_promoted",
+            "at_ms": now,
+            "target": self.current,
+        }));
+        eprintln!("supervisor promoted LKG -> {}", self.current.id());
+    }
+
+    fn execute(&mut self, trigger: &str, decision: Decision) {
+        let mut now = self.clock.now_ms();
+        self.audit(json!({
+            "event": "decision",
+            "at_ms": now,
+            "trigger": trigger,
+            "decision": decision.decision,
+            "reason_code": decision.reason_code,
+            "reason": decision.reason,
+            "delay_ms": decision.delay_ms,
+            "current": self.current,
+            "lkg": self.lkg,
+        }));
+        eprintln!(
+            "supervisor decision trigger={trigger} decision={} reason={} ({})",
+            decision.decision.as_str(),
+            decision.reason_code,
+            decision.reason
+        );
+
+        if decision
+            .delay_ms
+            .is_some_and(|delay| delay > MAX_DECISION_DELAY_MS)
+        {
+            self.note_policy_error("decision delay_ms exceeds supervisor cap");
+            let decision = self.policy_error_decision();
+            self.execute(trigger, decision);
+            return;
+        }
+        if decision.delay_ms.unwrap_or(0) > 0 {
+            self.sleeper.sleep_ms(decision.delay_ms.unwrap_or(0));
+            now = self.clock.now_ms();
+        }
+
+        match decision.decision {
+            DecisionKind::Hold => {
+                self.consecutive_holds = self.consecutive_holds.saturating_add(1);
+                if !self.runner.running() {
+                    let spec = self.current.clone();
+                    match self.runner.start(&spec) {
+                        Ok(()) => {
+                            self.audit(json!({
+                                "event": "execute",
+                                "at_ms": now,
+                                "decision": "hold",
+                                "result": "restarted",
+                                "target": spec,
+                            }));
+                        }
+                        Err(error) => {
+                            self.failed = Some(format!("restart failed: {error}"));
+                            self.audit(json!({
+                                "event": "execute",
+                                "at_ms": now,
+                                "decision": "hold",
+                                "result": "restart_failed",
+                                "error": error,
+                            }));
+                        }
+                    }
+                } else {
+                    self.audit(json!({
+                        "event": "execute",
+                        "at_ms": now,
+                        "decision": "hold",
+                        "result": "kept_running",
+                    }));
+                }
+            }
+            DecisionKind::Fail => {
+                self.failed = Some(decision.reason.clone());
+                self.audit(json!({
+                    "event": "execute",
+                    "at_ms": now,
+                    "decision": "fail",
+                    "result": "stopped_auto_recovery",
+                    "reason": decision.reason,
+                }));
+            }
+            DecisionKind::Rollback => {
+                let Some(target) = self.lkg.clone() else {
+                    self.note_policy_error("rollback without LKG");
+                    let decision = self.policy_error_decision();
+                    self.execute(trigger, decision);
+                    return;
+                };
+                if self.runner.running() {
+                    if let Err(error) = self.runner.stop() {
+                        self.failed = Some(format!("rollback stop failed: {error}"));
+                        self.audit(json!({
+                            "event": "execute",
+                            "at_ms": now,
+                            "decision": "rollback",
+                            "result": "stop_failed",
+                            "target": target,
+                            "error": error,
+                        }));
+                        return;
+                    }
+                }
+                match self.runner.start(&target) {
+                    Ok(()) => {
+                        self.current = target.clone();
+                        self.lkg = None;
+                        self.startup_at_ms = now;
+                        self.healthy_since_ms = None;
+                        self.ever_healthy = false;
+                        self.consecutive_unhealthy = 0;
+                        self.unhealthy_since_ms = None;
+                        self.consecutive_failures = 0;
+                        self.consecutive_holds = 0;
+                        self.failures.clear();
+                        self.audit(json!({
+                            "event": "execute",
+                            "at_ms": now,
+                            "decision": "rollback",
+                            "result": "rolled_back",
+                            "target": self.current,
+                        }));
+                        eprintln!("supervisor rollback executed -> {}", self.current.id());
+                    }
+                    Err(error) => {
+                        self.failed = Some(format!("rollback start failed: {error}"));
+                        self.audit(json!({
+                            "event": "execute",
+                            "at_ms": now,
+                            "decision": "rollback",
+                            "result": "rollback_failed",
+                            "target": target,
+                            "error": error,
+                        }));
+                        eprintln!("supervisor rollback failed -> {}: {error}", target.id());
+                    }
+                }
+            }
+        }
+    }
+
+    fn audit(&self, record: Value) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.audit)
+        {
+            let _ = writeln!(file, "{record}");
+        }
+        eprintln!("supervisor audit: {record}");
+    }
+}
+
+fn valid_decision(decision: &Decision, has_lkg: bool) -> bool {
+    if decision
+        .delay_ms
+        .is_some_and(|delay| delay > MAX_DECISION_DELAY_MS)
+    {
+        return false;
+    }
+    if decision.decision == DecisionKind::Rollback && !has_lkg {
+        return false;
+    }
+    true
+}
+
+fn backoff_ms(options: &PolicyConfig, holds: u32) -> u64 {
+    let ladder = if options.restart_backoff_secs.is_empty() {
+        &DEFAULT_BACKOFF[..]
+    } else {
+        &options.restart_backoff_secs[..]
+    };
+    let index = (holds as usize).min(ladder.len().saturating_sub(1));
+    ladder
+        .get(index)
+        .copied()
+        .unwrap_or(30)
+        .saturating_mul(1000)
+}
+const DEFAULT_BACKOFF: [u64; 5] = [1, 2, 4, 8, 30];
+
+fn evaluate_with_timeout(
+    policy: Arc<dyn Policy>,
+    snapshot: Snapshot,
+    options: PolicyConfig,
+    timeout: Duration,
+) -> Result<Decision, String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(policy.evaluate(&snapshot, &options));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("policy timed out after {}ms", timeout.as_millis()))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("policy worker disconnected".to_owned()),
+    }
+}
+
+fn lkg_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("lkg.json")
+}
+
+fn load_lkg(state_dir: &Path) -> Option<CommandSpec> {
+    let text = std::fs::read_to_string(lkg_path(state_dir)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    serde_json::from_value(value.get("command")?.clone()).ok()
+}
+
+fn save_lkg(state_dir: &Path, command: &CommandSpec, now: i64) -> Result<(), String> {
+    let record = json!({"command": command, "promoted_at_ms": now});
+    let path = lkg_path(state_dir);
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(
+        &temp,
+        serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("cannot write {}: {error}", temp.display()))?;
+    std::fs::rename(&temp, &path)
+        .map_err(|error| format!("cannot replace {}: {error}", path.display()))
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}

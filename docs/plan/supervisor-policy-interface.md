@@ -1,6 +1,6 @@
 # Supervisor 决策接口（已定）
 
-状态：**已定（2026-11-04）**。本文定义接口与策略边界；实现尚未开始。
+状态：**已实现（2026-11-05）**。接口与策略边界已定；运行时落地见第 9 节。
 相关决策：[supervision-packaging-issues.md](supervision-packaging-issues.md) 第 1、4 节。
 
 ## 0. 目标
@@ -316,3 +316,108 @@ provider = "acb.supervisor.default"   # 缺省用内置
      接口，外部进程/WASM 策略限时 1000ms，超时 `hold + 告警`；
    - 原则：**故障路径上不许有等待；判断可以慢，恢复不能慢。**
    - 若实测显示分层带来不便，再单独评估，不现在扩大范围。
+
+## 9. 运行时落地（2026-11-05）
+
+实现位置：
+
+- `crates/supervisor-policy/`：纯决策 `decide(&PolicyConfig, &Snapshot) -> Decision`；
+- `crates/supervisor/`：独立二进制 `acb-supervisor`，负责采样、快照、策略调用、执行、审计。
+
+默认策略仍是 `acb-supervisor-policy::decide`；运行时没有把默认实现做薄——所有规则、
+退避、LKG 语义都在这里，替换策略只是换 `Arc<dyn Policy>`。
+
+### 9.1 决策到执行的调用链
+
+- 主循环：`crates/supervisor/src/main.rs` 每 100ms 调一次 `Supervisor::tick()`。
+- `Supervisor::tick()`（`crates/supervisor/src/lib.rs`）：
+  - 进程已退出 → `record_failure` → 构造 `Snapshot` → **内置策略直接决策** →
+    `execute("process_exit")`；
+  - 进程运行中 → 按 `probe_interval_secs` 到点探测 → 更新连续失败/健康序列 →
+    稳定窗口到期则提升 LKG → 构造 `Snapshot` → `evaluate_periodic` →
+    `execute("health_probe")`。
+- `evaluate_periodic` 把 `Arc<dyn Policy>` 放到工作线程，主线程
+  `recv_timeout(decision_timeout_ms)`；到点返回 `Err("policy timed out ...")`，
+  按 `policy_error` 处理，不等待策略自行返回。
+- `execute` 写两条审计：`decision`（依据）与 `execute`（结果与目标），同时向
+  stderr 打一行摘要。审计文件是 `state_dir/supervisor.log`（JSONL）。
+- 策略替换：`[supervisor.policy].provider`。内置 `acb.supervisor.default`；
+  `command` 走「stdin 收 `{"snapshot","options"}`、stdout 回 `Decision`」。
+  外部策略只用于周期触发；进程退出/启动宽限仍走内置，保证故障路径零等待。
+
+### 9.2 LKG 定义（本轮拍板，保守侧）
+
+- **LKG 是什么**：一条可执行命令（`program` + `args`），不是 NixOS generation。
+  指针文件 `state_dir/lkg.json`：
+  `{"command": {"program": "...", "args": [...]}, "promoted_at_ms": 123}`。
+  临时文件 + `rename` 原子替换。启动时优先读状态文件，缺失才用 `[supervisor].lkg`。
+- **什么算「健康」**：配置了 `health_url` 时 = `GET` 返回 200；未配置时 = 进程存活。
+  健康不等于 LKG；LKG 只由稳定窗口提升。
+- **什么时候更新 LKG**：当前版本连续健康达到 `stable_window_secs`（默认 60s）后的
+  那次探测，且当前命令与 LKG 不同；**先写盘成功，再更新内存指针**。写失败只记
+  `lkg_write_failed`，不影响当前运行。
+- **回滚后多久算恢复成功**：回滚动作成功 = LKG 进程已启动（审计
+  `result=rolled_back`）。「恢复成功」另算：回滚版本重新健康满 `stable_window_secs`
+  才重新提升为 LKG（审计 `lkg_promoted`）。期间内存 `lkg=None`，不会再回滚第二次。
+- **回滚本身失败怎么办**：
+  - stop 失败 → `failed`，审计 `result=stop_failed`，停止自动恢复；
+  - start 失败 → `failed`，审计 `result=rollback_failed`，停止自动恢复；
+    **不回退到「重启原版本」**，避免在两个坏版本之间来回切换；
+  - 周期策略给出 `rollback` 但没有 LKG → 视为非法决策，走 `policy_error`
+    （默认 `hold`，连续 `policy_error_fail_after=3` 次转 `fail`），不执行任何切换。
+- **回滚后再次失败**：内存 LKG 已置空，达到阈值时内置策略返回 `fail`，
+  不再自动尝试其它版本，等人处理。状态文件里的旧指针保留，供下一次部署作为
+  已知良好版本；若 supervisor 重启且 `current` 与它相同，则不视为可回滚目标。
+- **启动宽限**：从 supervisor 启动计时，每次回滚成功重新计时；`hold` 重启不重置
+  （否则崩溃循环永远等不到阈值）。宽限期内退出仍计失败，但决策是 `hold`。
+- **失败计数**：连续失败只在健康探测成功后清零；回滚成功清空全部失败记录与
+  hold 计数。失败窗口保留最近 64 条。
+- **panic**：退出码 `101` 记为 `panic` 类（Rust 默认 panic 退出码），其它记为
+  `exit`；是否升级由 `panic_classes` / `panic_rollback` 决定。
+
+取舍（全部选保守侧）：
+
+- 回滚成功后清空 LKG 而不是立刻把回滚版本标为 LKG：宁可多等一个稳定窗口，
+  也不把未经观察的版本当「好的」。
+- 回滚失败即 `fail`，不做「回滚到再上一个版本」：当前只维护单个 LKG 指针，
+  多级回滚没有证据支撑。
+- `fail` 不杀正在运行的进程，supervisor 进程保持存活以便查看审计与控制台；
+  systemd 不会因此重启（也不应该重启）。
+
+### 9.3 systemd 边界（最小接入）
+
+- 单元文件：`deploy/systemd/acb-supervisor.service`；配置样例：
+  `deploy/supervisor.example.toml`。
+- systemd 只负责：拉起 `acb-supervisor`、supervisor 崩溃时重启它、收集日志。
+  **不读也不写 NixOS generation，不做健康门禁，不做版本切换。**
+- 回滚由 supervisor 决策并执行：停当前命令 → 启动 `lkg.json` 里的命令 → 写审计。
+- `fail` 后 supervisor 进程保持运行（`failed` 状态），systemd 不会自动重启；
+  这是有意的，避免把「已判死」的版本重新拉起。人工处理后再 `systemctl restart`。
+- 非 systemd / Windows：supervisor 不调用 systemd，也不假设 Linux 信号；只需要一个
+  能把长驻进程拉起的包装器（Windows 服务包装器、容器 restart policy、launchd 等）。
+  唯一平台假设：`state_dir` 可写、LKG 命令在本机可执行；健康探测是普通 `http://`
+  GET，不依赖 socket activation。
+
+### 9.4 测试证据
+
+`crates/supervisor/tests/rollback.rs` 共 8 个测试，全部读真实审计文件断言「执行了
+什么」，而不是只断言决策结果：
+
+| 测试 | 证明的执行事实 |
+|---|---|
+| `rollback_is_executed_and_switches_to_lkg` | runner 收到第二次 `start`，目标是 `/lkg`；审计 `execute.result=rolled_back` |
+| `rollback_start_failure_is_visible_and_stops_recovery` | LKG 启动失败 → `failed` + `rollback_failed`，之后不再重启 |
+| `policy_timeout_holds_then_three_errors_fail` | 策略睡 200ms、超时 100ms → 3 次 `policy_error` 后执行 `fail` |
+| `consecutive_policy_errors_hold_then_fail` | 前两次错误执行 `hold`，第三次执行 `fail` |
+| `startup_grace_keeps_restarting_without_rollback` | 宽限期内 3 次退出都重启当前版本，决策 `startup_grace` |
+| `unhealthy_secs_waits_for_the_window_before_rollback` | 59s 不动；61s 才 `stop` 并切 `/lkg`（断言 `stops=1`） |
+| `hold_restart_uses_the_backoff_ladder` | `sleep` 序列 `[1000, 2000, 4000, 8000, 30000]` |
+| `stable_window_promotes_current_to_lkg` | 健康满 60s 后 LKG 指向当前版本，并写 `lkg_promoted` |
+
+实际回滚日志片段（`state/supervisor/supervisor.log`）：
+
+```text
+{"event":"decision","trigger":"process_exit","decision":"rollback","reason_code":"consecutive_failures","reason":"consecutive failures reached 1","current":{"program":"/current"},"lkg":{"program":"/lkg"}}
+{"event":"execute","decision":"rollback","result":"rolled_back","target":{"program":"/lkg"}}
+```
+

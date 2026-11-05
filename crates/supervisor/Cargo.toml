@@ -1,0 +1,17 @@
+[package]
+name = "acb-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "ACB 进程监督器：LKG 回滚与策略执行"
+
+[[bin]]
+name = "acb-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+acb-supervisor-policy = { path = "../supervisor-policy" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }

@@ -169,6 +169,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "acb-supervisor"
+version = "0.1.0"
+dependencies = [
+ "acb-supervisor-policy",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "acb-supervisor-policy"
 version = "0.1.0"
 dependencies = [

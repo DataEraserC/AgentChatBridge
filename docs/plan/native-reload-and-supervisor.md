@@ -3,6 +3,10 @@
 状态：设计提案（2026-11-04）。**本轮只出设计，不改代码、不改 systemd 单元、不重启服务。**
 等待用户拍板后再落地。
 
+> 2026-11-05 更新：独立 `acb-supervisor` 已实装自动回滚（LKG 指针 + 策略决策 + 审计），
+> systemd 只负责拉起 supervisor。本文 §3.1 的「MVP 手动回滚」描述已被取代；
+> 当前语义以 [supervisor-policy-interface.md](supervisor-policy-interface.md) 第 9 节为准。
+
 ## 0. 结论先行
 
 - **core 能做**：识别「该重启了」、进入排空状态、停止开新轮、等在途轮次/任务收尾、刷库、
