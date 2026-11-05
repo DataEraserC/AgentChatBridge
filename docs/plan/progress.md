@@ -1789,6 +1789,40 @@
 - 能力状态：计数 **8 完全 / 8 部分 / 7 未实现 → 8 完全 / 9 部分 / 6 未实现**；
   #21 群相册升为「部分」，#22 QQ 空间 / #23 收藏闪传仍为「未实现」（产品范围）。
 
+## 2026-11-05 — 载体级 AdapterStatus 上报收口
+
+- 目标：让 in-process / dynamic / process 三种平台载体在「载体没加载、退出、panic」
+  时都能进依赖表，不再停留在 `unknown` 或假的 `up`。
+- 做了什么：
+  - `crates/kernel/src/adapter.rs`：
+    - 新增 `carrier_create_failed`：`create_adapter` 失败（in-process 工厂、动态库
+      `dlopen`/入口校验、进程首次启动失败）时 `attempt` + `failed("carrier")`，
+      硬失败立即 down。
+    - 新增 `run_adapter`：core 统一包住 `launch`，正常退出但 shutdown 未置位时
+      按载体消失报 `failed("carrier")`；panic 也立即 `failed("carrier")`。
+    - 正常 shutdown 仍报 `disconnected("closed")`，不改变原有语义。
+  - `crates/bridge/src/main.rs`：单条连接 `create_adapter` 失败不再 `?` 退出整个桥；
+    标 down 后继续启动其他连接。`launch` 统一走 `run_adapter`。
+  - `crates/bridge/src/console.html`：依赖卡新增「账号在线」列，直接显示现有
+    `accountOnline`（在线/离线/未知），不新增重复字段；载体失败看 `lastErrorClass=carrier`
+    且账号列为未知，账号离线看 `accountOnline=false` + `lastErrorClass=account_offline`。
+- 取舍：
+  - 载体创建失败后该连接没有 outbound；向它发送会得到明确「no outbound connection」，
+    不会假装成功。桥继续运行，`/healthz` 能看到这条连接 down。
+  - 进程载体自身的 `supervise` 仍在管子进程重启；`run_adapter` 只兜底「launch 返回/panic」，
+    没有重复实现进程监督。
+- 证据：
+  - `carrier_create_failure_marks_down_immediately`（`state=down`、`lastErrorClass=carrier`、
+    `accountOnline=null`、`attempts=1`）
+  - `all_carrier_kinds_share_the_same_failure_mapping`（in-process / dynamic / process 同一映射）
+  - `adapter_carrier_exit_after_connect_marks_down_not_stuck_up`
+  - `adapter_carrier_panic_marks_down_immediately`
+  - `hard_and_soft_carrier_failures_have_distinct_thresholds`（单次软失败仍 up；硬失败立即 down）
+  - `/healthz` 依赖条目实际片段：
+    `{"id":"dyn-adapter","kind":"platform","state":"down","accountOnline":null,`
+    `"attempts":1,"lastErrorClass":"carrier","lastError":"dlopen failed","neverConnected":true}`
+- 验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode、`node --check` 全绿。
+
 
 
 ## 部署注意事项（nix-config 打包）
@@ -1821,10 +1855,8 @@
   外部 delivery composer（`namespace != acb`）且启用 provider 超时。当前量级
   可接受；若调大投递上限或记录元素变重，可改为共享只读快照或先传编号集合，
   避免每轮深拷贝全部记录。
-- in-process / dynamic 平台载体尚未上报 `AdapterStatus`：`/api/dependencies`
-  会一直显示 `unknown`，不会进入 `down`。这是「平台断开被人看见」的最后一块
-  覆盖缺口；需要把该载体的连接建立/断开接入 `AdapterStatus`，或在 manifest
-  里声明能力并让 core 采用安全兜底。暂不实现。
+- in-process / dynamic 平台载体 `AdapterStatus`：**已收口（2026-11-05）**，见
+  「载体级 AdapterStatus 上报收口」；`/api/dependencies` 现在能看到载体 failed/down。
 - 控制台尚未展示 `/api/dependencies`：目前只有 API 与 `/api/plugins` 的
   `connections` 字段，运维/管理员需要在页面上看到逐依赖状态与迁移历史。暂不实现。
 
