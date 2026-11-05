@@ -168,6 +168,50 @@ impl AdapterStatus {
     }
 }
 
+/// 载体创建/装载失败：硬失败，立即 down，不套用连接失败阈值。
+///
+/// in-process 工厂 `create` 失败、动态库 `dlopen`/入口校验失败、进程载体第一次
+/// `start_child` 失败都走这里；错误分类固定为 `carrier`，与账号离线区分开。
+pub fn carrier_create_failed(
+    deps: &crate::deps::DependencyRegistry,
+    connection: &str,
+    error: &str,
+) {
+    let now = crate::deps::now_millis();
+    deps.platform_attempt(connection, now);
+    deps.platform_failed(connection, "carrier", error, now);
+}
+
+/// 跑一个适配器载体线程，并在载体退出/崩溃时兜底上报。
+///
+/// 适配器自己的 supervisor 负责常规的 connected/disconnected；这里只处理
+/// 「launch 返回了」和「launch panic」两种没人收尾的情况。载体已经没了却还显示
+/// `up` 是 `/healthz` 最坏的假状态，所以都按硬失败立即 down。
+pub fn run_adapter(host: AdapterHost, launch: Box<dyn FnOnce(AdapterHost) + Send>) {
+    let status = host.status.clone();
+    let shutdown = std::sync::Arc::clone(&host.shutdown);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| launch(host)));
+    match result {
+        Ok(()) if shutdown.load(std::sync::atomic::Ordering::Relaxed) => {
+            status.disconnected("closed", "adapter shutdown");
+        }
+        Ok(()) => {
+            status.failed("carrier", &acb_i18n::t!("kernel.adapter.carrier_exited"));
+        }
+        Err(payload) => {
+            let panic = crate::plugin::panic_text(payload);
+            status.failed(
+                "carrier",
+                &acb_i18n::t!("kernel.adapter.carrier_panicked", panic = panic),
+            );
+            eprintln!(
+                "{}",
+                acb_i18n::t!("kernel.adapter.carrier_panicked", panic = panic)
+            );
+        }
+    }
+}
+
 impl std::fmt::Debug for AdapterHost {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -486,5 +530,99 @@ mod tests {
             validate_manifest(&bad_version),
             Err(AdapterError::ApiVersion(_, _))
         ));
+    }
+
+    fn dep_entry(deps: &crate::deps::DependencyRegistry, id: &str) -> serde_json::Value {
+        deps.snapshot(None)["dependencies"]
+            .as_array()
+            .expect("数组")
+            .iter()
+            .find(|item| item["id"] == id)
+            .cloned()
+            .expect("有条目")
+    }
+
+    fn host(
+        id: &str,
+        deps: crate::deps::DependencyRegistry,
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+    ) -> AdapterHost {
+        AdapterHost {
+            events: crate::event_queue::EventQueue::channel().0,
+            shutdown,
+            status: AdapterStatus::new(id, deps),
+        }
+    }
+
+    #[test]
+    fn carrier_create_failure_marks_down_immediately() {
+        let deps = crate::deps::DependencyRegistry::new();
+        carrier_create_failed(&deps, "dyn-adapter", "dlopen failed");
+        let entry = dep_entry(&deps, "dyn-adapter");
+        assert_eq!(entry["state"], "down");
+        assert_eq!(entry["lastErrorClass"], "carrier");
+        assert!(entry["accountOnline"].is_null(), "载体失败不是账号离线");
+        assert_eq!(entry["attempts"], 1);
+    }
+
+    #[test]
+    fn all_carrier_kinds_share_the_same_failure_mapping() {
+        for id in ["in-process", "dynamic", "process"] {
+            let deps = crate::deps::DependencyRegistry::new();
+            carrier_create_failed(&deps, id, "carrier load failed");
+            let entry = dep_entry(&deps, id);
+            assert_eq!(entry["state"], "down", "{id} 应硬失败");
+            assert_eq!(entry["lastErrorClass"], "carrier", "{id} 类别应一致");
+        }
+    }
+
+    #[test]
+    fn adapter_carrier_exit_after_connect_marks_down_not_stuck_up() {
+        let deps = crate::deps::DependencyRegistry::new();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = host("qq", deps.clone(), shutdown);
+        run_adapter(
+            host,
+            Box::new(|host| {
+                host.status.connected();
+            }),
+        );
+        let entry = dep_entry(&deps, "qq");
+        assert_eq!(entry["state"], "down", "载体没了不能还显示 up");
+        assert_eq!(entry["lastErrorClass"], "carrier");
+        assert!(entry["accountOnline"].is_null());
+    }
+
+    #[test]
+    fn adapter_carrier_panic_marks_down_immediately() {
+        let deps = crate::deps::DependencyRegistry::new();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = host("qq", deps.clone(), shutdown);
+        run_adapter(host, Box::new(|_host| panic!("carrier boom")));
+        let entry = dep_entry(&deps, "qq");
+        assert_eq!(entry["state"], "down");
+        assert_eq!(entry["lastErrorClass"], "carrier");
+        assert!(
+            entry["lastError"]
+                .as_str()
+                .is_some_and(|text| text.contains("panic")),
+            "{}",
+            entry["lastError"]
+        );
+    }
+
+    #[test]
+    fn hard_and_soft_carrier_failures_have_distinct_thresholds() {
+        let deps = crate::deps::DependencyRegistry::new();
+        let status = AdapterStatus::new("qq", deps.clone());
+        status.connected();
+        status.disconnected("unreachable", "probe timeout");
+        assert_eq!(
+            dep_entry(&deps, "qq")["state"],
+            "up",
+            "单次软失败不跳过阈值"
+        );
+        status.failed("carrier", "handle dead");
+        assert_eq!(dep_entry(&deps, "qq")["state"], "down", "硬失败立即 down");
     }
 }

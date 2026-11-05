@@ -29,8 +29,8 @@ pub mod wire;
 
 pub use adapter::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
-    AdapterInstance, AdapterManifest, AdapterStatus, create_instance, manifest_supports_transport,
-    validate_manifest,
+    AdapterInstance, AdapterManifest, AdapterStatus, carrier_create_failed, create_instance,
+    manifest_supports_transport, run_adapter, validate_manifest,
 };
 pub use config::{
     AccessPolicy, ClockPolicy, Config, Connection, ConsoleConfig, DEFAULT_MAX_AGE_DAYS,

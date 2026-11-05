@@ -21,7 +21,7 @@ use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::{
     AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ControlRegistry,
     DependencyRegistry, EventQueue, FileRelay, Outbounds, PluginManager, RouteWorker, SqliteStore,
-    drain_events, serve,
+    carrier_create_failed, drain_events, run_adapter, serve,
 };
 use acb_plugin_lua::LuaLoader;
 use acb_plugin_process_tools::{ProcessNotifier, ProcessToolLoader};
@@ -199,7 +199,23 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut outbounds = Outbounds::new();
     let mut launches = Vec::new();
     for connection in &config.connections {
-        let instance = plugins.create_adapter(connection, events.clone())?;
+        let instance = match plugins.create_adapter(connection, events.clone()) {
+            Ok(instance) => instance,
+            Err(error) => {
+                // 载体没加载起来是硬失败：立即把依赖条目打到 down，桥继续跑。
+                // 不能再 `?` 直接退出——那样 /healthz 根本没机会展示这条连接。
+                carrier_create_failed(&deps, &connection.id, &error.to_string());
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "bridge.main.adapter_create_failed",
+                        id = connection.id,
+                        error = error
+                    )
+                );
+                continue;
+            }
+        };
         let AdapterInstance {
             outbound,
             launch,
@@ -259,7 +275,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             shutdown: Arc::clone(&shutdown),
             status: AdapterStatus::new(connection_id, deps.clone()),
         };
-        std::thread::spawn(move || launch(host));
+        std::thread::spawn(move || run_adapter(host, launch));
     }
 
     match &config.endpoint {
