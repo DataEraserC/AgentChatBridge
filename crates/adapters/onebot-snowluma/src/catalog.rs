@@ -3,7 +3,7 @@
 //! 目标是一句话：**人在一个房间里能做的事，模型都能做**。所以这里不是「挑几个安全的」，
 //! 而是把 OneBot 11（含 go-cqhttp / NapCat / LLOneBot 的常用扩展）里跟「聊天」有关的
 //! 动作全列上；不安全的那些不删，只标 `Risk::Destructive`，由配置决定放不放行
-//! （`[connections.policy.risk]`）。
+//! （由 `[grants]` 规则决定直调或票据）。
 //!
 //! 故意不列的东西，理由都是同一条——**那不是「人能做的事」**：
 //! - `get_cookies` / `get_csrf_token` / `get_credentials`：那是账号凭据，不是聊天能力。

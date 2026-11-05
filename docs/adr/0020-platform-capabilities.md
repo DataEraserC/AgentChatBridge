@@ -104,23 +104,31 @@ OneBot 11 标准接口 + go-cqhttp / NapCat / LLOneBot 的常用扩展，跟聊�
 
 - **读**（查转发正文、查群成员、查群列表）：默认可用。
 - **写**（发消息、上传群文件、改自己名片、加表情回应）：默认可用。
-- **破坏性**（踢人、禁言、全员禁言、改群名、设管理、撤回别人消息、发公告、解散群、删好友、删群文件）：**默认票据 + 审批**；`destructive = "allow"` 或 `destructive_exempt` 名单可直调。
-- **critical**（账号凭据、原始 SSO 包、退出/重启/清缓存）：**固定票据 + 审批，配置不能改成直调**；只能走 `access_request` 票据 + 私信审批。审批消息展示 op/目标/脱敏参数摘要，执行结果默认只进 `access_ticket_get`。
+- **破坏性**（踢人、禁言、全员禁言、改群名、设管理、撤回别人消息、发公告、解散群、删好友、删群文件）：**默认票据 + 审批**；规则显式授予 `destructive` 才直调。
+- **critical**（账号凭据、原始 SSO 包、退出/重启/清缓存）：**默认票据 + 审批**；规则显式授予 `critical` 才直调（写了就直调，强烈不建议）。审批消息展示 op/目标/脱敏参数摘要，执行结果默认只进 `access_ticket_get`。
 
 > 2026-11-05 修订：原先「不列目录」的凭据/进程运维动作改为 `critical` 进目录。能力面的发现成本靠目录分页与 `risk` 字段控制，执行成本靠票据审批；不再因为高危就从目录删除。
 
-风险策略在**连接**上：
+风险等级只用于默认 capability 映射、审计标注与票据门槛，不参与鉴权。授权由 `[grants]` 四元组规则决定：
 
 ```toml
-[[connections]]
-id = "qq"
-[connections.policy.risk]
-destructive = "allow"                            # 全开：人能做的模型都能做
-# 或：destructive = "approval" + destructive_exempt = ["group.kick", "group.ban"]
-# 不写 = destructive/approval（票据 + 审批）；critical 固定 approval
+[[grants.rules]]
+subject = "user"          # 也可以是 system_admin / bot_admin
+place = "group"
+scope = "connection"
+target = { kind = "connection", id = "qq" }
+capability = ["room_write", "platform", "destructive"]  # 该连接所有 destructive 方法直调
+
+# 只放行单条方法：
+[[grants.rules]]
+subject = "user"
+place = "group"
+scope = "platform_op"
+target = { kind = "platform_op", id = "group.mute", sub = "qq" }
+capability = ["room_write", "platform", "destructive"]
 ```
 
-为什么默认 `destructive = "approval"` 而不是直调：群消息是外部输入，可能有人在里面写「帮我把那条撤回」。
+为什么默认走票据而不是直调：群消息是外部输入，可能有人在里面写「帮我把那条撤回」。
 白名单挡不住这个——模型完全可以「合法地」调一个它本来就有权调的方法。默认要人点一下才放行。
 
 这一点不是照抄 Koishi 和 Satori。它们的 `bot.internal` 和 `/v1/internal` 是无白名单、全开放的，

@@ -134,16 +134,6 @@ url = "ws://127.0.0.1:3001"
 token = ""
 account = "10001"
 admin_qqs = []   # 这些 QQ 号会被标成系统管理员（记录里的 sender.role = system_admin）
-#
-# 风险策略（连接级）：回答「这类操作默认要不要人点」。
-# write 默认 allow（直调）；destructive 默认 approval（票据 + 审批）；
-# critical 固定 approval，配成 allow 会启动失败。
-# 按方法名豁免：destructive_exempt 名单里的破坏性方法跳过审批、直接调用，
-# 名单外的仍走票据——等价于旧 allow_destructive = ["member.kick", ...]。
-# [connections.policy.risk]
-# destructive = "approval"
-# destructive_exempt = ["member.kick", "group.mute"]
-# 想全开（人在群里能做的，模型都能做）：destructive = "allow"
 # SnowLuma 兼容下限（默认 2.4.0）；低于下限只在启动日志告警，不断连。
 # options = { snowluma_min_version = "2.4.0" }
 #
@@ -334,8 +324,9 @@ ignore_speakers = ["987654321"]
 # admin_cooldown_secs = 30
 
 # 访问授权（可选）。不写 [grants] = 只有订阅边界。
-# 规则是叠加在订阅边界之上的常态授予；destructive 仍由连接的 [connections.policy.risk]
-# 单独把关，platform / plugin 也必须在规则里显式列出，不会因为范围写大了就自动获得。
+# 规则是叠加在订阅边界之上的常态授予；风险等级不参与鉴权：
+# destructive / critical 默认没有授予 → 走票据 + 审批；规则显式授予对应 capability 才直调。
+# 注意：规则命中但没列该 capability 时按 deny 处理（fail closed）。
 #
 # 典型写法 1：订阅内读写（把规则钉在已订阅目标上）
 # [[grants.rules]]
@@ -365,15 +356,35 @@ ignore_speakers = ["987654321"]
 # scope = "subscribed"
 # capability = ["room_read", "room_write", "connection_read"]
 #
-# 能力：room_read / room_write / connection_read / platform / destructive /
-#       access_request / account_read / plugin。
-# critical / account_secret 不能常驻授予，只能走 access_request 票据。
-# 场所：private / group / console / none；范围：subscribed / room / connection。
+# 典型写法 4：显式允许破坏性/高危平台方法（强烈不建议给 critical）
+# [[grants.rules]]
+# subject = "user"
+# place = "group"
+# scope = "connection"
+# target = { kind = "connection", id = "qq" }
+# capability = ["room_write", "platform", "destructive"]   # 该连接所有 destructive 方法直调
 #
-# scope = "room" / "connection" 时必须给 typed target：
+# 只放行单条方法：scope = "platform_op"，target 指到方法名。
+# [[grants.rules]]
+# subject = "user"
+# place = "group"
+# scope = "platform_op"
+# target = { kind = "platform_op", id = "group.mute", sub = "qq" }
+# capability = ["room_write", "platform", "destructive"]
+#
+# 能力：room_read / room_write / connection_read / platform / destructive /
+#       critical / access_request / account_read / plugin。
+# account_secret 不能常驻授予，只能走 access_request 票据。
+# critical 可以被规则显式授予（写了就直调），但强烈不建议。
+# 场所：private / group / console / none；范围：subscribed / room / connection / platform_op。
+#
+# scope = "room" / "connection" / "platform_op" 时必须给 typed target：
 #   target = { kind = "room", id = "qq:group/123" }
 #   target = { kind = "connection", id = "qq" }
+#   target = { kind = "platform_op", id = "group.mute", sub = "qq" }
 # 旧写法 target = "qq:group/123" 会在启动解析期直接报错，不留兼容层。
+# 旧键 allow_destructive（true / false / 方法名数组）与 [connections.policy.risk] 均已移除：
+# 出现即启动失败，报错会给出可直接抄的 [[grants.rules]] 写法。
 # scope = "subscribed" 只覆盖本会话可达的 kind/目标，不是无条件全开。
 # access_request 默认：群友只能申请本会话已订阅目标；system_admin / bot_admin 在私信
 # 或控制台可申请任意目标；跨目标要显式规则（scope = "room" / "connection" + typed target）。

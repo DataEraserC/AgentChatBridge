@@ -84,7 +84,6 @@ core 不复制第二份 schema，也不做第二份权限判定。
 - `catalog`：全部非驻留工具的索引（含按需层）。可执行条目只有 `tool` + `purpose`；
   不可执行条目只有 `tool` + `direct_executable=false` + `requestable` +
   `ticket_required` + `reason`（本轮不会注入，所以不带 `purpose`）；
-- `risk`：当前房间连接的风险策略（write / destructive / critical / destructive_exempt）；
 - `counts`：total / resident / catalog / visible / hidden。
 
 不再重复列 `visible` / `hidden` 数组：可见集 = `resident` ∪ `catalog` 里不带
@@ -142,7 +141,7 @@ JSON 锁住）。
    常驻白名单无条件进 `resident` / `visible`，即使当前 `available=false`。
 4. 过滤判定复用既有 helper，不写第二份权限逻辑：
    - `tool_unavailable_reason` → `probe_room_reason` → `check_access(..., probe=true)`；
-   - 平台 op 的 `direct_executable` / `risk` → `connection_allows_destructive` + 连接风险策略
+   - 平台 op 的 `direct_executable` / `risk` → `platform_capability` + grants 规则评估
      （现有 `cap_op_json` 已经这么算）；
    - `requestable` → `TICKET_OPS`（`notes:*`、`platform_call:<op>` 是词表里已有的模式）。
 

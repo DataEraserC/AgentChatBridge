@@ -416,7 +416,6 @@ mod tests {
             token: None,
             account: "10001".into(),
             admin_qqs: Vec::new(),
-            risk: Default::default(),
             receive: Default::default(),
             routes: Vec::new(),
         }

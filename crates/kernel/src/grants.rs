@@ -1,9 +1,8 @@
 //! 访问授权的内置实现：四元组 + 目标。
 //!
 //! 这一层只做**授权叠加**：命中配置里的常态授予时给出 `allow`；没命中时退回
-//! 现有的订阅边界。它不是第二套房间策略，也不替代
-//! `MethodSpec.risk` + `[connections.policy.risk]` 风险策略。
-//!
+//! 现有的订阅边界。风险等级只是操作属性（默认映射 / 审计标注 / 票据门槛），
+//! 不参与鉴权。
 //! 不做旧 provider 的兼容翻译：没有用户需要平滑迁移，多一层翻译只会让旧配置
 //! 悄悄多出权限。旧键留在配置里会在启动期直接报错。
 //!
@@ -26,6 +25,8 @@ pub enum AccessTargetKind {
     Account,
     Connection,
     PluginTool,
+    /// 单条平台方法，如 `group.mute`；`sub` 是连接名。
+    PlatformOp,
 }
 
 impl AccessTargetKind {
@@ -38,6 +39,7 @@ impl AccessTargetKind {
             Self::Account => "account",
             Self::Connection => "connection",
             Self::PluginTool => "plugin_tool",
+            Self::PlatformOp => "platform_op",
         }
     }
 }
@@ -88,6 +90,15 @@ impl AccessTarget {
         }
     }
 
+    /// 单条平台方法：`id` 是方法名，`sub` 是连接名。
+    pub fn platform_op(connection: &str, method: &str) -> Self {
+        Self {
+            kind: AccessTargetKind::PlatformOp,
+            id: method.to_owned(),
+            sub: Some(connection.to_owned()),
+        }
+    }
+
     /// 从 `room / member / message / file` 这类带房间从属的目标里取回房间。
     pub fn room_ref(&self) -> Option<&str> {
         match self.kind {
@@ -102,7 +113,7 @@ impl AccessTarget {
     pub fn connection_ref(&self) -> Option<&str> {
         match self.kind {
             AccessTargetKind::Connection => Some(&self.id),
-            AccessTargetKind::Account => self.sub.as_deref(),
+            AccessTargetKind::Account | AccessTargetKind::PlatformOp => self.sub.as_deref(),
             _ => self
                 .room_ref()
                 .and_then(|room| room.split_once(':').map(|(connection, _)| connection)),
@@ -132,6 +143,14 @@ impl AccessTarget {
             AccessTargetKind::Message => format!("消息 {}", self.id),
             AccessTargetKind::File => format!("文件 {}", self.id),
             AccessTargetKind::PluginTool => format!("插件工具 {}", self.id),
+            AccessTargetKind::PlatformOp => format!(
+                "平台方法 {}{}",
+                self.id,
+                self.sub
+                    .as_deref()
+                    .map(|connection| format!("（连接 {connection}）"))
+                    .unwrap_or_default()
+            ),
         }
     }
 }
@@ -270,6 +289,8 @@ pub enum GrantScope {
     Subscribed,
     Room,
     Connection,
+    /// 单条平台方法；target 必须是 `kind = "platform_op"`。
+    PlatformOp,
 }
 
 impl<'de> Deserialize<'de> for GrantScope {
@@ -279,12 +300,13 @@ impl<'de> Deserialize<'de> for GrantScope {
             "subscribed" => Ok(Self::Subscribed),
             "room" => Ok(Self::Room),
             "connection" => Ok(Self::Connection),
+            "platform_op" => Ok(Self::PlatformOp),
             "any" => Err(serde::de::Error::custom(
                 "scope \"any\" has been removed; use \"subscribed\" instead \
                  (the two have identical reachability semantics)",
             )),
             other => Err(serde::de::Error::custom(format!(
-                "unknown scope {other:?}; expected one of \"subscribed\", \"room\", \"connection\""
+                "unknown scope {other:?}; expected one of \"subscribed\", \"room\", \"connection\", \"platform_op\""
             ))),
         }
     }
@@ -299,7 +321,7 @@ pub enum GrantCapability {
     ConnectionRead,
     Platform,
     Destructive,
-    /// 最高风险档。只由 `access_request` 票据携带，配置里的常驻授予一律拒绝。
+    /// 最高风险档。默认不授予；规则显式授予才直调（强烈不建议）。
     Critical,
     /// 读账号资料。与取账号凭证的 `account_secret` 分开。
     AccountRead,
@@ -432,10 +454,7 @@ impl GrantsConfig {
             }
             let mut seen = std::collections::BTreeSet::new();
             for capability in &rule.capability {
-                if matches!(
-                    *capability,
-                    GrantCapability::Critical | GrantCapability::AccountSecret
-                ) {
+                if matches!(*capability, GrantCapability::AccountSecret) {
                     return Err(format!(
                         "grants.rules[{index}] capability {} cannot be granted by config; \
                          it requires an access_request ticket approved in private",
@@ -478,6 +497,25 @@ impl GrantsConfig {
                     if target.kind != AccessTargetKind::Connection || target.id.trim().is_empty() {
                         return Err(format!(
                             "grants.rules[{index}] scope connection target must be kind = \"connection\" with a connection id"
+                        ));
+                    }
+                }
+                GrantScope::PlatformOp => {
+                    let Some(target) = rule.target.as_ref() else {
+                        return Err(format!(
+                            "grants.rules[{index}] scope platform_op requires target"
+                        ));
+                    };
+                    if target.kind != AccessTargetKind::PlatformOp
+                        || target.id.trim().is_empty()
+                        || target
+                            .sub
+                            .as_deref()
+                            .is_none_or(|sub| sub.trim().is_empty())
+                    {
+                        return Err(format!(
+                            "grants.rules[{index}] scope platform_op target must be \
+                             {{ kind = \"platform_op\", id = \"<method>\", sub = \"<connection>\" }}"
                         ));
                     }
                 }
@@ -583,6 +621,8 @@ pub struct GrantQuery<'a> {
     pub capability: GrantCapability,
     pub target: &'a AccessTarget,
     pub subscriptions: &'a [RoomId],
+    /// 当前评估的平台方法名；只有 `platform_call` 的能力检查会填。
+    pub platform_op: Option<&'a str>,
 }
 
 /// 评估结果。豁免（basis 非 `base:`）与任何拒绝都要写审计；普通 base allow 不写。
@@ -672,8 +712,9 @@ pub fn evaluate_access(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDe
     evaluate_rules(grants, query).unwrap_or_else(|| base_access(query))
 }
 
-/// 平台动作的额外能力检查（`platform` / `destructive`）。
-/// 返回 `None` = 没有任何授予，沿用已通过的基础访问。
+/// 平台动作的额外能力检查（`platform` / `destructive` / `critical`）。
+/// 返回 `None` = 没有任何规则命中，沿用已通过的基础访问；基础访问只授 read/write，
+/// 调用方据此把 destructive / critical 落回票据。
 pub fn evaluate_platform(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Option<GrantDecision> {
     evaluate_rules(grants, query)
 }
@@ -723,7 +764,7 @@ fn evaluate_rules(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Option<Grant
         if rule.subject != query.subject || rule.place != query.place {
             continue;
         }
-        if !scope_matches(rule, query.target, query.subscriptions) {
+        if !scope_matches(rule, query) {
             continue;
         }
         if rule.capability.contains(&query.capability) {
@@ -779,6 +820,11 @@ fn target_is_reachable(target: &AccessTarget, subscriptions: &[RoomId]) -> bool 
                 .iter()
                 .any(|listed| listed.connection == connection)
         }),
+        AccessTargetKind::PlatformOp => target.sub.as_deref().is_some_and(|connection| {
+            subscriptions
+                .iter()
+                .any(|listed| listed.connection == connection)
+        }),
         AccessTargetKind::Member | AccessTargetKind::Message | AccessTargetKind::File => {
             target.sub.as_deref().is_some_and(|room| {
                 subscriptions
@@ -790,7 +836,9 @@ fn target_is_reachable(target: &AccessTarget, subscriptions: &[RoomId]) -> bool 
     }
 }
 
-fn scope_matches(rule: &GrantRule, target: &AccessTarget, subscriptions: &[RoomId]) -> bool {
+fn scope_matches(rule: &GrantRule, query: &GrantQuery<'_>) -> bool {
+    let target = query.target;
+    let subscriptions = query.subscriptions;
     match rule.scope {
         GrantScope::Subscribed => target_is_reachable(target, subscriptions),
         GrantScope::Room => match rule.target.as_ref() {
@@ -809,6 +857,13 @@ fn scope_matches(rule: &GrantRule, target: &AccessTarget, subscriptions: &[RoomI
             }
             _ => false,
         },
+        GrantScope::PlatformOp => match rule.target.as_ref() {
+            Some(wanted) if wanted.kind == AccessTargetKind::PlatformOp => {
+                query.platform_op == Some(wanted.id.as_str())
+                    && target.connection_ref() == wanted.connection_ref()
+            }
+            _ => false,
+        },
     }
 }
 
@@ -818,6 +873,7 @@ impl GrantRule {
             GrantScope::Subscribed => "subscribed",
             GrantScope::Room => "room",
             GrantScope::Connection => "connection",
+            GrantScope::PlatformOp => "platform_op",
         }
     }
 }
@@ -840,6 +896,7 @@ mod tests {
                     capability: GrantCapability::AccessRequest,
                     target: &AccessTarget::room(&target),
                     subscriptions,
+                    platform_op: None,
                 },
             )
         };
@@ -948,6 +1005,7 @@ mod tests {
                 capability,
                 target,
                 subscriptions,
+                platform_op: None,
             },
         )
     }
@@ -967,6 +1025,7 @@ mod tests {
                 capability: GrantCapability::Plugin,
                 target,
                 subscriptions,
+                platform_op: None,
             },
         )
     }
