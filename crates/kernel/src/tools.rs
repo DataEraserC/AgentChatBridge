@@ -327,6 +327,10 @@ pub struct PlatformListArgs {
     pub tags: Vec<crate::outbound::PlatformTag>,
     pub query: Option<String>,
     pub all: bool,
+    /// 目录分页：最多给几条；缺省按目录预算自动取一页。
+    pub limit: Option<usize>,
+    /// 目录分页：从第几条开始给。
+    pub offset: Option<usize>,
 }
 
 /// 查插件/策略目录。默认只看当前会话实际用到的 provider。

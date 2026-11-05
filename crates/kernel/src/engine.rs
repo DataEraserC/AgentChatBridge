@@ -117,6 +117,13 @@ const MAX_HISTORY: usize = 200;
 /// 4 KiB 是经验阈值：低于它的全文通常比多一次调用便宜（一次调用还要重付工具定义）。
 const LIST_INDEX_BYTES: usize = 4096;
 
+/// 目录清单一页默认多少条。条目索引化后约 150–250 B；20 条约 4–5 KiB，
+/// 比一次性倒出整张表（68+ op）小一个量级。
+const CATALOG_PAGE_DEFAULT: usize = 20;
+
+/// 目录清单单页上限。再多就该按 path / tags 收窄，而不是硬翻。
+const CATALOG_PAGE_MAX: usize = 60;
+
 /// 轮次结束后票还留多久。留它是为了两件事：补确认（可能慢一步）、写反馈（随时想写）。
 const TURN_GRACE: Duration = Duration::from_secs(600);
 
@@ -6947,11 +6954,13 @@ impl<S: Store> Bridge<S> {
                 || clean(args.path.as_deref()).is_some()
                 || !args.tags.is_empty()
                 || clean(args.query.as_deref()).is_some()
+                || args.limit.is_some()
+                || args.offset.is_some()
             {
                 return Err(ToolError::new(
                     ErrorCode::BadRequest,
                     "[bad_params] all=true only returns a connection summary; do not also pass \
-                     room / connection / path / tags / query. To expand a connection, query it \
+                     room / connection / path / tags / query / limit / offset. To expand a connection, query it \
                      separately.",
                 ));
             }
@@ -7026,6 +7035,8 @@ impl<S: Store> Bridge<S> {
         let path = clean(args.path.as_deref());
         let tag_filter = args.tags;
         let query = clean(args.query.as_deref());
+        let page_limit = args.limit;
+        let page_offset = args.offset;
 
         // 没设条件：清单。不带参数表——那样就等于把整张表倒出来。
         if path.is_none() && tag_filter.is_empty() && query.is_none() {
@@ -7040,6 +7051,7 @@ impl<S: Store> Bridge<S> {
                 "tags": tags_of(&methods),
                 "hint": "op 是层级名（如 msg.send、member.list、group.mute）；path 是父路径（如 group.file）。\
                          要某个 op 的参数表，再调一次并给 path / tags / query，三者可叠加。\
+                         目录分页时用 offset = _page.next_offset。\
                          scope=connection 的 op 跟房间无关（好友列表、账号资料这类），调它不用给 room。",
             });
             maybe_index_list(
@@ -7048,6 +7060,17 @@ impl<S: Store> Bridge<S> {
                 "indexed=true: tags omitted and summaries shortened. Call platform_call with path / tags / query for full details.",
                 method_index,
             );
+            let bytes = serde_json::to_vec(&response)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0);
+            if bytes > LIST_INDEX_BYTES || page_offset.is_some() || page_limit.is_some() {
+                page_catalog(
+                    &mut response,
+                    methods.len(),
+                    page_offset.unwrap_or(0),
+                    page_limit,
+                );
+            }
             return Ok(response);
         }
 
@@ -7064,15 +7087,25 @@ impl<S: Store> Bridge<S> {
             return Err(no_match(&methods, path, &tag_filter, query));
         }
 
-        Ok(json!({
+        let matched = hits.len();
+        let mut response = json!({
             "room": room_text,
             "connection": connection,
             "platform": platform,
             "total": methods.len(),
-            "matched": hits.len(),
+            "matched": matched,
+            "returned": matched,
             "ops": hits.iter().map(|method| describe_method(method)).collect::<Vec<_>>(),
-            "hint": "每条都带一个 example：照它把 params 里的号/内容换掉，就能直接喂给 platform_call。",
-        }))
+            "hint": "每条都带一个 example：照它把 params 里的号/内容换掉，就能直接喂给 platform_call。\
+                     命中太多时用 offset = _page.next_offset 翻页，或按 path / tags 收窄。",
+        });
+        let bytes = serde_json::to_vec(&response)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+        if bytes > LIST_INDEX_BYTES || page_offset.is_some() || page_limit.is_some() {
+            page_catalog(&mut response, matched, page_offset.unwrap_or(0), page_limit);
+        }
+        Ok(response)
     }
 
     /// 多平台会话的连接摘要：每条订阅连接一条，带平台、kind、方法数和事件能力。
@@ -8123,6 +8156,34 @@ fn method_index(item: &Value) -> Value {
     out
 }
 
+/// 目录清单分页。索引化之后仍然超过 [`LIST_INDEX_BYTES`]，或者调用方显式给了
+/// `limit` / `offset`，就只回一页，并挂 `_page` 让模型接着翻。
+///
+/// 目录是「发现」用的，不该为了看全部 op 先付十几 KB；按 path / tags 收窄通常更省。
+fn page_catalog(response: &mut Value, total: usize, offset: usize, limit: Option<usize>) {
+    let Some(items) = response.get_mut("ops").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let offset = offset.min(items.len());
+    let size = limit
+        .unwrap_or(CATALOG_PAGE_DEFAULT)
+        .clamp(1, CATALOG_PAGE_MAX);
+    let end = offset.saturating_add(size).min(items.len());
+    let kept: Vec<Value> = items[offset..end].to_vec();
+    *items = kept;
+
+    let returned = end.saturating_sub(offset);
+    response["returned"] = json!(returned);
+    response["_page"] = json!({
+        "total": total,
+        "offset": offset,
+        "returned": returned,
+        "has_more": end < total,
+        "next_offset": (end < total).then_some(end),
+        "note": "目录分页：接着取用 offset = next_offset；按 path / tags / query 缩范围也能少翻几页。",
+    });
+}
+
 fn task_index(item: &Value) -> Value {
     json!({
         "id": item["id"],
@@ -8549,10 +8610,9 @@ fn platform_call_args(args: PlatformToolArgs) -> Result<PlatformCallArgs, ToolEr
 }
 
 /// 目录档：只接受查询字段。执行字段在这里出现就是混用，明确拒绝。
+/// `limit` / `offset` 两档都认：执行时分页结果，列目录时分页 op 清单。
 fn platform_list_args(args: PlatformToolArgs) -> Result<PlatformListArgs, ToolError> {
     if !args.params.is_null()
-        || args.limit.is_some()
-        || args.offset.is_some()
         || !args.shape.filter.is_empty()
         || args.shape.fields.is_some()
         || args.shape.order_by.is_some()
@@ -8560,8 +8620,8 @@ fn platform_list_args(args: PlatformToolArgs) -> Result<PlatformListArgs, ToolEr
     {
         return Err(ToolError::new(
             ErrorCode::BadRequest,
-            "[bad_params] params / limit / offset / where / fields / order_by / group_by are \
-             execution-only; give op to execute, or omit them to list the directory.",
+            "[bad_params] params / where / fields / order_by / group_by are execution-only; \
+             give op to execute, or omit them to list the directory.",
         ));
     }
 
@@ -8592,6 +8652,8 @@ fn platform_list_args(args: PlatformToolArgs) -> Result<PlatformListArgs, ToolEr
         tags,
         query: args.query,
         all: args.all,
+        limit: args.limit,
+        offset: args.offset,
     })
 }
 

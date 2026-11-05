@@ -259,6 +259,66 @@ fn methods() -> Vec<MethodSpec> {
                 ParamSpec::optional("approve", ParamType::Bool, "true 同意，false 拒绝"),
             ],
         ),
+        // ── 收藏表情 / 系统表情 ──
+        cm(
+            "face.custom_list",
+            "列出收藏表情。return_type=url 给图片地址，=id 给 emoji_id；默认 url",
+            &[tags::IMAGE, tags::MEDIA, tags::ACCOUNT],
+            Risk::Read,
+            &[
+                num("count", "取多少个，默认 10"),
+                opt("return_type", "url 或 id，默认 url"),
+            ],
+        ),
+        cm(
+            "face.custom_detail",
+            "列出收藏表情的详情：emoji_id、url、md5、描述",
+            &[tags::IMAGE, tags::MEDIA, tags::ACCOUNT],
+            Risk::Read,
+            &[num("count", "取多少个，默认 48")],
+        ),
+        cm(
+            "face.custom_delete",
+            "删除一个收藏表情。emoji_id 必须存在于收藏列表；不存在时平台返回错误，不会静默成功",
+            &[tags::IMAGE, tags::ACCOUNT],
+            Risk::Destructive,
+            &[req("emoji_id", "要删的表情 id")],
+        ),
+        cm(
+            "face.custom_modify",
+            "改收藏表情的描述。emoji_id 必须存在；desc 为空表示清空描述",
+            &[tags::IMAGE, tags::ACCOUNT],
+            Risk::Write,
+            &[
+                req("emoji_id", "收藏表情 id"),
+                opt("desc", "新描述；空 = 清空"),
+            ],
+        ),
+        cm(
+            "face.system_list",
+            "列出系统表情包：包名和每个表情的 id、名称、别名、图片地址",
+            &[tags::IMAGE, tags::SYSTEM],
+            Risk::Read,
+            &[flag("refresh", "true = 强制刷新缓存，默认 false")],
+        ),
+        cm(
+            "face.system_search",
+            "搜索系统表情：按编号/名称/别名/分组名匹配。query 不能为空",
+            &[tags::IMAGE, tags::SYSTEM],
+            Risk::Read,
+            &[req("query", "搜索词")],
+        ),
+        cm(
+            "face.entity",
+            "按编号查一个系统表情。face_id 不存在时平台返回 null",
+            &[tags::IMAGE, tags::SYSTEM],
+            Risk::Read,
+            &[require(ParamSpec::optional(
+                "face_id",
+                ParamType::Integer,
+                "系统表情编号，>= 0",
+            ))],
+        ),
         // ── 群：看 ──
         cm(
             "group.list",
@@ -349,6 +409,17 @@ fn methods() -> Vec<MethodSpec> {
             &[tags::GROUP, tags::FILE],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
+        ),
+        cm(
+            "file.private_url",
+            "拿私聊文件的下载地址（会过期，要用时现取）。user_id 必须给，避免猜文件属于谁",
+            &[tags::FILE, tags::DOWNLOAD],
+            Risk::Read,
+            &[
+                req("user_id", "私聊对方的 QQ 号"),
+                req("file_id", "文件 id"),
+                opt("file_hash", "文件 hash；平台需要时再给"),
+            ],
         ),
         m(
             "group.essence.list",
@@ -588,6 +659,53 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
+            "group.file.folder_create",
+            "在群文件里建一个文件夹。name 不能为空；parent_id 默认根目录 \"/\"",
+            &[tags::GROUP, tags::FILE],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("name", "文件夹名，不能为空"),
+                opt("parent_id", "父文件夹 id，默认 \"/\""),
+            ],
+        ),
+        m(
+            "group.file.folder_delete",
+            "删除一个群文件夹。folder_id 必须存在；不存在或平台拒绝时返回错误，不会静默成功。\
+             非空文件夹是否允许删除由平台决定，core 不预判",
+            &[tags::GROUP, tags::FILE],
+            Risk::Destructive,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("folder_id", "要删的文件夹 id"),
+            ],
+        ),
+        m(
+            "group.file.move",
+            "把一个群文件移到另一个文件夹。file_id 必须存在于 parent_directory，\
+             target_directory 必须已存在；移动失败会返回错误，不静默成功",
+            &[tags::GROUP, tags::FILE],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("file_id", "文件 id"),
+                req("parent_directory", "文件当前所在目录"),
+                req("target_directory", "目标目录"),
+            ],
+        ),
+        m(
+            "group.file.rename",
+            "重命名一个群文件。file_id 必须存在于 current_parent_directory；失败会返回错误",
+            &[tags::GROUP, tags::FILE],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("file_id", "文件 id"),
+                opt("current_parent_directory", "文件当前目录，默认 \"/\""),
+                req("new_name", "新文件名"),
+            ],
+        ),
+        m(
             "group.member_permissions",
             "设置普通群成员的权限：上传群相册、发起临时会话、建群。仅群主",
             &[tags::GROUP, tags::MEMBER, tags::REQUIRES_ADMIN],
@@ -763,6 +881,38 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
+            "msg.reactions",
+            "读一条消息上的表情回应汇总：每个表情的 id、类型、数量、最后回应时间",
+            &[tags::MESSAGE, tags::IMAGE],
+            Risk::Read,
+            &[req("message_id", "消息 id")],
+        ),
+        m(
+            "msg.reaction_users",
+            "读某个表情回应下的用户列表。emojiId 必须在该消息的回应里，先用 msg.reactions 查；\
+             用 count / cookie 翻页",
+            &[tags::MESSAGE, tags::IMAGE],
+            Risk::Read,
+            &[
+                req("message_id", "消息 id"),
+                req("emojiId", "表情 id（参数名就是 emojiId）"),
+                num("count", "取多少个用户，默认 10"),
+                opt("cookie", "翻页 cookie，从上一次结果拿"),
+            ],
+        ),
+        m(
+            "group.reaction",
+            "给群里的一条消息加/取消表情回应。message_id 必须存在；code 是平台定义的表情 code",
+            &[tags::GROUP, tags::MESSAGE, tags::IMAGE],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("message_id", "消息 id"),
+                req("code", "平台表情 code"),
+                flag("is_set", "true 加，false 取消，默认 true"),
+            ],
+        ),
+        m(
             "msg.mark_read",
             "把消息标成已读",
             &[tags::MESSAGE],
@@ -895,6 +1045,13 @@ pub static ROUTES: &[Route] = &[
     route("friend.one_way", "get_unidirectional_friend_list"),
     route("friend.doubt_list", "get_doubt_friends_add_request"),
     route("friend.doubt_approve", "set_doubt_friends_add_request"),
+    route("face.custom_list", "fetch_custom_face"),
+    route("face.custom_detail", "fetch_custom_face_detail"),
+    route("face.custom_delete", "delete_custom_face"),
+    route("face.custom_modify", "modify_custom_face"),
+    route("face.system_list", "fetch_sys_faces"),
+    route("face.system_search", "search_sys_faces"),
+    route("face.entity", "fetch_face_entity"),
     route("group.list", "get_group_list"),
     group_route("group.info", "get_group_info"),
     group_route("member.info", "get_group_member_info"),
@@ -913,6 +1070,7 @@ pub static ROUTES: &[Route] = &[
     group_route("group.file.folder", "get_group_files_by_folder"),
     group_route("group.file.url", "get_group_file_url"),
     group_route("group.file.info", "get_group_file_system_info"),
+    route("file.private_url", "get_private_file_url"),
     group_route("group.essence.list", "get_essence_msg_list"),
     group_route("group.at_all_remain", "get_group_at_all_remain"),
     group_route("group.notice.send", "_send_group_notice"),
@@ -939,6 +1097,10 @@ pub static ROUTES: &[Route] = &[
     group_route("group.avatar", "set_group_portrait"),
     group_route("group.leave", "set_group_leave"),
     group_route("group.file.delete", "delete_group_file"),
+    group_route("group.file.folder_create", "create_group_file_folder"),
+    group_route("group.file.folder_delete", "delete_group_file_folder"),
+    group_route("group.file.move", "move_group_file"),
+    group_route("group.file.rename", "rename_group_file"),
     room_route("msg.send", "send_group_msg", "send_private_msg"),
     both_route("msg.face", "send_custom_face"),
     both_route("msg.send_forward", "send_forward_msg"),
@@ -953,6 +1115,9 @@ pub static ROUTES: &[Route] = &[
     route("msg.image", "get_image"),
     route("msg.voice", "get_record"),
     route("msg.react", "set_msg_emoji_like"),
+    route("msg.reactions", "get_msg_emoji_likes"),
+    route("msg.reaction_users", "fetch_emoji_like"),
+    group_route("group.reaction", "set_group_reaction"),
     route("msg.mark_read", "mark_msg_as_read"),
     room_route("msg.poke", "group_poke", "friend_poke"),
     route("like.send", "send_like"),
@@ -1065,8 +1230,10 @@ fn effect_of(method: &MethodSpec) -> Effect {
 const DELETE_METHODS: &[&str] = &[
     "friend.delete",
     "group.file.delete",
+    "group.file.folder_delete",
     "group.essence.delete",
     "group.notice.delete",
+    "face.custom_delete",
 ];
 
 /// 调用成功后要写进流水的那几个。core 靠它判断“这次调用会不会改变房间”。

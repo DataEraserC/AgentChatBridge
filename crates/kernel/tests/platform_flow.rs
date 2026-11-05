@@ -1090,6 +1090,65 @@ fn catalog_marks_only_connection_scoped_methods() {
     assert!(forward.get("scope").is_none(), "房间级是默认，不用写出来");
 }
 
+/// 目录清单也能分页：目录变大时模型不应一次收到整张表。
+/// 明确给 limit/offset 时按条切，`_page` 带总数和下一页指针。
+#[test]
+fn catalog_list_pages_by_offset_and_limit() {
+    let (mut bridge, _calls) = setup();
+    let ticket = open_turn(&mut bridge);
+
+    let all = bridge
+        .tool_call(&ticket, &sessions(), "platform_call", json!({}))
+        .expect("能查目录");
+    let total = all["total"].as_u64().expect("有总数");
+    assert!(total > 3, "假目录要够翻页");
+
+    let first = bridge
+        .tool_call(&ticket, &sessions(), "platform_call", json!({"limit": 3}))
+        .expect("能分页列目录");
+    assert_eq!(first["_page"]["total"], total);
+    assert_eq!(first["_page"]["offset"], 0);
+    assert_eq!(first["_page"]["returned"], 3);
+    assert_eq!(first["_page"]["has_more"], true);
+    assert!(
+        serde_json::to_vec(&first).expect("可序列化").len() <= 24 * 1024,
+        "目录页要装得进预算"
+    );
+
+    let next = first["_page"]["next_offset"].as_u64().expect("有下一页");
+    let second = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"limit": 3, "offset": next}),
+        )
+        .expect("能翻目录页");
+    assert_eq!(second["_page"]["offset"], next);
+    assert_eq!(second["_page"]["returned"], 3);
+    assert_ne!(
+        first["ops"][0]["op"], second["ops"][0]["op"],
+        "第二页不能重复第一页"
+    );
+}
+
+/// 给目录也带上 where / fields 这类执行查询字段仍然要拒绝。
+#[test]
+fn catalog_list_still_rejects_execution_shaping_fields() {
+    let (mut bridge, _calls) = setup();
+    let ticket = open_turn(&mut bridge);
+
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"where": [{"field": "role", "op": "eq", "value": "admin"}]}),
+        )
+        .expect_err("列目录不该接受执行过滤");
+    assert_eq!(error.code, ErrorCode::BadRequest);
+}
+
 // ── 分页与查询（ADR-0022 / ADR-0023）───────────────────────────────────
 
 /// 大列表必须给总数，而且能接着翻。以前是「超过 8000 字符就砍成半截字符串」，
