@@ -9,6 +9,7 @@ import assert from "node:assert/strict"
 import { BridgeLink } from "../../opencode/plugin/acb-wire.mjs"
 import { DshError } from "../src/dsh-client.mjs"
 import { TurnDriver, callBridge } from "../src/driver.mjs"
+import { RESIDENT_TOOL_NAMES } from "../../shared/tools.mjs"
 import { FakeBridge, TICKET, delivery } from "../../opencode/test/fake-bridge.mjs"
 
 // 可控制 follow 的假 dsh。
@@ -521,4 +522,45 @@ test("会话模型按 provider/model 拆，模型 id 里的斜杠保留", async 
   await runPromise
   const turnEnd = await nextTurnEnd(bridge)
   assert.equal(turnEnd.error, undefined)
+})
+
+test("surface_failure_falls_back_to_resident_only：拉取失败时退回常驻层，不退回全量", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+
+  // 这个用例直接调 driver.run 而不走 turn_start 帧，手动补上桥保证的「轮内」状态；
+  // 否则 BridgeLink 会以 no_active_turn 拒绝 surface 查询，测不到成功路径。
+  link.ticket = TICKET
+
+  // 第一轮：surface 成功，长尾工具进可见面。
+  const first = driver.run(delivery(), link)
+  await waitFor(() => dsh.prompts.length === 1, "surface 之后要投话")
+  const expanded = driver.toolDefs().map((tool) => tool.name)
+  assert.ok(expanded.includes("notes"), "成功拉取后长尾工具应在工具面里")
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
+  await first
+
+  // 第二轮：桥拒绝 surface，必须整体退回常驻白名单，而不是保留长尾或全量。
+  bridge.failSurface = true
+  link.ticket = TICKET
+  const second = driver.run(delivery(), link)
+  await waitFor(() => dsh.prompts.length === 2, "失败后仍要投话")
+  assert.equal(driver.surfaceStatus, "surface_fallback")
+  const fallback = driver.toolDefs().map((tool) => tool.name)
+  assert.deepEqual(
+    new Set(fallback),
+    new Set(RESIDENT_TOOL_NAMES),
+    "surface_fallback 只能留下常驻白名单",
+  )
+  assert.equal(fallback.includes("memory_git"), false, "不能退回长尾工具")
+  assert.equal(fallback.length, RESIDENT_TOOL_NAMES.length)
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t2" } })
+  await second
 })

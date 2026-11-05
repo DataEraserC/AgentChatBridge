@@ -30,7 +30,6 @@ test("同一会话同一场所：dsh 与 opencode 选出同一批工具", () => 
 
 test("surface 收窄时两个 harness 一起收窄", () => {
   const fixture = surface({
-    visible: [...RESIDENT_TOOL_NAMES, "notes"],
     catalog: surface().catalog.filter((entry) => entry.tool === "notes"),
   });
   const dsh = names(toolDefsForSurface(fixture));

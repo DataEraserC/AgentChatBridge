@@ -25,6 +25,7 @@ import {
 } from "./acb-wire.mjs"
 import {
   RESIDENT_TOOL_NAMES,
+  residentSurface,
   toolsForSurface,
   withLocalSchema,
 } from "../../shared/tools.mjs"
@@ -135,11 +136,7 @@ export default {
         content: await callBridge(link, spec.name, input ?? {}),
       }),
     })
-    const residentSpecs = toolSpecsForSurface({
-      resident: RESIDENT_TOOL_NAMES,
-      visible: RESIDENT_TOOL_NAMES,
-      catalog: [],
-    })
+    const residentSpecs = toolSpecsForSurface(residentSurface())
     const registration = await ctx.tool.transform((editor) => {
       for (const spec of residentSpecs) {
         editor.add(makeSpec(spec))
@@ -229,11 +226,9 @@ class TurnDriver {
     /** 串行链：同一会话本来就串行，这里再兜一层，免得两轮叠在一起。 */
     this.chain = Promise.resolve()
     /** 本轮可见工具面；启动时只有常驻白名单，开轮后按桥的 surface 更新。 */
-    this.surface = {
-      resident: RESIDENT_TOOL_NAMES,
-      visible: RESIDENT_TOOL_NAMES,
-      catalog: [],
-    }
+    this.surface = residentSurface()
+    /** `ok` / `surface_fallback`：桥拉取失败时退回常驻层，不退回全量。 */
+    this.surfaceStatus = "resident_only"
     /** setup 里注入：用新的 surface 调 ctx.tool.transform 增删工具。 */
     this.applySurface = null
     /** 当前已注册的工具名，避免重复 add / 漏 remove。 */
@@ -241,8 +236,8 @@ class TurnDriver {
   }
 
   /**
-   * 开轮后、投话前向桥要一次 surface。失败只记日志并沿用上一次的工具面：
-   * 工具面是辅助信息，不能因为它把一轮对话拖死。
+   * 开轮后、投话前向桥要一次 surface。失败退到常驻层并记 `surface_fallback`：
+   * 工具面是辅助信息，不能因为它把一轮对话拖死，也不能因为拉不到就退回全量工具。
    */
   async #refreshSurface(link, session) {
     try {
@@ -256,26 +251,39 @@ class TurnDriver {
       if (
         !surface ||
         !Array.isArray(surface.resident) ||
-        !Array.isArray(surface.visible) ||
         !Array.isArray(surface.catalog)
       ) {
         throw new Error("tool surface shape is invalid")
       }
       await this.applySurface?.(surface)
       this.surface = surface
+      this.surfaceStatus = "ok"
       this.log(
         "info",
         t("opencode.tool_surface_loaded", {
           session,
           resident: surface.counts?.resident ?? surface.resident.length,
-          visible: surface.counts?.visible ?? surface.visible.length,
-          hidden: surface.counts?.hidden ?? surface.hidden?.length ?? 0,
+          visible:
+            surface.counts?.visible ??
+            surface.resident.length +
+              surface.catalog.filter((entry) => entry.direct_executable !== false)
+                .length,
+          hidden:
+            surface.counts?.hidden ??
+            surface.catalog.filter((entry) => entry.direct_executable === false)
+              .length,
         }),
       )
     } catch (error) {
+      const fallback = residentSurface()
+      await this.applySurface?.(fallback)
+      this.surface = fallback
+      this.surfaceStatus = "surface_fallback"
       this.log(
         "warn",
-        t("opencode.tool_surface_failed", { error: error?.message ?? String(error) }),
+        t("opencode.tool_surface_fallback", {
+          error: error?.message ?? String(error),
+        }),
       )
     }
   }

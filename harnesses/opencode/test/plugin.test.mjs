@@ -178,6 +178,28 @@ test("开轮后按 surface 补长尾工具，隐藏工具不进来", async (t) =
   assert.equal(notes.input.additionalProperties, true, "长尾用占位 schema")
 })
 
+test("surface_failure_falls_back_to_resident_only：拉取失败时退回常驻层，不退回全量", async (t) => {
+  const { bridge, host } = await boot(t)
+
+  // 第一轮成功：长尾工具被补进来。
+  await openTurn(bridge, host)
+  await waitFor(() => host.tools.has("notes"), "第一轮应补上长尾工具")
+  host.finishTurn()
+
+  // 第二轮桥拒绝 surface：工具面必须缩回常驻白名单，而不是保留长尾或灌满全量。
+  bridge.failSurface = true
+  await openTurn(bridge, host)
+  await waitFor(() => !host.tools.has("notes"), "失败后长尾工具应被移除")
+  assert.deepEqual(
+    [...host.tools.keys()].sort(),
+    [...RESIDENT_TOOL_NAMES].sort(),
+    "surface_fallback 只能留下常驻白名单",
+  )
+  assert.equal(host.tools.has("memory_git"), false, "不能退回长尾工具")
+  assert.equal(host.tools.has("extensions_list"), false, "也不能退回 29 个全量")
+  host.finishTurn()
+})
+
 test("capabilities scope=tool 在 harness 侧补完整 schema", async (t) => {
   const { bridge, host } = await boot(t)
   await openTurn(bridge, host)
