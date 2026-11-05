@@ -40,8 +40,8 @@
 | 16 | `ToolProvider` | `tools() -> Vec<ToolSpec>`；`call(&ToolCallContext, tool, args) -> Value` | `plugin_tools` / `plugin_tool_call` 调用时；`ToolLoader` 注册后可随轮次边界卸载/重载 | 只读旁路（插件自己的 I/O 由插件负责） | 由工具自己 | 否 |
 | 17 | `ToolAccessProvider` | `check(&ToolAccessContext) -> Allow \| Deny{reason}`；错误按失败关闭处理 | core 已知工具/轮次判定之后、任何副作用之前 | **只能否决**，不能覆盖 core 判定 | 否 | 否 |
 
-补充：`describe_plugins`、`extensions_list/read/write/reload`、`task_list/get`、
-`feedback_*` 是**工具面**，不是扩展点；它们让 agent 观察/操作扩展与状态。
+补充：`describe_plugins`、`extensions_list/read/write/reload`、`tasks`、
+`feedback` / `feedback_reply` 是**工具面**，不是扩展点；它们让 agent 观察/操作扩展与状态。
 
 ## 2. 今天就能用插件做的事（不需要改 core）
 
@@ -142,8 +142,8 @@
 | `fetch_records` | 少量 id ≈ KB 级 | **无上限** | **是**（ids 数 × 单条；且扫全房间流水） | 无 ids 上限 |
 | `wait_message` | 0–几条 ≈ 几 KB | 受 limit/超时约束 | 是 | 默认/上限见参数 |
 | `list_rooms` | < 1 KB | 订阅数 × ~100 B | **是**（房间数） | 无分页 |
-| `get_notes` | 几 KB | notes 数 × 单条 | **是**（笔记数） | 无分页 |
-| `set_note` / `del_note` | < 300 B | < 500 B | 否 | — |
+| `get_notes` → `notes`（op=list） | 几 KB | notes 数 × 单条 | **是**（笔记数） | 无分页 |
+| `notes`（op=set/del） | < 300 B | < 500 B | 否 | — |
 | `get_platform_events` | 20 条 ≈ 几 KB | 200 条 | **是** | `limit` ≤ 200 |
 | `platform_call`（列目录模式） | 摘要 ≈ 几 KB | 全量 op × 连接数，可达几十 KB | **是**（连接 × op） | `connection` 过滤；无条数上限 |
 | `platform_call` | 平台相关，通常 KB 级 | 500 条 × 单条 | **是** | `limit` ≤ 500，有 offset |
@@ -151,20 +151,20 @@
 | `extensions_list` | 模块数 × 元数据，几 KB | **无上限**（模块多/描述长） | **是**（模块数） | 无分页、无摘要模式 |
 | `extensions_read` | 单文件 | ≤ 64 KiB | 否 | 64 KiB 硬上限 |
 | `extensions_write` / `extensions_reload` | < 500 B | < 1 KB | 否 | — |
-| `task_list` | 20 条 ≈ 4–8 KB | 100 条 ≈ 20–40 KB | 是，但有界 | `limit` ≤ 100；内存保留 200 |
-| `task_get` | < 2 KB | < 4 KB | 否 | 单条 |
+| `tasks`（op=list） | 20 条 ≈ 4–8 KB | 100 条 ≈ 20–40 KB | 是，但有界 | `limit` ≤ 100；内存保留 200 |
+| `tasks`（op=get） | < 2 KB | < 4 KB | 否 | 单条 |
 | `report_feedback` | < 300 B | < 1 KB | 否 | — |
-| `feedback_list` | 20 条 ≈ 10–20 KB | **100 条 × 正文 4 KB + 回复** ≈ 400 KB+ | **是**（条数 × 正文/回复） | `limit` ≤ 100；正文/回复无列表级截断 |
-| `feedback_get` | < 8 KB | 正文 4 KB + 回复 × 2 KB，**回复数无上限** | **是**（回复数） | 正文/单条回复有上限，条数无上限 |
+| `feedback`（op=list） | 20 条 ≈ 10–20 KB | **100 条 × 正文 4 KB + 回复** ≈ 400 KB+ | **是**（条数 × 正文/回复） | `limit` ≤ 100；正文/回复无列表级截断 |
+| `feedback`（op=get） | < 8 KB | 正文 4 KB + 回复 × 2 KB，**回复数无上限** | **是**（回复数） | 正文/单条回复有上限，条数无上限 |
 | `feedback_reply` | < 500 B | < 1 KB | 否 | — |
 | `memory_read` | 文件大小 | **无上限** | **是**（文件大小） | 无上限/无分页 |
 | `memory_search` | 100 命中 ≈ 几 KB | 500 命中 | 是，但有界 | `limit` ≤ 500 |
-| `memory_git_log` | 10 条 ≈ 几 KB | `limit` 无上限 | **是**（提交数） | 默认 10，无上限 |
-| `memory_git_diff` / `blame` | 变更规模 | **无上限** | **是** | 无上限 |
-| `memory_write` / `git_add/commit/push/branch` | < 1 KB | 几 KB | 否 | — |
+| `memory_git`（op=log） | 10 条 ≈ 几 KB | `limit` 无上限 | **是**（提交数） | 默认 10，无上限 |
+| `memory_git`（op=diff/blame） | 变更规模 | **无上限** | **是** | 无上限 |
+| `memory_write` / `memory_git`（op=add/commit/push/branch） | < 1 KB | 几 KB | 否 | — |
 
-另：给 harness 的**工具描述本身**是常驻上下文。当前 `TOOL_NAMES` 约 30+ 个，schema
-描述是每轮固定成本；`tools.mjs` 之间的描述长度差异会直接进入首轮上下文。
+另：给 harness 的**工具描述本身**是常驻上下文。2026-11-05 合并后 `TOOL_NAMES` 为 28 个；
+schema 描述是每轮固定成本；`tools.mjs` 之间的描述长度差异会直接进入首轮上下文。
 
 ### 6.2 事件/合成事件
 
@@ -178,11 +178,11 @@
 
 | 优化 | 省什么 | 代价 | 测量方式 |
 |---|---|---|---|
-| `feedback_list` 默认不返回 `body`/`suggestion`，只给标题、状态、回复数 | 最坏从 400 KB+ 降到 ~10 KB | agent 要多一次 `feedback_get`；可发现性下降 | 同场景调用次数 + 返回字节 |
+| `feedback`（op=list）默认不返回 `body`/`suggestion`，只给标题、状态、回复数 | 最坏从 400 KB+ 降到 ~10 KB | agent 要多一次 `feedback`（op=get）；可发现性下降 | 同场景调用次数 + 返回字节 |
 | `extensions_list` 默认只给 id/extension/summary，详情按需 | 模块多时线性下降 | 多一次查询；调试时要翻两层 | 模块数 × 返回字节 |
 | `fetch_records` 限制 ids 数量并提示分批 | 防止一次拉全房间 | agent 需分批；错误信息要教它怎么分 | 单次 ids 数、返回字节 |
 | `memory_read` 加 head/tail/offset 或 64 KiB 截断提示 | 防大文件塞爆 | 多一次调用；截断会丢上下文 | 文件大小 vs 调用次数 |
-| `memory_git_log` 加上限 | 防无限提交历史 | 翻历史要分页 | limit 与返回字节 |
+| `memory_git`（op=log）加上限 | 防无限提交历史 | 翻历史要分页 | limit 与返回字节 |
 | `platform_call` 列目录默认摘要、详情要求 `connection` | 连接/op 多时下降 | 多一次调用 | 连接数 × op 数 |
 | `get_history` 默认列已有精简，但单条文本仍无上限 | 可加单条字节预算 | 截断会改变事实，需明确标注 | 单条最大字节 |
 | 工具按需注册（lazy tool exposure） | 省工具描述常驻成本 | 可发现性明显下降，agent 可能不知道能力存在 | 每轮工具描述字节 + 漏用率 |
@@ -233,20 +233,48 @@ Pack 拆分（用于分层设计，不默认启用）：
    [adapter-snowluma.md](adapter-snowluma.md#99-实装结果2026-11-05)。
 3. **目录/列表阈值索引**：`LIST_INDEX_BYTES = 4096`。超过阈值时自动降级：
    - `platform_call` 目录默认清单 → op + 短 summary + risk（tags 省略、summary 截到 80 字）；
-   - `feedback_list` → 去掉 body/suggestion/replies，保留标题、状态、回复数；
-   - `task_list` → 去掉 result/error，保留 id/status/handler；
+   - `feedback`（op=list）→ 去掉 body/suggestion/replies，保留标题、状态、回复数；
+   - `tasks`（op=list）→ 去掉 result/error，保留 id/status/handler；
    - `get_platform_events` → 去掉 payload/elements，保留 id/at/sender/event/tags/summary。
-   响应顶层加 `indexed: true` 与 `detail_hint`，详情走 `feedback_get` / `task_get` /
+   响应顶层加 `indexed: true` 与 `detail_hint`，详情走 `feedback`（op=get） / `tasks`（op=get） /
    `fetch_records` 或带 `path/tags/query` 的 `platform_call` 目录模式。阈值以下保持全文，
    不默认拆成两步。阈值取值依据：一次额外调用的成本（~9k 工具定义 + 历史）通常高于
    4 KiB 全文，只有超过 4 KiB 才值得换一次调用。
 
 **待实验（先设计 + 基准，不默认启用）**
 
-- **工具数上限 30（计划，不实现）**：`TOOL_NAMES` 超过 30 个时不再平铺新增工具，改走
-  「单入口 + op」：`memory_git_status/log/diff/blame/add/commit/push/branch` 八件套收成
-  `memory_git { op, args }`；`get_notes` / `set_note` / `del_note` 合并为 `notes { op, ... }`。
-  入口的错误信息必须列出可用 op，避免可发现性下降。
+- **工具数上限 30（已实装，2026-11-05）**：`TOOL_NAMES` 从 39 收到 **28**。合并沿用
+  `platform_call` 的做法：单入口 + 封闭 op；未知 op 返回 `[bad_params]` 并列出合法值。
+  不保留兼容别名，旧名从 `TOOL_NAMES`、分派和 `tools.mjs` 一次删净。
+  权限语义按原实现保留：notes 仍走房间可读检查与 `notes:*` 票据能力；tasks / feedback
+  查询仍允许迟到调用；`feedback_reply` 仍单独存在，不走迟到放行。
+
+  | 旧工具名 | 新入口 + op |
+  |---|---|
+  | `get_notes` | `notes` op=list |
+  | `set_note` | `notes` op=set |
+  | `del_note` | `notes` op=del |
+  | `task_list` | `tasks` op=list |
+  | `task_get` | `tasks` op=get |
+  | `feedback_list` | `feedback` op=list |
+  | `feedback_get` | `feedback` op=get |
+  | `memory_git_status` | `memory_git` op=status |
+  | `memory_git_log` | `memory_git` op=log |
+  | `memory_git_diff` | `memory_git` op=diff |
+  | `memory_git_blame` | `memory_git` op=blame |
+  | `memory_git_add` | `memory_git` op=add |
+  | `memory_git_commit` | `memory_git` op=commit |
+  | `memory_git_push` | `memory_git` op=push |
+  | `memory_git_branch` | `memory_git` op=branch |
+
+  实测：schema 总字节 12,862 → **11,628**（-1,234 B，-9.6%）；工具定义全量
+  21,737 → **19,871**（-1,866 B，-8.6%）。按 0.296 tokens/byte 粗估，
+  schema 约 3,807 → **3,442** tokens（-365），全量约 6,434 → **5,882** tokens（-552）。
+
+  没有合并的族：`access_request` / `access_ticket_get`（参数形状与安全边界不同）、
+  `extensions_list/read/write/reload`（每个 op 的管理员检查不同，合并会扩大一次调用
+  的权限面）、`plugin_tools` / `plugin_tool_call`（索引与调用是两种请求形状）、
+  `memory_read/write/list/search`（参数差异大且高频）、消息/历史/等待类（高频且参数简单）。
 - **分层工具包**：按会话能力注册 core / notes / memory / extensions / feedback / task /
   describe_plugins 等 pack。基线 9,058 tokens；最小 core pack 约 5,541 tokens，
   不含 memory 的会话可省约 1,206，普通成员可省 extensions 约 608 + feedback 约 389。

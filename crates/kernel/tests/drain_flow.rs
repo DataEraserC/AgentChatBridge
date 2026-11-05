@@ -210,8 +210,8 @@ fn large_task_list_is_indexed_and_task_get_keeps_detail() {
         .tool_call(
             &ticket,
             &["main".to_owned()],
-            "task_list",
-            json!({"limit": 20}),
+            "tasks",
+            json!({"op": "list", "limit": 20}),
         )
         .expect("列任务");
     assert_eq!(listed["indexed"], true, "超过阈值应自动索引：{listed}");
@@ -222,7 +222,12 @@ fn large_task_list_is_indexed_and_task_get_keeps_detail() {
 
     let id = tasks[0]["id"].as_str().expect("id");
     let got = lock(&bridge)
-        .tool_call(&ticket, &["main".to_owned()], "task_get", json!({"id": id}))
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "tasks",
+            json!({"op": "get", "id": id}),
+        )
         .expect("详情仍给全文");
     assert!(got.get("result").is_some());
     assert!(got.get("error").is_some());

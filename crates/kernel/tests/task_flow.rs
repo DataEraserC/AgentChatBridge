@@ -378,10 +378,10 @@ fn task_records_success_failure_and_can_be_queried_after_turn_end() {
         .tool_call(
             &ticket,
             &["main".to_owned()],
-            "task_list",
-            json!({"status": "failed"}),
+            "tasks",
+            json!({"op": "list", "status": "failed"}),
         )
-        .expect("task_list");
+        .expect("tasks op=list");
     assert_eq!(listed["returned"], 2);
     assert_eq!(listed["tasks"][0]["status"], "failed");
 
@@ -390,10 +390,10 @@ fn task_records_success_failure_and_can_be_queried_after_turn_end() {
         .tool_call(
             &ticket,
             &["main".to_owned()],
-            "task_get",
-            json!({"id": task_id}),
+            "tasks",
+            json!({"op": "get", "id": task_id}),
         )
-        .expect("task_get");
+        .expect("tasks op=get");
     assert_eq!(got["status"], "failed");
 
     // 收工后票仍在宽限窗内，任务查询不依赖任务触发时的票。
@@ -402,8 +402,8 @@ fn task_records_success_failure_and_can_be_queried_after_turn_end() {
         .tool_call(
             &ticket,
             &["main".to_owned()],
-            "task_get",
-            json!({"id": task_id}),
+            "tasks",
+            json!({"op": "get", "id": task_id}),
         )
         .expect("收工后仍可查任务");
     assert_eq!(got_after["status"], "failed");
@@ -475,8 +475,8 @@ fn task_get_is_scoped_to_the_current_session() {
         .tool_call(
             &ticket,
             &["main".to_owned()],
-            "task_get",
-            json!({"id": format!("{task_id}-other")}),
+            "tasks",
+            json!({"op": "get", "id": format!("{task_id}-other")}),
         )
         .expect_err("不存在的 id 必须报错");
     assert!(error.message.contains("task") || error.message.contains("任务"));

@@ -568,13 +568,14 @@ test("其它工具原样透传，顺手去掉空字段", () => {
     { limit: 5 },
   )
   assert.deepEqual(
-    normalizeToolArgs("set_note", {
+    normalizeToolArgs("notes", {
+      op: "set",
       key: "k",
       value: "v",
       room: "qq:group/1",
       status: null,
     }),
-    { key: "k", value: "v", room: "qq:group/1" },
+    { op: "set", key: "k", value: "v", room: "qq:group/1" },
   )
 })
 

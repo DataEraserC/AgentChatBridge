@@ -196,12 +196,12 @@ fn measure_task_list() {
             .tool_call(
                 &ticket,
                 &["main".to_owned()],
-                "task_list",
-                json!({"limit": count}),
+                "tasks",
+                json!({"op": "list", "limit": count}),
             )
             .expect("列任务");
         println!(
-            "MEASURE task_list count={count} bytes={} indexed={} returned={}",
+            "MEASURE tasks count={count} bytes={} indexed={} returned={}",
             bytes(&listed),
             listed["indexed"],
             listed["returned"]

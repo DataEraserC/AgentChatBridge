@@ -1639,6 +1639,42 @@
 - 未决/风险：没有真实 SnowLuma 实例联调；`fetch_sys_faces` 等返回结构按文档字段声明，
   字段差异只影响结果内容，不影响 catalog 与风险闸门。
 
+## 2026-11-05 — 工具清单收口到 30 以内
+
+- 任务来源：`docs/plan/extension-point-catalog.md` 的「工具数上限 30」计划项。
+- 做了什么：`TOOL_NAMES` 从 **39 → 28**，4 个合并入口，全部用封闭 op：
+  - `notes`：`get_notes` / `set_note` / `del_note` → `op=list/set/del`；
+  - `tasks`：`task_list` / `task_get` → `op=list/get`；
+  - `feedback`：`feedback_list` / `feedback_get` → `op=list/get`；
+  - `memory_git`：`memory_git_status/log/diff/blame/add/commit/push/branch` → 8 个 op。
+- 实现：
+  - `crates/kernel/src/tools.rs`：新 `NotesToolArgs` / `TasksToolArgs` / `FeedbackToolArgs` /
+    `MemoryGitToolArgs`；`TOOL_NAMES` 删旧名、加 4 个入口。
+  - `crates/kernel/src/engine.rs`：单入口按 op 分派到原实现；未知 op 返回
+    `[bad_params] unknown op ...; valid ops: ...`；缺必填字段返回 `op_requires`。
+  - 权限/边界保留：notes 仍走 `ensure_readable` 与票据 `notes:*` 能力；`tasks` / `feedback`
+    仍在迟到调用白名单；`feedback_reply` 不并入 `feedback`，避免把回复放进迟到放行。
+  - 没有兼容别名：旧工具名从 `TOOL_NAMES`、分派和 `harnesses/shared/tools.mjs` 一次删净。
+- schema 体积实测（`TOOLS` 的 `JSON.stringify` 求和）：
+  - 合并前：39 个工具，schema 12,862 B，全量工具定义 21,737 B；
+  - 合并后：28 个工具，schema 11,628 B（-1,234 B，-9.6%），全量 19,871 B（-1,866 B，-8.6%）；
+  - 按 0.296 tokens/byte 粗估：schema 约 3,807 → 3,442 tokens（-365），全量约
+    6,434 → 5,882 tokens（-552）。
+- 不合并的族（判断）：
+  - `access_request` / `access_ticket_get`：参数形状与安全边界不同；
+  - `extensions_list/read/write/reload`：每个 op 的管理员检查不同，合并会扩大单次调用的权限面；
+  - `plugin_tools` / `plugin_tool_call`：索引与调用是两种请求形状；
+  - `memory_read/write/list/search`：参数差异大且高频；
+  - 消息/历史/等待/平台入口：高频且参数简单，合并会变成 discriminated union。
+- 证据：
+  - `merged_tool_ops_are_closed_and_report_candidates`（4 个入口未知 op 报候选；notes 缺
+    value 报明确错误）
+  - `turn_flow` 笔记用例、`task_flow` / `drain_flow` 任务用例、`feedback_flow` 反馈用例
+    全部改用新入口，原有行为通过。
+  - `cargo test --workspace`、clippy `-D warnings`、dsh/opencode 测试、`node --check` 全绿。
+- 文档：`extension-point-catalog.md` 把「计划，不实现」改为实装结果，并附
+  「旧工具名 → 新入口 + op」对照表；6.1 表的旧工具名同步改成合并后的入口。
+
 
 
 ## 部署注意事项（nix-config 打包）
