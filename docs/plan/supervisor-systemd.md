@@ -79,7 +79,7 @@ systemd (acb-launcher.service, Type=notify)
 |---|---|---|
 | `0` | 正常停止（操作员 stop / 手动运行时的 SIGTERM） | 不重启 |
 | `75` | 需要回滚后重启；`current.json` 已换成 LKG | `RestartForceExitStatus=75`，`Restart=on-failure` |
-| `78` | 监督器放弃自动恢复（`fail`、无 LKG、回滚写指针失败、回滚后版本再失败） | `RestartPreventExitStatus=78`，不重启，停在 failed |
+| `78` | 监督器放弃自动恢复（`fail`、无 LKG、回滚写指针失败、回滚后版本再失败、`rollback = "none"`） | `RestartPreventExitStatus=78`，不重启，停在 failed |
 | 其它 | 普通失败 | `Restart=on-failure` + `RestartSec` + StartLimit |
 
 常量在 `crates/supervisor/src/lib.rs`：
@@ -88,6 +88,27 @@ systemd (acb-launcher.service, Type=notify)
 
 **75 不能被当成成功**：不要给 unit 加 `SuccessExitStatus=75`；`RestartForceExitStatus=75`
 的作用是即使以后有人加了成功码，也强制重启。
+
+## 3.1 LKG 提升与回滚开关
+
+`[supervisor]` 有两个正交开关，默认值都保持旧行为：
+
+```toml
+[supervisor]
+lkg_update = "on_stable"   # on_stable | never
+rollback   = "lkg"         # lkg | none
+```
+
+- `lkg_update = "never"`：`maybe_promote` 不再写 `lkg.json`，已有文件逐字节保持原样。
+  用于破坏性测试 / canary，避免当前（可能是坏的）版本在稳定窗口后被提升成
+  「好版本」。它只冻结提升，不改变 `rollback = "lkg"` 时仍可回退到旧 LKG 的能力。
+- `rollback = "none"`：策略产出 `Rollback` 时降级为放弃：不写 `current.json`、
+  不以 75 退出，而是停掉子进程后以 **78** 退出。配合
+  `RestartPreventExitStatus=78`，unit 停在 failed 等人处理，不会自动换版本。
+- 两者独立：破坏性测试两个都开（既不提升也不回退）；只做 canary 就只开
+  `lkg_update = "never"`，保留 `rollback = "lkg"` 以便失败后回到旧的已知好版本。
+- 配错值（例如 `lkg_update = "sometimes"`）会在加载配置时报错，错误信息列出
+  `on_stable` / `never` 或 `lkg` / `none`，不会静默忽略。
 
 ## 4. Watchdog 与 unhealthy 的先后
 

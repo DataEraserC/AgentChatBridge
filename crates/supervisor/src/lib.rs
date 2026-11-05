@@ -51,6 +51,29 @@ pub enum RollbackMode {
     External,
 }
 
+/// 稳定窗口结束后是否把当前版本提升为 LKG。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LkgUpdate {
+    /// 健康满 `stable_window_secs` 就写 `lkg.json`（旧行为）。
+    #[default]
+    OnStable,
+    /// 永不写 `lkg.json`；已有文件保持原样。测试或 canary 期间用它防止
+    /// 坏版本被提升成「好版本」。
+    Never,
+}
+
+/// 策略产出 `Rollback` 时是否真的回退到 LKG。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackPolicy {
+    /// 按 LKG 回退（旧行为）。
+    #[default]
+    Lkg,
+    /// 不回退：降级为放弃，不写 `current.json`，以 [`EXIT_GIVE_UP`] 退出。
+    None,
+}
+
 /// 一条可执行的命令。LKG 指针保存的就是这个形状。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
@@ -146,6 +169,12 @@ pub struct Config {
     pub probe_interval_secs: u64,
     #[serde(default = "default_stable_window")]
     pub stable_window_secs: u64,
+    /// 稳定窗口后是否提升 LKG。`never` 冻结 `lkg.json`。
+    #[serde(default)]
+    pub lkg_update: LkgUpdate,
+    /// 策略要求回滚时是否真的回退。`none` 降级为放弃（78）。
+    #[serde(default)]
+    pub rollback: RollbackPolicy,
     #[serde(default)]
     pub rollback_mode: RollbackMode,
     #[serde(default)]
@@ -678,6 +707,10 @@ impl Supervisor {
     }
 
     fn maybe_promote(&mut self, now: i64) {
+        // `never` 连读取/比较都不做：已有 lkg.json 必须逐字节保持不变。
+        if self.config.lkg_update == LkgUpdate::Never {
+            return;
+        }
         let Some(since) = self.healthy_since_ms else {
             return;
         };
@@ -812,6 +845,31 @@ impl Supervisor {
                 }));
             }
             DecisionKind::Rollback => {
+                if self.config.rollback == RollbackPolicy::None {
+                    // `none`：不写 current.json、不退出 75，直接按放弃处理。
+                    // 先停子进程，避免 launcher 退出后留下孤儿。
+                    if self.runner.running() {
+                        let _ = self.runner.stop();
+                    }
+                    let reason = format!(
+                        "{}; rollback disabled by supervisor.rollback = \"none\"",
+                        decision.reason
+                    );
+                    self.failed = Some(reason.clone());
+                    self.exit_code = Some(EXIT_GIVE_UP);
+                    self.audit(json!({
+                        "event": "execute",
+                        "at_ms": now,
+                        "decision": "rollback",
+                        "result": "rollback_disabled",
+                        "reason": reason,
+                        "target": self.lkg,
+                    }));
+                    eprintln!(
+                        "supervisor rollback disabled by config; giving up (exit {EXIT_GIVE_UP})"
+                    );
+                    return;
+                }
                 let Some(target) = self.lkg.clone() else {
                     self.note_policy_error("rollback without LKG");
                     let decision = self.policy_error_decision();
