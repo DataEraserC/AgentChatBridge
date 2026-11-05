@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 8 项、部分实现 9 项、未实现 6 项**。动作级：现有 catalog 暴露 91 个层级 op / 94 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 9 项、部分实现 8 项、未实现 6 项**。动作级：现有 catalog 暴露 118 个层级 op / 121 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。逐动作覆盖矩阵见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -245,12 +245,16 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 批次 6 完成后计数不变：#18 语音/媒体仍是「部分」，缺口缩为原始流式上传下载、
 `download_file` 与音乐签名；#16 流式传输仍未实现。批次 7 完成后：#21 群相册从
 「未实现」升为「部分」，计数变为 **8 完全 / 9 部分 / 6 未实现**；#22 QQ 空间与
-#23 收藏/闪传按产品范围保持「未实现」。
+#23 收藏/闪传按产品范围保持「未实现」。批次 8 完成后：#21 群相册升为「完全」，
+计数变为 **9 完全 / 8 部分 / 6 未实现**；#16 仍为「部分」（op 已暴露，WS 单响应
+语义下下载流只能拿到首帧）；#18 仍为「部分」（`download_file` 已补，音乐签名不是
+动作）；#22 / #23 仍未排期（下一批）。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 91 个层级 op / 94 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 现有 `ROUTES` 118 个层级 op / 121 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
-- 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。这是「完整实现 SnowLuma 能力」的主要工作量。
+- 逐动作「已暴露 / 未暴露 + 原因分类」见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
+- 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。
 
 **曾经最容易造成实际事故的三个缺口，已由批次 1 / 2 收口**：
 1. `bot_status` 不再写成 `private/<self_id>`，改走账号状态（批次 2）。
@@ -750,18 +754,56 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   - 两者都是 `Scope::Room`、`Risk::Read`、`Effect::Read`，没有状态变更。
 - **参数校验**：`group.album.media` 的 `album_id` 不能为空。
 - **工具位不变**：仍为 28 个工具；新能力全部走 `platform_call` 的层级 op。
-- **产品范围判断不做（记缺口）**：
-  - 群相册写操作：`upload_image_to_qun_album`、`upload_video_to_qun_album`、
-    `del_group_album_media`、`do_group_album_comment`、点赞/取消点赞。上传/删除属于
-    相册媒体写面，评论/点赞属于社交互动，不纳入本轮聊天核心。
-  - 文档里没有创建/删除相册的动作，只有媒体级操作；不能凭空补一个 op。
-  - QQ 空间 26 个动作全部不暴露：账号级社交发布/删除/点赞/关注，权限和审计成本高。
-  - 收藏/闪传 115 个 extended：只读的 `get_collection_list` / 闪传读取也没有排期；
-    `send_packet`、`request_decrypt_key`、`get_credentials`、`get_cookies`、
-    `get_clientkey`、`set_restart`、`bot_exit`、`clean_cache` 永不暴露。
+- **产品范围判断不做（批次 8 已推翻，见下）**：
+  - 群相册写操作、QQ 空间、收藏/闪传、账号凭据/进程运维原先都不暴露。
+  - 2026-11-05 口径改为「任何平台功能都必须有 op，风险靠分级和审批管住」：
+    本批只把 critical、媒体/文件、合并转发、相册写补回来；QQ 空间与收藏/闪传
+    仍留到下一批，不再以「永不暴露」为由删除。
 - **没有新增 `PlatformTag`，没有第二张 op→risk 表**；全部走 `catalog()` + `ROUTES`。
 
 **前置**：无强依赖；但媒体相关动作可能依赖批次 5/6。
+
+### 批次 8：critical 风险档与媒体/文件能力补全（已完成，2026-11-05）
+
+**能力范围**
+- 新增 `Risk::Critical`：默认拒绝，**`allow_destructive` 不放行**，只能走
+  `access_request` 票据 + 私信审批。
+- 补回此前按安全理由拒掉的媒体/文件动作，以及账号凭据/进程运维动作。
+
+**实际落地**
+- **新增 27 个 op（91 → 118），映射 27 个 action（94 → 121）**：
+  - critical（9）：`account.credentials` / `account.cookies` / `account.csrf_token` /
+    `account.clientkey` / `account.decrypt_key` / `system.send_packet` /
+    `system.bot_exit` / `system.restart` / `system.clean_cache`。全部 `Scope::Connection`、`Risk::Critical`；
+    直接 `platform_call` 返回 `ToolNotAllowed`，不会触碰平台。
+  - 文件下载：`file.download` → `download_file`（Destructive）。只收 http/https URL
+    或 base64，二选一；`max_bytes` 默认 8 MiB、上限 32 MiB（base64 本地预检）；
+    返回平台路径/元信息，不回传文件字节。
+  - 流式（6）：`stream.upload_file`、`stream.download_image`、
+    `stream.download_record`、`stream.download_file`、`stream.test_download`、
+    `stream.clean`。单块 1 MiB、总大小 256 MiB、stream_id 限 `[A-Za-z0-9_-]`。
+    多帧、无逐请求取消、WS 无背压写进 op 描述：当前 WS 单响应语义下下载流只拿到
+    首帧 `file_info`，完整文件走 HTTP/SDK。
+  - 合并转发（4）：`msg.forward_upload`、`msg.forward_upload_alias`
+    （`upload_foward_msg` 拼写别名）、`msg.send_group_forward`、
+    `msg.send_private_forward`。载荷上限 256 KiB / 100 个节点。
+  - 群相册（7）：`group.album.qun_list`、`upload_image`、`upload_video`、
+    `delete_media`（Destructive + `Effect::Delete`）、`comment`、`like`、`unlike`。
+    上传/评论/点赞为 Write，删除为 Destructive；评论上限 4096 字符。
+- **critical 执行路径**：`access_request` 用 `platform_call:<op>` 申请；票据能力集包含
+  `critical`；审批私信显示 `[CRITICAL]` + op/目标 + **脱敏参数摘要**（cookie/token/
+  secret/password/clientkey/db_key/db_path/authorization/headers，以及 send_packet 的
+  data 一律替换为 `***`）；批准后 core 执行，结果只写入票据存储，
+  `access_ticket_get` 显式查询才可见，不进房间流水/投递正文。
+- **配置侧**：`grants.rules` 里出现 `capability = ["critical"]` 会在启动期报错；
+  critical 只能由票据携带。
+- **工具位不变**：仍为 28 个工具；全部能力走 `platform_call` 的层级 op。
+- **目录体积**：118 op 的全量清单会更大；`platform_call` 的 4 KiB 索引降级和分页
+  继续生效，默认页仍是 20 条（约 3–4 KB）。
+- **测试**：critical 闸门（`allow_destructive` 不放行 + 票据批准后真的调用平台）、
+  审批脱敏、`file.download` scheme/大小上限、流式 op 存在且路由可达、
+  转发载荷上限、相册写 risk/effect、op 总数 118。
+- **逐动作覆盖**：[snowluma-action-coverage.md](snowluma-action-coverage.md)。
 
 ### 批次之间的依赖
 
