@@ -2338,6 +2338,76 @@ pub static ROUTES: &[Route] = &[
     group_route("group.anonymous_ban", "set_group_anonymous_ban"),
 ];
 
+/// `Verified` 的目录快照出处。路径相对仓库根；测试会把 `#` 后的 action
+/// 与快照文件逐条核对，改名会直接失败。
+pub const CATALOG_SNAPSHOT: &str =
+    "docs/plan/catalog-snapshots/snowluma-2026-09-29-190-actions.json";
+
+/// 只读真机实验记录出处。`#` 后是 op 名，测试会核对记录里的结论。
+pub const EXPERIMENT_READONLY: &str =
+    "docs/plan/catalog-snapshots/snowluma-2026-11-05-readonly-experiments.json";
+
+/// 由目录快照支撑的 52 个批次 9 op → 快照里的 action。
+///
+/// 这张表是 `Verified` 的唯一真相：source 由它生成，测试反向核对快照。
+pub const SNAPSHOT_ACTIONS: &[(&str, &str)] = &[
+    ("friend.dress", "_get_friend_dress"),
+    ("account.online_clients", "get_online_clients"),
+    ("account.profile_likes", "get_profile_like"),
+    ("account.user_status", "nc_get_user_status"),
+    ("account.diy_status", "set_diy_online_status"),
+    ("account.input_status", "set_input_status"),
+    ("account.online_status", "set_online_status"),
+    ("account.avatar", "set_qq_avatar"),
+    ("account.profile", "set_qq_profile"),
+    ("account.long_nick", "set_self_longnick"),
+    ("account.can_send_image", "can_send_image"),
+    ("account.can_send_record", "can_send_record"),
+    ("account.rkey", "get_rkey"),
+    ("account.rkey_server", "get_rkey_server"),
+    ("msg.mark_all_read", "_mark_all_as_read"),
+    ("group.todo.list", "get_group_todo_list"),
+    ("group.todo.set", "set_group_todo"),
+    ("group.todo.complete", "complete_group_todo"),
+    ("group.todo.cancel", "cancel_group_todo"),
+    ("msg.inline_button", "click_inline_keyboard_button"),
+    ("group.robot_add_option", "set_group_robot_add_option"),
+    ("file.collection_list", "get_collection_list"),
+    ("file.flash_task_create", "create_flash_task"),
+    ("file.flash_file_list", "get_flash_file_list"),
+    ("file.flash_file_url", "get_flash_file_url"),
+    ("file.flash_file_delete", "delete_flash_file"),
+    ("file.flash_file_rename", "rename_flash_file"),
+    ("file.flash_msg_send", "send_flash_msg"),
+    ("file.fileset_list", "list_filesets"),
+    ("file.fileset_id", "get_fileset_id"),
+    ("file.fileset_info", "get_fileset_info"),
+    ("file.fileset_download", "download_fileset"),
+    ("file.private_upload", "upload_private_file"),
+    ("face.custom_move_front", "move_custom_face_to_front"),
+    ("msg.forward_single_friend", "forward_friend_single_msg"),
+    ("msg.forward_single_group", "forward_group_single_msg"),
+    ("msg.mini_app_ark", "get_mini_app_ark"),
+    ("face.super_id", "fetch_super_face_id"),
+    ("msg.group_ark_share", "send_group_ark_share"),
+    ("msg.group_share_ex", "share_group_ex"),
+    ("msg.ark_share", "send_ark_share"),
+    ("msg.peer_share", "share_peer"),
+    ("msg.translate", "translate_en2zh"),
+    ("account.qzone.feeds", "get_qzone_feeds"),
+    ("account.qzone.list", "get_qzone_msg_list"),
+    ("account.qzone.send", "send_qzone_msg"),
+    ("account.qzone.comment", "comment_qzone"),
+    ("account.qzone.delete", "delete_qzone_msg"),
+    ("account.qzone.like", "like_qzone"),
+    ("account.qzone.ban", "set_qzone_ban"),
+    ("account.qzone.right", "set_qzone_msg_right"),
+    ("group.info_ex", "get_group_info_ex"),
+];
+
+/// 只读真机实验确证的两个批次 8/9 op。
+pub const EXPERIMENT_VERIFIED: &[&str] = &["group.tag_list", "account.qzone.detail"];
+
 /// 别名 op →（主 op、对应平台动作）。
 ///
 /// 别名不出现在目录里，解析时归一化到主 op；risk / scope / targets / verification
@@ -2516,6 +2586,17 @@ const DEFAULT_SOURCE: &str = "SnowLuma v2.4.0 (e44e4ced) action catalog / OneBot
 /// 每个 op 的可信度。只有 `research §3` 里需要实机实验的动作才标 `Unverified`；
 /// 其余有官方文档/源码出处的按 `Verified` 处理。
 fn verification_of(method: &str) -> Verification {
+    // 目录快照 / 真机实验的确证出处：source 由 code 生成，避免手抄漂移。
+    if let Some((_, action)) = SNAPSHOT_ACTIONS.iter().find(|(op, _)| *op == method) {
+        return Verification::Verified {
+            source: Cow::Owned(format!("{CATALOG_SNAPSHOT}#{action}")),
+        };
+    }
+    if EXPERIMENT_VERIFIED.contains(&method) {
+        return Verification::Verified {
+            source: Cow::Owned(format!("{EXPERIMENT_READONLY}#{method}")),
+        };
+    }
     match method {
         "group.add_option" => Verification::unverified(
             "add_type=0 的真实语义（空设置 / 允许任何人 / 不允许任何人）与 1-3 只有 NapCat \
@@ -2523,124 +2604,20 @@ fn verification_of(method: &str) -> Verification {
             "research §3.1：先 get_group_admin_settings 记录基线，对 v={0,1,2,3,4,5,55} 逐个 \
              set_group_add_option 并回读 + QQ 客户端截图；再试 6/100 观察平台是否拒绝",
         ),
-        "group.tag_list" | "group.tag_add" | "group.tag_delete" => Verification::unverified(
-            "group_class 是分类 ID 且请求体没有 group_id；它是否等于 NTQQ GroupClassExt、\
-             加/删标签是否影响群资料而不是全局分类目录，尚未实机确认",
-            "research §3.3：选两个不同分类的测试群，扫描 get_group_tags(0..30)，加/删一个 \
-             测试标签后检查两群资料与标签目录，最后清理",
+        "group.tag_add" | "group.tag_delete" => Verification::unverified(
+            "写标签的语义（影响群资料还是全局分类目录）尚未实机确认；只读的 \
+             group.tag_list 已由 2026-11-05 实验确证",
+            "research §3.3：选两个不同分类的测试群，加/删一个测试标签后检查两群资料与标签\
+             目录，最后清理",
         ),
         "msg.mark_read_group" | "msg.mark_read_private" => Verification::verified(
             "SnowLuma action catalog：mark_group_msg_as_read / mark_private_msg_as_read 是 \
              mark_msg_as_read 的群/私聊专用别名",
         ),
-        // 批次 9 审计：SnowLuma 动作目录（_snowluma-catalog.json）有摘要与参数表的，
-        // 按目录出处标 Verified；目录自己标注未核实/缺失的才留 Unverified。
-        // 重点核对过的动作单独写出处。
-        "msg.translate" => {
-            Verification::verified("SnowLuma action catalog: translate_en2zh（英译中，参数 words）")
-        }
-        "msg.inline_button" => Verification::verified(
-            "SnowLuma action catalog: click_inline_keyboard_button（参数 group_id / bot_appid / \
-             msg_seq）",
-        ),
-        "msg.ark_share" => Verification::verified(
-            "SnowLuma action catalog: send_ark_share（NapCat 标准名，参数 user_id / group_id / \
-             phone_number）",
-        ),
-        "msg.group_ark_share" | "msg.group_share_ex" => Verification::verified(
-            "SnowLuma action catalog: send_group_ark_share / share_group_ex（群 Ark 卡片，\
-             参数 group_id）",
-        ),
-        "msg.peer_share" => Verification::verified(
-            "SnowLuma action catalog: share_peer（参数 user_id / group_id / phone_number）",
-        ),
-        "group.todo.list" => {
-            Verification::verified("SnowLuma action catalog: get_group_todo_list（参数 group_id）")
-        }
-        "group.todo.set" | "group.todo.complete" | "group.todo.cancel" => Verification::verified(
-            "SnowLuma action catalog: set_group_todo / complete_group_todo / \
-                 cancel_group_todo（参数 group_id / message_id）",
-        ),
-        "account.online_status" => Verification::verified(
-            "SnowLuma action catalog: set_online_status（参数 status / ext_status / \
-             battery_status）",
-        ),
-        "group.info_ex" => Verification::verified(
-            "SnowLuma action catalog: get_group_info_ex（参数 group_id / no_cache）",
-        ),
-        "friend.dress"
-        | "account.online_clients"
-        | "account.profile_likes"
-        | "account.user_status"
-        | "account.diy_status"
-        | "account.input_status"
-        | "account.avatar"
-        | "account.profile"
-        | "account.long_nick"
-        | "account.can_send_image"
-        | "account.can_send_record"
-        | "account.rkey"
-        | "account.rkey_server"
-        | "msg.mark_all_read" => Verification::verified(
-            "SnowLuma action catalog: _get_friend_dress / get_online_clients / \
-             get_profile_like / nc_get_user_status / set_diy_online_status / \
-             set_input_status / set_qq_avatar / set_qq_profile / set_self_longnick / \
-             can_send_image / can_send_record / get_rkey / get_rkey_server / \
-             _mark_all_as_read（摘要与参数逐条对照）",
-        ),
-        "group.robot_add_option" => Verification::verified(
-            "SnowLuma action catalog: set_group_robot_add_option（参数 group_id / \
-             robot_member_switch / robot_member_examine）",
-        ),
-        "file.collection_list"
-        | "file.flash_task_create"
-        | "file.flash_file_list"
-        | "file.flash_file_url"
-        | "file.flash_file_delete"
-        | "file.flash_file_rename"
-        | "file.flash_msg_send"
-        | "file.fileset_list"
-        | "file.fileset_id"
-        | "file.fileset_info"
-        | "file.fileset_download"
-        | "file.private_upload"
-        | "face.custom_move_front" => Verification::verified(
-            "SnowLuma action catalog: get_collection_list / create_flash_task / \
-             get_flash_file_list / get_flash_file_url / delete_flash_file / \
-             rename_flash_file / send_flash_msg / list_filesets / get_fileset_id / \
-             get_fileset_info / download_fileset / upload_private_file / \
-             move_custom_face_to_front（摘要与参数逐条对照）",
-        ),
-        "msg.forward_single_friend"
-        | "msg.forward_single_group"
-        | "msg.mini_app_ark"
-        | "face.super_id" => Verification::verified(
-            "SnowLuma action catalog: forward_friend_single_msg / \
-             forward_group_single_msg / get_mini_app_ark / fetch_super_face_id（摘要与参数\
-             逐条对照）",
-        ),
-        "account.qzone.feeds"
-        | "account.qzone.list"
-        | "account.qzone.send"
-        | "account.qzone.comment"
-        | "account.qzone.delete"
-        | "account.qzone.like"
-        | "account.qzone.ban"
-        | "account.qzone.right" => Verification::verified(
-            "SnowLuma action catalog: get_qzone_feeds / get_qzone_msg_list / \
-             send_qzone_msg / comment_qzone / delete_qzone_msg / like_qzone / \
-             set_qzone_ban / set_qzone_msg_right（摘要与参数逐条对照；get_qzone_feeds 目录\
-             自述深翻页未实现）",
-        ),
         // 目录自身标注未核实 / 运行目录里没有条目的，继续 Unverified。
         "account.qzone.unlike" => Verification::unverified(
             "SnowLuma action catalog 在 unlike_qzone 条目上明确写「取消赞端点待真机核实」",
             "research §3.8：用隔离测试号点赞再取消，确认端点、参数与失败码",
-        ),
-        "account.qzone.detail" => Verification::unverified(
-            "get_qzone_msg_detail 只出现在中文 API 索引，运行目录快照没有该动作；参数与\
-             返回字段无出处",
-            "research §3.8：抓一次客户端请求，确认 tid / 返回结构后再补条目",
         ),
         "msg.tuwen_ark" => Verification::unverified(
             "send_tuwen_ark 只出现在中文 API 索引，运行目录快照没有该动作；Ark 载荷形状\
