@@ -226,46 +226,25 @@ false 是「这次没查」，不是「这条没这个值」，要的话把它�
     schema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
-    name: "get_notes",
-    description: "查这个房间的笔记（长期记住的词、人、话题）。",
+    name: "notes",
+    description: `房间笔记单入口：op=list 查、set 写、del 删。
+kind=term 记词，member 记人，topic 记还没聊完的事（topic 有状态：open / closed）。`,
     schema: {
       type: "object",
       properties: {
+        op: {
+          type: "string",
+          enum: ["list", "set", "del"],
+          description: "list 查、set 写、del 删",
+        },
         room: ROOM_SCHEMA,
-        kind: { type: "string", description: "只看某种：term / member / topic" },
+        kind: { type: "string", description: "默认 term；list 时只看某种" },
+        key: { type: "string", description: "笔记的键；set / del 必填" },
+        value: { type: "string", description: "笔记的内容；set 必填" },
+        label: { type: "string", description: "给人看的名字；set 可选" },
+        status: { type: "string", description: "只有 topic 用：open / closed" },
       },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "set_note",
-    description: `写一条笔记。kind=term 记词，member 记人，topic 记还没聊完的事
-（topic 有状态：open / closed）。`,
-    schema: {
-      type: "object",
-      properties: {
-        room: ROOM_SCHEMA,
-        kind: { type: "string", description: "默认 term" },
-        key: { type: "string", description: "笔记的键" },
-        value: { type: "string", description: "笔记的内容" },
-        label: { type: "string", description: "给人看的名字" },
-        status: { type: "string", description: "只有 topic 用：open / closed；term/member 不传或传空字符串" },
-      },
-      required: ["key", "value"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "del_note",
-    description: "删一条笔记。",
-    schema: {
-      type: "object",
-      properties: {
-        room: ROOM_SCHEMA,
-        kind: { type: "string", description: "默认 term" },
-        key: { type: "string", description: "笔记的键" },
-      },
-      required: ["key"],
+      required: ["op"],
       additionalProperties: false,
     },
   },
@@ -505,38 +484,29 @@ path 例如 echo/manifest.toml。`,
     },
   },
   {
-    name: "task_list",
-    description: `列出本会话的后台任务记录（最新在前）。
+    name: "tasks",
+    description: `本会话后台任务记录单入口：op=list 列出（最新在前），op=get 按 id 查详情。
 后台任务（route 的 task 动作）会记录任务 id、handler、状态、开始/结束时间、结果摘要、
 错误、wake_on 和合成事件信息。任务可能在本轮结束后才完成；即使你没有收到唤醒，
-也可以回来用 task_list / task_get 查询。
-status 可过滤 queued / running / succeeded / failed。`,
+也可以回来用 tasks 查询。list 的 status 可过滤 queued / running / succeeded / failed。`,
     schema: {
       type: "object",
       properties: {
+        op: {
+          type: "string",
+          enum: ["list", "get"],
+          description: "list 列表；get 按 id 查详情",
+        },
         status: {
           type: "string",
           enum: ["queued", "running", "succeeded", "failed"],
-          description: "只看某个状态",
+          description: "list 用：只看某个状态",
         },
-        limit: { type: "integer", description: "最多返回几条，默认 20，上限 100" },
-        offset: { type: "integer", description: "从第几条开始（翻页）" },
+        limit: { type: "integer", description: "list 用：最多返回几条，默认 20，上限 100" },
+        offset: { type: "integer", description: "list 用：从第几条开始（翻页）" },
+        id: { type: "string", description: "get 用：tasks 返回的任务 id" },
       },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "task_get",
-    description: `按任务 id 查一条本会话的后台任务记录。
-返回 handler、params_summary、wake_on、状态、时间、result、error、delivery_error，
-以及合成事件 id / 唤醒会话 / 事件错误。
-只能查当前会话的任务；跨会话 id 会报 not found。`,
-    schema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "task_list 返回的任务 id" },
-      },
-      required: ["id"],
+      required: ["op"],
       additionalProperties: false,
     },
   },
@@ -591,33 +561,29 @@ status 可过滤 queued / running / succeeded / failed。`,
     },
   },
   {
-    name: "feedback_list",
-    description: `列出你（当前会话）写过的反馈，最新在前，带状态和回复。
-回复只会出现在这里和被唤醒的那一轮里；不查就不知道维护方回了什么。`,
+    name: "feedback",
+    description: `反馈查询单入口：op=list 列出你（当前会话）写过的反馈，最新在前，带状态和回复；
+op=get 按 id 查一条，含完整正文、备注和回复记录。
+回复只会出现在这里和被唤醒的那一轮里；不查就不知道维护方回了什么。
+只能查当前会话写过的反馈。回复用 feedback_reply。`,
     schema: {
       type: "object",
       properties: {
+        op: {
+          type: "string",
+          enum: ["list", "get"],
+          description: "list 列表；get 按 id 查详情",
+        },
         status: {
           type: "string",
           enum: ["open", "acked", "resolved", "wontfix"],
-          description: "只看某个状态",
+          description: "list 用：只看某个状态",
         },
-        limit: { type: "integer", description: "最多返回几条，默认 20，上限 100" },
-        offset: { type: "integer", description: "从第几条开始（翻页）" },
+        limit: { type: "integer", description: "list 用：最多返回几条，默认 20，上限 100" },
+        offset: { type: "integer", description: "list 用：从第几条开始（翻页）" },
+        id: { type: "integer", description: "get 用：feedback list 返回的反馈编号" },
       },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "feedback_get",
-    description: `按 id 查一条你写过的反馈，含完整正文、备注和回复记录。
-只能查当前会话写过的反馈。`,
-    schema: {
-      type: "object",
-      properties: {
-        id: { type: "integer", description: "feedback_list 返回的反馈编号" },
-      },
-      required: ["id"],
+      required: ["op"],
       additionalProperties: false,
     },
   },
@@ -751,102 +717,27 @@ content 是内容。父目录不存在会自动建。`,
     },
   },
   {
-    name: "memory_git_status",
-    description: "看记忆仓库的 git 状态（哪些文件改过、新增、删除）。",
+    name: "memory_git",
+    description: `记忆仓库 git 单入口。op=status / log / diff / blame / add / commit / push / branch。
+status 看工作区改动；log 看提交记录；diff 看相对最近提交的改动；blame 查逐行作者；
+add 暂存改动（path 留空=全部）；commit 提交已暂存内容（要 message）；push 推到 origin；branch 列本地分支。`,
     schema: {
       type: "object",
       properties: {
+        op: {
+          type: "string",
+          enum: ["status", "log", "diff", "blame", "add", "commit", "push", "branch"],
+          description: "要执行的 git 操作",
+        },
         memory: { type: "string", description: "记忆 id" },
+        path: {
+          type: "string",
+          description: "相对路径；blame 必填，add 留空=全部，其它 op 可忽略",
+        },
+        limit: { type: "number", description: "log 用：看最近几条，默认 10" },
+        message: { type: "string", description: "commit 用：提交信息" },
       },
-      required: ["memory"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "memory_git_log",
-    description: "看记忆仓库最近的提交记录。",
-    schema: {
-      type: "object",
-      properties: {
-        memory: { type: "string", description: "记忆 id" },
-        limit: { type: "number", description: "看最近几条，默认 10" },
-      },
-      required: ["memory"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "memory_git_diff",
-    description: "看记忆仓库工作区相对最近提交的改动。",
-    schema: {
-      type: "object",
-      properties: {
-        memory: { type: "string", description: "记忆 id" },
-      },
-      required: ["memory"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "memory_git_blame",
-    description: "查记忆仓库里某个文件每一行是谁改的。",
-    schema: {
-      type: "object",
-      properties: {
-        memory: { type: "string", description: "记忆 id" },
-        path: { type: "string", description: "相对路径" },
-      },
-      required: ["memory", "path"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "memory_git_add",
-    description: "暂存记忆仓库的改动。path 留空表示暂存全部。",
-    schema: {
-      type: "object",
-      properties: {
-        memory: { type: "string", description: "记忆 id" },
-        path: { type: "string", description: "相对路径，留空=全部" },
-      },
-      required: ["memory"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "memory_git_commit",
-    description: "提交记忆仓库已暂存的改动。",
-    schema: {
-      type: "object",
-      properties: {
-        memory: { type: "string", description: "记忆 id" },
-        message: { type: "string", description: "提交信息" },
-      },
-      required: ["memory", "message"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "memory_git_push",
-    description: "推送记忆仓库到默认远端（origin）。",
-    schema: {
-      type: "object",
-      properties: {
-        memory: { type: "string", description: "记忆 id" },
-      },
-      required: ["memory"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "memory_git_branch",
-    description: "列出记忆仓库的本地分支。",
-    schema: {
-      type: "object",
-      properties: {
-        memory: { type: "string", description: "记忆 id" },
-      },
-      required: ["memory"],
+      required: ["op", "memory"],
       additionalProperties: false,
     },
   },

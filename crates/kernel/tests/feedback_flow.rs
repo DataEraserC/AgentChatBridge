@@ -179,7 +179,12 @@ fn feedback_reply_is_recorded_and_wakes_the_original_session() {
     let id = reported["id"].as_i64().expect("feedback id");
 
     let listed = lock(&bridge)
-        .tool_call(&ticket, &["main".to_owned()], "feedback_list", json!({}))
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "feedback",
+            json!({"op": "list"}),
+        )
         .expect("列反馈");
     assert_eq!(listed["total"], 1);
     assert_eq!(listed["feedback"][0]["id"], id);
@@ -188,8 +193,8 @@ fn feedback_reply_is_recorded_and_wakes_the_original_session() {
         .tool_call(
             &ticket,
             &["main".to_owned()],
-            "feedback_get",
-            json!({"id": id}),
+            "feedback",
+            json!({"op": "get", "id": id}),
         )
         .expect("查反馈");
     assert_eq!(got["body"], "缺少任务取消入口");
@@ -219,8 +224,8 @@ fn feedback_reply_is_recorded_and_wakes_the_original_session() {
         .tool_call(
             &ticket,
             &["main".to_owned()],
-            "feedback_get",
-            json!({"id": id}),
+            "feedback",
+            json!({"op": "get", "id": id}),
         )
         .expect("回复后查反馈");
     let replies = got["replies"].as_array().expect("replies");
@@ -286,7 +291,12 @@ fn large_feedback_list_is_indexed_and_get_keeps_full_body() {
         .expect("报第二条");
 
     let listed = lock(&bridge)
-        .tool_call(&ticket, &["main".to_owned()], "feedback_list", json!({}))
+        .tool_call(
+            &ticket,
+            &["main".to_owned()],
+            "feedback",
+            json!({"op": "list"}),
+        )
         .expect("列反馈");
     assert_eq!(listed["indexed"], true, "超过阈值应自动索引：{listed}");
     assert_eq!(listed["returned"], 2);
@@ -303,8 +313,8 @@ fn large_feedback_list_is_indexed_and_get_keeps_full_body() {
         .tool_call(
             &ticket,
             &["main".to_owned()],
-            "feedback_get",
-            json!({"id": id}),
+            "feedback",
+            json!({"op": "get", "id": id}),
         )
         .expect("详情仍给全文");
     assert!(
@@ -336,8 +346,8 @@ fn feedback_is_scoped_and_reply_requires_admin_cross_session() {
         .tool_call(
             &observer.ticket,
             &["observer".to_owned()],
-            "feedback_list",
-            json!({}),
+            "feedback",
+            json!({"op": "list"}),
         )
         .expect("列反馈");
     assert_eq!(listed["total"], 0, "别的会话的反馈不可见");
@@ -345,8 +355,8 @@ fn feedback_is_scoped_and_reply_requires_admin_cross_session() {
     let got = lock(&bridge).tool_call(
         &observer.ticket,
         &["observer".to_owned()],
-        "feedback_get",
-        json!({"id": id}),
+        "feedback",
+        json!({"op": "get", "id": id}),
     );
     assert_eq!(got.expect_err("不能跨会话查").code, ErrorCode::BadRequest);
 

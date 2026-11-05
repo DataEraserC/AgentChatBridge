@@ -1916,24 +1916,24 @@ fn set_note_term_and_member_accept_absent_or_empty_status() {
         .tool_call(
             &ticket,
             &sessions(),
-            "set_note",
-            json!({"kind": "term", "key": "部署", "value": "蓝绿发布"}),
+            "notes",
+            json!({"op": "set", "kind": "term", "key": "部署", "value": "蓝绿发布"}),
         )
         .expect("term 不传 status 应当能写");
     bridge
         .tool_call(
             &ticket,
             &sessions(),
-            "set_note",
-            json!({"kind": "term", "key": "发布", "value": "周五", "status": ""}),
+            "notes",
+            json!({"op": "set", "kind": "term", "key": "发布", "value": "周五", "status": ""}),
         )
         .expect("term 空 status 应当视为没有状态");
     bridge
         .tool_call(
             &ticket,
             &sessions(),
-            "set_note",
-            json!({"kind": "member", "key": "老王", "value": "运维", "status": "  "}),
+            "notes",
+            json!({"op": "set", "kind": "member", "key": "老王", "value": "运维", "status": "  "}),
         )
         .expect("member 空白 status 应当视为没有状态");
 
@@ -1942,8 +1942,8 @@ fn set_note_term_and_member_accept_absent_or_empty_status() {
         .tool_call(
             &ticket,
             &sessions(),
-            "set_note",
-            json!({"kind": "topic", "key": "部署", "value": "蓝绿", "status": "open"}),
+            "notes",
+            json!({"op": "set", "kind": "topic", "key": "部署", "value": "蓝绿", "status": "open"}),
         )
         .expect("topic open 能写");
 
@@ -1952,8 +1952,8 @@ fn set_note_term_and_member_accept_absent_or_empty_status() {
         .tool_call(
             &ticket,
             &sessions(),
-            "set_note",
-            json!({"kind": "term", "key": "部署", "value": "蓝绿", "status": "open"}),
+            "notes",
+            json!({"op": "set", "kind": "term", "key": "部署", "value": "蓝绿", "status": "open"}),
         )
         .expect_err("term 不该接受 topic 状态");
     assert_eq!(error.code, ErrorCode::BadRequest);
@@ -1962,8 +1962,8 @@ fn set_note_term_and_member_accept_absent_or_empty_status() {
         .tool_call(
             &ticket,
             &sessions(),
-            "set_note",
-            json!({"kind": "topic", "key": "部署", "value": "蓝绿", "status": "weird"}),
+            "notes",
+            json!({"op": "set", "kind": "topic", "key": "部署", "value": "蓝绿", "status": "weird"}),
         )
         .expect_err("topic 只接受 open / closed");
     assert_eq!(error.code, ErrorCode::BadRequest);
@@ -1981,13 +1981,13 @@ fn notes_written_in_one_room_are_invisible_in_another() {
         .tool_call(
             &ticket,
             &sessions(),
-            "set_note",
-            json!({"kind": "term", "key": "部署", "value": "蓝绿发布"}),
+            "notes",
+            json!({"op": "set", "kind": "term", "key": "部署", "value": "蓝绿发布"}),
         )
         .expect("能写");
 
     let mine = bridge
-        .tool_call(&ticket, &sessions(), "get_notes", json!({}))
+        .tool_call(&ticket, &sessions(), "notes", json!({"op": "list"}))
         .expect("能读");
     assert_eq!(mine["notes"].as_array().expect("是数组").len(), 1);
 
@@ -1995,8 +1995,8 @@ fn notes_written_in_one_room_are_invisible_in_another() {
         .tool_call(
             &ticket,
             &sessions(),
-            "get_notes",
-            json!({"room": "dc:channel/456"}),
+            "notes",
+            json!({"op": "list", "room": "dc:channel/456"}),
         )
         .expect("能读");
     assert!(
@@ -3830,4 +3830,58 @@ fn custom_receive_provider_can_drop_inbound_records() {
         .ingest(message("qq:group/123", "10001", "在吗", true))
         .expect("能记下来");
     assert!(matches!(kept, Ingest::Recorded { .. }), "正常消息照常入库");
+}
+
+/// 合并入口的 op 是封闭枚举：未知 op 直接报错，并给出合法候选。
+#[test]
+fn merged_tool_ops_are_closed_and_report_candidates() {
+    let (mut bridge, _sends) = bridge();
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let error = bridge
+        .tool_call(&ticket, &sessions(), "notes", json!({"op": "nope"}))
+        .expect_err("未知 op 要拒绝");
+    assert_eq!(error.code, ErrorCode::BadRequest);
+    assert!(
+        error.message.contains("list / set / del"),
+        "要给候选：{}",
+        error.message
+    );
+
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "notes",
+            json!({"op": "set", "key": "k"}),
+        )
+        .expect_err("set 缺 value");
+    assert!(
+        error.message.contains("requires value"),
+        "{}",
+        error.message
+    );
+
+    let error = bridge
+        .tool_call(&ticket, &sessions(), "tasks", json!({"op": "remove"}))
+        .expect_err("未知 op 要拒绝");
+    assert!(error.message.contains("list / get"), "{}", error.message);
+
+    let error = bridge
+        .tool_call(&ticket, &sessions(), "feedback", json!({"op": "reply"}))
+        .expect_err("回复不在合并入口里");
+    assert!(error.message.contains("list / get"), "{}", error.message);
+
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "memory_git",
+            json!({"op": "reset", "memory": "main"}),
+        )
+        .expect_err("未知 op 要拒绝");
+    assert!(error.message.contains("status / log"), "{}", error.message);
 }

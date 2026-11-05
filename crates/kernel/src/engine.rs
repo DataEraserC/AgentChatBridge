@@ -67,12 +67,12 @@ use crate::tools::{
     AccessRequestArgs, AccessTicketGetArgs, AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT,
     DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs, DescribePluginsArgs, EventsArgs, ExtensionsListArgs,
     ExtensionsReadArgs, ExtensionsReloadArgs, ExtensionsWriteArgs, FeedbackArgs, FeedbackGetArgs,
-    FeedbackListArgs, FeedbackReplyArgs, FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT,
-    MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs, MemoryBlameArgs, MemoryCommitArgs,
-    MemoryListArgs, MemoryLogArgs, MemorySearchArgs, MemoryWriteArgs, NotesArgs, PlatformCallArgs,
-    PlatformListArgs, PlatformToolArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs,
-    RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, TaskGetArgs, TaskListArgs, WaitMessageArgs,
-    is_known,
+    FeedbackListArgs, FeedbackReplyArgs, FeedbackToolArgs, FetchRecordsArgs, HistoryArgs,
+    MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs, MemoryBlameArgs,
+    MemoryCommitArgs, MemoryGitToolArgs, MemoryListArgs, MemoryLogArgs, MemorySearchArgs,
+    MemoryWriteArgs, NotesArgs, NotesToolArgs, PlatformCallArgs, PlatformListArgs,
+    PlatformToolArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs, RECORD_COLUMNS,
+    SendArgs, SendToArgs, SetNoteArgs, TasksToolArgs, WaitMessageArgs, is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -3583,17 +3583,59 @@ impl<S: Store> Bridge<S> {
                  outside the lock); the current call path would block the whole bridge.",
             )),
             "list_rooms" => self.list_rooms(&turn_config, sessions),
-            "get_notes" => {
-                let args: NotesArgs = parse(args)?;
-                self.read_notes(&turn_config, sessions, &room, args)
-            }
-            "set_note" => {
-                let args: SetNoteArgs = parse(args)?;
-                self.write_note(&turn_config, sessions, &room, args)
-            }
-            "del_note" => {
-                let args: DelNoteArgs = parse(args)?;
-                self.delete_note(&turn_config, sessions, &room, args)
+            "notes" => {
+                let parsed: NotesToolArgs = parse(args)?;
+                let NotesToolArgs {
+                    op,
+                    room: note_room,
+                    kind,
+                    key,
+                    value,
+                    label,
+                    status,
+                } = parsed;
+                match op.as_str() {
+                    "list" => self.read_notes(
+                        &turn_config,
+                        sessions,
+                        &room,
+                        NotesArgs {
+                            room: note_room,
+                            kind,
+                        },
+                    ),
+                    "set" => {
+                        let key = key.ok_or_else(|| op_requires("notes", &op, "key"))?;
+                        let value = value.ok_or_else(|| op_requires("notes", &op, "value"))?;
+                        self.write_note(
+                            &turn_config,
+                            sessions,
+                            &room,
+                            SetNoteArgs {
+                                room: note_room,
+                                kind,
+                                key,
+                                value,
+                                label,
+                                status,
+                            },
+                        )
+                    }
+                    "del" => {
+                        let key = key.ok_or_else(|| op_requires("notes", &op, "key"))?;
+                        self.delete_note(
+                            &turn_config,
+                            sessions,
+                            &room,
+                            DelNoteArgs {
+                                room: note_room,
+                                kind,
+                                key,
+                            },
+                        )
+                    }
+                    other => Err(unknown_op("notes", other, &["list", "set", "del"])),
+                }
             }
             "get_platform_events" => {
                 let args: EventsArgs = parse(args)?;
@@ -3652,31 +3694,58 @@ impl<S: Store> Bridge<S> {
                     ),
                 }))
             }
-            "task_list" => {
-                let args: TaskListArgs = parse(args)?;
-                self.task_list(
-                    &turn_session,
-                    args.status.as_deref(),
-                    args.limit.unwrap_or(20),
-                    args.offset.unwrap_or(0),
-                )
-            }
-            "task_get" => {
-                let args: TaskGetArgs = parse(args)?;
-                self.task_get(&turn_session, &args.id)
+            "tasks" => {
+                let parsed: TasksToolArgs = parse(args)?;
+                let TasksToolArgs {
+                    op,
+                    status,
+                    limit,
+                    offset,
+                    id,
+                } = parsed;
+                match op.as_str() {
+                    "list" => self.task_list(
+                        &turn_session,
+                        status.as_deref(),
+                        limit.unwrap_or(20),
+                        offset.unwrap_or(0),
+                    ),
+                    "get" => {
+                        let id = id.ok_or_else(|| op_requires("tasks", &op, "id"))?;
+                        self.task_get(&turn_session, &id)
+                    }
+                    other => Err(unknown_op("tasks", other, &["list", "get"])),
+                }
             }
             // 反馈：诚实报告「这里卡住了」。这是出口，不是抱怨箱（ADR-0021）。
             "report_feedback" => {
                 let args: FeedbackArgs = parse(args)?;
                 self.report_feedback(ticket, &turn_session, &room, live, args)
             }
-            "feedback_list" => {
-                let args: FeedbackListArgs = parse(args)?;
-                self.feedback_list(&turn_session, args)
-            }
-            "feedback_get" => {
-                let args: FeedbackGetArgs = parse(args)?;
-                self.feedback_get(&turn_session, args)
+            "feedback" => {
+                let parsed: FeedbackToolArgs = parse(args)?;
+                let FeedbackToolArgs {
+                    op,
+                    status,
+                    limit,
+                    offset,
+                    id,
+                } = parsed;
+                match op.as_str() {
+                    "list" => self.feedback_list(
+                        &turn_session,
+                        FeedbackListArgs {
+                            status,
+                            limit,
+                            offset,
+                        },
+                    ),
+                    "get" => {
+                        let id = id.ok_or_else(|| op_requires("feedback", &op, "id"))?;
+                        self.feedback_get(&turn_session, FeedbackGetArgs { id })
+                    }
+                    other => Err(unknown_op("feedback", other, &["list", "get"])),
+                }
             }
             "feedback_reply" => {
                 let args: FeedbackReplyArgs = parse(args)?;
@@ -3821,38 +3890,75 @@ impl<S: Store> Bridge<S> {
                 let args: MemorySearchArgs = parse(args)?;
                 self.memory_search(&turn_config, &turn_session, args)
             }
-            // 记忆：git 层。
-            "memory_git_status" => {
-                let args: MemoryArgs = parse(args)?;
-                self.memory_git_status(&turn_config, &turn_session, args)
-            }
-            "memory_git_log" => {
-                let args: MemoryLogArgs = parse(args)?;
-                self.memory_git_log(&turn_config, &turn_session, args)
-            }
-            "memory_git_diff" => {
-                let args: MemoryArgs = parse(args)?;
-                self.memory_git_diff(&turn_config, &turn_session, args)
-            }
-            "memory_git_blame" => {
-                let args: MemoryBlameArgs = parse(args)?;
-                self.memory_git_blame(&turn_config, &turn_session, args)
-            }
-            "memory_git_add" => {
-                let args: MemoryAddArgs = parse(args)?;
-                self.memory_git_add(&turn_config, &turn_session, args)
-            }
-            "memory_git_commit" => {
-                let args: MemoryCommitArgs = parse(args)?;
-                self.memory_git_commit(&turn_config, &turn_session, args)
-            }
-            "memory_git_push" => {
-                let args: MemoryArgs = parse(args)?;
-                self.memory_git_push(&turn_config, &turn_session, args)
-            }
-            "memory_git_branch" => {
-                let args: MemoryArgs = parse(args)?;
-                self.memory_git_branch(&turn_config, &turn_session, args)
+            // 记忆：git 层。单入口，按 op 分派到原来的实现。
+            "memory_git" => {
+                let parsed: MemoryGitToolArgs = parse(args)?;
+                let MemoryGitToolArgs {
+                    op,
+                    memory,
+                    path,
+                    limit,
+                    message,
+                } = parsed;
+                match op.as_str() {
+                    "status" => self.memory_git_status(
+                        &turn_config,
+                        &turn_session,
+                        MemoryArgs { memory, path },
+                    ),
+                    "log" => self.memory_git_log(
+                        &turn_config,
+                        &turn_session,
+                        MemoryLogArgs { memory, limit },
+                    ),
+                    "diff" => self.memory_git_diff(
+                        &turn_config,
+                        &turn_session,
+                        MemoryArgs { memory, path },
+                    ),
+                    "blame" => {
+                        if path.trim().is_empty() {
+                            return Err(op_requires("memory_git", &op, "path"));
+                        }
+                        self.memory_git_blame(
+                            &turn_config,
+                            &turn_session,
+                            MemoryBlameArgs { memory, path },
+                        )
+                    }
+                    "add" => self.memory_git_add(
+                        &turn_config,
+                        &turn_session,
+                        MemoryAddArgs { memory, path },
+                    ),
+                    "commit" => {
+                        let message = message
+                            .filter(|message| !message.trim().is_empty())
+                            .ok_or_else(|| op_requires("memory_git", &op, "message"))?;
+                        self.memory_git_commit(
+                            &turn_config,
+                            &turn_session,
+                            MemoryCommitArgs { memory, message },
+                        )
+                    }
+                    "push" => self.memory_git_push(
+                        &turn_config,
+                        &turn_session,
+                        MemoryArgs { memory, path },
+                    ),
+                    "branch" => self.memory_git_branch(
+                        &turn_config,
+                        &turn_session,
+                        MemoryArgs { memory, path },
+                    ),
+                    other => Err(unknown_op(
+                        "memory_git",
+                        other,
+                        &[
+                            "status", "log", "diff", "blame", "add", "commit", "push", "branch",
+                        ],
+                    )),
+                }
             }
             other => Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
@@ -4335,7 +4441,7 @@ impl<S: Store> Bridge<S> {
                 }
             }
             // 任务结果查询不依赖任务触发时的票：任务可能在本轮结束后才完成。
-            "report_feedback" | "feedback_list" | "feedback_get" | "task_list" | "task_get" => {}
+            "report_feedback" | "feedback" | "tasks" => {}
             _ => return Err(no_active_round()),
         }
 
@@ -4810,9 +4916,9 @@ impl<S: Store> Bridge<S> {
                 }
                 "get_history"
                 | "fetch_records"
-                | "get_notes"
-                | "set_note"
-                | "del_note"
+                | "notes:list"
+                | "notes:set"
+                | "notes:del"
                 | "get_platform_events"
                 | "wait_message" => {
                     capabilities.insert(GrantCapability::RoomRead);
@@ -6634,7 +6740,7 @@ impl<S: Store> Bridge<S> {
         args: NotesArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room, turn_room, "get_notes")?;
+        self.ensure_readable(config, sessions, &room, turn_room, "notes:list")?;
 
         let kind = match args.kind.as_deref() {
             Some(text) => Some(parse_note_kind(text)?),
@@ -6663,7 +6769,7 @@ impl<S: Store> Bridge<S> {
         args: SetNoteArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room, turn_room, "set_note")?;
+        self.ensure_readable(config, sessions, &room, turn_room, "notes:set")?;
 
         let kind = match args.kind.as_deref() {
             Some(text) => parse_note_kind(text)?,
@@ -6714,7 +6820,7 @@ impl<S: Store> Bridge<S> {
         args: DelNoteArgs,
     ) -> Result<Value, ToolError> {
         let room = self.resolve(&args.room, turn_room)?;
-        self.ensure_readable(config, sessions, &room, turn_room, "del_note")?;
+        self.ensure_readable(config, sessions, &room, turn_room, "notes:del")?;
 
         let kind = match args.kind.as_deref() {
             Some(text) => parse_note_kind(text)?,
@@ -8655,6 +8761,25 @@ fn platform_list_args(args: PlatformToolArgs) -> Result<PlatformListArgs, ToolEr
         limit: args.limit,
         offset: args.offset,
     })
+}
+
+/// 合并入口的 op 校验：未知 op 不给近似猜测，直接把合法值全列出来。
+fn unknown_op(tool: &str, op: &str, valid: &[&str]) -> ToolError {
+    ToolError::new(
+        ErrorCode::BadRequest,
+        format!(
+            "[bad_params] unknown op {op} for {tool}; valid ops: {}",
+            valid.join(" / ")
+        ),
+    )
+}
+
+/// 合并入口里某个 op 必填字段缺失：说清楚是哪个工具、哪个 op、哪个字段。
+fn op_requires(tool: &str, op: &str, field: &str) -> ToolError {
+    ToolError::new(
+        ErrorCode::BadRequest,
+        format!("[bad_params] {tool} op={op} requires {field}"),
+    )
 }
 
 /// 唯一的 op 解析入口：普通调用、票据申请、票据执行都走这里，未知 op 一律拒绝。

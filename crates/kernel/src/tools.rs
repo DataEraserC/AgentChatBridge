@@ -23,9 +23,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "fetch_records",
     "wait_message",
     "list_rooms",
-    "get_notes",
-    "set_note",
-    "del_note",
+    // 笔记：单入口，op = list / set / del。
+    "notes",
     "get_platform_events",
     // 平台能力：单入口。给 op = 执行，不给 op = 按层级/标签列目录（ADR-0020）。
     "platform_call",
@@ -36,14 +35,12 @@ pub const TOOL_NAMES: &[&str] = &[
     "extensions_read",
     "extensions_write",
     "extensions_reload",
-    // 后台任务记录（T7a）。
-    "task_list",
-    "task_get",
+    // 后台任务记录（T7a）：单入口，op = list / get。
+    "tasks",
     // 反馈：把「哪里卡住了」写回桥里（ADR-0021）。活干不下去时用它，不要直接摸平台端口。
     "report_feedback",
-    // 反馈查询与回复（T7c）。回复会作为合成事件通知原会话。
-    "feedback_list",
-    "feedback_get",
+    // 反馈查询（T7c）：单入口，op = list / get。回复单独一件，避免迟到调用被放宽。
+    "feedback",
     "feedback_reply",
     // 插件工具：索引 + 通用调用口。插件自己的工具不必挤进 core 工具表。
     "plugin_tools",
@@ -53,15 +50,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "memory_write",
     "memory_list",
     "memory_search",
-    // 记忆：git 层
-    "memory_git_status",
-    "memory_git_log",
-    "memory_git_diff",
-    "memory_git_blame",
-    "memory_git_add",
-    "memory_git_commit",
-    "memory_git_push",
-    "memory_git_branch",
+    // 记忆：git 层。单入口，op = status / log / diff / blame / add / commit / push / branch。
+    "memory_git",
 ];
 
 /// 元素数组的包装：解析走 proto 的人话通道（别名兼容 + 报错带原文），
@@ -240,6 +230,24 @@ pub struct DelNoteArgs {
     pub key: String,
 }
 
+/// 笔记单入口：`op = list / set / del`，其余字段按 op 取用。
+#[derive(Debug, Default, Deserialize)]
+pub struct NotesToolArgs {
+    pub op: String,
+    #[serde(default)]
+    pub room: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
 /// 查平台事件。
 #[derive(Debug, Default, Deserialize)]
 pub struct EventsArgs {
@@ -393,6 +401,20 @@ pub struct TaskGetArgs {
     pub id: String,
 }
 
+/// 后台任务单入口：`op = list / get`。
+#[derive(Debug, Default, Deserialize)]
+pub struct TasksToolArgs {
+    pub op: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
 /// 一条反馈（ADR-0021）。
 ///
 /// 刻意做成「写建议」而不是「填表」：正文一个字段，想写多长写多长；
@@ -437,6 +459,20 @@ pub struct FeedbackListArgs {
 #[derive(Debug, Deserialize)]
 pub struct FeedbackGetArgs {
     pub id: i64,
+}
+
+/// 反馈查询单入口：`op = list / get`。回复单独一个工具，保留原来的迟到调用边界。
+#[derive(Debug, Default, Deserialize)]
+pub struct FeedbackToolArgs {
+    pub op: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub id: Option<i64>,
 }
 
 /// 回复一条反馈。维护方会话或该反馈的原会话可以写。
@@ -552,6 +588,20 @@ pub struct MemoryCommitArgs {
 pub struct MemoryBlameArgs {
     pub memory: String,
     pub path: String,
+}
+
+/// 记忆 git 单入口：`op = status / log / diff / blame / add / commit / push / branch`。
+/// 各 op 只取自己用得到的字段；`commit` 要 `message`，`blame` 要非空 `path`。
+#[derive(Debug, Default, Deserialize)]
+pub struct MemoryGitToolArgs {
+    pub op: String,
+    pub memory: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// 工具的真假判定：这个名字认识不认识。
