@@ -1510,7 +1510,7 @@ fn send_message_rechecks_current_room_access() {
 }
 
 /// system admin 只在私信里有常态授予；群里即使同账号也不自动提权。
-/// 跨订阅目标的放宽必须写显式 typed target，`scope = "any"` 只覆盖可达目标。
+/// 跨订阅目标的放宽必须写显式 typed target，`scope = "subscribed"` 只覆盖可达目标。
 #[test]
 fn system_admin_private_grants_stay_out_of_groups() {
     let rule = r#"

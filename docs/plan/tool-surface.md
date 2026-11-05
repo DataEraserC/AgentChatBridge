@@ -84,7 +84,7 @@ core 不复制第二份 schema，也不做第二份权限判定。
 - `catalog`：全部非驻留工具的索引（含按需层）。可执行条目只有 `tool` + `purpose`；
   不可执行条目只有 `tool` + `direct_executable=false` + `requestable` +
   `ticket_required` + `reason`（本轮不会注入，所以不带 `purpose`）；
-- `allow_destructive`：当前房间连接的破坏性放行状态；
+- `risk`：当前房间连接的风险策略（write / destructive / critical / destructive_exempt）；
 - `counts`：total / resident / catalog / visible / hidden。
 
 不再重复列 `visible` / `hidden` 数组：可见集 = `resident` ∪ `catalog` 里不带
@@ -142,7 +142,7 @@ JSON 锁住）。
    常驻白名单无条件进 `resident` / `visible`，即使当前 `available=false`。
 4. 过滤判定复用既有 helper，不写第二份权限逻辑：
    - `tool_unavailable_reason` → `probe_room_reason` → `check_access(..., probe=true)`；
-   - 平台 op 的 `direct_executable` / `allow_destructive` → `connection_allows_destructive`
+   - 平台 op 的 `direct_executable` / `risk` → `connection_allows_destructive` + 连接风险策略
      （现有 `cap_op_json` 已经这么算）；
    - `requestable` → `TICKET_OPS`（`notes:*`、`platform_call:<op>` 是词表里已有的模式）。
 
@@ -219,7 +219,7 @@ JSON 锁住）。
   `resident_entry_points_are_never_filtered_out`，以及 session/tool scope 的
   `requestable` / `ticket_required` 断言。
 - `crates/kernel/tests/access_ticket_flow.rs`：
-  `critical_is_refused_by_allow_destructive_and_runs_only_via_ticket`
+  `critical_never_runs_directly_and_only_via_ticket`
   先断言 critical op `direct_executable=false` / `requestable=true`，再走
   `access_request` → 管理员批准 → 执行，证明过滤没缩小申请范围。
 - `crates/kernel/tests/tool_schema_consistency.rs`：
@@ -250,6 +250,6 @@ JSON 锁住）。
   `fetch_records`；它们不在普通轮次的模型上下文里，只是不预先占位。
 - 目录层只覆盖内置工具。平台 op 的目录仍在 `capabilities scope=room` /
   `platform_call` 里，按同样的 `cap_op_json` 给出 `direct_executable` /
-  `ticket_required` / `allow_destructive`。
+  `ticket_required` / `risk`。
 - 不新增 `tools_describe`；如果未来目录需要独立工具名，再显式改
   `TOOL_NAMES` / `tools.mjs` / 计数测试，而不是悄悄加。

@@ -461,7 +461,7 @@ cargo test -p acb-adapter-wake-fixture --test policy
 
 - 插件能力由 descriptor 授予；插件拿不到 `Store` / `Bridge` / 配置写入，也不能替别的
   扩展点做决定。`effects` 是给人和 agent 看的说明，不是强制保证。
-- 访问策略和连接的 `allow_destructive` 是两道独立闸门；插件不能替破坏性操作放行。
+- 访问策略和连接的 `[connections.policy.risk]` 是两道独立闸门；插件不能替破坏性操作放行。
 - 动态库在桥进程内，panic/死循环会影响整座桥；需要崩溃隔离就用外置进程。
 - 动态库策略判定是同步调用，没有超时；把插件写成快速、无阻塞的判定函数。
 - 动态库卸载不支持：换 `.so` 需要重启桥；外置进程崩溃会自动重启。

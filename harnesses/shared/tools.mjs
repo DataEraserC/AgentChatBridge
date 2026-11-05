@@ -90,11 +90,12 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
     description: `申请一次性访问票据。一条 item = 单张；多条 = 批量（共享 batch_id，每张仍是独立票据）。
 申请本身不执行任何平台动作；core 会把归一化后的目标/op 发给 system admin 私信，由人在私信里批准或拒绝。
 申请前会按 grants 判定：群友默认只能申请本会话已订阅目标；system_admin / bot_admin 私信可申请任意目标；
-未订阅目标要显式 [[grants.rules]] capability=["access_request"] 放开。destructive 未开 allow_destructive 时申请阶段直接拒。
+未订阅目标要显式 [[grants.rules]] capability=["access_request"] 放开。destructive 默认走票据 + 审批，申请永远可以发起。
 批准后 core 按申请时保存的 params 快照直接执行 send_message / send_message_to / platform_call:<method>；
 快照必须完整（例如 send 的 elements、平台方法的全部参数），批准后不能再改。
 只读 op（get_history 等）不由 core 执行：批准后票据保持 active，由会话在有效期内自己重试一次。
-票据不放宽 destructive 的 allow_destructive 闸门；critical 则相反：只能靠票据 + 私信审批放行，
+风险策略只约束直调：destructive 的 approval/allow、destructive_exempt 决定能否直接调用；
+票据批准后由 core 执行。critical 永远只能靠票据 + 私信审批放行，
 结果默认只进 access_ticket_get，不进房间流水或投递正文。
 同一个会话的审批消息会聚合成一条，在本轮结束时发出；冷却期内的申请会被明确拒绝并给出剩余秒数。
 op 列表要具体：send_message，send_message_to，get_history，fetch_records，notes:list，notes:set，notes:del，
@@ -149,13 +150,13 @@ get_platform_events，wait_message，或 platform_call:<op>（如 platform_call:
   {
     name: "capabilities",
     description: `只读自检：回答「此刻能不能用」，也回答「长尾有什么」。
-scope=session 给整体处境与计数；scope=room 看某房间的读写与 op 风险 / allow_destructive；
+scope=session 给整体处境与计数；scope=room 看某房间的读写与 op 风险 / 连接风险策略；
 scope=catalog 列长尾工具目录（名字 / 一句话用途 / 何时用 / 可用性 / 可申请）；
 scope=surface 给 harness 算本轮可见集；scope=tool 看单个工具或平台 op（name），
 工具会附完整 schema（本地工具定义），平台 op 只给目录里的参数。
 scope=surface 可加 view：visible（默认，本轮可见集）/ all（全集）/ hidden（被权限过滤掉的工具，
 每条带 why_hidden：place / scope / capability / risk / subscription）。
-遇到 forbidden / room_not_subscribed / destructive_disabled 先查这里，别盲目重试。
+遇到 forbidden / room_not_subscribed / destructive_requires_ticket 先查这里，别盲目重试。
 「有什么」仍用 platform_call（不给 op）、plugin_tools、describe_plugins。`,
     schema: {
       type: "object",
@@ -325,9 +326,9 @@ list 返回 total / returned / has_more / next_offset；超过 4 KiB 会只给�
     description: `平台能力单入口：给 op 执行，不给 op 列目录。
 
 **执行**：op 用层级名，如 msg.send、member.list、group.mute；params 的形状先用不带 op 的调用查。
-risk 由 op→risk 策略表决定，未知 op 直接拒绝；破坏性 op 默认不开放（报 forbidden），
-连接配置 allow_destructive 打开后才会真的执行。
-critical op（账号凭据、原始 SSO 包、进程运维）不接受 allow_destructive，直接调用一定 forbidden；
+risk 由 op→risk 策略表决定，未知 op 直接拒绝；破坏性 op 默认不直调（报 forbidden，提示申请票据），
+连接配置 [connections.policy.risk] 的 destructive = "allow" 或 destructive_exempt 名单才直接执行。
+critical op（账号凭据、原始 SSO 包、进程运维）不受风险策略放行，直接调用一定 forbidden；
 先申请 platform_call:<op> 票据、私信审批后由 core 执行，结果用 access_ticket_get 查。
 room 决定目标房间：不给就是当前轮次；给别的房间必须在本会话订阅内。
 不要在 params 里改 group_id/user_id 换目标——params 里的 user_id 只表示「踢谁/拍谁」这类成员目标。

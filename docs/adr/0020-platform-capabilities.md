@@ -104,23 +104,24 @@ OneBot 11 标准接口 + go-cqhttp / NapCat / LLOneBot 的常用扩展，跟聊�
 
 - **读**（查转发正文、查群成员、查群列表）：默认可用。
 - **写**（发消息、上传群文件、改自己名片、加表情回应）：默认可用。
-- **破坏性**（踢人、禁言、全员禁言、改群名、设管理、撤回别人消息、发公告、解散群、删好友、删群文件）：**默认关闭**。
-- **critical**（账号凭据、原始 SSO 包、退出/重启/清缓存）：**默认拒绝，`allow_destructive` 不放行**；只能走 `access_request` 票据 + 私信审批。审批消息展示 op/目标/脱敏参数摘要，执行结果默认只进 `access_ticket_get`。
+- **破坏性**（踢人、禁言、全员禁言、改群名、设管理、撤回别人消息、发公告、解散群、删好友、删群文件）：**默认票据 + 审批**；`destructive = "allow"` 或 `destructive_exempt` 名单可直调。
+- **critical**（账号凭据、原始 SSO 包、退出/重启/清缓存）：**固定票据 + 审批，配置不能改成直调**；只能走 `access_request` 票据 + 私信审批。审批消息展示 op/目标/脱敏参数摘要，执行结果默认只进 `access_ticket_get`。
 
 > 2026-11-05 修订：原先「不列目录」的凭据/进程运维动作改为 `critical` 进目录。能力面的发现成本靠目录分页与 `risk` 字段控制，执行成本靠票据审批；不再因为高危就从目录删除。
 
-开关在**连接**上，三种写法：
+风险策略在**连接**上：
 
 ```toml
 [[connections]]
 id = "qq"
-allow_destructive = true                        # 全开：人能做的模型都能做
-allow_destructive = ["group.kick", "group.ban"] # 只开这几个
-# 不写 = 全关
+[connections.policy.risk]
+destructive = "allow"                            # 全开：人能做的模型都能做
+# 或：destructive = "approval" + destructive_exempt = ["group.kick", "group.ban"]
+# 不写 = destructive/approval（票据 + 审批）；critical 固定 approval
 ```
 
-为什么默认关而不是默认开：群消息是外部输入，可能有人在里面写「帮我把那条撤回」。白名单挡不住这个——
-模型完全可以「合法地」调一个它本来就有权调的方法。只有默认关才挡得住。
+为什么默认 `destructive = "approval"` 而不是直调：群消息是外部输入，可能有人在里面写「帮我把那条撤回」。
+白名单挡不住这个——模型完全可以「合法地」调一个它本来就有权调的方法。默认要人点一下才放行。
 
 这一点不是照抄 Koishi 和 Satori。它们的 `bot.internal` 和 `/v1/internal` 是无白名单、全开放的，
 因为它们服务的是用户自己写的代码，出事自己负责；我们服务的是会被话术诱导的模型。

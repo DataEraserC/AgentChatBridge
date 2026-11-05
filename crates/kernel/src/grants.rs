@@ -2,7 +2,7 @@
 //!
 //! 这一层只做**授权叠加**：命中配置里的常态授予时给出 `allow`；没命中时退回
 //! 现有的订阅边界。它不是第二套房间策略，也不替代
-//! `MethodSpec.risk = Destructive` + `allow_destructive` 闸门。
+//! `MethodSpec.risk` + `[connections.policy.risk]` 风险策略。
 //!
 //! 不做旧 provider 的兼容翻译：没有用户需要平滑迁移，多一层翻译只会让旧配置
 //! 悄悄多出权限。旧键留在配置里会在启动期直接报错。
@@ -261,13 +261,33 @@ impl Trust {
 }
 
 /// 能力范围。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// `subscribed` 只覆盖本会话可达目标；跨目标要靠 `room` / `connection` 的显式
+/// typed target。旧值 `any` 与 `subscribed` 语义完全相同，已移除；配置里再写
+/// `any` 会在解析期报错，不做静默映射。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantScope {
-    Any,
     Subscribed,
     Room,
     Connection,
+}
+
+impl<'de> Deserialize<'de> for GrantScope {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        match value.trim() {
+            "subscribed" => Ok(Self::Subscribed),
+            "room" => Ok(Self::Room),
+            "connection" => Ok(Self::Connection),
+            "any" => Err(serde::de::Error::custom(
+                "scope \"any\" has been removed; use \"subscribed\" instead \
+                 (the two have identical reachability semantics)",
+            )),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown scope {other:?}; expected one of \"subscribed\", \"room\", \"connection\""
+            ))),
+        }
+    }
 }
 
 /// 能力枚举。封闭值域，未知值在配置解析期报错。
@@ -429,7 +449,7 @@ impl GrantsConfig {
                 }
             }
             match rule.scope {
-                GrantScope::Any | GrantScope::Subscribed => {
+                GrantScope::Subscribed => {
                     if rule.target.is_some() {
                         return Err(format!(
                             "grants.rules[{index}] target is only allowed for scope room/connection"
@@ -662,7 +682,7 @@ pub fn evaluate_platform(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Optio
 /// - `system_admin` / `bot_admin` 在私信或控制台可以申请任意目标；
 /// - 其它主体只能申请本会话已订阅的目标（`base:subscription`）；
 /// - 显式规则可以放开跨目标（`scope = room` / `connection` 写 typed target）；
-///   `scope = any` 只覆盖本会话可达目标，不跨范围。
+///   `scope = subscribed` 只覆盖本会话可达目标，不跨范围。
 pub fn evaluate_access_request(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDecision {
     if let Some(decision) = evaluate_rules(grants, query) {
         return decision;
@@ -744,7 +764,7 @@ fn base_access(query: &GrantQuery<'_>) -> GrantDecision {
     }
 }
 
-/// `any` / `subscribed` 的可达范围：房间与连接来自订阅；账号来自订阅连接的
+/// `subscribed` 的可达范围：房间与连接来自订阅；账号来自订阅连接的
 /// 账号；成员/消息/文件必须挂在可达房间上。插件工具不靠订阅判定，交给上层。
 fn target_is_reachable(target: &AccessTarget, subscriptions: &[RoomId]) -> bool {
     match target.kind {
@@ -772,7 +792,7 @@ fn target_is_reachable(target: &AccessTarget, subscriptions: &[RoomId]) -> bool 
 
 fn scope_matches(rule: &GrantRule, target: &AccessTarget, subscriptions: &[RoomId]) -> bool {
     match rule.scope {
-        GrantScope::Any | GrantScope::Subscribed => target_is_reachable(target, subscriptions),
+        GrantScope::Subscribed => target_is_reachable(target, subscriptions),
         GrantScope::Room => match rule.target.as_ref() {
             Some(wanted) if wanted.kind == AccessTargetKind::Room => match target.kind {
                 AccessTargetKind::Room => target.id == wanted.id,
@@ -795,7 +815,6 @@ fn scope_matches(rule: &GrantRule, target: &AccessTarget, subscriptions: &[RoomI
 impl GrantRule {
     fn scope_name(&self) -> &'static str {
         match self.scope {
-            GrantScope::Any => "any",
             GrantScope::Subscribed => "subscribed",
             GrantScope::Room => "room",
             GrantScope::Connection => "connection",
@@ -864,11 +883,11 @@ mod tests {
     }
 
     #[test]
-    fn any_does_not_escape_the_sessions_reachable_targets() {
+    fn subscribed_does_not_escape_the_sessions_reachable_targets() {
         let grants = config(vec![rule(
             GrantSubject::User,
             Place::Room(RoomScope::MultiParty),
-            GrantScope::Any,
+            GrantScope::Subscribed,
             None,
             &[GrantCapability::RoomRead],
         )]);
@@ -884,7 +903,7 @@ mod tests {
         );
         assert!(
             !decision.allow,
-            "scope=any 不能越过会话可达范围：{decision:?}"
+            "scope=subscribed 不能越过会话可达范围：{decision:?}"
         );
         let allowed = eval_access(
             &grants,
@@ -894,7 +913,23 @@ mod tests {
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
-        assert!(allowed.allow, "可达目标应被 scope=any 放行");
+        assert!(allowed.allow, "可达目标应被 scope=subscribed 放行");
+    }
+
+    #[test]
+    fn scope_any_is_rejected_with_a_migration_hint() {
+        let text = r#"
+            subject = "user"
+            place = "group"
+            scope = "any"
+            capability = ["room_read"]
+        "#;
+        let error = toml::from_str::<GrantRule>(text).expect_err("any 必须被拒绝");
+        let message = error.to_string();
+        eprintln!("scope=any 启动报错：{message}");
+        assert!(message.contains("any"), "{message}");
+        assert!(message.contains("subscribed"), "{message}");
+        assert!(message.contains("removed"), "{message}");
     }
 
     fn eval_access(

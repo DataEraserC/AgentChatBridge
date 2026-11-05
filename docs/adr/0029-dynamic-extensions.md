@@ -107,7 +107,7 @@ write → 语法/清单/能力校验 → 旁路编译 → 暂存（staged）
 - 配置：不允许（默认永远不给）。
 
 执行点在动作边界：发送、唤醒、任务启动、文件访问、网络访问。现有
-`sessions.access` 与连接 `allow_destructive` 仍是独立闸门，扩展能力不能替代它们。
+`sessions.access` 与连接 `[connections.policy.risk]` 仍是独立闸门，扩展能力不能替代它们。
 
 ### D7. 信任层级与审批
 

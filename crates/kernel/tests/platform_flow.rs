@@ -298,16 +298,18 @@ fn config() -> &'static str {
 }
 
 fn setup() -> (Bridge<MemoryStore>, Calls) {
-    setup_with("")
+    setup_with_qq_risk("")
 }
 
-/// 给 qq 那条连接额外加配置（比如 `allow_destructive = true`）。
-fn setup_with(extra: &str) -> (Bridge<MemoryStore>, Calls) {
+/// 给 qq 连接追加 `[connections.policy.risk]`（插在 dc 连接之前，
+/// 保证子表挂在 qq 这个数组元素上）。
+fn setup_with_qq_risk(policy: &str) -> (Bridge<MemoryStore>, Calls) {
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
-    // 插在 qq 连接的第一行配置后面；`account = "bot"` 全篇只出现一次。
     let text = config().replace(
-        "account = \"bot\"",
-        &format!("account = \"bot\"\n        {extra}"),
+        "[[connections]]\n        id = \"dc\"",
+        &format!(
+            "[connections.policy.risk]\n        {policy}\n\n        [[connections]]\n        id = \"dc\""
+        ),
     );
     let mut plugins = PluginManager::with_native_builtins();
     plugins
@@ -922,7 +924,7 @@ fn undeclared_param_is_refused_with_the_allowed_list() {
     assert!(error.message.contains("id"));
 }
 
-/// 破坏性操作默认关——白名单挡不住「模型被人骗着去调它有权调的破坏性方法」。
+/// 破坏性操作默认走票据 + 审批：直调被拒，且不交到适配器手上。
 #[test]
 fn destructive_method_is_refused_by_default() {
     let (mut bridge, calls) = setup();
@@ -935,17 +937,17 @@ fn destructive_method_is_refused_by_default() {
             "platform_call",
             json!({"op": "member.kick", "params": {"user_id": "1"}}),
         )
-        .expect_err("破坏性的默认不给");
+        .expect_err("默认 destructive=approval，直调不给");
 
     assert!(error.message.contains("forbidden"));
     // 关键：根本没交到适配器手上。
     assert!(calls.lock().expect("没被毒死").is_empty());
 }
 
-/// 但配了 `allow_destructive = true` 就要真的放行——「人能做的模型也能做」靠这一条成立。
+/// 显式 `destructive = "allow"` 等价于旧 `allow_destructive = true`：直调放行。
 #[test]
-fn destructive_method_runs_when_the_connection_allows_it() {
-    let (mut bridge, calls) = setup_with("allow_destructive = true");
+fn destructive_method_runs_when_policy_allows_it() {
+    let (mut bridge, calls) = setup_with_qq_risk("destructive = \"allow\"");
     let ticket = open_turn(&mut bridge);
 
     let result = bridge
@@ -961,10 +963,11 @@ fn destructive_method_runs_when_the_connection_allows_it() {
     assert_eq!(calls.lock().expect("没被毒死").len(), 1);
 }
 
-/// 只开名单里的那几个：列表外的仍然拒。
+/// 按方法名豁免保留：名单里的 destructive 直调，名单外的仍走票据。
 #[test]
-fn allow_destructive_list_only_opens_the_named_methods() {
-    let (mut bridge, calls) = setup_with("allow_destructive = [\"group.mute\"]");
+fn destructive_exempt_method_runs_directly() {
+    let (mut bridge, calls) =
+        setup_with_qq_risk("destructive = \"approval\"\ndestructive_exempt = [\"group.mute\"]");
     let ticket = open_turn(&mut bridge);
 
     let refused = bridge
@@ -974,7 +977,7 @@ fn allow_destructive_list_only_opens_the_named_methods() {
             "platform_call",
             json!({"op": "member.kick", "params": {"user_id": "1"}}),
         )
-        .expect_err("不在名单里");
+        .expect_err("不在豁免名单里，直调拒绝");
     assert!(refused.message.contains("forbidden"));
 
     let allowed = bridge
@@ -984,7 +987,7 @@ fn allow_destructive_list_only_opens_the_named_methods() {
             "platform_call",
             json!({"op": "group.mute", "params": {"user_id": "1"}}),
         )
-        .expect("在名单里");
+        .expect("在豁免名单里，直调放行");
     assert_eq!(allowed["done"], true);
     assert_eq!(calls.lock().expect("没被毒死").len(), 1);
 }

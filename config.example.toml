@@ -124,13 +124,6 @@ max_age_days = 90
 #   ws-server = 桥当服务端，等平台连过来（还没实现）
 # account 是这条连接登录的号：桥靠它认出「这句是我自己说的」。
 # 连上之后会跟平台报的号核对一次，对不上会警告。
-#
-# allow_destructive：破坏性平台方法（踢人、禁言、改群名、撤回别人消息、解散群……）
-# 放不放给模型。不写 = 全关。三种写法等价可选：
-#   allow_destructive = true                    # 全开：人在群里能做的，模型都能做
-#   allow_destructive = ["member.kick", "group.mute"]   # 只开这几个
-#   allow_destructive = false                   # 全关（默认）
-# 想让它真的顶一个人的位置干活，就写 true；只想像个普通成员聊天，就别写。
 
 [[connections]]
 id = "qq"
@@ -141,8 +134,16 @@ url = "ws://127.0.0.1:3001"
 token = ""
 account = "10001"
 admin_qqs = []   # 这些 QQ 号会被标成系统管理员（记录里的 sender.role = system_admin）
-# 想让它真顶一个人的位置（能踢人能禁言能改群名），把这行改成 true。
-allow_destructive = false
+#
+# 风险策略（连接级）：回答「这类操作默认要不要人点」。
+# write 默认 allow（直调）；destructive 默认 approval（票据 + 审批）；
+# critical 固定 approval，配成 allow 会启动失败。
+# 按方法名豁免：destructive_exempt 名单里的破坏性方法跳过审批、直接调用，
+# 名单外的仍走票据——等价于旧 allow_destructive = ["member.kick", ...]。
+# [connections.policy.risk]
+# destructive = "approval"
+# destructive_exempt = ["member.kick", "group.mute"]
+# 想全开（人在群里能做的，模型都能做）：destructive = "allow"
 # SnowLuma 兼容下限（默认 2.4.0）；低于下限只在启动日志告警，不断连。
 # options = { snowluma_min_version = "2.4.0" }
 #
@@ -333,8 +334,8 @@ ignore_speakers = ["987654321"]
 # admin_cooldown_secs = 30
 
 # 访问授权（可选）。不写 [grants] = 只有订阅边界。
-# 规则是叠加在订阅边界之上的常态授予；destructive 仍由 allow_destructive 单独把关，
-# platform / plugin 也必须在规则里显式列出，不会因为范围写大了就自动获得。
+# 规则是叠加在订阅边界之上的常态授予；destructive 仍由连接的 [connections.policy.risk]
+# 单独把关，platform / plugin 也必须在规则里显式列出，不会因为范围写大了就自动获得。
 #
 # 典型写法 1：订阅内读写（把规则钉在已订阅目标上）
 # [[grants.rules]]
@@ -350,7 +351,7 @@ ignore_speakers = ["987654321"]
 # [[grants.rules]]
 # subject = "bot_admin"
 # place = "private"
-# scope = "any"
+# scope = "subscribed"
 # capability = ["room_read", "room_write", "connection_read", "plugin"]
 #
 # 典型写法 3：系统管理员（私信/控制台常驻，群内同账号不提权）
@@ -361,19 +362,19 @@ ignore_speakers = ["987654321"]
 # [[grants.rules]]
 # subject = "system_admin"
 # place = "private"
-# scope = "any"
+# scope = "subscribed"
 # capability = ["room_read", "room_write", "connection_read"]
 #
 # 能力：room_read / room_write / connection_read / platform / destructive /
 #       access_request / account_read / plugin。
 # critical / account_secret 不能常驻授予，只能走 access_request 票据。
-# 场所：private / group / console / none；范围：any / subscribed / room / connection。
+# 场所：private / group / console / none；范围：subscribed / room / connection。
 #
 # scope = "room" / "connection" 时必须给 typed target：
 #   target = { kind = "room", id = "qq:group/123" }
 #   target = { kind = "connection", id = "qq" }
 # 旧写法 target = "qq:group/123" 会在启动解析期直接报错，不留兼容层。
-# scope = "any" 只覆盖本会话可达的 kind/目标，不是无条件全开。
+# scope = "subscribed" 只覆盖本会话可达的 kind/目标，不是无条件全开。
 # access_request 默认：群友只能申请本会话已订阅目标；system_admin / bot_admin 在私信
 # 或控制台可申请任意目标；跨目标要显式规则（scope = "room" / "connection" + typed target）。
 # 未知字段或未知枚举会在启动解析期报错，不会静默忽略。

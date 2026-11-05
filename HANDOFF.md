@@ -87,9 +87,10 @@ core 迟早认识 QQ。
   OneBot 侧不需要新通道：`Action{action,params,echo}` 本来就是通用 RPC，`send` 只是它的特例。
 - 错误分五种，分类当 message 前缀给模型：`unknown_method`（附同组近似名）/ `unsupported_platform` /
   `not_implemented` / `forbidden` / `bad_params`（指出哪个字段）。模型靠这个自己纠错，不是靠猜。
-- `Risk::Destructive` 默认拒，但连接上一个开关能放行：`allow_destructive = true`（全开）/
-  `["group.kick"]`（只开这几个）/ 不写（全关）。真机 `config.toml` 现在是 `true`——
-  用户要求「人能做的模型都能做」。开了就意味这个号能干的事模型都能干，这是明示的风险。
+- `Risk::Destructive` 默认票据 + 审批；连接级 `[connections.policy.risk]` 可设
+  `destructive = "allow"`（全开）或 `destructive_exempt = ["group.kick"]`（只开这几个）。
+  真机 `config.toml` 现在要迁移到 `destructive = "allow"`——用户要求「人能做的模型都能做」。
+  开了就意味这个号能干的事模型都能干，这是明示的风险。
 - opaque 渲染带上「可调什么」（affordance）：`[QQ 平台特有内容（未展开，可调
   platform_call(method="forward.get_content", params={"id":"…"}) 读取正文），原样如下：{…}]`。
   不主动展开正文（体积/限流/隐私），但也不让模型以为自己无能为力。
@@ -194,8 +195,9 @@ systemctl --user stop acb-drivers acb-bridge        # 停（顺序：驱动先�
 3. ~~**git 仓库有个异常的 `~/` 目录**~~（已清理 2026-11-01）：已移到 `/tmp/acb-stray-home-dir-20261101`，仓库里不再有该目录。
 4. ~~平台能力只有 4 个纯读方法~~（已完成）：现在 52 个，覆盖「人在这号上能做的事」，
    全部对着真机 NapCat 探测过。表在 `crates/adapters/onebot11/src/catalog.rs`。
-5. ~~破坏性方法的配置开关~~（已完成）：`[[connections]] allow_destructive = true / ["group.kick"] / 省略`。
-   真机现在开的是 `true`。
+5. ~~破坏性方法的配置开关~~（已完成，2026-11-05 改面）：`[[connections]]` 下的
+   `[connections.policy.risk]`：`destructive = "allow"` / `destructive_exempt = ["group.kick"]` / 省略（默认 approval）。
+   真机现在要写 `destructive = "allow"`。
 6. **待验证**：真实消息触发时，模型是否会自己调 `message.forward_content` 把转发正文读出来，
    以及平台特有方法（`platform_call`）这条通路在**模型手里**用不用得顺。
    （方法名/参数名已在真机上逐个探测过，桥侧校验与路由有测试覆盖；差的是「模型真的会去调」这一步。）

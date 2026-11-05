@@ -53,7 +53,9 @@ HTTP 地址也可以给，但要保证**平台那边**访问得到，否则平�
 agent 在流水里看得到这个身份；桥的默认唤醒策略不会因此改变行为。它本身也不代表任何自动通知。
 agent 的运行反馈（失败原因、异常通知）
 发给哪个房间，由会话的 `on_turn_error` / 全局 `default_on_turn_error` 决定。
-想让 agent 帮你做点危险操作（踢人、改群名），在连接上开 `allow_destructive`，并想清楚后果。
+想让 agent 帮你做点危险操作（踢人、改群名），在连接上把 `[connections.policy.risk]`
+的 `destructive` 设成 `allow`（或加进 `destructive_exempt`），并想清楚后果。
+默认 `approval` 时由你私信审批票据，不会直接执行。
 
 `/stop` 由消息路由插件 [`lua.stop_command`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/stop_command.lua) 提供（示例配置里已经挂上）。管理员在订阅房间发 `/stop`（也认
 `/stop@机器人名`）可以**提前结束当前轮次**：插件会打断这个房间里正在跑的轮次，并清掉

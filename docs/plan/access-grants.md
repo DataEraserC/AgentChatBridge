@@ -14,7 +14,7 @@
 - **群内常驻权限为零**：即使群里发言的账号是管理员本人，也不自动提权。群里要动危险操作，只能**提出申请**；审批必须在**私信**里进行。
 - 权限分两层：**常态授予**（配置写死的几条，带场所限制）与**一次性票据**（绑定本轮 + 单目标房间 + 具体 op 列表 + 过期时间；出轮即废、用后即废、可撤销、不跨轮）。
 - 授权判定只允许**一个实现**：内置四元组评估器，或一个外部策略（RBAC / 外接）。同一时刻不允许两套判据并存；插件缺席用内置实现，解析失败 fail closed。
-- `MethodSpec.risk = Destructive` + `allow_destructive` 与授权是**叠加**关系：授权只扩大范围，不替代 destructive 闸门。系统管理员也不能绕过 `allow_destructive`。
+- `MethodSpec.risk` + 连接级 `[connections.policy.risk]` 与授权是**叠加**关系：授权只扩大范围，不替代风险策略（直调 / 票据 + 审批）。
 
 ---
 
@@ -26,7 +26,7 @@
 |---|---|---|
 | `ToolAccessProvider` | [plugin.rs](../../crates/kernel/src/plugin.rs#L663-L665)，调用 [engine.rs](../../crates/kernel/src/engine.rs#L4112-L4164) | 按工具名/参数/轮次上下文做插件级否决；只能 Deny，不能 Allow 覆盖 core |
 | `AccessProvider` | [plugin.rs](../../crates/kernel/src/plugin.rs#L767-L769)，调用 [engine.rs](../../crates/kernel/src/engine.rs#L4258-L4373) | 按会话策略判定房间（Read/Send）或连接（Connection）访问 |
-| `Risk::Destructive` | [engine.rs](../../crates/kernel/src/engine.rs#L3875-L3888)，`allows_destructive` [engine.rs](../../crates/kernel/src/engine.rs#L6591-L6597) | 破坏性平台动作的独立闸门，按连接 `allow_destructive` 放行 |
+| `Risk::Destructive` | [engine.rs](../../crates/kernel/src/engine.rs)，`connection_allows_destructive` | 破坏性平台动作的独立闸门，按连接 `[connections.policy.risk]` 决定直调或票据 + 审批 |
 
 当前实际行为：
 
@@ -74,7 +74,7 @@
 
 - 配置指定平台账号；**入口限私信**：只有该账号在私信房间触发的轮次才获得这一档。
 - 范围 = **已订阅目标**。不能因为这一档访问未订阅房间。
-- 能力 = 全部平台动作 + 完整 `plugin_tool_call`；但 `destructive` 仍要过 `allow_destructive`。
+- 能力 = 全部平台动作 + 完整 `plugin_tool_call`；但 `destructive` 仍要过连接风险策略（直调或票据）。
 - 判定点：
   - 轮次开始：`origin_sender` 命中 bot admin 配置，且 `origin_room` 是私信房间。
   - `place = group` 时，即使账号相同，也不获得这一档。
@@ -87,7 +87,7 @@
 - 单独一条配置，通常是用户本人账号；**不是** `connections[].admin_qqs`（后者只用于标记群角色，不是全局权限）。
 - 常驻场所 = **私信 / 控制台**；**群聊不自动提权**，即使说话的是同一个账号。
 - 范围 = **任意目标，含未订阅房间/连接**（仅在允许的场所内）。
-- 能力 = 任意操作；`destructive` 仍要过 `allow_destructive`。
+- 能力 = 任意操作；`destructive` 仍要过连接风险策略（直调或票据）。
 - 启动时打醒目日志，例如：
   - `[access] system_admin configured connection=qq account=10002; standing grant: private/console only`
 - **每次使用记审计**：主体 / 场所 / 能力 / 目标。建议结构化一行：
@@ -133,12 +133,14 @@ evaluate(subject, place, scope, capability, target) -> allow/deny + reason
 - 插件缺席或加载失败 → 用内置实现并 fail closed；不要出现"没有 provider 所以放行"。
 - 现有 `AccessProvider` / `ToolAccessProvider` 在阶段二收敛为**调用适配器**：授权结论只由唯一 evaluator 产生；`ToolAccessProvider` 若保留，只能做非授权的工具过滤/否决，不能成为第二套授权来源。
 
-### 4.4 与 `Destructive` / `allow_destructive` 的关系：叠加
+### 4.4 与 `Destructive` / 风险策略的关系：叠加
 
 - 授权只决定"能不能到这个目标/用这个能力"；`Risk::Destructive` 是第二道独立闸门。
 - 结论：**叠加，不替代**。
-- 即使 system admin，`member.kick` / `group.mute` / `msg.recall` 等仍要求目标连接配置了 `allow_destructive`（或方法白名单）。
-- 不把 `allow_destructive` 并入 grant 表，也不因为 grant 放行就跳过它。
+- 即使 system admin，`member.kick` / `group.mute` / `msg.recall` 等仍受目标连接
+  `[connections.policy.risk]` 约束：默认 `destructive = "approval"`（票据 + 审批），
+  只有显式 `destructive = "allow"` 或 `destructive_exempt` 名单里的方法才直调。
+- 不把风险策略并入 grant 表，也不因为 grant 放行就跳过它。
 
 ---
 
@@ -164,13 +166,13 @@ account = "10002"
 [[grants.rules]]
 subject = "bot_admin"
 place = "private"
-scope = "subscribed"          # any / subscribed / room / connection
+scope = "subscribed"          # subscribed / room / connection
 capability = ["room_read", "room_write", "plugin"]
 
 [[grants.rules]]
 subject = "system_admin"
 place = "private"
-scope = "any"
+scope = "subscribed"
 capability = ["room_read", "room_write", "connection_read", "platform", "destructive", "access_request", "account_read", "plugin"]
 ```
 
@@ -180,7 +182,7 @@ capability = ["room_read", "room_write", "connection_read", "platform", "destruc
 
 - `bot_admin.accounts` 可多条，但每条必须带 `connection` 和 `account`。
 - `system_admin` 只允许一条；重复配置在解析期拒绝。
-- `scope = "room"` / `"connection"` 必须给 `target`；`any` / `subscribed` 不许给 `target`。
+- `scope = "room"` / `"connection"` 必须给 `target`；`subscribed` 不许给 `target`。
 - `capability` 不能为空、不能重复，值域是封闭枚举。
 - `[grants]` 省略 = 只有订阅边界；未知字段/未知枚举在启动解析期直接报错。
 - 外部 evaluator 通过 `[sessions.access] provider = "..."` 整体替换；此时该会话不跑内置 grants。
@@ -252,7 +254,8 @@ approval_route = ["qq:private/10002"]
    - `subject=bot_admin` + `place=private` → 仅已订阅目标；
    - `subject=system` / `place=none`、其他主体，或 `place=group` 且没有票据 → 走现有 room access；
    - 票据：命中本轮 + 单目标房间 + op 列表 + 未过期 → 允许该 op。
-3. **destructive**：`MethodSpec.risk == Destructive` → 查连接 `allow_destructive`；未放行则拒绝。
+3. **风险策略**：`MethodSpec.risk` → 查连接 `[connections.policy.risk]`：`allow` 直调；
+   `approval` 拒绝直调，改走 `access_request` 票据 + 审批。`critical` 固定 `approval`。
 4. **平台 I/O**。
 
 `plugin_tool_call` 走 1 → 2（用显式 `scope`）→ 4；它没有 `MethodSpec.risk`，所以不经过 core 的 destructive 表。插件工具内部如果自己调平台，core 看不到；这是插件信任边界，见 9.2。
@@ -302,7 +305,7 @@ approval_route = ["qq:private/10002"]
 | 其他 | 任意 | 现有 room access | 现有能力 |
 
 - 常态授予不随 agent 的自我声明变化。
-- `destructive` 能力仍受 `allow_destructive` 叠加限制。
+- `destructive` 能力仍受连接风险策略约束（直调或票据）。
 - 群内没有常态授予行；`place=group` 的 bot/system admin 自动落回普通 room access。
 
 ### 6.2 一次性票据（已实现）
@@ -339,12 +342,12 @@ AccessTicket {
   审批回来时轮次往往已经结束。`request_turn` 只用于审计；票据有效期内由同一会话使用。
 - **单目标房间**：一张票据只覆盖一个房间；连接级访问（好友列表等）不走票据。
 - **具体 op 列表**：只放行列出的 op；`platform_call` 必须写成 `platform_call:<op>`。
-- **用后即废**：命中一次 `ensure_room_access` 或批准后由 core 执行一次就置 `used`。即使随后被
-  `allow_destructive` 拒绝，也不退回票据（fail closed）。
+- **用后即废**：命中一次 `ensure_room_access` 或批准后由 core 执行一次就置 `used`。即使随后执行失败，
+  也不退回票据（fail closed）。
 - **过期**：pending 10 分钟；批准后 active 2 分钟。到点即 `expired`。
 - **可撤销**：私信管理员可以 `/revoke <id>`，立刻置 `revoked`。
-- **只放宽房间目标**：票据不绕过 `allow_destructive`，不授予 `plugin` 全权，
-  也不改变连接级或订阅边界之外的其它闸门。
+- **只放宽房间目标**：票据不授予 `plugin` 全权，也不改变连接级或订阅边界之外的其它闸门；
+  批准后的 destructive 执行不再被直调风险策略拦住，但 `critical` 仍需票据带 `critical` 能力。
 - **内存存储**：票据只活在本进程。重启后 pending/active 全部失效，不落库、
   不重新发审批消息——过期授权不能因为重启复活。
 
@@ -389,7 +392,7 @@ fail-closed 预检。deny / 预检失败都不建票、不发审批私信，并�
 | 其它主体 | `group` / `private` / `console` | 本会话已订阅的房间 | allow（`base:subscription`） |
 | 其它主体 | 任意 | 未订阅目标 | deny（`base:not_subscribed`） |
 
-显式 `[[grants.rules]]` 可以放开跨目标：`scope = "any"` / `"room"` / `"connection"`，
+显式 `[[grants.rules]]` 可以放开跨目标：`scope = "subscribed"` / `"room"` / `"connection"`，
 `capability` 必须包含 `access_request`。规则命中后覆盖默认表；匹配到规则但没列出
 该能力时按 deny 处理（fail closed）。
 
@@ -398,9 +401,11 @@ fail-closed 预检。deny / 预检失败都不建票、不发审批私信，并�
 1. 连接存在（`unknown_connection`）；
 2. op 在目标连接的 catalog 里（未知 op 直接拒绝）；
 3. 参数形状（`validate_ticket_params` 复用 `check_params` 与目标参数校验）；
-4. `destructive` 且该连接未开 `allow_destructive` → `[destructive_disabled]`，**不产生票据**；
-5. `critical` 允许申请（票据能力含 `critical`），但常驻授予仍被配置校验拒绝；
-6. 冷却与额度不变：会话 60s、管理员全局 30s、每轮 3 组、每会话活票上限 8。
+4. `critical` 允许申请（票据能力含 `critical`），但常驻授予仍被配置校验拒绝；
+5. 冷却与额度不变：会话 60s、管理员全局 30s、每轮 3 组、每会话活票上限 8。
+
+`access_request` 本身不受连接风险策略影响：即使 `destructive = "approval"`（或 `allow`），
+申请永远可以发起；策略只决定直调路径。
 
 审批身份（2026-11-05 更新）：`Room(Direct)` / `Console` 仍要求
 `grants.subject_for(...) ∈ {system_admin, bot_admin}`；`Room(MultiParty)` 改由
@@ -414,7 +419,7 @@ fail-closed 预检。deny / 预检失败都不建票、不发审批私信，并�
 票据审计行同时记录 `sender` / `sender_name` / `reason`。
 
 申请被拒时写
-`[access-request] denied sender=... sender_name=... room=... target=... code=<access_request_denied|destructive_disabled|unknown_connection> detail="..."`。
+`[access-request] denied sender=... sender_name=... room=... target=... code=<access_request_denied|unknown_connection> detail="..."`。
 
 **typed target（2026-11-05 实装）**
 
@@ -427,7 +432,7 @@ fail-closed 预检。deny / 预检失败都不建票、不发审批私信，并�
   `target = { kind = "connection", id = "qq" }`。旧字符串写法在启动解析期直接报错。
 - 能力表：`account_read` 读账号资料；`account_secret` 取账号凭证，与 `critical` 同级，
   不可常驻授予，只能走票据。
-- `scope = "any"` 只覆盖本会话可达的 kind/目标（房间、连接、账号、可达房间下的
+- `scope = "subscribed"` 只覆盖本会话可达的 kind/目标（房间、连接、账号、可达房间下的
   成员/消息/文件），不是无条件全开；跨 kind 放宽必须靠显式规则。
 - catalog 的 `MethodSpec::access_kind()` 与 grants 使用同一个 kind：`account.*` /
   `file.*` / `stream.*` → `account`，其它 connection-scope → `connection`，room-scope →
@@ -578,7 +583,7 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 - 权限合并/并集。
 - 跨实例联邦、远程授权。
 - 逐 action ACL 矩阵。
-- 把 `allow_destructive` 合并进 grant 表。
+- 把连接级风险策略合并进 grant 表。
 - 群内自动提权（即使账号是管理员本人）。
 - 长期/全局票据。
 
@@ -605,7 +610,8 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 - 执行入口复用现有路径：
   - `send_message` / `send_message_to`：`prepare_send` / `deliver_out`；
   - `platform_call:<op>`：`prepare_platform_call` + 锁外 execute + `finish_platform_call`。
-- 执行前仍检查 `MethodSpec.risk = Destructive` 的 `allow_destructive`；票据不放宽这个闸门。
+- 执行前不再走直调风险策略：票据批准本身就是放行依据；`critical` / unverified 仍要求
+  票据带对应能力（`critical`）。
 - 票据不授予 `plugin` 能力，不改变会话的常态 grants；执行只使用票据快照里的目标/op/参数。
 - 单条执行结果：`succeeded` / `failed` / `skipped`，附失败原因；批量逐条记录，不因一条失败中止后续。
 - 只读 op（`get_history` 等）不由 core 执行：票据保持 `active`，由会话在有效期内自己重试一次；
@@ -661,5 +667,5 @@ ticket id、state、principal、place、capability、target、ops、session、tu
 
 - 模型可以在重发时改写正文；目标房间和 op 能校验，消息内容不能校验，等于管理员批准的内容无法保证。
 - 唤醒模型重发还会把「管理员批准」误当成群里那一轮的提权来源，违反「群内零常驻」。
-- core 执行快照可以保证：批准的是什么，执行的就是什么；票据只放宽目标动作，执行前仍过
-  `allow_destructive`，不碰 plugin 权限。
+- core 执行快照可以保证：批准的是什么，执行的就是什么；票据只放宽目标动作，执行前仍按
+  `critical` 能力校验，不碰 plugin 权限。

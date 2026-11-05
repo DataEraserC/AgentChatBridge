@@ -70,7 +70,7 @@ fn connection() -> Connection {
         token: None,
         account: "bot".into(),
         admin_qqs: Vec::new(),
-        allow_destructive: Default::default(),
+        risk: Default::default(),
         receive: Default::default(),
         routes: Vec::new(),
     }
