@@ -86,6 +86,19 @@ path = "state/acb.db"
 max_records_per_room = 5000
 max_age_days = 90
 
+# 记忆管家：后台把「会话 × 记忆」的 worktree 推到远端、把远端提交合回来。
+# 不写在 core 的轮次路径里；失败/冲突只记状态并通知会话，不挡对话。
+# enabled = false（默认）时不起线程。
+# [memory_steward]
+# enabled = true
+# interval_secs = 300       # 时间触发；0 = 关闭（与 commit_threshold 至少开一个）
+# commit_threshold = 5      # 本地新增提交数触发；0 = 关闭
+# poll_secs = 30            # 后台检查间隔，不是同步周期
+# merge_strategy = "merge"  # merge | rebase
+# auto_resolve = "none"     # none（默认：冲突停下并列文件）| local | remote
+# state_dir = "state/memory-steward"
+# git_timeout_secs = 120
+
 # ---------------------------------------------------------------------------
 # 连接
 # ---------------------------------------------------------------------------

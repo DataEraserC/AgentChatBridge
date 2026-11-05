@@ -19,6 +19,7 @@ acb-adapter-process = { path = "../adapters/process" }
 acb-adapter-dynamic = { path = "../adapters/dynamic" }
 acb-extensions = { path = "../extensions" }
 acb-proto = { path = "../proto" }
+acb-memory-steward = { path = "../memory-steward" }
 serde_json = { workspace = true }
 # SIGTERM / SIGHUP 处理。只做信号到原子量的转发，handler 里不碰任何非信号安全函数。
 libc = "0.2"

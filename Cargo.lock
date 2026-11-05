@@ -79,6 +79,7 @@ dependencies = [
  "acb-extensions",
  "acb-i18n",
  "acb-kernel",
+ "acb-memory-steward",
  "acb-plugin-lua",
  "acb-plugin-process-tools",
  "acb-plugin-trusted",
@@ -127,6 +128,16 @@ version = "0.1.0"
 dependencies = [
  "acb-supervisor",
  "libc",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "acb-memory-steward"
+version = "0.1.0"
+dependencies = [
+ "acb-proto",
  "serde",
  "serde_json",
  "toml",

@@ -18,6 +18,7 @@ members = [
     "crates/supervisor-policy",
     "crates/supervisor",
     "crates/launcher",
+    "crates/memory-steward",
     "crates/bridge",
 ]
 
