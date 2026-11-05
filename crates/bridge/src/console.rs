@@ -11,11 +11,14 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use acb_kernel::{Bridge, ControlRegistry, DependencyRegistry, QueueStats, RouteWorker, Store};
+use acb_kernel::{
+    Bridge, CONSOLE_CONFIG_FILENAME, ConfigSource, ControlRegistry, DependencyRegistry, QueueStats,
+    RouteWorker, Store,
+};
 use acb_proto::Frame;
 use serde_json::json;
 
@@ -67,8 +70,12 @@ pub struct Console<S: Store> {
     bridge: Arc<Mutex<Bridge<S>>>,
     controls: ControlRegistry,
     token: String,
-    /// 配置文件路径：编辑写回要落到这个文件（ADR-0009）。
+    /// base 配置文件路径（`--config`）；控制台保存不再写它。
     config_path: String,
+    /// 分片目录；控制台保存写到 `<config_dir>/90-console.toml`。
+    config_dir: String,
+    /// 本次启动实际加载的配置文件与贡献计数（只读展示）。
+    config_sources: Vec<ConfigSource>,
     /// 入站队列统计。
     inbound_stats: QueueStats,
     /// 路由动作 worker（拿队列统计与 busy 数）。
@@ -87,6 +94,8 @@ impl<S: Store + Send + 'static> Console<S> {
         controls: ControlRegistry,
         token: String,
         config_path: String,
+        config_dir: String,
+        config_sources: Vec<ConfigSource>,
         inbound_stats: QueueStats,
         route_worker: RouteWorker,
         deps: DependencyRegistry,
@@ -97,11 +106,44 @@ impl<S: Store + Send + 'static> Console<S> {
             controls,
             token,
             config_path,
+            config_dir,
+            config_sources,
             inbound_stats,
             route_worker,
             deps,
             memory_steward,
         }
+    }
+
+    /// 控制台保存目标：分片目录里的最高优先级独立文件。
+    fn console_config_path(&self) -> PathBuf {
+        Path::new(&self.config_dir).join(CONSOLE_CONFIG_FILENAME)
+    }
+
+    /// 编辑器当前展示的文本：有控制台覆盖层就展示它，否则展示 base。
+    fn console_document(&self) -> Result<(String, String), (u16, String)> {
+        let overlay = self.console_config_path();
+        let (path, text) = if overlay.exists() {
+            let text = std::fs::read_to_string(&overlay);
+            (overlay, text)
+        } else {
+            (
+                PathBuf::from(&self.config_path),
+                std::fs::read_to_string(&self.config_path),
+            )
+        };
+        text.map(|text| (path.display().to_string(), text))
+            .map_err(|error| {
+                (
+                    500,
+                    json!({"error": acb_i18n::t!(
+                        "bridge.console.read_config_failed",
+                        path = path.display().to_string(),
+                        error = error
+                    )})
+                    .to_string(),
+                )
+            })
     }
 
     /// 守着监听端口，来一个请求处理一个。
@@ -434,6 +476,13 @@ impl<S: Store + Send + 'static> Console<S> {
             "queued_turns": bridge.queued_turns(),
             "config_version": bridge.config_version(),
             "staged_config": bridge.has_staged_config(),
+            "config_fragments": self.config_sources.iter().map(|source| json!({
+                "path": source.path,
+                "connections": source.connections,
+                "sessions": source.sessions,
+                "rules": source.rules,
+            })).collect::<Vec<_>>(),
+            "rules": config.grants.rules.len(),
             "queues": queue_status(&inbound, &route, self.route_worker.busy()),
             "dependencies": {
                 "status": dependencies["status"],
@@ -447,20 +496,9 @@ impl<S: Store + Send + 'static> Console<S> {
 
     /// 配置 TOML 原文。**只在鉴权之后给**——原文里就是明文密钥，管理员编辑用。
     fn config_toml(&self) -> (u16, String) {
-        match std::fs::read_to_string(&self.config_path) {
-            Ok(text) => (
-                200,
-                json!({"path": self.config_path, "text": text}).to_string(),
-            ),
-            Err(error) => (
-                500,
-                json!({"error": acb_i18n::t!(
-                    "bridge.console.read_config_failed",
-                    path = self.config_path,
-                    error = error
-                )})
-                .to_string(),
-            ),
+        match self.console_document() {
+            Ok((path, text)) => (200, json!({"path": path, "text": text}).to_string()),
+            Err(response) => response,
         }
     }
 
@@ -468,7 +506,8 @@ impl<S: Store + Send + 'static> Console<S> {
     ///
     /// 顺序是先校验后落盘：解析不过就原样退回，一个字节都不写——
     /// 「用户不该需要懂文件格式」的底线是**坏配置永远进不了磁盘**。
-    /// 落盘前把旧文件备份成 `<路径>.bak`（只留最近一份）。
+    /// 保存目标固定为 `<config_dir>/90-console.toml`，不再改写 `--config`；
+    /// 旧覆盖层备份成 `90-console.toml.bak`（只留最近一份）。
     /// 解析通过的新配置暂存进桥，下一次开轮换上（ADR-0009 轮次边界重载）。
     /// 返回里带影响清单：哪些下一轮自动生效、哪些要重启桥。
     fn save_config_toml(&self, body: &str) -> (u16, String) {
@@ -489,9 +528,13 @@ impl<S: Store + Send + 'static> Console<S> {
             );
         };
 
-        // 1. 校验：解析不过就拒绝，什么都不写。
-        let new_config = match acb_kernel::Config::parse(text) {
-            Ok(config) => config,
+        // 1. 校验：把这段文本当作 90-console 覆盖层，和 base + 其他分片一起解析。
+        let new_config = match acb_kernel::Config::load_with_console_overlay(
+            Path::new(&self.config_path),
+            Path::new(&self.config_dir),
+            text,
+        ) {
+            Ok(loaded) => loaded.config,
             Err(error) => {
                 return (
                     400,
@@ -542,19 +585,9 @@ impl<S: Store + Send + 'static> Console<S> {
             );
         }
 
-        let text = match std::fs::read_to_string(&self.config_path) {
-            Ok(text) => text,
-            Err(error) => {
-                return (
-                    500,
-                    json!({"error": acb_i18n::t!(
-                        "bridge.console.read_config_failed",
-                        path = self.config_path,
-                        error = error
-                    )})
-                    .to_string(),
-                );
-            }
+        let (_path, text) = match self.console_document() {
+            Ok(document) => document,
+            Err(response) => return response,
         };
         let (new_text, changes) = match crate::config_patch::apply_patch(&text, ops) {
             Ok(result) => result,
@@ -562,8 +595,12 @@ impl<S: Store + Send + 'static> Console<S> {
                 return (400, json!({"error": error, "saved": false}).to_string());
             }
         };
-        let new_config = match acb_kernel::Config::parse(&new_text) {
-            Ok(config) => config,
+        let new_config = match acb_kernel::Config::load_with_console_overlay(
+            Path::new(&self.config_path),
+            Path::new(&self.config_dir),
+            &new_text,
+        ) {
+            Ok(loaded) => loaded.config,
             Err(error) => {
                 return (
                     400,
@@ -615,35 +652,23 @@ impl<S: Store + Send + 'static> Console<S> {
             }
         }
 
-        // 备份失败不算致命（首次保存时旧文件可能不存在），但落盘失败必须报——
-        // 不能让「磁盘上和桥里跑的」悄悄分家。
-        let old_text = std::fs::read_to_string(&self.config_path).ok();
-        if let Some(old_text) = &old_text {
-            let backup_path = format!("{}.bak", self.config_path);
-            if let Err(error) = std::fs::write(&backup_path, old_text) {
-                eprintln!(
-                    "{}",
-                    acb_i18n::t!(
-                        "bridge.console.backup_failed",
-                        path = backup_path,
-                        error = error
-                    )
-                );
+        // 保存目标固定为 90-console.toml；目录不存在时自动创建。
+        let backup = match persist_console_config(&self.config_dir, text) {
+            Ok(backup) => backup,
+            Err(error) => {
+                return Err((
+                    500,
+                    json!({
+                        "error": acb_i18n::t!(
+                            "bridge.console.write_config_failed",
+                            path = self.console_config_path().display().to_string(),
+                            error = error
+                        ),
+                        "saved": false
+                    }),
+                ));
             }
-        }
-        if let Err(error) = std::fs::write(&self.config_path, text) {
-            return Err((
-                500,
-                json!({
-                    "error": acb_i18n::t!(
-                        "bridge.console.write_config_failed",
-                        path = self.config_path,
-                        error = error
-                    ),
-                    "saved": false
-                }),
-            ));
-        }
+        };
 
         {
             let mut bridge = lock(&self.bridge);
@@ -657,7 +682,7 @@ impl<S: Store + Send + 'static> Console<S> {
             "changes": changes,
             "hot_reload": hot,
             "needs_restart": restart,
-            "backup": old_text.map(|_| format!("{}.bak", self.config_path)),
+            "backup": backup,
         }))
     }
 
@@ -1215,6 +1240,32 @@ fn reload_impact(old: &acb_kernel::Config, new: &acb_kernel::Config) -> (Vec<Str
     (hot, restart)
 }
 
+/// 控制台保存落点：创建 `<config_dir>/90-console.toml`，旧覆盖层备份成 `.bak`。
+/// 返回备份路径（首次保存没有旧文件时为空）。与桥无关，便于单测。
+fn persist_console_config(config_dir: &str, text: &str) -> std::io::Result<Option<String>> {
+    let target = Path::new(config_dir).join(CONSOLE_CONFIG_FILENAME);
+    std::fs::create_dir_all(config_dir)?;
+    let old_text = std::fs::read_to_string(&target).ok();
+    let backup = old_text
+        .as_ref()
+        .map(|_| format!("{}.bak", target.display()));
+    if let Some(old_text) = &old_text {
+        let backup_path = format!("{}.bak", target.display());
+        if let Err(error) = std::fs::write(&backup_path, old_text) {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "bridge.console.backup_failed",
+                    path = backup_path,
+                    error = error
+                )
+            );
+        }
+    }
+    std::fs::write(&target, text)?;
+    Ok(backup)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1392,5 +1443,101 @@ token = "ctok123"
         let (hot, restart) = reload_impact(&old, &same);
         assert_eq!(hot, Vec::<String>::new());
         assert_eq!(restart, Vec::<String>::new());
+    }
+
+    static TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "acb-console-save-{label}-{}-{}",
+                std::process::id(),
+                TEST_DIR_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&path).expect("创建临时目录");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const SAVE_BASE: &str = r#"
+delivery_limit = 10
+
+[[connections]]
+id = "qq"
+platform = "qq"
+kind = "onebot11"
+url = "ws://127.0.0.1:3001"
+account = "10001"
+
+[[personas]]
+id = "default"
+name = "默认人格"
+text = "你是桥。"
+
+[[harnesses]]
+id = "dsh"
+name = "DeepSeek"
+
+[[sessions]]
+id = "main"
+harness = "dsh"
+persona = "default"
+token = "t-main"
+
+[[sessions.subscriptions]]
+connection = "qq"
+room = "group/123"
+"#;
+
+    #[test]
+    fn console_save_lands_in_90_and_survives_base_regeneration() {
+        let dir = TestDir::new("persist");
+        let base = dir.0.join("base.toml");
+        let config_dir = dir.0.join("config.d");
+        std::fs::write(&base, SAVE_BASE).expect("写 base");
+        let console_text = SAVE_BASE.replace("delivery_limit = 10", "delivery_limit = 50");
+        let saved = persist_console_config(&config_dir.display().to_string(), &console_text)
+            .expect("写 90-console");
+        assert!(saved.is_none(), "首次保存没有旧覆盖层");
+        assert!(
+            config_dir.join(CONSOLE_CONFIG_FILENAME).exists(),
+            "90-console 文件必须存在"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&base).expect("读 base"),
+            SAVE_BASE,
+            "控制台保存不能改写 base"
+        );
+
+        let first = acb_kernel::Config::load(&base, Some(&config_dir)).expect("首次加载");
+        assert_eq!(first.config.delivery_limit, 50);
+
+        // 模拟部署侧重新生成 base：控制台改动必须仍然生效。
+        std::fs::write(
+            &base,
+            SAVE_BASE.replace("delivery_limit = 10", "delivery_limit = 20"),
+        )
+        .expect("重写 base");
+        let second = acb_kernel::Config::load(&base, Some(&config_dir)).expect("重生成后加载");
+        assert_eq!(second.config.delivery_limit, 50, "控制台改动仍在");
+
+        let console_text = console_text.replace("delivery_limit = 50", "delivery_limit = 60");
+        let backup = persist_console_config(&config_dir.display().to_string(), &console_text)
+            .expect("第二次写 90-console")
+            .expect("第二次保存有备份");
+        let backup_text = std::fs::read_to_string(backup).expect("读备份");
+        assert!(
+            backup_text.contains("delivery_limit = 50"),
+            "备份是旧覆盖层"
+        );
     }
 }
