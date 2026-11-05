@@ -1,6 +1,7 @@
 # 访问授权（Access Grants）设计
 
-> 状态：阶段一设计，**不实现授权表、票据系统或审批流**。阶段一 B 的两个洞已单独实现并测试。
+> 状态：**已实现（2026-11-05）**。票据申请准入、预检与审批身份已接进 core；
+> `target` 类型化（第二笔）尚未落地，见 §6.2.2 的说明。
 > 目标：在不引入完整 RBAC 的前提下，明确「谁、在什么场所、什么范围、能做什么、对哪个目标」，并让默认拒绝、豁免和临时授权可审计。
 
 ---
@@ -170,7 +171,7 @@ capability = ["room_read", "room_write", "plugin"]
 subject = "system_admin"
 place = "private"
 scope = "any"
-capability = ["room_read", "room_write", "connection_read", "platform", "destructive", "plugin"]
+capability = ["room_read", "room_write", "connection_read", "platform", "destructive", "access_request", "critical", "plugin"]
 ```
 
 `[grants.tickets]` 等票据配置在阶段二再加；当前解析器不认识它，写了会按未知字段启动失败。
@@ -312,6 +313,55 @@ admin_cooldown_secs = 30     # 同一个 system admin 收到两条审批私信�
 
 ### 6.3 申请与审批（命令实现）
 
+**申请准入（2026-11-05 实装）**
+
+`access_request` 不再无条件建票；申请前必须过 `evaluate_access_request`，再跑一遍
+fail-closed 预检。deny / 预检失败都不建票、不发审批私信，并留一行审计。
+
+默认规则表：
+
+| subject | place | 目标 | 结果 |
+|---|---|---|---|
+| `system_admin` / `bot_admin` | `private` / `console` | 任意已配置连接上的房间 | allow（`base:admin_private`） |
+| 其它主体 | `group` / `private` / `console` | 本会话已订阅的房间 | allow（`base:subscription`） |
+| 其它主体 | 任意 | 未订阅目标 | deny（`base:not_subscribed`） |
+
+显式 `[[grants.rules]]` 可以放开跨目标：`scope = "any"` / `"room"` / `"connection"`，
+`capability` 必须包含 `access_request`。规则命中后覆盖默认表；匹配到规则但没列出
+该能力时按 deny 处理（fail closed）。
+
+申请前预检（任何一条失败都整批拒绝）：
+
+1. 连接存在（`unknown_connection`）；
+2. op 在目标连接的 catalog 里（未知 op 直接拒绝）；
+3. 参数形状（`validate_ticket_params` 复用 `check_params` 与目标参数校验）；
+4. `destructive` 且该连接未开 `allow_destructive` → `[destructive_disabled]`，**不产生票据**；
+5. `critical` 允许申请（票据能力含 `critical`），但常驻授予仍被配置校验拒绝；
+6. 冷却与额度不变：会话 60s、管理员全局 30s、每轮 3 组、每会话活票上限 8。
+
+审批身份：`/approve` / `/deny` / `/revoke` 只在私信里生效；允许的身份是
+`grants.subject_for(...) ∈ {system_admin, bot_admin}`，不再硬编码某一条账号。
+每次命令（允许或拒绝）都写 `[access-approval]` 审计行。
+
+审批私信除 target / ops / 参数摘要 / capabilities / session / principal / place / turn 外，
+新增 `申请者：<id>（<显示名>）`；显示名从最近记录里按 id 查，只用于展示，不参与身份判定。
+票据审计行同时记录 `sender` / `sender_name` / `reason`。
+
+申请被拒时写
+`[access-request] denied sender=... sender_name=... room=... target=... code=<access_request_denied|destructive_disabled|unknown_connection> detail="..."`。
+
+**尚未落地：target 类型化（第二笔）**
+
+`AccessTarget { kind, id, sub }`、`account_read` / `account_secret`、按 kind 匹配规则、
+typed target 审批展示与 `any` 的可达范围都还没有实现。当前 target 仍是 `RoomId` 字符串，
+`access_request` 只接受房间目标；跨账号/插件的 typed target 必须等这一笔落地。
+
+**已知、接受的威胁：管理员冷却全局单时间戳**
+
+`admin_cooldown_secs` 目前是全局单时间戳：一条审批私信会阻塞所有会话的新申请 30 秒。
+群友可以用刷申请的方式让其它会话在 30 秒内申请全被拒——这是一个轻量 DoS。
+这是已知、接受的取舍；缓解方向是 per-session 冷却或按管理员分桶，未在本轮实装。
+
 1. 群里 agent 调用唯一入口 `access_request { items: [...] }`；一条 item = 单张，多条 = 批量。
    申请本身不执行任何平台动作；core 从每条 ops 推导能力集并生成独立票据。
 2. core 把审批消息发到 **system admin 的私信**；同一会话的 pending 在收工时聚合成一条：
@@ -323,6 +373,7 @@ admin_cooldown_secs = 30     # 同一个 system admin 收到两条审批私信�
    目标：qq:group/123
    动作：platform_call:member.kick
    能力：destructive, platform, room_write
+   申请者：10001（群友一）
 ...
 批准整批：/approve <batch_id>
 批准单张：/approve <ticket-id> <nonce>
@@ -330,7 +381,8 @@ admin_cooldown_secs = 30     # 同一个 system admin 收到两条审批私信�
 撤销单张：/revoke <ticket-id>
 ```
 
-3. 只有 `[grants.system_admin]` 配置的账号在 **private** 场所发命令才生效：
+3. 只有 `system_admin` 或配置的 `bot_admin` 在 **private** 场所发命令才生效
+   （身份走 `grants.subject_for`，不是硬编码账号）：
    - `/approve <id> <nonce>` → 单张 `active`
    - `/deny <id> <nonce>` → 单张 `denied`
    - `/approve <batch_id>` → 整批逐张 `active`

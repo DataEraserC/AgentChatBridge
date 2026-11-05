@@ -145,6 +145,12 @@ fn config() -> &'static str {
         [grants.system_admin]
         connection = "qq"
         account = "admin"
+
+        [[grants.rules]]
+        subject = "user"
+        place = "group"
+        scope = "any"
+        capability = ["access_request"]
     "#
 }
 
@@ -263,6 +269,10 @@ fn single_request_approve_and_use_once() {
     assert!(
         text.contains("approved"),
         "非凭证参数应出现在摘要里：{text}"
+    );
+    assert!(
+        text.contains("申请者：user1（user1）"),
+        "审批私信要显示触发者 id 与显示名：{text}"
     );
     let nonce = field(&text, "nonce=");
 
@@ -407,7 +417,11 @@ fn two_requests_in_one_turn_are_aggregated_into_one_message() {
 
 #[test]
 fn batch_request_approve_by_batch_id_and_query() {
-    let (mut bridge, sends) = bridge();
+    let text = config().replace(
+        "account = \"bot\"",
+        "account = \"bot\"\n        allow_destructive = [\"member.kick\"]",
+    );
+    let (mut bridge, sends) = bridge_with(&text);
     bridge
         .ingest(message("qq:group/123", "user1", "批量申请", true))
         .expect("能记下来");
@@ -477,14 +491,7 @@ fn batch_request_approve_by_batch_id_and_query() {
     }
     let tickets = queried["tickets"].as_array().expect("tickets");
     assert_eq!(tickets[0]["state"], "used");
-    assert_eq!(tickets[0]["execution_status"], "failed");
-    assert!(
-        tickets[0]["failure_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("[forbidden]")),
-        "{}",
-        tickets[0]["failure_reason"]
-    );
+    assert_eq!(tickets[0]["execution_status"], "succeeded");
     assert_eq!(tickets[1]["state"], "used");
     assert_eq!(tickets[1]["execution_status"], "succeeded");
     assert!(
@@ -621,15 +628,123 @@ fn session_cooldown_rejects_the_next_request() {
     assert!(blocked.message.contains(" 60s") || blocked.message.contains("59s"));
 }
 
+fn config_without_request_rule() -> String {
+    config().replace(
+        "        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"any\"\n        capability = [\"access_request\"]\n",
+        "",
+    )
+}
+
 #[test]
-fn destructive_platform_call_is_refused_even_after_approval() {
+fn group_user_defaults_to_subscribed_targets_only() {
+    let (mut bridge, sends) = bridge_with(&config_without_request_rule());
+    bridge
+        .ingest(message("qq:group/123", "user1", "想申请", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let denied = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{"target": "qq:group/999", "ops": ["notes:list"]}]}),
+        )
+        .expect_err("默认不允许申请未订阅目标");
+    assert_eq!(denied.code, ErrorCode::ToolNotAllowed);
+    assert!(
+        denied.message.contains("access_request_denied"),
+        "错误要带稳定码：{}",
+        denied.message
+    );
+    assert!(
+        sends.lock().expect("没被毒死").is_empty(),
+        "被拒的申请不能产生审批私信"
+    );
+
+    let allowed = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{"target": "qq:group/123", "ops": ["notes:list"]}]}),
+        )
+        .expect("已订阅目标默认可申请");
+    assert_eq!(allowed["tickets"][0]["state"], "pending_approval");
+}
+
+#[test]
+fn bot_admin_can_approve_but_ordinary_user_cannot() {
+    let text = config().replace(
+        "[grants.system_admin]",
+        "[grants.bot_admin]\n        accounts = [{ connection = \"qq\", account = \"botadmin\" }]\n\n        [grants.system_admin]",
+    );
+    let (mut bridge, sends) = bridge_with(&text);
+    bridge
+        .ingest(message("qq:group/123", "user1", "申请", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let request = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{"target": "qq:group/999", "ops": ["notes:list"]}]}),
+        )
+        .expect("有规则时能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("票据 id")
+        .to_owned();
+    bridge.end_turn(&ticket, None).expect("收工");
+    let approval = approval_dm(&sends);
+    let nonce = field(&approval, "nonce=");
+
+    let denied = bridge
+        .ingest(message(
+            "qq:private/user1",
+            "user1",
+            &format!("/approve {id} {nonce}"),
+            false,
+        ))
+        .expect("命令能入库");
+    assert!(
+        !matches!(denied, Ingest::Handled { .. }),
+        "普通用户不能审批"
+    );
+
+    let handled = bridge
+        .ingest(message(
+            "qq:private/botadmin",
+            "botadmin",
+            &format!("/approve {id} {nonce}"),
+            false,
+        ))
+        .expect("命令能入库");
+    assert!(
+        matches!(handled, Ingest::Handled { .. }),
+        "bot_admin 可以审批"
+    );
+
+    bridge
+        .ingest(message("qq:group/123", "user1", "再开一轮", true))
+        .expect("能记下来");
+    let after = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let queried = bridge
+        .tool_call(&after, &sessions(), "access_ticket_get", json!({"id": id}))
+        .expect("能查");
+    assert_eq!(queried["state"], "active");
+}
+
+#[test]
+fn destructive_platform_call_is_refused_at_request_time() {
     let (mut bridge, sends, calls) = bridge_with_calls(config());
     bridge
         .ingest(message("qq:group/123", "user1", "踢个人", true))
         .expect("能记下来");
     let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
 
-    let request = bridge
+    let error = bridge
         .tool_call(
             &ticket,
             &sessions(),
@@ -640,45 +755,22 @@ fn destructive_platform_call_is_refused_even_after_approval() {
                 "params": {"user_id": "10001"}
             }]}),
         )
-        .expect("申请成功");
-    let id = request["tickets"][0]["ticket"]
-        .as_str()
-        .expect("票据 id")
-        .to_owned();
+        .expect_err("destructive 未开时申请阶段就拒绝");
+    assert_eq!(error.code, ErrorCode::ToolNotAllowed);
+    assert!(
+        error.message.contains("destructive_disabled"),
+        "错误要带稳定码：{}",
+        error.message
+    );
+    assert!(
+        sends.lock().expect("没被毒死").is_empty(),
+        "申请被拒时不能产生审批私信"
+    );
     bridge.end_turn(&ticket, None).expect("收工");
-    let text = approval_dm(&sends);
-    assert!(text.contains("[DESTRUCTIVE]"), "{text}");
-    let nonce = field(&text, "nonce=");
-
-    let handled = bridge
-        .ingest(message(
-            "qq:private/admin",
-            "admin",
-            &format!("/approve {id} {nonce}"),
-            false,
-        ))
-        .expect("管理员命令能入库");
-    assert!(matches!(handled, Ingest::Handled { .. }));
     assert!(
         calls.lock().expect("没被毒死").is_empty(),
-        "destructive 未被 allow_destructive 放行时，批准后也不能调用平台"
+        "申请阶段根本不该调用平台"
     );
-
-    let delivery = bridge.poll_turn().expect("能开轮").expect("有唤醒");
-    let after = delivery.ticket;
-    let queried = bridge
-        .tool_call(&after, &sessions(), "access_ticket_get", json!({"id": id}))
-        .expect("查询执行结果");
-    assert_eq!(queried["state"], "used");
-    assert_eq!(queried["execution_status"], "failed");
-    assert!(
-        queried["failure_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("[forbidden]")),
-        "{}",
-        queried["failure_reason"]
-    );
-    assert_eq!(queried["result"]["ops"][0]["status"], "failed");
 }
 
 #[test]

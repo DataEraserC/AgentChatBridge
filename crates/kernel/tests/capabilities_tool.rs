@@ -148,6 +148,12 @@ fn config() -> &'static str {
         [grants.system_admin]
         connection = "qq"
         account = "admin"
+
+        [[grants.rules]]
+        subject = "user"
+        place = "group"
+        scope = "any"
+        capability = ["access_request"]
     "#
 }
 
