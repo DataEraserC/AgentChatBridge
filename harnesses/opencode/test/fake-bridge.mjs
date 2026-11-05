@@ -35,27 +35,33 @@ export function delivery(overrides = {}) {
 /**
  * 测试用 surface：常驻白名单 + 长尾目录。`extensions_*` 默认不可直接执行，
  * 用来验证隐藏工具仍留在目录里但不进可见集。
+ *
+ * 形状与 core 的瘦身视图一致：可执行条目只有 `tool` + `purpose`，
+ * 不可执行条目才带 `reason` / `requestable`；不再重复列 `visible` / `hidden`。
  */
 export function surface(overrides = {}) {
   const resident = overrides.resident ?? RESIDENT_TOOL_NAMES
   const catalog =
     overrides.catalog ??
-    TOOLS.filter((tool) => !resident.includes(tool.name)).map((tool) => ({
-      tool: tool.name,
-      layer: "catalog",
-      purpose: `测试用途：${tool.name}`,
-      when: "测试需要时",
-      available: !tool.name.startsWith("extensions_"),
-      direct_executable: !tool.name.startsWith("extensions_"),
-      requestable: ["notes", "wait_message"].includes(tool.name),
-      ticket_required: false,
-      reason: tool.name.startsWith("extensions_") ? "admin_only" : null,
-    }))
-  const visible = overrides.visible ?? [
-    ...resident,
-    ...catalog.filter((entry) => entry.direct_executable).map((entry) => entry.tool),
-  ]
-  const hidden = overrides.hidden ?? catalog.filter((entry) => !entry.direct_executable)
+    TOOLS.filter((tool) => !resident.includes(tool.name)).map((tool) => {
+      if (tool.name.startsWith("extensions_")) {
+        return {
+          tool: tool.name,
+          direct_executable: false,
+          requestable: false,
+          ticket_required: false,
+          reason: "admin_only",
+        }
+      }
+      return {
+        tool: tool.name,
+        purpose: `测试用途：${tool.name}`,
+      }
+    })
+  const visibleCount = catalog.filter(
+    (entry) => entry.direct_executable !== false,
+  ).length
+  const hiddenCount = catalog.length - visibleCount
   return {
     scope: "surface",
     session: "main",
@@ -65,24 +71,28 @@ export function surface(overrides = {}) {
     allow_destructive: "none",
     resident: resident,
     catalog,
-    visible,
-    hidden,
     counts: {
       tools_total: TOOLS.length,
       resident: resident.length,
       catalog: catalog.length,
-      visible: visible.length,
-      hidden: hidden.length,
+      visible: resident.length + visibleCount,
+      hidden: hiddenCount,
     },
     ...overrides,
   }
 }
 
 export class FakeBridge {
-  constructor({ sessions = ["main"], token = "t-main", surface: surfaceFixture = surface() } = {}) {
+  constructor({
+    sessions = ["main"],
+    token = "t-main",
+    surface: surfaceFixture = surface(),
+    failSurface = false,
+  } = {}) {
     this.sessions = sessions
     this.token = token
     this.surface = surfaceFixture
+    this.failSurface = failSurface
     this.frames = []
     this.socket = null
     this.connected = null
@@ -107,7 +117,15 @@ export class FakeBridge {
           frame.args?.scope === "surface"
         ) {
           this.frames.push(frame)
-          this.#write({ frame: "tool_result", id: frame.id, result: this.surface })
+          if (this.failSurface) {
+            this.#write({
+              frame: "tool_result",
+              id: frame.id,
+              error: { code: "internal", message: "surface unavailable" },
+            })
+          } else {
+            this.#write({ frame: "tool_result", id: frame.id, result: this.surface })
+          }
           return true
         }
         // capabilities scope=tool：给一个最小权限结果，让 harness 拼本地 schema。

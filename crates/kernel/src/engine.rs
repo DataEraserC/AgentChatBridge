@@ -5398,7 +5398,7 @@ impl<S: Store> Bridge<S> {
         let tools: Vec<Value> = TOOL_NAMES
             .iter()
             .filter(|tool| !is_resident(tool))
-            .map(|tool| self.tool_catalog_json(ctx, config, session, tool))
+            .map(|tool| self.tool_catalog_index_json(ctx, config, session, tool))
             .collect();
         Ok(json!({
             "scope": "catalog",
@@ -5413,10 +5413,12 @@ impl<S: Store> Bridge<S> {
         }))
     }
 
-    /// 三层视图：常驻（永远注入）/ 目录（长尾索引）/ 可见（本轮可直接执行）。
+    /// 三层视图：常驻（永远注入）/ 目录（长尾索引）/ 本轮可直接执行。
     ///
-    /// `visible` 始终包含全部常驻工具；过滤只决定长尾工具进不进 `visible`，
-    /// 不会把它们从 `catalog` / `scope=session` / 票据申请里删掉。
+    /// 这里是被 harness 每轮拉取的内部视图，只放选工具真正要用的字段：
+    /// 常驻层只给名字；可执行的长尾条目只给 `tool` + `purpose`；不可执行的条目
+    /// 才带 `direct_executable=false` / `requestable` / `ticket_required` / `reason`。
+    /// `when` 与更完整的索引留给 `scope=catalog`，避免每轮重复付字节。
     fn cap_surface(
         &mut self,
         ctx: &TurnCtx,
@@ -5426,24 +5428,16 @@ impl<S: Store> Bridge<S> {
         let (subject, place) = self.subject_place(config, session, Some(&ctx.room));
         let entries: Vec<Value> = TOOL_NAMES
             .iter()
-            .map(|tool| self.tool_catalog_json(ctx, config, session, tool))
+            .filter(|tool| !is_resident(tool))
+            .map(|tool| self.tool_surface_entry_json(ctx, config, session, tool))
             .collect();
         let resident: Vec<&str> = RESIDENT_TOOLS.to_vec();
-        let catalog: Vec<Value> = entries
+        let executable = entries
             .iter()
-            .filter(|entry| entry["layer"] == "catalog")
-            .cloned()
-            .collect();
-        let visible: Vec<String> = entries
-            .iter()
-            .filter(|entry| entry["layer"] == "resident" || entry["direct_executable"] == true)
-            .filter_map(|entry| entry["tool"].as_str().map(str::to_owned))
-            .collect();
-        let hidden: Vec<Value> = catalog
-            .iter()
-            .filter(|entry| entry["direct_executable"] == false)
-            .cloned()
-            .collect();
+            .filter(|entry| entry["direct_executable"] != false)
+            .count();
+        let hidden = entries.len() - executable;
+        let catalog: Vec<Value> = entries;
         Ok(json!({
             "scope": "surface",
             "session": session,
@@ -5453,16 +5447,71 @@ impl<S: Store> Bridge<S> {
             "allow_destructive": destructive_state(config, &ctx.room.connection),
             "resident": resident,
             "catalog": catalog,
-            "visible": visible,
-            "hidden": hidden,
             "counts": {
                 "tools_total": TOOL_NAMES.len(),
                 "resident": resident.len(),
                 "catalog": catalog.len(),
-                "visible": visible.len(),
-                "hidden": hidden.len(),
+                "visible": resident.len() + executable,
+                "hidden": hidden,
             },
         }))
+    }
+
+    /// 面视图的瘦身条目：与目录层同一份权限判定，但只保留 harness 选工具要用的字段。
+    ///
+    /// - 可执行：`tool` + `purpose`；
+    /// - 不可执行：`tool` + `direct_executable=false` + `requestable` +
+    ///   `ticket_required` + `reason`（不带 `purpose`，因为它本轮不会被注入）。
+    fn tool_surface_entry_json(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+        tool: &str,
+    ) -> Value {
+        let reason = self.tool_unavailable_reason(ctx, config, session, tool);
+        let available = reason.is_none();
+        let requestable = tool_requestable(tool);
+        let entry = catalog_entry(tool);
+        if available {
+            return json!({
+                "tool": tool,
+                "purpose": entry.map(|entry| entry.purpose).unwrap_or(""),
+            });
+        }
+        json!({
+            "tool": tool,
+            "direct_executable": false,
+            "requestable": requestable,
+            "ticket_required": requestable,
+            "reason": reason,
+        })
+    }
+
+    /// 目录层的索引形状：名字 + 用途 + 何时用；不可直调才带权限字段。
+    fn tool_catalog_index_json(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+        tool: &str,
+    ) -> Value {
+        let reason = self.tool_unavailable_reason(ctx, config, session, tool);
+        let available = reason.is_none();
+        let requestable = tool_requestable(tool);
+        let entry = catalog_entry(tool);
+        let mut value = json!({
+            "tool": tool,
+            "purpose": entry.map(|entry| entry.purpose).unwrap_or(""),
+            "when": entry.map(|entry| entry.when).unwrap_or(""),
+        });
+        if !available {
+            value["direct_executable"] = json!(false);
+            value["requestable"] = json!(requestable);
+            value["ticket_required"] = json!(requestable);
+            value["reason"] = json!(reason);
+        }
+        value
     }
 
     /// 一个工具的公共索引形状；权限判定全部来自既有 helper。

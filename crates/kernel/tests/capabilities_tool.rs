@@ -14,6 +14,10 @@ use serde_json::{Value, json};
 
 const AT: i64 = 1_793_000_000_000;
 
+/// `capabilities scope=surface` 是每轮都要拉的内部视图。修改工具目录或
+/// purpose 文案时，回到这里确认没把每轮成本推上去。
+const SURFACE_BYTE_BUDGET: usize = 2048;
+
 struct Recorder {
     catalog: Arc<[MethodSpec]>,
 }
@@ -222,6 +226,25 @@ fn open_turn(bridge: &mut Bridge<MemoryStore>, room: &str) -> acb_kernel::Ticket
         .ingest(message(room, "10001", "在吗"))
         .expect("能记下来");
     bridge.poll_turn().expect("能开轮").expect("有活").ticket
+}
+
+/// surface 不再重复列 `visible`：可见集 = 常驻 ∪ catalog 里不带
+/// `direct_executable=false` 的长尾工具。
+fn visible_tools(value: &Value) -> std::collections::BTreeSet<String> {
+    let resident = value["resident"]
+        .as_array()
+        .expect("resident")
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned);
+    let catalog = value["catalog"]
+        .as_array()
+        .expect("catalog")
+        .iter()
+        .filter(|entry| entry["direct_executable"] != false)
+        .filter_map(|entry| entry["tool"].as_str())
+        .map(str::to_owned);
+    resident.chain(catalog).collect()
 }
 
 #[test]
@@ -453,6 +476,10 @@ fn surface_splits_resident_catalog_and_hidden() {
         .expect("能查");
 
     assert_eq!(value["scope"], "surface");
+    eprintln!(
+        "capabilities scope=surface bytes: {}",
+        value.to_string().len()
+    );
     assert_eq!(value["place"], "group");
     assert_eq!(value["allow_destructive"], "none");
     assert_eq!(value["counts"]["tools_total"], TOOL_NAMES.len());
@@ -471,11 +498,12 @@ fn surface_splits_resident_catalog_and_hidden() {
     let expected: std::collections::BTreeSet<&str> = RESIDENT_TOOLS.iter().copied().collect();
     assert_eq!(resident, expected, "常驻层必须逐字等于显式白名单");
 
-    let visible: Vec<&str> = value["visible"]
-        .as_array()
-        .expect("visible 是数组")
+    let catalog = value["catalog"].as_array().expect("catalog 是数组");
+    let visible: std::collections::BTreeSet<&str> = catalog
         .iter()
-        .filter_map(Value::as_str)
+        .filter(|entry| entry["direct_executable"] != false)
+        .filter_map(|entry| entry["tool"].as_str())
+        .chain(RESIDENT_TOOLS.iter().copied())
         .collect();
     for tool in RESIDENT_TOOLS {
         assert!(visible.contains(tool), "常驻工具 {tool} 永远可见");
@@ -484,8 +512,6 @@ fn surface_splits_resident_catalog_and_hidden() {
         !visible.contains(&"extensions_list"),
         "admin-only 工具不进本轮可见集"
     );
-
-    let catalog = value["catalog"].as_array().expect("catalog 是数组");
     assert_eq!(catalog.len(), TOOL_NAMES.len() - RESIDENT_TOOLS.len());
     assert!(
         catalog
@@ -497,22 +523,80 @@ fn surface_splits_resident_catalog_and_hidden() {
         !catalog.iter().any(|entry| entry["tool"] == "send_message"),
         "常驻工具不重复进目录层"
     );
+    let wait = catalog
+        .iter()
+        .find(|entry| entry["tool"] == "wait_message")
+        .expect("wait_message 在 catalog 里");
+    assert!(
+        wait["purpose"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "可执行条目要有用途"
+    );
+    assert!(
+        wait.get("reason").is_none(),
+        "可执行条目不该带权限字段：{wait}"
+    );
 
-    let hidden = value["hidden"].as_array().expect("hidden 是数组");
-    let extension = hidden
+    let extension = catalog
         .iter()
         .find(|entry| entry["tool"] == "extensions_list")
-        .expect("extensions_list 在 hidden 里");
+        .expect("extensions_list 在 catalog 里");
     assert_eq!(extension["reason"], "admin_only");
     assert_eq!(extension["direct_executable"], false);
     assert_eq!(extension["requestable"], false);
     assert_eq!(extension["ticket_required"], false);
     assert!(
-        extension["purpose"]
-            .as_str()
-            .is_some_and(|text| !text.is_empty()),
-        "目录条目要有用途"
+        extension.get("purpose").is_none(),
+        "被过滤条目本轮不注入，不必带用途：{extension}"
     );
+    assert!(value["counts"]["hidden"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+fn surface_response_stays_within_budget() {
+    let mut bridge = bridge();
+    let ticket = open_turn(&mut bridge, "qq:group/123");
+    let value = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "surface"}),
+        )
+        .expect("能查");
+    let bytes = value.to_string().len();
+    eprintln!("capabilities scope=surface bytes: {bytes}");
+    assert!(
+        bytes <= SURFACE_BYTE_BUDGET,
+        "surface 每轮都要拉：{bytes} 字节超出 {SURFACE_BYTE_BUDGET} 字节预算"
+    );
+
+    let resident = value["resident"].as_array().expect("resident 是数组");
+    assert!(
+        resident.iter().all(Value::is_string),
+        "常驻层只给名字，不给 schema 或权限字段"
+    );
+    for entry in value["catalog"].as_array().expect("catalog 是数组") {
+        let object = entry.as_object().expect("条目是对象");
+        if object.get("direct_executable") == Some(&Value::Bool(false)) {
+            assert!(object.contains_key("reason"), "不可直调条目必须给原因");
+            assert!(
+                object.contains_key("requestable") && object.contains_key("ticket_required"),
+                "不可直调条目必须给申请状态：{entry}"
+            );
+        } else {
+            assert!(
+                object.contains_key("purpose"),
+                "可执行条目要给用途：{entry}"
+            );
+            assert_eq!(
+                object.len(),
+                2,
+                "可执行条目只保留 tool + purpose，其余字段去 scope=catalog：{entry}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -533,7 +617,11 @@ fn catalog_scope_is_the_long_tail_index() {
     let tools = value["tools"].as_array().expect("tools 是数组");
     assert_eq!(tools.len(), TOOL_NAMES.len() - RESIDENT_TOOLS.len());
     assert!(
-        tools.iter().all(|entry| entry["layer"] == "catalog"),
+        tools.iter().all(|entry| {
+            entry["tool"]
+                .as_str()
+                .is_some_and(|name| !RESIDENT_TOOLS.contains(&name))
+        }),
         "目录层只放非驻留工具"
     );
     let extension = tools
@@ -567,12 +655,7 @@ fn resident_entry_points_are_never_filtered_out() {
             json!({"scope": "surface"}),
         )
         .expect("能查");
-    let visible: Vec<&str> = value["visible"]
-        .as_array()
-        .expect("visible")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
+    let visible = visible_tools(&value);
     for tool in [
         "access_request",
         "access_ticket_get",
@@ -580,7 +663,7 @@ fn resident_entry_points_are_never_filtered_out() {
         "ack_messages",
     ] {
         assert!(
-            visible.contains(&tool),
+            visible.contains(tool),
             "入口/结束轮次工具 {tool} 永不被过滤"
         );
     }
@@ -602,14 +685,9 @@ fn access_request_stays_visible_without_an_approver() {
             json!({"scope": "surface"}),
         )
         .expect("能查");
-    let visible: Vec<&str> = value["visible"]
-        .as_array()
-        .expect("visible")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
+    let visible = visible_tools(&value);
     assert!(
-        visible.contains(&"access_request"),
+        visible.contains("access_request"),
         "没有审批人时 access_request 仍必须可见"
     );
 

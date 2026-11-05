@@ -38,7 +38,12 @@ import {
   renderPersona,
   renderTurn,
 } from "../../opencode/plugin/acb-wire.mjs"
-import { RESIDENT_TOOL_NAMES, toolsForSurface, withLocalSchema } from "../../shared/tools.mjs"
+import {
+  RESIDENT_TOOL_NAMES,
+  residentSurface,
+  toolsForSurface,
+  withLocalSchema,
+} from "../../shared/tools.mjs"
 import { McpServer } from "./mcp-server.mjs"
 import { McpHttpServer } from "./mcp-http-server.mjs"
 import { DshClient, DshError } from "./dsh-client.mjs"
@@ -251,11 +256,9 @@ class TurnDriver {
     this.generations = new Map()
     this.chain = Promise.resolve()
     // 本轮可见工具面；启动时只有常驻白名单，开轮后用桥的 capabilities scope=surface 更新。
-    this.surface = {
-      resident: RESIDENT_TOOL_NAMES,
-      visible: RESIDENT_TOOL_NAMES,
-      catalog: [],
-    }
+    this.surface = residentSurface()
+    // `ok` / `surface_fallback`：桥拉取失败时退回常驻层，不退回 29 个全量。
+    this.surfaceStatus = "resident_only"
   }
 
   /** 当前 MCP tools/list 要返回的工具定义。 */
@@ -268,17 +271,17 @@ class TurnDriver {
     if (
       !surface ||
       !Array.isArray(surface.resident) ||
-      !Array.isArray(surface.visible) ||
       !Array.isArray(surface.catalog)
     ) {
       throw new Error("tool surface shape is invalid")
     }
     this.surface = surface
+    this.surfaceStatus = "ok"
   }
 
   /**
-   * 开轮后、投话前向桥要一次 surface。失败只记日志并沿用上一次的工具面：
-   * 工具面是辅助信息，不能因为它把一轮对话拖死。
+   * 开轮后、投话前向桥要一次 surface。失败退到常驻层并记 `surface_fallback`：
+   * 工具面是辅助信息，不能因为它把一轮对话拖死，也不能因为拉不到就退回全量工具。
    */
   async #refreshSurface(link, session) {
     try {
@@ -295,14 +298,21 @@ class TurnDriver {
         t("dsh.tool_surface_loaded", {
           session,
           resident: surface.counts?.resident ?? surface.resident.length,
-          visible: surface.counts?.visible ?? surface.visible.length,
-          hidden: surface.counts?.hidden ?? surface.hidden?.length ?? 0,
+          visible:
+            surface.counts?.visible ??
+            surface.resident.length +
+              visibleCatalogCount(surface.catalog),
+          hidden: surface.counts?.hidden ?? hiddenCatalogCount(surface.catalog),
         }),
       )
     } catch (error) {
+      this.surface = residentSurface()
+      this.surfaceStatus = "surface_fallback"
       this.log(
         "warn",
-        t("dsh.tool_surface_failed", { error: error?.message ?? String(error) }),
+        t("dsh.tool_surface_fallback", {
+          error: error?.message ?? String(error),
+        }),
       )
     }
   }
@@ -816,6 +826,16 @@ async function callBridge(link, name, args, options = {}) {
     const code = error instanceof BridgeError ? error.code : "internal"
     throw new Error(`${name} failed (${code}): ${error.message}`)
   }
+}
+
+export { residentSurface }
+
+function visibleCatalogCount(catalog) {
+  return catalog.filter((entry) => entry.direct_executable !== false).length
+}
+
+function hiddenCatalogCount(catalog) {
+  return catalog.length - visibleCatalogCount(catalog)
 }
 
 /** 按 surface 选 MCP 工具定义；dsh 与 opencode 共用 shared/tools.mjs 的选择逻辑。 */

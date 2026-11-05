@@ -809,6 +809,20 @@ export const RESIDENT_TOOL_NAMES = [
   "get_history",
 ]
 
+/** 只含常驻白名单的 surface：启动时与桥拉取失败时的兜底，绝不退回全量工具。 */
+export function residentSurface() {
+  return {
+    resident: RESIDENT_TOOL_NAMES,
+    catalog: [],
+    counts: {
+      resident: RESIDENT_TOOL_NAMES.length,
+      catalog: 0,
+      visible: RESIDENT_TOOL_NAMES.length,
+      hidden: 0,
+    },
+  }
+}
+
 const CATALOG_SCHEMA = {
   type: "object",
   description: "参数形状见 capabilities {scope:\"tool\",name:\"<工具>\"} 返回的完整 schema",
@@ -833,8 +847,10 @@ function catalogSpec(spec, entry) {
  * 按 core 的 `capabilities scope=surface` 选本轮工具面。
  *
  * - `resident` 里的工具给完整 schema（高频路径不搞两阶段）；
- * - `visible` 里的长尾工具给最小占位 schema（目录层）；
- * - 其余（hidden）不注入，但仍可从 `capabilities scope=catalog/session` 查到。
+ * - `catalog` 里不带 `direct_executable=false` 的长尾工具给最小占位 schema；
+ * - 其余（隐藏）不注入，但仍可从 `capabilities scope=catalog/session` 查到。
+ *
+ * surface 不再重复列 `visible`：可见集 = 常驻 ∪ 可执行的长尾。
  * 没有 surface（例如还没开过轮）时只返回常驻层。
  */
 export function toolsForSurface(surface = {}) {
@@ -843,10 +859,13 @@ export function toolsForSurface(surface = {}) {
       ? surface.resident
       : RESIDENT_TOOL_NAMES,
   )
-  const visible = new Set(Array.isArray(surface.visible) ? surface.visible : [...resident])
   const catalog = new Map(
     (Array.isArray(surface.catalog) ? surface.catalog : []).map((entry) => [entry.tool, entry]),
   )
+  const visible = new Set(resident)
+  for (const entry of catalog.values()) {
+    if (entry.direct_executable !== false) visible.add(entry.tool)
+  }
   const out = []
   for (const spec of TOOLS) {
     if (resident.has(spec.name)) {
