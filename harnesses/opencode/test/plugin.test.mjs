@@ -110,8 +110,12 @@ class FakeHost {
 }
 
 /** 起假桥 + 假宿主，装上插件，测完都收掉。 */
-async function boot(t, { token = TOKEN } = {}) {
-  const bridge = await new FakeBridge({ sessions: ["main"], token: TOKEN }).start()
+async function boot(t, { token = TOKEN, ...bridgeOptions } = {}) {
+  const bridge = await new FakeBridge({
+    sessions: ["main"],
+    token: TOKEN,
+    ...bridgeOptions,
+  }).start()
   const host = new FakeHost()
   // 选项必须在 setup 之前摆好：插件读一次配置就定了。
   host.options = { endpoint: bridge.endpoint }
@@ -222,6 +226,67 @@ test("surface_failure_falls_back_to_resident_only：拉取失败时退回常驻�
   )
   assert.equal(host.tools.has("memory_git"), false, "不能退回长尾工具")
   assert.equal(host.tools.has("extensions_list"), false, "也不能退回 29 个全量")
+  host.finishTurn()
+})
+
+const ISSUE_UNREAD = {
+  count: 4,
+  event_ids: ["ev_1", "ev_2", "ev_3", "ev_4"],
+  events: [
+    { event_id: "ev_1", issue_id: "is_1", title: "登录失败", kind: "issue.created", created_at: 1 },
+    { event_id: "ev_2", issue_id: "is_2", title: "导出超时", kind: "issue.status_changed", created_at: 2 },
+    { event_id: "ev_3", issue_id: "is_3", title: "第三条", kind: "workitem.result_reported", created_at: 3 },
+    { event_id: "ev_4", issue_id: "is_4", title: "第四条", kind: "issue.created", created_at: 4 },
+  ],
+}
+
+test("首轮前 internal 拉 issue 未读，注入一行并立即 ack；第二轮不再查", async (t) => {
+  const { bridge, host } = await boot(t, { issueUnread: ISSUE_UNREAD })
+
+  await openTurn(bridge, host)
+  const text = host.prompts[0].text
+  assert.match(text, /\[系统事件 issue_unread\] 4 条未读/)
+  assert.match(text, /is_1 登录失败/, "摘要只给 id + 标题")
+  assert.match(text, /is_3 第三条/)
+  assert.match(text, /另有 1 条/, "前 3 条之外只报计数")
+  assert.doesNotMatch(text, /ev_1/, "event_id 不进正文")
+
+  assert.equal(bridge.issueCalls.length, 2, "一次读取 + 一次 ack")
+  assert.equal(bridge.issueCalls[0].args.arguments.subscriber, "session:main")
+  assert.equal(bridge.issueCalls[0].args.arguments.channel, "acb_session")
+  assert.deepEqual(bridge.issueCalls[0].args.scope, {
+    kind: "connection",
+    connection: "qq",
+  })
+  assert.deepEqual(bridge.issueCalls[1].args.arguments.ack_event_ids, [
+    "ev_1",
+    "ev_2",
+    "ev_3",
+    "ev_4",
+  ])
+
+  host.finishTurn()
+  await openTurn(bridge, host, delivery({ ticket: "main-2" }))
+  assert.equal(bridge.issueCalls.length, 2, "同一会话已经查过，不再补查")
+  assert.doesNotMatch(host.prompts[1].text, /issue_unread/)
+  host.finishTurn()
+})
+
+test("issue 补查失败静默降级，下一轮再试", async (t) => {
+  const { bridge, host } = await boot(t, {
+    issueUnread: ISSUE_UNREAD,
+    failIssue: true,
+  })
+
+  await openTurn(bridge, host)
+  assert.equal(bridge.issueCalls.length, 1, "只发了一次失败的读取")
+  assert.doesNotMatch(host.prompts[0].text, /issue_unread/, "失败不注入")
+  host.finishTurn()
+
+  bridge.failIssue = false
+  await openTurn(bridge, host, delivery({ ticket: "main-2" }))
+  assert.equal(bridge.issueCalls.length, 3, "下一轮重试读取 + ack")
+  assert.match(host.prompts[1].text, /\[系统事件 issue_unread\] 4 条未读/)
   host.finishTurn()
 })
 

@@ -2326,3 +2326,40 @@
   仍使用 `~/.config/systemd/user/acb-bridge.service.d/worktree.conf` 指向 worktree debug 构建。
 - 未提交文件：`code-review-prompt.md`（按用户要求不提交）。
 - `docs/09-cordis-mechanism-evaluation.md` 已补提交，作为 Cordis 评估的可评审产物。
+
+## 2026-11-05 — issue 阶段 1：独立服务 + ACB 工具面
+
+- 任务：按 `docs/plan/issue-system.md` 第 6 节实现阶段 1，并补一条首轮主动补投。
+- 做了什么：
+  - 新增 `crates/issue-service/`：`acb-issue-service`（SQLite WAL + HTTP API + CLI）
+    与 `acb-issue-tools`（process-tools stdio provider，8 个工具）。
+  - 表：`issues` / `issue_tags` / `work_items` / `issue_events` / `event_deliveries`
+    / `subscriptions` / `tokens`；`work_items.issue_id` NOT NULL。
+  - 鉴权：SHA-256 token、六种 scope、401/403、90 天过期、7 天轮换重叠、
+    service token 禁 `issue:admin`、`on_behalf_of` 只进 actor。
+  - 状态机 + `expected_version`、验收者规则、72h 升级、168h 自动关闭。
+  - outbox：事件幂等键 + `(event_id, subscriber, channel)` 双唯一键、原子 claim、
+    ack、5 分钟回 pending。
+  - harness（dsh / opencode）：会话首轮前 internal `issue_my_work`，
+    有未读注入一行 `[系统事件 issue_unread]`，注入后立即用同一账本 ack，
+    失败静默降级并在下一轮重试。
+  - 部署：`deploy/systemd/acb-issue-service.service`、`deploy/nix/issue-service.nix`
+    （默认不启用）；文档 `docs/guide/issue-service.md`。
+  - 修复：`random_hex` 曾用 `fs::read("/dev/urandom")` 无限读导致测试进程 OOM，
+    改为固定 32 字节 `read_exact`。
+- 证据：
+  - `cargo test -p acb-issue-service` → 8 phase1 + 2 provider_flow 全过。
+  - `cargo test -p acb-kernel --test tool_schema_consistency --test issue_tool_surface`
+    → 5 + 1 全过。
+  - `cargo test --workspace` → 全过（退出码 0）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` → 0 warning。
+  - opencode `npm test` 52/52；dsh `npm test` 46/46。
+  - 真机验收（curl）：空库启动/healthz 200/7 张表；401 + `WWW-Authenticate`；
+    403；轮换新旧 token 均 200；409 `stale_version` / `invalid_transition`；
+    非验收者 done=403；中文搜索 1 条；游标 6 条不重不漏；
+    `kill -9` 后 pending 3 条仍在、重启后 my_work 3 条、ack 后 0；
+    注入时钟 72h escalated=3、168h auto_closed=3 + `verification_timeout`。
+  - core 工具数断言：`TOOL_NAMES.len() == 29`，8 个 issue 工具不在
+    `TOOL_NAMES` / `RESIDENT_TOOLS` / `ON_DEMAND_TOOLS` / harness `TOOLS`。
+- 偏离说明：阶段 1 仍不做 webhook 服务端直投与 Wake；第 6 节对应两项标 `[~]`。
+- 下一步入口：阶段 2 的 Wake/outbox 游标补投（复用 `event_deliveries`）。

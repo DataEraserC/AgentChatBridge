@@ -88,11 +88,17 @@ export class FakeBridge {
     token = "t-main",
     surface: surfaceFixture = surface(),
     failSurface = false,
+    issueUnread = { count: 0, event_ids: [], events: [] },
+    failIssue = false,
   } = {}) {
     this.sessions = sessions
     this.token = token
     this.surface = surfaceFixture
     this.failSurface = failSurface
+    this.issueUnread = issueUnread
+    this.failIssue = failIssue
+    /** harness 的 issue_my_work 内部调用（读取 + ack 都在这里）。 */
+    this.issueCalls = []
     this.frames = []
     this.socket = null
     this.connected = null
@@ -151,6 +157,39 @@ export class FakeBridge {
               reason: null,
             },
           })
+          return true
+        }
+        // 首轮 issue 未读补查：harness 走 plugin_tool_call → issue_my_work。
+        // 读取和 ack 都是内部动作，不进 next() 的轮次帧序列。
+        if (
+          frame.frame === "tool_call" &&
+          frame.tool === "plugin_tool_call" &&
+          frame.args?.tool === "issue_my_work"
+        ) {
+          this.frames.push(frame)
+          this.issueCalls.push(frame)
+          if (this.failIssue) {
+            this.#write({
+              frame: "tool_result",
+              id: frame.id,
+              error: { code: "internal", message: "issue service unavailable" },
+            })
+          } else if (Array.isArray(frame.args?.arguments?.ack_event_ids)) {
+            this.#write({
+              frame: "tool_result",
+              id: frame.id,
+              result: {
+                ok: true,
+                acked: frame.args.arguments.ack_event_ids.length,
+              },
+            })
+          } else {
+            this.#write({
+              frame: "tool_result",
+              id: frame.id,
+              result: { work_items: [], unread_events: this.issueUnread },
+            })
+          }
           return true
         }
         return false

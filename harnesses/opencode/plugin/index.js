@@ -226,6 +226,8 @@ class TurnDriver {
     this.reported = new Map()
     /** 会话 id → 已注入过的人格签名；人格只在首轮/变更时注入一次。 */
     this.personas = new Map()
+    /** 已做过 issue 首轮补查的会话；失败不记录，下一轮再试。 */
+    this.issueChecked = new Set()
     /** 串行链：同一会话本来就串行，这里再兜一层，免得两轮叠在一起。 */
     this.chain = Promise.resolve()
     /** 本轮可见工具面；启动时只有常驻白名单，开轮后按桥的 surface 更新。 */
@@ -291,6 +293,63 @@ class TurnDriver {
         }),
       )
     }
+  }
+
+  /**
+   * 会话首轮前补一次 issue 未读：internal 调 `issue_my_work`，有未读就返回给
+   * 本轮注入。失败静默降级、不记录已查，下一轮再试；成功后注入并立刻 ack，
+   * 用 `event_deliveries` 的 claim 账本保证同一 event_id 在本会话只注入一次。
+   */
+  async #primeIssueUnread(link, delivery) {
+    if (this.issueChecked.has(delivery.session)) return null
+    const connection = delivery.room?.connection
+    if (!connection) return null
+    const scope = { kind: "connection", connection }
+    const args = {
+      subscriber: `session:${delivery.session}`,
+      channel: "acb_session",
+    }
+    let raw
+    try {
+      raw = await callBridge(
+        link,
+        "plugin_tool_call",
+        { tool: "issue_my_work", arguments: args, scope },
+        { internal: true },
+      )
+    } catch (error) {
+      this.log(
+        "debug",
+        t("opencode.issue_unread_skipped", {
+          error: error?.message ?? String(error),
+        }),
+      )
+      return null
+    }
+    let result
+    try {
+      result = JSON.parse(raw)
+    } catch {
+      this.log("debug", t("opencode.issue_unread_skipped", { error: "invalid JSON" }))
+      return null
+    }
+    this.issueChecked.add(delivery.session)
+    const unread = result?.unread_events
+    if (!unread || Number(unread.count) <= 0) return null
+    const ids = Array.isArray(unread.event_ids) ? unread.event_ids : []
+    if (ids.length > 0) {
+      try {
+        await callBridge(
+          link,
+          "plugin_tool_call",
+          { tool: "issue_my_work", arguments: { ...args, ack_event_ids: ids }, scope },
+          { internal: true },
+        )
+      } catch {
+        // 注入已经发生；ack 失败留给 5 分钟 claim 过期，不拖死这一轮。
+      }
+    }
+    return unread
   }
 
   /**
@@ -401,6 +460,8 @@ class TurnDriver {
       // 投递溢出/补上下文是框架自己知道的事：这一轮临时把回看工具加进工具面。
       this.onDemand = overflowTools(delivery)
       await this.#refreshSurface(link, delivery.session)
+      const issueUnread = await this.#primeIssueUnread(link, delivery)
+      if (issueUnread) delivery.issue_unread = issueUnread
       // 映射（新建或接上的）报给桥，控制台才看得到 harness 侧映射。
       this.#reportMap(delivery.session, sessionID, link)
       let text = renderTurn(delivery) + CODE_MODE_HINT
