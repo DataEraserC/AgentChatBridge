@@ -1,6 +1,7 @@
 //! 场所轴（适配器声明）与审批路由（配置驱动）的集成测试。
 
 use std::borrow::Cow;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use acb_kernel::{
@@ -47,6 +48,43 @@ impl Outbound for Recorder {
         } else {
             Arc::from(Vec::<MethodSpec>::new())
         }
+    }
+
+    fn call(
+        &mut self,
+        _room: &RoomId,
+        _method: &str,
+        _params: &Value,
+    ) -> Result<CallOutcome, CallError> {
+        Ok(CallOutcome::value(json!({"done": true})))
+    }
+}
+
+/// 指定目标发送失败，用于验证多目标投递的逐目标隔离。
+struct FailingRecorder {
+    sends: Sends,
+    fail_targets: Vec<String>,
+}
+
+impl Outbound for FailingRecorder {
+    fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
+        if self
+            .fail_targets
+            .iter()
+            .any(|target| target == &room.to_string())
+        {
+            return Err(OutboundError::Unavailable("mock send failure".to_owned()));
+        }
+        let mut sends = self.sends.lock().expect("没被毒死");
+        sends.push((room.clone(), elements.to_vec()));
+        Ok(Sent {
+            platform_id: format!("p-{}", sends.len()),
+            at: AT,
+        })
+    }
+
+    fn catalog(&self, _connection: &str) -> Arc<[MethodSpec]> {
+        Arc::from(Vec::<MethodSpec>::new())
     }
 
     fn call(
@@ -109,6 +147,12 @@ fn config() -> String {
         room = "group/789"
         [[sessions.subscriptions]]
         connection = "qq"
+        room = "group/140"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/141"
+        [[sessions.subscriptions]]
+        connection = "qq"
         room = "private/admin"
         [[sessions.subscriptions]]
         connection = "qq"
@@ -135,6 +179,14 @@ fn config() -> String {
 
         [grants.rooms."qq:group/128"]
         approval_route = ["qq:group/128"]
+
+        # 混合可达性：一个不可达、一个发送失败、一个正常。
+        [grants.rooms."qq:group/140"]
+        approval_route = ["qq:private/unreachable", "qq:group/789", "qq:group/456"]
+
+        # 全部目标都发送失败。
+        [grants.rooms."qq:group/141"]
+        approval_route = ["qq:group/789", "qq:group/456"]
 
         # 账号级路由：请求房间没有房间级配置时使用。
         [grants.accounts."qq:bot"]
@@ -636,4 +688,149 @@ fn ticket_result_keeps_audit_fields() {
             .is_some_and(|reference| reference.starts_with("qq:group/456#")),
         "审批记录要带真正的批准房间: {ticket}"
     );
+}
+
+/// 子进程拿不到 libtest 的捕获缓冲，只能另起一个测试二进制来验证审计行。
+#[test]
+fn wrong_nonce_audit_logs_deny_not_allow() {
+    let binary = std::env::current_exe().expect("测试二进制路径");
+    let output = Command::new(binary)
+        .args([
+            "--exact",
+            "wrong_nonce_audit_probe",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .expect("能启动审计探针子进程");
+    assert!(
+        output.status.success(),
+        "探针子进程失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[access-approval]") && stderr.contains("result=deny"),
+        "错 nonce 必须记 deny 审计: {stderr}"
+    );
+    assert!(
+        !stderr.contains("result=allow"),
+        "错 nonce 不能记 allow 审计: {stderr}"
+    );
+}
+
+#[test]
+#[ignore = "由 wrong_nonce_audit_logs_deny_not_allow 子进程执行"]
+fn wrong_nonce_audit_probe() {
+    let (mut bridge, _sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/123", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let handled = approve(&mut bridge, "qq:private/admin", "admin", &id, "wrong-nonce");
+    assert!(matches!(handled, Ingest::Handled { .. }));
+}
+
+#[test]
+fn wrong_nonce_is_rejected_and_does_not_approve() {
+    let (mut bridge, sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/123", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nonce = nonce_of(&approval_text(&sends, "qq:private/admin"));
+
+    let handled = approve(
+        &mut bridge,
+        "qq:private/admin",
+        "admin",
+        &id,
+        "0000000000000000",
+    );
+    assert!(matches!(handled, Ingest::Handled { .. }));
+
+    let ticket = ticket_state(&mut bridge, "qq:group/123", &id);
+    assert_eq!(ticket["state"], "pending_approval", "错 nonce 不能批准");
+    assert!(
+        ticket["approval_room"].is_null(),
+        "错 nonce 不能写批准房间: {ticket}"
+    );
+    let failure = sent_to(&sends, "qq:private/admin")
+        .into_iter()
+        .rev()
+        .find(|text| text.contains("授权命令失败"))
+        .expect("失败原因要回给审批房间");
+    assert!(failure.contains("nonce mismatch"), "{failure}");
+
+    let handled = approve(&mut bridge, "qq:private/admin", "admin", &id, &nonce);
+    assert!(matches!(handled, Ingest::Handled { .. }));
+    let ticket = ticket_state(&mut bridge, "qq:group/123", &id);
+    assert_eq!(ticket["state"], "used", "正确 nonce 仍可批准");
+    assert_eq!(ticket["approval_room"], "qq:private/admin");
+}
+
+#[test]
+fn one_target_send_failure_does_not_block_other_targets() {
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let outbounds = Outbounds::new().with(
+        "qq",
+        Box::new(FailingRecorder {
+            sends: sends.clone(),
+            fail_targets: vec!["qq:group/789".to_owned()],
+        }),
+    );
+    let mut bridge = Bridge::with_outbounds(
+        Config::parse(&config()).expect("配置合法"),
+        MemoryStore::new(),
+        outbounds,
+        PluginManager::with_native_builtins(),
+    );
+    let request = start_request(&mut bridge, "qq:group/140", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    assert!(
+        approval_text(&sends, "qq:group/456").contains(&id),
+        "一个不可达 + 一个发送失败时，正常目标仍应收到审批消息"
+    );
+    let ticket = ticket_state(&mut bridge, "qq:group/140", &id);
+    assert!(
+        ticket["route_unavailable"].is_null(),
+        "只要有目标投递成功，就不能标记整批投递失败: {ticket}"
+    );
+}
+
+#[test]
+fn all_target_send_failures_mark_the_ticket_failed() {
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let outbounds = Outbounds::new().with(
+        "qq",
+        Box::new(FailingRecorder {
+            sends: sends.clone(),
+            fail_targets: vec!["qq:group/789".to_owned(), "qq:group/456".to_owned()],
+        }),
+    );
+    let mut bridge = Bridge::with_outbounds(
+        Config::parse(&config()).expect("配置合法"),
+        MemoryStore::new(),
+        outbounds,
+        PluginManager::with_native_builtins(),
+    );
+    let request = start_request(&mut bridge, "qq:group/141", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    let ticket = ticket_state(&mut bridge, "qq:group/141", &id);
+    assert_eq!(ticket["state"], "pending_approval");
+    assert!(
+        ticket["route_unavailable"].is_string(),
+        "全部目标失败必须记录投递失败，不能静默: {ticket}"
+    );
+    assert!(sent_to(&sends, "qq:group/456").is_empty());
 }
