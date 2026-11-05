@@ -2016,6 +2016,33 @@
   - `system_admin_private_grants_stay_out_of_groups`
   - 全量验证：`cargo test --workspace`、clippy `-D warnings` 全绿。
 
+## 2026-11-05 — 批次 8 + verification 合并
+
+- 做了什么：
+  - `MethodSpec.verification: Verified { source } | Unverified { reason, experiment }`
+    构造期必填；wire 协议同样必填。unverified 门槛等同 critical：直调拒绝、
+    `allow_destructive` 不适用、只能票据 + 审批；审批私信显示 `[UNVERIFIED]` +
+    reason 摘要，票据/审计行带 `unverified=true`，catalog 与 `capabilities` 暴露字段。
+  - 按 `snowluma-gap-research.md` 落地 A 类：群分类标签改连接级 `group.tag_*`；
+    `group.add_option`（add_type 显式、55→5）；`group.search`（open/close → 0/1）；
+    CQ 码解析；WS 下载流多帧累计；`httpClients` 可选 HTTP 入口 + HMAC-SHA1 + 原始
+    JSON 去重；`wss` 部署前提写进文档；`file.download` 1 GiB / 60 s / http(s)；
+    `face.custom_add`；`group.file.folder_rename` / `group.file.trans` /
+    `file.share_link`；`group_upload` / `essence` / `notify.*` 字段解析。
+  - op 118 → 127，action 121 → 130；覆盖矩阵未暴露 79 → 70（外部约束 8、未排期 62）。
+  - 4 个 op 标 `Unverified`（`group.tag_list` / `group.tag_add` / `group.tag_delete` /
+    `group.add_option`），实验设计写进 `adapter-snowluma.md`。
+- 证据：
+  - `unverified_op_is_direct_denied_and_ticket_approval_shows_the_reason`
+  - `catalog_lists_the_unverified_ops`
+  - `batch8_params_are_normalized_before_the_platform`
+  - `cq_string_is_parsed_into_segments` / `cq_escapes_are_decoded_after_segment_parsing`
+  - `download_stream_frames_are_accumulated_until_complete`
+  - `group_upload_and_essence_fields_are_parsed` / `notify_subtypes_are_named_and_parsed`
+  - `hmac_sha1_matches_the_rfc2202_vector` / `event_dedup_drops_repeats_but_not_heartbeats`
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode `npm test`、
+    `node --check harnesses/shared/tools.mjs` 全绿。
+
 
 ## 部署注意事项（nix-config 打包）
 

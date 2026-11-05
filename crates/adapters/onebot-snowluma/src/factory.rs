@@ -98,6 +98,27 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
                 acb_i18n::t!("adapter.onebot11.url_required"),
             ));
         }
+        let http_events = connection
+            .options
+            .get("http_listen")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty());
+        if http_events
+            && connection
+                .token
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            return Err(AdapterError::Create(
+                connection.id.clone(),
+                acb_i18n::t!(
+                    "adapter.onebot11.http_listen_requires_token",
+                    id = connection.id
+                ),
+            ));
+        }
         let slot = LinkSlot::new();
         let outbound = Box::new(OneBotSnowLumaOutbound::new(
             slot.clone(),

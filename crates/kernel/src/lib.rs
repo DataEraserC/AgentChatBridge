@@ -56,7 +56,7 @@ pub use notice::{NoticeEvent, NoticeSink};
 pub use outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, Outbounds, OutgoingKind,
     OutgoingRecord, ParamSpec, ParamType, PlatformTag, RecordMode, Risk, Scope, Sent, TargetRole,
-    TargetSpec,
+    TargetSpec, Verification,
 };
 pub use plugin::{
     AcceptAllReceiveProvider, AccessAction, AccessDecision, AccessProvider, AccessRequest,

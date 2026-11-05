@@ -61,6 +61,11 @@ allow_destructive = false  # 见下
 - OneBot 连接会带 `options`；`options.snowluma_min_version` 可覆盖适配器默认的 SnowLuma
   兼容下限（默认 `2.4.0`）。低于下限只在启动日志警告，不拒绝连接：
   在 `[[connections]]` 里写 `options = { snowluma_min_version = "2.4.0" }`。
+- 可选 `options.http_listen`：额外监听一个 HTTP 端点接收 SnowLuma 的 `httpClients`
+  事件（动作仍走 WS）。必须同时配置 `token`（HMAC-SHA1 密钥），请求要带
+  `X-Signature: sha1=...`；没有 token 会启动失败。
+- `wss://` 部署前提：适配器只接受 `ws://`；需要 TLS 时用反向代理终止 TLS 后转发到
+  桥监听的 `ws://` 地址。
 - 连接成功后适配器会自动调 `get_login_info` / `get_version_info` / `get_status`；
   三层版本与 `compat.state` 可在 `/healthz` 的 `dependencies.items[].version` 和
   `/api/plugins.connections[].version` 看到。

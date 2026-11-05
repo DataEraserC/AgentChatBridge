@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 9 项、部分实现 8 项、未实现 6 项**。动作级：现有 catalog 暴露 118 个层级 op / 121 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。逐动作覆盖矩阵见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 16 项、部分实现 3 项、未实现 4 项**。动作级：现有 catalog 暴露 127 个层级 op / 130 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。逐动作覆盖矩阵见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -209,51 +209,43 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 1 | 正向 WS | `wsServers` | **已实现**，`ws-client` | 无 |
 | 2 | HTTP API | `httpServers` | **未实现** | 没有 HTTP transport；出站只走 WS 队列 |
 | 3 | 反向 WS | `wsClients` | **已实现** | `transport = "ws-server"`，桥监听 `options.listen`；握手校验 `?access_token=` 或 Bearer；一次服务一条活动连接 |
-| 4 | HTTP 事件上报 | `httpClients` | **未实现** | 没有入站 HTTP 端点；也没有签名/令牌校验设计 |
-| 5 | `wss://` | 未成文 | **未实现** | 只接受 `ws://`；TLS 依赖未引入 |
-| 6 | Token 鉴权 | Bearer / query / 每适配器独立 | **已实现** | 单一 `Connection.token`；多 transport 时无法区分不同 token |
-| 7 | `messageFormat` | array / string | **部分** | array 完整；string 被当纯文本，CQ 码不解析（[segment.rs](../../crates/adapters/onebot11/src/segment.rs#L58-L68,L258-L259)） |
+| 4 | HTTP 事件上报 | `httpClients` | **已实现（可选）** | `options.http_listen`；只收事件，动作仍走 WS；按 `X-Signature: sha1=HMAC-SHA1(token, raw body)` 校验，1 MiB 上限，按原始 JSON 哈希去重 |
+| 5 | `wss://` | 客户端支持 wss，服务端无 TLS 配置 | **未实现** | 只接受 `ws://`；需要 TLS 时用反向代理终止后连本机 `ws://`（部署前提，见 §7） |
+| 6 | Token 鉴权 | Bearer / query / 每适配器独立 | **已实现** | 单一 `Connection.token`；`http_listen` 的 token 同时是 HMAC 密钥 |
+| 7 | `messageFormat` | array / string | **已实现** | array 完整；string 按 CQ 码解析，含 `&#91;` / `&#93;` / `&#44;` / `&amp;` 转义与 `raw_message` 回退 |
 | 8 | 消息收发 | 群/私聊发送、读取、撤回 | **已实现** | 群/私聊文本、图片、语音、视频、文件、自定义收藏表情（`msg.face`）都有；`send_msg` 不需要（桥按房间选动作） |
 | 9 | 合并转发 | 发送、读取、上传 | **部分** | `send_forward_msg` / `get_forward_msg` 有；`upload_forward_msg` 与群/私聊专用别名未暴露（预上传返回 `res_id`，现有发送路径只接受节点数组，且它会是任意大小转发载荷的搬运通道） |
-| 10 | 群管理 | 21（中文页）/ 24（英文页） | **部分** | 现有禁言/踢人/批量踢/管理员/名片/退群/群名/头像/头衔/全员禁言/成员权限/邀请策略/历史可见性/管理设置读取；缺加群选项、群搜索、群分类标签（参数取值语义未成文）；匿名相关上游本身未实现 |
+| 10 | 群管理 | 21（中文页）/ 24（英文页） | **已实现** | 禁言/踢人/批量踢/管理员/名片/退群/群名/头像/头衔/全员禁言/成员权限/邀请策略/历史可见性/管理设置读取 + 加群选项/群搜索/群分类标签；分类标签与 add_type 的 4 个 op 标 `Unverified` |
 | 11 | 群信息/成员 | 7 + 扩展 | **已实现** | 群列表/信息/成员信息/成员列表/荣誉/系统消息/分享链接/详情/禁言名单/打卡名单 |
 | 12 | 好友 | 3 + 扩展 | **已实现** | 列表/陌生人/删好友/备注/分组/单向好友 |
 | 13 | 请求处理 | 2 + 扩展 | **已实现** | 好友/加群请求处理、可疑好友申请列表与处理、被过滤加群请求 |
 | 14 | 群公告 | 3 | **已实现** | 获取/发送/删除 |
-| 15 | 群文件 | 12 | **部分** | 根/子目录列表、下载链接、系统信息、群/私聊上传、群删除、文件夹创建/删除、文件移动/重命名、私聊下载链接有；缺文件夹重命名（两个名称参数优先级未成文）、群文件分享链接（`get_share_link` 只收 `fileset_id`）、转存（`trans_group_file` 没有目标参数） |
-| 16 | 流式传输 | 6 | **未实现** | 没有 HTTP 流式通道；现有文件中继（ADR-0025）不是流式 |
-| 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **部分** | `set_msg_emoji_like` / `set_group_reaction`、回应汇总、回应用户列表、收藏表情列表/详情/改/删、系统表情列表/搜索/单查有；缺收藏表情新增（`file` 格式未成文）、置顶、`get_emoji_likes`（与 `fetch_emoji_like` 重叠） |
-| 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **部分** | `get_record` / `get_image` / `get_file`、语音转写（`msg.voice_text`）、OCR（`msg.ocr`）、AI 语音角色/生成/发送有；缺原始流式上传下载、`download_file`（任意 URL/base64，无大小上限）、音乐签名（`musicSignUrl` 是配置项不是动作） |
+| 15 | 群文件 | 12 | **已实现** | 根/子目录列表、下载链接、系统信息、群/私聊上传、群删除、文件夹创建/删除/改名、文件移动/重命名、私聊下载链接、分享链接、临时文件转永久 |
+| 16 | 流式传输 | 6 | **已实现** | WS 多帧下载 `file_info → file_chunk* → file_complete` 累计为元信息/分块统计；上传多请求 + `reset:true`；chunk 字节不整段进内存 |
+| 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **部分** | 回应/自定义表情/系统表情主体已实现；仍缺 `move_custom_face_to_front` 与 `get_emoji_likes`（与 `fetch_emoji_like` 重叠） |
+| 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **已实现** | 原始流式上传下载、`download_file`（1 GiB / 60 s / http(s)）已补；音乐签名是配置项不是动作 |
 | 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 启动已调用 `get_login_info` / `get_status` / `get_version_info`；三层版本 + 兼容下限进依赖元数据。仍缺 `can_send_*`、资料设置、在线状态设置 |
-| 20 | 事件类型 | message / message_sent / notice / request / meta | **部分** | 有分流；notice 只解析 6 类 + poke；`bot_status` / `bot_offline` 已走账号状态并驱动依赖健康，心跳只刷新 `lastOkAt`，`message_sent` 已忽略。仍缺 `group_upload`、`essence`、`notify.*` 的字段解析（SnowLuma 未成文），未知 notice 保留 Opaque |
-| 21 | 群相册 | 9 | **部分** | 相册列表/相册媒体列表（只读）有；创建/删除相册动作文档里不存在，上传/删除/评论/点赞按产品范围不暴露 |
+| 20 | 事件类型 | message / message_sent / notice / request / meta | **已实现** | `group_upload` / `essence` / `notify.*`（poke/profile_like/title/group_name/input_status）按 research §2.1 字段解析；未知 notice 仍保留 Opaque |
+| 21 | 群相册 | 9 | **已实现** | 相册/媒体列表、上传、删除、评论、点赞全部暴露；删除/上传按风险分级 |
 | 22 | QQ 空间 | 10（中文）/ 26（英文） | **未实现** | 产品决定不暴露：账号级社交面，权限/审计成本高于聊天核心收益 |
-| 23 | 收藏/闪传/其他扩展 | 115 个 extended 里的大部分 | **未实现** | 产品决定不暴露：收藏/闪传/SSO/数据库密钥等账号级或敏感面；`send_packet`、`request_decrypt_key`、`get_credentials` 永不暴露 |
+| 23 | 收藏/闪传/其他扩展 | 115 个 extended 里的大部分 | **未实现** | 仍按产品范围不暴露收藏/闪传的其余动作、SSO、数据库密钥等；`add_custom_face` / `get_share_link` / `trans_group_file` 已按出处落地 |
 | 24 | WebUI 邮件/Webhook | 运维通道 | **不适用** | 不在适配器职责 |
 | 25 | MCP / TypeScript SDK | 独立包 | **不适用** | 不是 OneBot 运行时协议 |
 
-**计数**：25 项中 2 项不适用；适用 23 项 = 已实现 8 + 部分 9 + 未实现 6。
-批次 1 完成后计数不变：第 19 项仍是「部分」，但缺口从「启动不调用版本/状态」缩小为
-「缺能力查询、资料设置、在线状态设置」。批次 2 完成后计数仍不变：第 20 项仍是「部分」，
-但缺口从「`bot_status` 污染私聊房间、心跳不更新健康」缩小为「`group_upload` / `essence` /
-`notify.*` 的字段未成文，只能显式降级」。批次 3 完成后：#8 补上自定义收藏表情，
-#11 群信息 / #12 好友 / #13 请求 / #14 公告从「部分」升为「已实现」；
-#10 群管理仍是「部分」，缺口缩为加群选项、群搜索、群分类标签。批次 4 完成后计数不变：
-#15 群文件 / #17 表情回应仍是「部分」，缺口分别缩为文件夹重命名/分享链接/转存与
-收藏表情新增/置顶。批次 5 完成后：#3 反向 WS 从「未实现」升为「已实现」，
-计数变为 **8 完全 / 8 部分 / 7 未实现**；HTTP API、HTTP 事件上报、`wss://` 仍未实现。
-批次 6 完成后计数不变：#18 语音/媒体仍是「部分」，缺口缩为原始流式上传下载、
-`download_file` 与音乐签名；#16 流式传输仍未实现。批次 7 完成后：#21 群相册从
-「未实现」升为「部分」，计数变为 **8 完全 / 9 部分 / 6 未实现**；#22 QQ 空间与
-#23 收藏/闪传按产品范围保持「未实现」。批次 8 完成后：#21 群相册升为「完全」，
-计数变为 **9 完全 / 8 部分 / 6 未实现**；#16 仍为「部分」（op 已暴露，WS 单响应
-语义下下载流只能拿到首帧）；#18 仍为「部分」（`download_file` 已补，音乐签名不是
-动作）；#22 / #23 仍未排期（下一批）。
+**计数（2026-11-05，动作补全 + verification 之后）**：25 项中 2 项不适用；
+适用 23 项 = 已实现 16 + 部分 3 + 未实现 4。批次 8 完成后计数为
+**9 完全 / 8 部分 / 6 未实现**；随后「动作补全 + verification」批次把 #4 HTTP 事件上报、
+#7 CQ 字符串、#10 群管理、#15 群文件、#16 流式、#20 事件字段补齐，计数变为
+**16 完全 / 3 部分 / 4 未实现**；#17 / #18 / #19 仍各有未排期动作，#2 HTTP API 与
+#5 `wss://` 仍未实现。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 118 个层级 op / 121 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 现有 `ROUTES` 127 个层级 op / 130 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 其中 4 个 op（`group.tag_list` / `group.tag_add` / `group.tag_delete` /
+  `group.add_option`）带 `Verification::Unverified`，按 critical 档管理。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
-- 逐动作「已暴露 / 未暴露 + 原因分类」见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
+- 逐动作「已暴露 / 未暴露 + 原因分类」见 [snowluma-action-coverage.md](snowluma-action-coverage.md)：
+  已暴露 130、未暴露 70（外部约束 8、未排期 62）。
 - 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。
 
 **曾经最容易造成实际事故的三个缺口，已由批次 1 / 2 收口**：
@@ -629,13 +621,15 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   自动只回一页：默认 20 个 op，约 2.9 KB 的 ops 主体（另加 tags 概览与信封），
   `_page` 给 `total` / `offset` / `returned` / `has_more` / `next_offset`；
   列目录也可显式给 `limit` / `offset`（上限 60 条/页），或按 `path` / `tags` 收窄。
-- **按文档判断不做（记缺口）**：
-  - `rename_group_file_folder`：`new_folder_name` 与 `name` 两个名称参数都存在且默认空，
-    优先级未成文，不猜。
-  - `get_share_link`：只接受 `fileset_id`（闪传文件集），不接受群 `file_id`，不属于群文件域。
-  - `trans_group_file`：没有任何目标参数，文档没说转存到哪里，不暴露。
-  - `add_custom_face`：`file` 的格式（URL / 本地路径 / base64）未成文，且属附件上传通道，
-    先不暴露，避免 core 变成替模型搬文件的通道。
+- **按文档判断不做（批次 4 时；后续「动作补全 + verification」已落地前 4 项）**：
+  - `rename_group_file_folder`：当时 `new_folder_name` 与 `name` 优先级未成文；
+    后续按 research §2 #5 落地为 `group.file.folder_rename`。
+  - `get_share_link`：当时只接受 `fileset_id`（闪传文件集）；后续按 research §2 #6
+    落地为 `file.share_link`。
+  - `trans_group_file`：当时没有任何目标参数；后续按 research §2 #7 确认是
+    “同群永久存储”，落地为 `group.file.trans`。
+  - `add_custom_face`：当时 `file` 格式未成文；后续按 research §2 #8 落地为
+    `face.custom_add`。
   - `get_emoji_likes`：与 `fetch_emoji_like` 重叠，只保留后者（支持 count/cookie 翻页）。
 - **没有新增 `PlatformTag`，没有第二张 op→risk 表**；全部走 `catalog()` + `ROUTES`。
 
@@ -676,18 +670,19 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   - 监听/accept 失败是配置或环境问题：标 `failed` 并退出，不在原地无限重试。
 - **没有新增 op、没有新增工具位**：工具数保持 28，`platform_call` 仍是唯一平台入口；
   本批只改连接方式，不改事件/消息解析。目录仍是 83 op，默认 20 条/页一页约 3–4 KB。
-- **按文档/实施成本判断不做（记缺口）**：
+- **按文档/实施成本判断暂不做（后续动作补全批次已补 HTTP 事件上报）**：
   - HTTP API transport（`httpServers`）：需要新增 HTTP 客户端依赖与独立动作通道；
     当前没有部署只用 HTTP，先不做。
-  - HTTP 事件上报接收端（`httpClients`）：需要入站 HTTP 服务、去重与鉴权设计，
-    文档也未给出签名/令牌细节，先不做。
-  - `wss://`：需要 TLS 依赖；现有部署用同机/内网 `ws://`，没确认前不声明支持。
-  - 多 transport 独立 token：目前只落了两条 WS 方向的 token 校验，没有 HTTP transport，
-    拆 token 字段没有实际收益。
+  - HTTP 事件上报接收端（`httpClients`）：本批先不做；后续按 research §2 #11 落地
+    为可选 `options.http_listen`，用 HMAC-SHA1 校验 + 原始 JSON 去重。
+  - `wss://`：需要 TLS 依赖；现有部署用同机/内网 `ws://`。需要 TLS 时用反向代理
+    终止 TLS（见「动作补全 + verification」）。
+  - 多 transport 独立 token：目前只落了两条 WS 方向的 token 校验，没有 HTTP API，
+    拆 token 字段没有实际收益；`http_listen` 复用同一个 token 作 HMAC 密钥。
 
 **前置**：这是「必须先解决鉴权/连接形态」的批次本身。批次 6 依赖它；如果部署只用 HTTP，批次 3/4 也要等它。
 
-### 批次 6：流式传输与媒体增强（媒体增强已完成，流式按判断不做）
+### 批次 6：流式传输与媒体增强（媒体增强 + 流式已完成）
 
 **能力范围**
 - 6 个流式动作：上传、下载图片/语音/文件、测试下载、清理临时文件。
@@ -716,18 +711,18 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - **参数校验**：语音消息 id 非空；OCR 图片地址非空且 ≤ 2048 字符；`file.info` 至少一个标识；
   AI 语音 `character` / `text` 非空。
 - **工具位不变**：仍为 28 个工具；全部新能力走 `platform_call` 的层级 op。
-- **按文档/风险判断不做（记缺口）**：
+- **按文档/风险判断暂不做（后续动作补全批次已补前两项）**：
   - 原始流式动作（`upload_file_stream`、`download_file_image_stream` /
     `download_file_record_stream` / `download_file_stream`、`test_download_stream`）：
-    多帧协议、无逐请求取消、WS 无背压，且会把大文件字节搬进 core；不在本轮接。
-  - `download_file`：接受任意 URL / base64 且没有文档化大小上限，属于把平台当下载器，
-    先不暴露。
-  - `clean_stream_temp_file`：没有流式上传/下载就没必要先给清理入口；留给实现流式时一起做。
+    本批先没接；后续实现 WS 多帧累计（只回元信息/分块统计，不回传字节）。
+  - `download_file`：本批先没暴露；后续按 research §2 #13 补回（http/https、
+    默认 8 MiB、最大 1 GiB、60 s）。
+  - `clean_stream_temp_file`：随流式一起暴露为 `stream.clean`。
   - `musicSignUrl`：它是 SnowLuma 配置项，不是 OneBot 动作，不能变成 op。
 - **连接失败路径**：本批没有改连接代码，沿用批次 5 的反向 WS 鉴权/监听测试；
   role 仍是「单活动连接 + 必须配 Universal」，没有新增多连接分流。
 
-**前置**：**批次 5**。流式大概率只能走 HTTP；WS 不适合分段响应。
+**前置**：**批次 5**。流式后续按 research §2 #9 走 WS 多帧累计，不再假设只能走 HTTP。
 
 ### 批次 7：扩展域（已完成：只读群相册；其余按产品范围不暴露）
 
@@ -804,6 +799,70 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   审批脱敏、`file.download` scheme/大小上限、流式 op 存在且路由可达、
   转发载荷上限、相册写 risk/effect、op 总数 118。
 - **逐动作覆盖**：[snowluma-action-coverage.md](snowluma-action-coverage.md)。
+
+### 动作补全 + verification（2026-11-05）
+
+**verification 模型**
+- `MethodSpec.verification: Verified { source } | Unverified { reason, experiment }`，
+  构造期必填；wire 协议同样必填（外部适配器缺字段会在启动期被拒）。
+- `Verified` 必须有 source；`Unverified` 必须同时有 reason 与 experiment。
+- **unverified 门槛等同 critical**：直调 `platform_call` 返回 `ToolNotAllowed`，
+  `allow_destructive` 与常驻 grants 都不放行；只能 `access_request` 票据 + 私信审批。
+  票据能力集自动带 `critical`（账号级再带 `account_secret`），审批私信显示
+  `[UNVERIFIED]` 和 reason 摘要，审计行带 `unverified=true`。
+- `platform_call` 目录（brief/detail）与 `capabilities` 的 op 条目都暴露
+  `verification`；索引降级只保留 `verified: true/false`。
+
+**新增 9 个 op（118 → 127），映射 9 个 action（121 → 130）**
+- 群管理：`group.add_option`（`set_group_add_option`，add_type 必填、55→5）、
+  `group.search`（`set_group_search`，open/close → 0/1）、
+  `group.tag_list` / `group.tag_add` / `group.tag_delete`（连接级，显式 group_class）。
+- 群文件：`group.file.folder_rename`（new_folder_name 优先、name 回退）、
+  `group.file.trans`（同群临时文件转永久，无目标群参数）。
+- 扩展：`file.share_link`（`get_share_link`，只收 fileset_id）、
+  `face.custom_add`（`add_custom_face`，两段式：先加收藏再用 emoji_id 调 `msg.face`）。
+
+**CQ 码 / 流式 / 事件 / HTTP**
+- `messageFormat: string`（或 `message` 缺失时）按 CQ 码解析 `message` / `raw_message`，
+  支持 `text/at/reply/image/record/video/face` 与未知段的 Opaque 保留；
+  转义 `&#91;` / `&#93;` / `&#44;` / `&amp;` 按规范还原。
+- WS 下载流按 `file_info → file_chunk* → file_complete` 累计；只保留元信息、分块数与
+  总字节，不把 chunk base64 整段攒进内存；上传用多次调用 + `reset:true` 取消。
+- `group_upload` / `essence` / `notify.*`（poke/profile_like/title/group_name/
+  input_status）按 research §2.1 字段解析；`notify.*` 的事件名带 sub_type。
+- 可选 `options.http_listen` 接收 SnowLuma `httpClients`：只收事件，动作仍走 WS；
+  校验 `X-Signature: sha1=HMAC-SHA1(token, raw body)`（常量时间比较），
+  请求体上限 1 MiB；WS 与 HTTP 共用按原始 JSON SHA1 的 10 分钟去重表。
+  `http_listen` 没有 token 时启动拒绝（工厂 `Create` 错误）。
+- `file.download` 对齐平台上限：http/https、默认 8 MiB、最大 1 GiB、60 s 超时
+  （`DOWNLOAD_TIMEOUT`）；平台没有 URL 白名单/SSRF 防护，适配器也不替它猜。
+- `wss://` **部署前提**：适配器只接受 `ws://`。SnowLuma 的 `wsClients` 可以连
+  `wss://`（走系统 CA，无自定义证书配置），`wsServers` 本身不能直接提供 TLS；
+  因此需要 TLS 时，在桥前面放反向代理终止 TLS，桥仍监听本机 `ws://`。
+
+**标为 Unverified 的 op 与实验设计**
+- `group.add_option`：reason = add_type 0/1-3 的语义只有 NapCat 注释单一来源；
+  experiment = research §3.1（基线 `get_group_admin_settings` → 对
+  `v ∈ {0,1,2,3,4,5,55}` 逐个 `set_group_add_option` 并回读 + QQ 客户端截图 →
+  再试 6/100；实验后恢复基线）。
+- `group.tag_list` / `group.tag_add` / `group.tag_delete`：reason = group_class
+  是否等于 NTQQ `GroupClassExt`、标签是全局分类目录还是群级语义未经实机确认；
+  experiment = research §3.3（两个不同分类测试群，扫描 `get_group_tags(0..30)`，
+  加/删测试标签后检查两群资料与目录，最后清理）。
+- 其余新 op（folder rename / share link / trans / custom face / stream /
+  download / CQ / events）按 research §2 的源码/文档出处标 `Verified`。
+
+**证据**
+- `catalog_lists_the_unverified_ops`（unverified 清单与 source/reason/experiment 完整性）
+- `batch8_params_are_normalized_before_the_platform`（55→5、open/close、别名优先级、
+  1 GiB 上限）
+- `cq_string_is_parsed_into_segments` / `cq_escapes_are_decoded_after_segment_parsing`
+- `download_stream_frames_are_accumulated_until_complete`
+- `group_upload_and_essence_fields_are_parsed` / `notify_subtypes_are_named_and_parsed`
+- `hmac_sha1_matches_the_rfc2202_vector` / `event_dedup_drops_repeats_but_not_heartbeats`
+- 内核：`unverified_op_is_direct_denied_and_ticket_approval_shows_the_reason`、
+  `capabilities` 里的 `fake.unverified` 条目。
+- 逐动作覆盖：[snowluma-action-coverage.md](snowluma-action-coverage.md)（130 已暴露 / 70 未暴露）。
 
 ### 批次之间的依赖
 

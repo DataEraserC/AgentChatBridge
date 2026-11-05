@@ -11,5 +11,6 @@ acb-i18n = { workspace = true }
 acb-proto = { path = "../../proto" }
 acb-kernel = { path = "../../kernel" }
 serde_json = { workspace = true }
+sha1 = "0.11"
 thiserror = { workspace = true }
 tungstenite = "0.30"

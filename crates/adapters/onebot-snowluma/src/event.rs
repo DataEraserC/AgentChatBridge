@@ -107,8 +107,13 @@ fn message(
         _ => return Err(EventError::Missing("message_type")),
     };
 
-    let (elements, at_self) =
-        segment::from_onebot(event.get("message").unwrap_or(&Value::Null), self_id);
+    let (elements, at_self) = segment::from_onebot(
+        event
+            .get("message")
+            .or_else(|| event.get("raw_message"))
+            .unwrap_or(&Value::Null),
+        self_id,
+    );
 
     Ok(Parsed::Record(
         RecordDraft::message(
@@ -208,12 +213,21 @@ fn notice(
         }
     };
     let recall = matches!(notice_type, "group_recall" | "friend_recall");
-    let mut tags = vec!["notice".to_owned(), notice_type.to_owned()];
+    let event_name = if notice_type == "notify" {
+        let sub = event
+            .get("sub_type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        format!("notify.{sub}")
+    } else {
+        notice_type.to_owned()
+    };
+    let mut tags = vec!["notice".to_owned(), event_name.clone()];
     if recall {
         // 跨平台标签：适配器认 `recall`，core 不解释标签，只按 target 追加。
         tags.push("recall".to_owned());
     }
-    let mut draft = RecordDraft::event(room, sender, at, notice_type, elements, false)
+    let mut draft = RecordDraft::event(room, sender, at, event_name, elements, false)
         .with_event_meta(tags, Some(event.clone()), summary);
     if recall {
         // 撤回事件只进流水备查，不投递/不唤醒；core 只看到通用的 suppressed 和 target。
@@ -350,6 +364,7 @@ fn role_of(event: &Value) -> Option<SenderRole> {
 fn describe_notice(notice_type: &str, event: &Value) -> Option<String> {
     let operator = id_of(event.get("operator_id"));
     let target = id_of(event.get("target_id"));
+    let user = id_of(event.get("user_id"));
     match notice_type {
         "group_increase" => Some(format!("[{notice_type}] {target} 加入")),
         "group_decrease" => Some(format!("[{notice_type}] {target} 离开")),
@@ -366,6 +381,75 @@ fn describe_notice(notice_type: &str, event: &Value) -> Option<String> {
             Some(format!("[{notice_type}] {operator} 撤回了一条消息"))
         }
         "group_admin" => Some(format!("[{notice_type}] {target} 的管理员身份变了")),
+        "group_upload" => {
+            let file = event.get("file");
+            let name = file
+                .and_then(|value| value.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("未命名文件");
+            let size = file
+                .and_then(|value| value.get("size"))
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            Some(format!(
+                "[{notice_type}] {user} 上传了文件 {name}（{size} 字节）"
+            ))
+        }
+        "essence" => {
+            let sub = event
+                .get("sub_type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let action = match sub {
+                "add" => "设精",
+                "delete" => "取消精华",
+                _ => "精华状态变更",
+            };
+            Some(format!(
+                "[{notice_type}] {operator} {action}了 {user} 的消息"
+            ))
+        }
+        "notify" => describe_notify(event, &user),
+        _ => None,
+    }
+}
+
+/// `notify` 的 5 个 sub_type。字段表见 research §2.1。
+fn describe_notify(event: &Value, user: &str) -> Option<String> {
+    let operator = id_of(event.get("operator_id"));
+    let target = id_of(event.get("target_id"));
+    let sub = event.get("sub_type").and_then(Value::as_str)?;
+    match sub {
+        "poke" => Some(format!("[notify/poke] {target} 被拍")),
+        "profile_like" => {
+            let times = event.get("times").and_then(Value::as_i64).unwrap_or(1);
+            let by = if operator.is_empty() {
+                user
+            } else {
+                operator.as_str()
+            };
+            Some(format!("[notify/profile_like] {by} 赞了资料卡 {times} 次"))
+        }
+        "title" => {
+            let title = event.get("title").and_then(Value::as_str).unwrap_or("");
+            Some(format!("[notify/title] {user} 的头衔变成 {title}"))
+        }
+        "group_name" => {
+            let name = event.get("name_new").and_then(Value::as_str).unwrap_or("");
+            Some(format!("[notify/group_name] 群名改成 {name}"))
+        }
+        "input_status" => {
+            let text = event
+                .get("status_text")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let kind = match event.get("event_type").and_then(Value::as_i64) {
+                Some(1) => "正在输入",
+                Some(3) => "正在录音",
+                _ => "输入状态变化",
+            };
+            Some(format!("[notify/input_status] {user} {kind} {text}"))
+        }
         _ => None,
     }
 }
@@ -806,5 +890,111 @@ mod tests {
             panic!("应当成一条记录");
         };
         assert_eq!(draft.sender.role, None);
+    }
+
+    #[test]
+    fn group_upload_and_essence_fields_are_parsed() {
+        let upload = json!({
+            "post_type": "notice",
+            "notice_type": "group_upload",
+            "self_id": 999,
+            "group_id": 456,
+            "user_id": 10001,
+            "time": 1_793_000_000,
+            "file": {"id": "f1", "name": "报告.pdf", "size": 2048, "busid": 102}
+        });
+        let Parsed::Record(draft) = parse("qq", &upload, &[]).expect("能解析") else {
+            panic!("group_upload 要进流水");
+        };
+        assert_eq!(
+            draft.elements[0],
+            Element::text("[group_upload] 10001 上传了文件 报告.pdf（2048 字节）")
+        );
+        assert!(matches!(
+            &draft.kind,
+            acb_proto::RecordKind::Event { event, tags, .. }
+                if event == "group_upload" && tags.iter().any(|tag| tag == "group_upload")
+        ));
+
+        let essence = json!({
+            "post_type": "notice",
+            "notice_type": "essence",
+            "sub_type": "add",
+            "self_id": 999,
+            "group_id": 456,
+            "user_id": 10001,
+            "operator_id": 10002,
+            "message_id": 592852179
+        });
+        let Parsed::Record(draft) = parse("qq", &essence, &[]).expect("能解析") else {
+            panic!("essence 要进流水");
+        };
+        assert_eq!(
+            draft.elements[0],
+            Element::text("[essence] 10002 设精了 10001 的消息")
+        );
+    }
+
+    #[test]
+    fn notify_subtypes_are_named_and_parsed() {
+        for (sub, expected) in [
+            (
+                "profile_like",
+                "[notify/profile_like] 10002 赞了资料卡 3 次",
+            ),
+            ("title", "[notify/title] 10001 的头衔变成 新头衔"),
+            ("group_name", "[notify/group_name] 群名改成 新群名"),
+            (
+                "input_status",
+                "[notify/input_status] 10001 正在输入 打字中",
+            ),
+        ] {
+            let event = json!({
+                "post_type": "notice",
+                "notice_type": "notify",
+                "sub_type": sub,
+                "self_id": 999,
+                "group_id": 456,
+                "user_id": 10001,
+                "operator_id": 10002,
+                "operator_nick": "老王",
+                "times": 3,
+                "title": "新头衔",
+                "name_new": "新群名",
+                "event_type": 1,
+                "status_text": "打字中",
+                "time": 1_793_000_000,
+            });
+            let Parsed::Record(draft) = parse("qq", &event, &[]).expect("能解析") else {
+                panic!("notify.{sub} 要进流水");
+            };
+            assert_eq!(draft.elements[0], Element::text(expected), "{sub}");
+            assert!(matches!(
+                &draft.kind,
+                acb_proto::RecordKind::Event { event, tags, .. }
+                    if event == &format!("notify.{sub}")
+                        && tags.iter().any(|tag| tag == &format!("notify.{sub}"))
+            ));
+        }
+    }
+
+    #[test]
+    fn string_message_format_is_parsed_as_cq() {
+        let event = json!({
+            "post_type": "message",
+            "message_type": "group",
+            "self_id": 999,
+            "group_id": 456,
+            "user_id": 10001,
+            "time": 1_793_000_000,
+            "sender": {"nickname": "老王"},
+            "post_format": "string",
+            "message": "[CQ:at,qq=999] 在吗",
+        });
+        let Parsed::Record(draft) = parse("qq", &event, &[]).expect("能解析") else {
+            panic!("应当成一条记录");
+        };
+        assert!(draft.at_self, "string 模式也要认出 @ 到自己");
+        assert!(matches!(&draft.elements[0], Element::At { .. }));
     }
 }

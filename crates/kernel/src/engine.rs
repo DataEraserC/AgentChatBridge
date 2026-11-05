@@ -63,7 +63,7 @@ use crate::storage::{
 };
 use crate::tickets::{
     ACTIVE_TTL_MS, AccessTicket, AccessTickets, BatchReply, MAX_LIVE_PER_SESSION,
-    MAX_REQUESTS_PER_TURN, PENDING_TTL_MS, TicketReply, TicketRequest, TicketState,
+    MAX_REQUESTS_PER_TURN, PENDING_TTL_MS, TicketReply, TicketRequest, TicketState, UnverifiedOp,
 };
 use crate::tools::{
     AccessRequestArgs, AccessTicketGetArgs, AckArgs, CapabilitiesArgs, DEFAULT_COLUMNS,
@@ -4182,7 +4182,20 @@ impl<S: Store> Bridge<S> {
         let spec = find_platform_op(&methods, &args.op)?;
 
         // critical 不接受任何常驻授权或 allow_destructive：直接调用一律拒绝，
-        // 只允许由已批准的 access_request 票据在 core 内执行。
+        // 只允许由已批准的 access_request 票据在 core 内执行。unverified 同档。
+        if spec.verification.is_unverified() {
+            return Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                format!(
+                    "[forbidden] {} is unverified ({}); it requires an access_request ticket \
+                     approved in private. File an access_request with op \"platform_call:{}\" \
+                     and wait for approval before retrying",
+                    spec.name,
+                    spec.verification.reason().unwrap_or("no reason declared"),
+                    spec.name
+                ),
+            ));
+        }
         if spec.risk == Risk::Critical {
             return Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
@@ -4286,36 +4299,52 @@ impl<S: Store> Bridge<S> {
             ));
         }
 
-        match spec.risk {
-            Risk::Critical => {
-                let approved_critical = approved
-                    .is_some_and(|ticket| ticket.capabilities.contains(&GrantCapability::Critical));
-                if !approved_critical {
-                    return Err(ToolError::new(
-                        ErrorCode::ToolNotAllowed,
-                        format!(
-                            "[forbidden] {} is a critical operation; it requires an approved \
-                             access_request ticket and cannot be enabled by allow_destructive",
-                            spec.name
-                        ),
-                    ));
-                }
-            }
-            Risk::Destructive
-                if !Self::allows_destructive(&config, &room.connection, spec.name.as_ref()) =>
-            {
+        if spec.verification.is_unverified() {
+            let approved_critical = approved
+                .is_some_and(|ticket| ticket.capabilities.contains(&GrantCapability::Critical));
+            if !approved_critical {
                 return Err(ToolError::new(
                     ErrorCode::ToolNotAllowed,
                     format!(
-                        "[forbidden] {} is a destructive operation and connection {} does not allow it \
-                         by default. Enable it in the [[connections]] section of config.toml with \
-                         allow_destructive = true (or list only the methods to enable, e.g. \
-                         allow_destructive = [\"{}\"])",
-                        spec.name, room.connection, spec.name
+                        "[forbidden] {} is unverified and requires an approved access_request \
+                         ticket; allow_destructive and persistent grants do not apply",
+                        spec.name
                     ),
                 ));
             }
-            _ => {}
+        } else {
+            match spec.risk {
+                Risk::Critical => {
+                    let approved_critical = approved.is_some_and(|ticket| {
+                        ticket.capabilities.contains(&GrantCapability::Critical)
+                    });
+                    if !approved_critical {
+                        return Err(ToolError::new(
+                            ErrorCode::ToolNotAllowed,
+                            format!(
+                                "[forbidden] {} is a critical operation; it requires an approved \
+                                 access_request ticket and cannot be enabled by allow_destructive",
+                                spec.name
+                            ),
+                        ));
+                    }
+                }
+                Risk::Destructive
+                    if !Self::allows_destructive(&config, &room.connection, spec.name.as_ref()) =>
+                {
+                    return Err(ToolError::new(
+                        ErrorCode::ToolNotAllowed,
+                        format!(
+                            "[forbidden] {} is a destructive operation and connection {} does not allow it \
+                             by default. Enable it in the [[connections]] section of config.toml with \
+                             allow_destructive = true (or list only the methods to enable, e.g. \
+                             allow_destructive = [\"{}\"])",
+                            spec.name, room.connection, spec.name
+                        ),
+                    ));
+                }
+                _ => {}
+            }
         }
 
         check_params(&spec, &args.params)?;
@@ -4874,13 +4903,25 @@ impl<S: Store> Bridge<S> {
                 .ticket_capabilities(&target, &ops)
                 .map_err(|error| batch_item_error(index, &error.message))?;
             let methods = self.outbound.catalog(&room.connection);
+            let mut unverified = Vec::new();
             for op in &ops {
                 let Some(name) = op.strip_prefix("platform_call:") else {
                     continue;
                 };
                 let spec = find_platform_op(&methods, name)
                     .map_err(|error| batch_item_error(index, &error.message))?;
+                if spec.verification.is_unverified() {
+                    unverified.push(UnverifiedOp {
+                        op: name.to_owned(),
+                        reason: spec
+                            .verification
+                            .reason()
+                            .unwrap_or("adapter did not declare a reason")
+                            .to_owned(),
+                    });
+                }
                 if spec.risk == Risk::Destructive
+                    && spec.verification.is_verified()
                     && !Self::allows_destructive(&ctx.config, &room.connection, name)
                 {
                     self.audit_ticket_denied(ctx, &target, "destructive_disabled", name);
@@ -4919,6 +4960,7 @@ impl<S: Store> Bridge<S> {
                 origin_sender: ctx.origin_sender.clone(),
                 origin_sender_name: origin_sender_name.clone(),
                 capabilities,
+                unverified,
                 request_turn: ticket.as_str().to_owned(),
                 batch_id: None,
                 now,
@@ -5487,7 +5529,10 @@ impl<S: Store> Bridge<S> {
                     target.kind.as_str()
                 ));
             }
-            if spec.scope != Scope::Room && spec.risk != Risk::Critical {
+            if spec.scope != Scope::Room
+                && spec.risk != Risk::Critical
+                && spec.verification.is_verified()
+            {
                 return Err(format!(
                     "{op_name} is connection-scope; tickets can only carry room actions"
                 ));
@@ -5550,22 +5595,33 @@ impl<S: Store> Bridge<S> {
                         ));
                     }
                     capabilities.insert(GrantCapability::Platform);
-                    match spec.risk {
-                        Risk::Critical => {
-                            capabilities.insert(GrantCapability::Critical);
-                            // 账号级 critical = 取凭证，能力表里单独记 account_secret。
-                            if spec.access_kind() == AccessTargetKind::Account {
-                                capabilities.insert(GrantCapability::AccountSecret);
+                    if spec.verification.is_unverified() {
+                        // 未验证 = critical 档：票据必须带 critical；账号级再带 account_secret。
+                        capabilities.insert(GrantCapability::Critical);
+                        if spec.access_kind() == AccessTargetKind::Account {
+                            capabilities.insert(GrantCapability::AccountSecret);
+                        }
+                    } else {
+                        match spec.risk {
+                            Risk::Critical => {
+                                capabilities.insert(GrantCapability::Critical);
+                                // 账号级 critical = 取凭证，能力表里单独记 account_secret。
+                                if spec.access_kind() == AccessTargetKind::Account {
+                                    capabilities.insert(GrantCapability::AccountSecret);
+                                }
                             }
+                            Risk::Destructive => {
+                                capabilities.insert(GrantCapability::Destructive);
+                            }
+                            _ => {}
                         }
-                        Risk::Destructive => {
-                            capabilities.insert(GrantCapability::Destructive);
-                        }
-                        _ => {}
                     }
-                    // critical 由审批本身放行，不再需要房间读写能力；其余房间平台动作
-                    // 之前先过房间访问检查，所以票据必须带上对应的房间能力。
-                    if spec.risk == Risk::Critical || spec.scope != Scope::Room {
+                    // critical / unverified 由审批本身放行，不再需要房间读写能力；其余房间
+                    // 平台动作之前先过房间访问检查，所以票据必须带上对应的房间能力。
+                    if spec.risk == Risk::Critical
+                        || spec.verification.is_unverified()
+                        || spec.scope != Scope::Room
+                    {
                         continue;
                     }
                     if spec.effect == Effect::Read {
@@ -5885,7 +5941,10 @@ impl<S: Store> Bridge<S> {
                 )),
             );
         }
-        if spec.scope != Scope::Room && spec.risk != Risk::Critical {
+        if spec.scope != Scope::Room
+            && spec.risk != Risk::Critical
+            && spec.verification.is_verified()
+        {
             return (
                 "skipped",
                 None,
@@ -8837,6 +8896,7 @@ fn ticket_json(ticket: &crate::tickets::AccessTicket) -> Value {
         "target_display": ticket.target.display(),
         "ops": ticket.ops,
         "capabilities": ticket.capabilities.iter().map(|capability| capability.as_str()).collect::<Vec<_>>(),
+        "unverified": ticket.unverified.iter().map(|item| json!({"op": item.op, "reason": item.reason})).collect::<Vec<_>>(),
         "created_at": ticket.created_at,
         "expires_at": ticket.expires_at,
         "request_turn": ticket.request_turn,
@@ -8878,13 +8938,19 @@ fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
         } else {
             ""
         };
+        let unverified = if ticket.unverified.is_empty() {
+            ""
+        } else {
+            " [UNVERIFIED]"
+        };
         text.push_str(&format!(
-            "{}. ticket={} batch={} nonce={}{}\n   目标：{}\n   动作：{}\n   参数：{}\n   能力：{}\n   申请：session={} principal={} place={} turn={}\n",
+            "{}. ticket={} batch={} nonce={}{}{}\n   目标：{}\n   动作：{}\n   参数：{}\n   能力：{}\n   申请：session={} principal={} place={} turn={}\n",
             index + 1,
             ticket.id,
             ticket.batch_id.as_deref().unwrap_or("-"),
             ticket.nonce,
             destructive,
+            unverified,
             ticket.target.display(),
             ticket.ops.join(", "),
             ticket_params_summary(&ticket.ops, ticket.params.as_ref()),
@@ -8894,6 +8960,15 @@ fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
             ticket.place.as_str(),
             ticket.request_turn,
         ));
+        if !ticket.unverified.is_empty() {
+            let notes = ticket
+                .unverified
+                .iter()
+                .map(|item| format!("{}：{}", item.op, truncate_chars(&item.reason, 160)))
+                .collect::<Vec<_>>()
+                .join("；");
+            text.push_str(&format!("   未验证：{notes}\n"));
+        }
         if ticket.capabilities.contains(&GrantCapability::Critical) {
             text.push_str(
                 "   注意：critical 结果只在 access_ticket_get 中可见，不进入房间流水或投递正文。\n",
@@ -9137,6 +9212,7 @@ fn method_index(item: &Value) -> Value {
         "path": item["path"],
         "summary": truncate_chars(item["summary"].as_str().unwrap_or(""), 80),
         "risk": item["risk"],
+        "verified": item["verification"]["state"].as_str() == Some("verified"),
     });
     if let Some(scope) = item.get("scope") {
         out["scope"] = scope.clone();
@@ -9197,6 +9273,7 @@ fn cap_op_index(item: &Value) -> Value {
         "ticket_required": item["ticket_required"],
         "requestable": item["requestable"],
         "reason": item["reason"],
+        "verification": item["verification"],
     })
 }
 
@@ -9263,17 +9340,22 @@ fn cap_op_json(
     } else {
         send_reason
     };
-    let (mut direct_executable, mut reason, ticket_required, requestable) = match spec.risk {
-        Risk::Critical => (false, Some("critical_requires_ticket"), true, true),
-        Risk::Destructive => {
-            if connection_allows_destructive(config, connection, spec.name.as_ref()) {
-                (true, None, false, false)
-            } else {
-                (false, Some("destructive_disabled"), false, false)
+    let (mut direct_executable, mut reason, ticket_required, requestable) =
+        if spec.verification.is_unverified() {
+            (false, Some("unverified_requires_ticket"), true, true)
+        } else {
+            match spec.risk {
+                Risk::Critical => (false, Some("critical_requires_ticket"), true, true),
+                Risk::Destructive => {
+                    if connection_allows_destructive(config, connection, spec.name.as_ref()) {
+                        (true, None, false, false)
+                    } else {
+                        (false, Some("destructive_disabled"), false, false)
+                    }
+                }
+                Risk::Read | Risk::Write => (true, None, false, spec.scope == Scope::Room),
             }
-        }
-        Risk::Read | Risk::Write => (true, None, false, spec.scope == Scope::Room),
-    };
+        };
     if direct_executable {
         if let Some(blocked) = access_reason {
             direct_executable = false;
@@ -9292,6 +9374,7 @@ fn cap_op_json(
         "ticket_required": ticket_required,
         "requestable": requestable,
         "reason": reason,
+        "verification": spec.verification.to_json(false),
     })
 }
 
@@ -9834,6 +9917,7 @@ fn describe_brief(spec: &MethodSpec) -> Value {
         "summary": spec.summary,
         "tags": spec.tags.iter().map(|tag| tag.as_str()).collect::<Vec<_>>(),
         "risk": spec.risk.as_str(),
+        "verification": spec.verification.to_json(true),
     });
     // 房间级是默认，不写；只有「跟房间无关」的那些才标一下，
     // 顺便告诉模型这些方法不用为了它编一个房间出来。五十来行清单里只多十处。
@@ -9858,6 +9942,7 @@ fn describe_method(spec: &MethodSpec) -> Value {
         "scope": spec.scope.as_str(),
         "params": spec.params_schema(),
         "example": spec.example_call(),
+        "verification": spec.verification.to_json(false),
     })
 }
 

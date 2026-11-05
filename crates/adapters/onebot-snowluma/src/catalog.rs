@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 
 use acb_kernel::{
     Effect, MethodSpec, ParamSpec, ParamType, PlatformTag, RecordMode, Risk, Scope, TargetSpec,
-    outbound::tags,
+    Verification, outbound::tags,
 };
 
 // ── 参数写法 ──────────────────────────────────────────────────────────────
@@ -113,6 +113,20 @@ fn choices(name: &'static str, desc: &'static str, values: &'static [&'static st
     param
 }
 
+/// 可选枚举字符串。
+fn pick(name: &'static str, desc: &'static str, values: &'static [&'static str]) -> ParamSpec {
+    let mut param = choices(name, desc, values);
+    param.required = false;
+    param
+}
+
+/// 必填整数。
+fn int_req(name: &'static str, desc: &'static str) -> ParamSpec {
+    let mut param = ParamSpec::optional(name, ParamType::Integer, desc);
+    param.required = true;
+    param
+}
+
 fn m(
     name: &'static str,
     summary: &'static str,
@@ -131,6 +145,8 @@ fn m(
         // 下面两个字段由 `catalog()` 按方法名/风险推导；这里只是静态表的缺省值。
         effect: Effect::Read,
         record: RecordMode::None,
+        // 出处由 `catalog()` 按方法名补齐；这里只是构造期必填的占位。
+        verification: Verification::verified(DEFAULT_SOURCE),
     }
 }
 
@@ -156,6 +172,8 @@ fn cm(
         // 下面两个字段由 `catalog()` 按方法名/风险推导；这里只是静态表的缺省值。
         effect: Effect::Read,
         record: RecordMode::None,
+        // 出处由 `catalog()` 按方法名补齐；这里只是构造期必填的占位。
+        verification: Verification::verified(DEFAULT_SOURCE),
     }
 }
 
@@ -311,6 +329,18 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         cm(
+            "face.custom_add",
+            "把一张图片加进收藏表情，返回 emoji_id。file 接受服务端本地路径、\
+             file://、http(s)://、base64://、data:...;base64,...；裸 base64 不支持。\
+             两段式：先加进收藏，再用返回的 emoji_id 调 msg.face 发送",
+            &[tags::IMAGE, tags::MEDIA, tags::ACCOUNT, tags::UPLOAD],
+            Risk::Write,
+            &[req(
+                "file",
+                "图片源：路径 / file:// / http(s):// / base64:// / data URI",
+            )],
+        ),
+        cm(
             "face.system_list",
             "列出系统表情包：包名和每个表情的 id、名称、别名、图片地址",
             &[tags::IMAGE, tags::SYSTEM],
@@ -448,6 +478,15 @@ fn methods() -> Vec<MethodSpec> {
                 opt("file", "文件标识；和 file_id 至少给一个"),
             ],
         ),
+        cm(
+            "file.share_link",
+            "拿一个闪传文件集（fileset）的分享链接。只接受 fileset_id，不是群 file_id；\
+             fileset_id 从 create_flash_task / list_filesets / get_fileset_info / \
+             get_fileset_id 获取。平台可能返回空字符串",
+            &[tags::FILE],
+            Risk::Read,
+            &[req("fileset_id", "闪传文件集 id")],
+        ),
         m(
             "group.essence.list",
             "群精华消息列表",
@@ -468,6 +507,71 @@ fn methods() -> Vec<MethodSpec> {
             &[tags::GROUP, tags::SYSTEM],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
+        ),
+        // 群分类标签是分类级（group_class）不是群级：协议请求体里没有 group_id，
+        // 不能从群号推导。三个 op 都要求显式 group_class。
+        cm(
+            "group.tag_list",
+            "按分类 ID 列出群分类标签目录。group_class 是分类 ID（0 也合法），\
+             不是群号；平台没有 群号 → 分类 的查询接口",
+            &[tags::GROUP, tags::SYSTEM],
+            Risk::Read,
+            &[int_req("group_class", "分类 ID（uint32，0 也是合法值）")],
+        ),
+        cm(
+            "group.tag_add",
+            "往一个群分类目录里加标签。group_class 是分类 ID，不是群号；\
+             name 是标签名。是否影响具体群的资料需按实验确认",
+            &[tags::GROUP, tags::SYSTEM],
+            Risk::Write,
+            &[
+                int_req("group_class", "分类 ID（uint32）"),
+                req("name", "标签名，不能为空"),
+            ],
+        ),
+        cm(
+            "group.tag_delete",
+            "从一个群分类目录里删标签。group_class 是分类 ID，不是群号",
+            &[tags::GROUP, tags::SYSTEM],
+            Risk::Destructive,
+            &[
+                int_req("group_class", "分类 ID（uint32）"),
+                req("name", "要删的标签名，不能为空"),
+            ],
+        ),
+        m(
+            "group.add_option",
+            "设置加群方式。add_type 必须显式给：0 空设置、1 任何人都能进、\
+             2 需要管理员批准、3 不允许任何人、4 问题+答案、5 问题+管理员批准；\
+             55 是 5 的别名（适配器归一化为 5）。只有 4/5 会带 question/answer",
+            &[tags::GROUP, tags::SYSTEM, tags::REQUIRES_ADMIN],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                int_req("add_type", "0-5（55 视为 5）；不允许省略"),
+                opt("question", "问题进入（add_type=4/5）的问题正文"),
+                opt("answer", "答案进入（add_type=4）的答案"),
+            ],
+        ),
+        m(
+            "group.search",
+            "设置群的搜索开关。name_search / code_search 用 open / close 枚举；\
+             只传一个也可以，不传的字段保持不变",
+            &[tags::GROUP, tags::SYSTEM, tags::REQUIRES_ADMIN],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                pick(
+                    "name_search",
+                    "按群名/关键词搜索：open 开启，close 关闭",
+                    &["open", "close"],
+                ),
+                pick(
+                    "code_search",
+                    "按群号搜索：open 开启，close 关闭",
+                    &["open", "close"],
+                ),
+            ],
         ),
         m(
             "group.share_link",
@@ -785,6 +889,30 @@ fn methods() -> Vec<MethodSpec> {
                 req("file_id", "文件 id"),
                 opt("current_parent_directory", "文件当前目录，默认 \"/\""),
                 req("new_name", "新文件名"),
+            ],
+        ),
+        m(
+            "group.file.folder_rename",
+            "重命名一个群文件夹。folder_id 必填；new_folder_name 优先，name 是平台\
+             兼容别名（前者为空时回退到 name），两者都不给会被本地拒绝",
+            &[tags::GROUP, tags::FILE],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("folder_id", "要改名的文件夹 id"),
+                opt("new_folder_name", "新文件夹名（优先）"),
+                opt("name", "新文件夹名（new_folder_name 为空时的兼容别名）"),
+            ],
+        ),
+        m(
+            "group.file.trans",
+            "把群临时文件转存到同群的永久文件存储。只有 group_id + file_id，\
+             没有目标群参数；语义不是跨群转存",
+            &[tags::GROUP, tags::FILE],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("file_id", "临时文件 id"),
             ],
         ),
         m(
@@ -1454,6 +1582,7 @@ pub static ROUTES: &[Route] = &[
     route("face.custom_detail", "fetch_custom_face_detail"),
     route("face.custom_delete", "delete_custom_face"),
     route("face.custom_modify", "modify_custom_face"),
+    route("face.custom_add", "add_custom_face"),
     route("face.system_list", "fetch_sys_faces"),
     route("face.system_search", "search_sys_faces"),
     route("face.entity", "fetch_face_entity"),
@@ -1466,6 +1595,11 @@ pub static ROUTES: &[Route] = &[
     route("group.ignored_requests", "get_group_ignored_notifies"),
     group_route("group.notice.get", "_get_group_notice"),
     group_route("group.admin_settings", "get_group_admin_settings"),
+    route("group.tag_list", "get_group_tags"),
+    route("group.tag_add", "add_group_tag"),
+    route("group.tag_delete", "delete_group_tag"),
+    group_route("group.add_option", "set_group_add_option"),
+    group_route("group.search", "set_group_search"),
     group_route("group.share_link", "get_group_share_link"),
     group_route("group.detail", "get_group_detail_info"),
     group_route("group.shut_list", "get_group_shut_list"),
@@ -1482,6 +1616,7 @@ pub static ROUTES: &[Route] = &[
     group_route("group.file.info", "get_group_file_system_info"),
     route("file.private_url", "get_private_file_url"),
     route("file.info", "get_file"),
+    route("file.share_link", "get_share_link"),
     group_route("group.essence.list", "get_essence_msg_list"),
     group_route("group.at_all_remain", "get_group_at_all_remain"),
     group_route("group.notice.send", "_send_group_notice"),
@@ -1512,6 +1647,8 @@ pub static ROUTES: &[Route] = &[
     group_route("group.file.folder_delete", "delete_group_file_folder"),
     group_route("group.file.move", "move_group_file"),
     group_route("group.file.rename", "rename_group_file"),
+    group_route("group.file.folder_rename", "rename_group_file_folder"),
+    group_route("group.file.trans", "trans_group_file"),
     room_route("msg.send", "send_group_msg", "send_private_msg"),
     both_route("msg.face", "send_custom_face"),
     both_route("msg.send_forward", "send_forward_msg"),
@@ -1585,6 +1722,7 @@ pub fn catalog() -> std::sync::Arc<[MethodSpec]> {
                         targets: targets_of(method.name.as_ref()).into(),
                         effect,
                         record: record_of(method.name.as_ref()),
+                        verification: verification_of(method.name.as_ref()),
                         ..method
                     }
                 })
@@ -1692,6 +1830,74 @@ fn record_of(method: &str) -> RecordMode {
         | "msg.send_private_forward"
         | "group.notice.send" => RecordMode::Event,
         _ => RecordMode::None,
+    }
+}
+
+/// 默认出处：SnowLuma 中文 API 目录（由 `collectActionDocs()` 生成，等价于
+/// `@snowluma/mcp` 的 `CatalogAction`）与 OneBot 11 规范。
+const DEFAULT_SOURCE: &str = "SnowLuma v2.4.0 (e44e4ced) action catalog / OneBot 11";
+
+/// 每个 op 的可信度。只有 `research §3` 里需要实机实验的动作才标 `Unverified`；
+/// 其余有官方文档/源码出处的按 `Verified` 处理。
+fn verification_of(method: &str) -> Verification {
+    match method {
+        "group.add_option" => Verification::unverified(
+            "add_type=0 的真实语义（空设置 / 允许任何人 / 不允许任何人）与 1-3 只有 NapCat \
+             注释单一来源，尚未在 SnowLuma v2.4.0 实机确认",
+            "research §3.1：先 get_group_admin_settings 记录基线，对 v={0,1,2,3,4,5,55} 逐个 \
+             set_group_add_option 并回读 + QQ 客户端截图；再试 6/100 观察平台是否拒绝",
+        ),
+        "group.tag_list" | "group.tag_add" | "group.tag_delete" => Verification::unverified(
+            "group_class 是分类 ID 且请求体没有 group_id；它是否等于 NTQQ GroupClassExt、\
+             加/删标签是否影响群资料而不是全局分类目录，尚未实机确认",
+            "research §3.3：选两个不同分类的测试群，扫描 get_group_tags(0..30)，加/删一个 \
+             测试标签后检查两群资料与标签目录，最后清理",
+        ),
+        "group.search" => Verification::verified(
+            "SnowLuma packages/proto-defs/src/oidb.ts:139-142（0=open,1=close）与 \
+             packages/onebot/src/actions/group-admin.ts:323-330",
+        ),
+        "group.file.folder_rename" => Verification::verified(
+            "SnowLuma packages/onebot/src/actions/group-file.ts:526-563（new_folder_name 优先、\
+             name 回退，两者皆空 retcode 1400）",
+        ),
+        "file.share_link" => Verification::verified(
+            "SnowLuma packages/onebot/src/actions/extended.ts:5032-5083,5143-5160,5362-5392\
+             （fileset_id 来源与 GetFilesetDetail.uploadUrlWrap）",
+        ),
+        "group.file.trans" => Verification::verified(
+            "SnowLuma packages/onebot/src/actions/extended.ts:3596-3627 与 \
+             packages/protocol/src/oidb-services/group-file/trans-group-file.ts:1-2,22-28\
+             （临时群文件转同群永久存储，无目标群参数）",
+        ),
+        "face.custom_add" => Verification::verified(
+            "SnowLuma packages/onebot/src/actions/extended.ts:883-910 与 \
+             packages/onebot/src/action-kit.ts:373-393（file 接受路径 / file:// / http(s):// / \
+             base64:// / data URI）",
+        ),
+        "file.download" => Verification::verified(
+            "SnowLuma packages/onebot/src/actions/extended.ts:37-42,277-342,4507-4573\
+             （平台上限 1 GiB、默认 60 s、无 URL 白名单）",
+        ),
+        "stream.upload_file" => Verification::verified(
+            "SnowLuma packages/onebot/src/streaming.ts:1-31,62-108、actions/stream-file.ts:\
+             42-55,239-342（多请求上传 + 单独完成调用 + reset:true）",
+        ),
+        "stream.download_image" | "stream.download_record" | "stream.download_file" => {
+            Verification::verified(
+                "SnowLuma packages/onebot/src/actions/stream-download.ts:31-112,568-616,620-643\
+                 （file_info → file_chunk* → file_complete；下载无逐请求取消）",
+            )
+        }
+        "stream.test_download" | "stream.clean" => Verification::verified(
+            "SnowLuma packages/onebot/src/actions/stream-download.ts:568-616,620-643 与 \
+             actions/stream-file.ts:425-442",
+        ),
+        "msg.send" | "msg.face" | "msg.send_forward" => Verification::verified(
+            "SnowLuma packages/onebot/src/helper/cq.ts:3-65 与 event-converter/to-message.ts:\
+             80-90,124-144（string 模式按 CQ 码解析）",
+        ),
+        _ => Verification::verified(DEFAULT_SOURCE),
     }
 }
 

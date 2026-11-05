@@ -86,6 +86,13 @@ impl TicketState {
     }
 }
 
+/// 票据里被标 unverified 的 op 与原因摘要；审批展示与审计用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnverifiedOp {
+    pub op: String,
+    pub reason: String,
+}
+
 /// 一张票据。`nonce` 只在 pending 阶段有效；任何迁移后清空，防重放。
 #[derive(Debug, Clone)]
 pub struct AccessTicket {
@@ -105,6 +112,8 @@ pub struct AccessTicket {
     /// 触发者的显示名，只用于审批私信与审计；不参与身份判定。
     pub origin_sender_name: Option<String>,
     pub capabilities: BTreeSet<GrantCapability>,
+    /// 申请里命中的未验证 op；空 = 全部 Verified。
+    pub unverified: Vec<UnverifiedOp>,
     /// 进程内的创建序号；批量执行按它还原申请顺序。
     pub seq: u64,
     pub created_at: i64,
@@ -138,6 +147,7 @@ pub struct TicketRequest {
     pub origin_sender: Option<String>,
     pub origin_sender_name: Option<String>,
     pub capabilities: BTreeSet<GrantCapability>,
+    pub unverified: Vec<UnverifiedOp>,
     pub request_turn: String,
     pub batch_id: Option<String>,
     pub now: i64,
@@ -336,6 +346,7 @@ impl AccessTickets {
             origin_sender: request.origin_sender,
             origin_sender_name: request.origin_sender_name,
             capabilities: request.capabilities,
+            unverified: request.unverified,
             seq: self.seq,
             created_at: request.now,
             expires_at: request.now.saturating_add(PENDING_TTL_MS),
@@ -777,7 +788,7 @@ impl AccessTickets {
             .join("|");
         let ops = ticket.ops.join("|");
         let line = format!(
-            "[access-ticket] event={} ticket={} batch={} state={} principal={} place={} capability={} target={} ops={} session={} turn={} sender={} sender_name={} approval_ref={} reason=\"{}\"",
+            "[access-ticket] event={} ticket={} batch={} state={} principal={} place={} capability={} target={} ops={} session={} turn={} sender={} sender_name={} approval_ref={} unverified={} reason=\"{}\"",
             event,
             ticket.id,
             ticket.batch_id.as_deref().unwrap_or("-"),
@@ -792,6 +803,7 @@ impl AccessTickets {
             ticket.origin_sender.as_deref().unwrap_or("-"),
             ticket.origin_sender_name.as_deref().unwrap_or("-"),
             ticket.approval_ref.as_deref().unwrap_or("-"),
+            !ticket.unverified.is_empty(),
             reason.replace('"', "'"),
         );
         eprintln!("{line}");
@@ -899,6 +911,7 @@ mod tests {
             origin_sender: Some("user1".to_owned()),
             origin_sender_name: Some("群友一".to_owned()),
             capabilities: BTreeSet::from([GrantCapability::RoomWrite]),
+            unverified: Vec::new(),
             request_turn: "turn-1".to_owned(),
             batch_id: None,
             now,

@@ -53,15 +53,16 @@ fn one_to_onebot(element: &Element) -> Result<Value, SegmentError> {
 
 /// OneBot 消息段数组 → 内容元素，顺带判定「有没有 @ 到我」。
 ///
-/// `message` 不是数组（老实现发的是 CQ 码字符串）时整段当文本，`at_self` 只能是假——
-/// 所以连接要设成 `post-format=array`（见 `docs/05-adapters.md`）。
+/// `message` 不是数组时按 CQ 码字符串解析（SnowLuma 的 `messageFormat: string`
+/// 会把 `message` 换成 CQ 串；老实现也直接发 CQ 串）。解析不出来的片段保留为文本，
+/// 不静默丢弃。
 pub fn from_onebot(message: &Value, self_id: &str) -> (Vec<Element>, bool) {
     let Some(items) = message.as_array() else {
         let text = message.as_str().unwrap_or_default();
         if text.is_empty() {
             return (Vec::new(), false);
         }
-        return (vec![Element::text(text)], false);
+        return parse_cq(text, self_id);
     };
 
     let mut elements = Vec::new();
@@ -70,51 +71,128 @@ pub fn from_onebot(message: &Value, self_id: &str) -> (Vec<Element>, bool) {
     for item in items {
         let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
         let data = item.get("data").cloned().unwrap_or(Value::Null);
-        let field = |key: &str| {
-            data.get(key)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        };
+        let (element, aimed) = segment_element(kind, &data, self_id);
+        at_self |= aimed;
+        elements.push(element);
+    }
 
-        match kind {
-            "text" => elements.push(Element::text(field("text"))),
-            "at" => {
-                let qq = field("qq");
-                let all = qq == "all";
-                if !all && !self_id.is_empty() && qq == self_id {
-                    at_self = true;
-                }
-                elements.push(Element::At {
+    (elements, at_self)
+}
+
+/// 一段 OneBot 消息段（数组项或 CQ 码解析结果）→ 内容元素。
+fn segment_element(kind: &str, data: &Value, self_id: &str) -> (Element, bool) {
+    let field = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    match kind {
+        "text" => (Element::text(field("text")), false),
+        "at" => {
+            let qq = field("qq");
+            let all = qq == "all";
+            let aimed = !all && !self_id.is_empty() && qq == self_id;
+            (
+                Element::At {
                     target: if all { String::new() } else { qq },
                     all,
-                });
-            }
-            "reply" => elements.push(Element::Quote {
+                },
+                aimed,
+            )
+        }
+        "reply" => (
+            Element::Quote {
                 message_id: field("id"),
-            }),
-            "image" => elements.push(Element::Image {
-                url: url_of(&data),
+            },
+            false,
+        ),
+        "image" => (
+            Element::Image {
+                url: url_of(data),
                 alt: data
                     .get("summary")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
-            }),
-            "record" => elements.push(Element::Audio { url: url_of(&data) }),
-            "video" => elements.push(Element::Video { url: url_of(&data) }),
-            "face" => elements.push(Element::Face {
+            },
+            false,
+        ),
+        "record" => (Element::Audio { url: url_of(data) }, false),
+        "video" => (Element::Video { url: url_of(data) }, false),
+        "face" => (
+            Element::Face {
                 platform: PLATFORM.to_owned(),
                 id: field("id"),
-            }),
-            // 卡片、合并转发、markdown……核心不认识，原样留着。
-            _ => elements.push(Element::Opaque {
+            },
+            false,
+        ),
+        // 卡片、合并转发、markdown……核心不认识，原样留着。
+        _ => (
+            Element::Opaque {
                 platform: PLATFORM.to_owned(),
-                payload: item.clone(),
-            }),
+                payload: json!({"type": kind, "data": data}),
+            },
+            false,
+        ),
+    }
+}
+
+/// CQ 码字符串 → 内容元素。语法 `[CQ:type,key=value,...]`；`[` / `]` / `,` / `&`
+/// 用 `&#91;` / `&#93;` / `&#44;` / `&amp;` 转义。未知段保留成 Opaque。
+fn parse_cq(text: &str, self_id: &str) -> (Vec<Element>, bool) {
+    let mut elements = Vec::new();
+    let mut at_self = false;
+    let mut rest = text;
+
+    while let Some(start) = rest.find("[CQ:") {
+        let (before, marked) = rest.split_at(start);
+        if !before.is_empty() {
+            elements.push(Element::text(unescape_cq(before)));
         }
+        let body_and_rest = &marked["[CQ:".len()..];
+        // 只认第一个 `]`；CQ 参数值里的 `]` 必须转义成 `&#93;`。
+        let Some(end) = body_and_rest.find(']') else {
+            // 没有闭合括号：从 `[CQ:` 到结尾都按文本保留，不猜。
+            elements.push(Element::text(unescape_cq(marked)));
+            return (elements, at_self);
+        };
+        let (kind, params) = match body_and_rest[..end].split_once(',') {
+            Some((kind, params)) => (kind, Some(params)),
+            None => (&body_and_rest[..end], None),
+        };
+        let kind = kind.trim();
+        let mut data = serde_json::Map::new();
+        if let Some(params) = params {
+            for pair in params.split(',') {
+                let Some((key, value)) = pair.split_once('=') else {
+                    continue;
+                };
+                let key = key.trim();
+                if key.is_empty() {
+                    continue;
+                }
+                data.insert(key.to_owned(), json!(unescape_cq(value)));
+            }
+        }
+        let data = Value::Object(data);
+        let (element, aimed) = segment_element(kind, &data, self_id);
+        at_self |= aimed;
+        elements.push(element);
+        rest = &body_and_rest[end + 1..];
     }
 
+    if !rest.is_empty() {
+        elements.push(Element::text(unescape_cq(rest)));
+    }
     (elements, at_self)
+}
+
+/// CQ 转义还原。先还原转义字符本身，最后还原 `&`，避免 `&amp;#91;` 被多解一层。
+fn unescape_cq(text: &str) -> String {
+    text.replace("&#91;", "[")
+        .replace("&#93;", "]")
+        .replace("&#44;", ",")
+        .replace("&amp;", "&")
 }
 
 /// 媒体段优先取直链，取不到退回平台内部文件名。
@@ -254,12 +332,72 @@ mod tests {
     }
 
     #[test]
-    fn cq_string_is_taken_as_plain_text() {
+    fn cq_string_is_parsed_into_segments() {
         let (elements, at_self) = from_onebot(&json!("[CQ:at,qq=999] 你好"), "999");
-        assert_eq!(elements, vec![Element::text("[CQ:at,qq=999] 你好")]);
-        assert!(
-            !at_self,
-            "CQ 码字符串里认不出 @，所以要设 post-format=array"
+        assert_eq!(
+            elements,
+            vec![
+                Element::At {
+                    target: "999".to_owned(),
+                    all: false,
+                },
+                Element::text(" 你好"),
+            ]
+        );
+        assert!(at_self, "string 模式也要能认出 @ 到自己");
+    }
+
+    #[test]
+    fn cq_escapes_are_decoded_after_segment_parsing() {
+        let (elements, _) = from_onebot(&json!("[CQ:face,id=14]&#91;x&#93;&#44;&amp;"), "999");
+        assert_eq!(
+            elements,
+            vec![
+                Element::Face {
+                    platform: PLATFORM.to_owned(),
+                    id: "14".to_owned(),
+                },
+                Element::text("[x],&"),
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_cq_segment_is_kept_as_opaque() {
+        let (elements, _) = from_onebot(&json!("[CQ:mface,emoji_id=5]"), "999");
+        assert_eq!(
+            elements,
+            vec![Element::Opaque {
+                platform: PLATFORM.to_owned(),
+                payload: json!({"type": "mface", "data": {"emoji_id": "5"}}),
+            }]
+        );
+    }
+
+    #[test]
+    fn unclosed_cq_marker_is_kept_as_text() {
+        let (elements, at_self) = from_onebot(&json!("[CQ:at,qq=999"), "999");
+        assert_eq!(elements, vec![Element::text("[CQ:at,qq=999")]);
+        assert!(!at_self, "不闭合的 CQ 码不猜");
+    }
+
+    #[test]
+    fn cq_reply_and_image_are_mapped() {
+        let (elements, _) = from_onebot(
+            &json!("[CQ:reply,id=42][CQ:image,file=https://x/a.png]"),
+            "999",
+        );
+        assert_eq!(
+            elements,
+            vec![
+                Element::Quote {
+                    message_id: "42".to_owned(),
+                },
+                Element::Image {
+                    url: "https://x/a.png".to_owned(),
+                    alt: None,
+                },
+            ]
         );
     }
 }

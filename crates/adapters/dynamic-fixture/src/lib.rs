@@ -13,7 +13,7 @@ use acb_adapter_api::abi::{ABI_VERSION, AdapterV1, HostV1};
 use acb_adapter_api::{
     AdapterMessage, CoreMessage, WireConnection, WireError, WireInstanceConfig, WireManifest,
     WireMethodSpec, WireOutgoingKind, WireOutgoingRecord, WireParamSpec, WirePluginMetadata,
-    WireRecord, WireResult, decode_line, encode_line,
+    WireRecord, WireResult, WireVerification, decode_line, encode_line,
 };
 use acb_proto::{Element, RecordKind, RoomId, Sender};
 use serde_json::{Value, json};
@@ -274,6 +274,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             targets: Vec::new(),
             effect: "read".into(),
             record: "none".into(),
+            verification: verified(),
         },
         WireMethodSpec {
             name: "demo.send".into(),
@@ -285,6 +286,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             targets: Vec::new(),
             effect: "send".into(),
             record: "message".into(),
+            verification: verified(),
         },
         WireMethodSpec {
             name: "demo.fail".into(),
@@ -296,6 +298,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             targets: Vec::new(),
             effect: "read".into(),
             record: "none".into(),
+            verification: verified(),
         },
         WireMethodSpec {
             name: "demo.slow".into(),
@@ -307,6 +310,13 @@ fn catalog() -> Vec<WireMethodSpec> {
             targets: Vec::new(),
             effect: "read".into(),
             record: "none".into(),
+            verification: verified(),
         },
     ]
+}
+
+fn verified() -> WireVerification {
+    WireVerification::Verified {
+        source: "dynamic fixture".into(),
+    }
 }
