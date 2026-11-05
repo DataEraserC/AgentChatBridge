@@ -1267,7 +1267,9 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::ALIASES;
+    use crate::catalog::{
+        ALIASES, CATALOG_SNAPSHOT, EXPERIMENT_READONLY, EXPERIMENT_VERIFIED, SNAPSHOT_ACTIONS,
+    };
     use acb_kernel::{Effect, OutgoingKind, RecordMode, Risk, Scope, TargetRole, Verification};
 
     #[test]
@@ -1833,6 +1835,94 @@ mod tests {
             assert!(
                 spec.verification.is_verified(),
                 "别名继承主 op 的 verification：{main} 必须是 Verified"
+            );
+        }
+    }
+
+    /// `Verified` 的 source 必须能落到快照里的真实 action，或实验记录里的
+    /// verified 结论。动作改名 / 快照换版时这里会直接失败，不会静默失效。
+    #[test]
+    fn verified_sources_resolve_to_snapshot_or_experiment() {
+        const SNAPSHOT: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/plan/catalog-snapshots/snowluma-2026-09-29-190-actions.json"
+        ));
+        const EXPERIMENTS: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/plan/catalog-snapshots/snowluma-2026-11-05-readonly-experiments.json"
+        ));
+
+        let snapshot: Vec<Value> = serde_json::from_str(SNAPSHOT).expect("快照是 JSON");
+        assert_eq!(snapshot.len(), 190, "快照应包含 190 个动作");
+        let actions: std::collections::BTreeSet<&str> = snapshot
+            .iter()
+            .filter_map(|entry| entry["name"].as_str())
+            .collect();
+
+        let experiments: Value = serde_json::from_str(EXPERIMENTS).expect("实验记录是 JSON");
+        let verified_ops: std::collections::BTreeSet<&str> = experiments["probes"]
+            .as_array()
+            .expect("实验记录有 probes")
+            .iter()
+            .filter(|probe| probe["conclusion"] == "verified")
+            .filter_map(|probe| probe["op"].as_str())
+            .collect();
+
+        let methods = catalog();
+        let snapshot_prefix = format!("{CATALOG_SNAPSHOT}#");
+        let experiment_prefix = format!("{EXPERIMENT_READONLY}#");
+        let mut snapshot_sources = 0;
+        for method in methods.iter() {
+            if let Verification::Verified { source } = &method.verification {
+                let source = source.as_ref();
+                if let Some(action) = source.strip_prefix(&snapshot_prefix) {
+                    snapshot_sources += 1;
+                    assert!(
+                        actions.contains(action),
+                        "{} 的 source 指向快照里不存在的 action：{source}",
+                        method.name
+                    );
+                } else if let Some(op) = source.strip_prefix(&experiment_prefix) {
+                    assert!(
+                        verified_ops.contains(op),
+                        "{} 的 source 指向没有 verified 结论的实验：{source}",
+                        method.name
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            snapshot_sources,
+            SNAPSHOT_ACTIONS.len(),
+            "快照支撑的 Verified 数量必须与 SNAPSHOT_ACTIONS 一致"
+        );
+
+        for (op, action) in SNAPSHOT_ACTIONS {
+            assert!(
+                actions.contains(action),
+                "{op} 的快照 action {action} 不存在"
+            );
+            let spec = methods
+                .iter()
+                .find(|method| method.name.as_ref() == *op)
+                .unwrap_or_else(|| panic!("{op} 不在目录里"));
+            let expected = format!("{snapshot_prefix}{action}");
+            assert_eq!(
+                spec.verification.source(),
+                Some(expected.as_str()),
+                "{op} 的 source 必须是快照路径#action"
+            );
+        }
+        for op in EXPERIMENT_VERIFIED {
+            let spec = methods
+                .iter()
+                .find(|method| method.name.as_ref() == *op)
+                .unwrap_or_else(|| panic!("{op} 不在目录里"));
+            let expected = format!("{experiment_prefix}{op}");
+            assert_eq!(
+                spec.verification.source(),
+                Some(expected.as_str()),
+                "{op} 的 source 必须指向只读实验记录"
             );
         }
     }
@@ -2931,7 +3021,6 @@ mod tests {
             [
                 "account.model_show",
                 "account.model_show_set",
-                "account.qzone.detail",
                 "account.qzone.unlike",
                 "file.collection_create",
                 "friend.recent_contacts",
@@ -2940,7 +3029,6 @@ mod tests {
                 "group.anonymous_ban",
                 "group.tag_add",
                 "group.tag_delete",
-                "group.tag_list",
                 "msg.tuwen_ark",
                 "msg.word_slices",
                 "system.packet_status",

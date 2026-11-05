@@ -1,0 +1,215 @@
+{
+  "meta": {
+    "timestamp": "2026-11-05T15:30:00+08:00",
+    "instance": {
+      "app_name": "SnowLuma",
+      "app_version": "2.2.1-node",
+      "protocol_version": "v11",
+      "account": "3683924053"
+    },
+    "endpoint": "http://127.0.0.1:53000",
+    "note": "运行中的 acb-bridge 对 Unverified op 的 platform_call 一律拒绝（安全设计），console 没有 tool_call 入口；只读探针直接打同一 SnowLuma 实例的 OneBot HTTP API（桥配置里的同一 token）。写入/破坏性动作未执行。"
+  },
+  "supporting_probes": [
+    {
+      "op": "account.qzone.list",
+      "action": "get_qzone_msg_list",
+      "params": {
+        "target_uin": "3683924053",
+        "pos": 0,
+        "num": 5
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "data": {
+        "total": 3,
+        "tids": [
+          "553894db3dbf75689abb0000",
+          "553894db717fb767916d0000",
+          "553894db5bc58f6720280c00"
+        ]
+      },
+      "note": "只用于取得有效 tid；正文未入库。"
+    }
+  ],
+  "probes": [
+    {
+      "op": "account.qzone.detail",
+      "action": "get_qzone_msg_detail",
+      "params": {
+        "tid": "0"
+      },
+      "http_status": 200,
+      "retcode": 100,
+      "status": "failed",
+      "wording": "qzone msg detail failed: code=-8 对不起，原文已经被删除，无法查看",
+      "data": null,
+      "conclusion": "supporting",
+      "conclusion_note": "tid=0 不存在/已删除，返回 qzone code=-8；只证明参数 tid 有效，不作为成功依据。"
+    },
+    {
+      "op": "msg.tuwen_ark",
+      "action": "send_tuwen_ark",
+      "params": {},
+      "http_status": 200,
+      "retcode": 1400,
+      "status": "failed",
+      "wording": "title: is required",
+      "data": null,
+      "conclusion": "unverified",
+      "conclusion_note": "动作存在，空参数返回 retcode 1400「title: is required」；这是发送类动作，未执行有效发送。"
+    },
+    {
+      "op": "account.qzone.unlike",
+      "action": "unlike_qzone",
+      "params": {
+        "tid": "0"
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "wording": null,
+      "data": null,
+      "conclusion": "unverified",
+      "conclusion_note": "tid=0 返回 ok/retcode 0，但没有真实点赞可取消，无法确认端点是否真的改变状态；保留 Unverified。"
+    },
+    {
+      "op": "group.tag_list",
+      "action": "get_group_tags",
+      "params": {
+        "group_class": 0
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "wording": null,
+      "data": {
+        "tags": []
+      },
+      "conclusion": "verified",
+      "conclusion_note": "参数 group_class 有效；group_class=0 返回 tags:[]。读取契约确认，但分类语义仍只有目录出处。"
+    },
+    {
+      "op": "account.model_show",
+      "action": "_get_model_show",
+      "params": {
+        "model": "test"
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "wording": null,
+      "data": [
+        {
+          "variants": {
+            "model_show": "test",
+            "need_pay": false
+          }
+        }
+      ],
+      "conclusion": "unverified",
+      "conclusion_note": "返回 variants.model_show=入参，符合 mock；无真实业务语义。"
+    },
+    {
+      "op": "friend.recent_contacts",
+      "action": "get_recent_contact",
+      "params": {
+        "count": 5
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "wording": null,
+      "data": [],
+      "conclusion": "unverified",
+      "conclusion_note": "count=5 返回空数组，符合占位动作；无真实会话数据。"
+    },
+    {
+      "op": "system.packet_status",
+      "action": "nc_get_packet_status",
+      "params": {},
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "wording": null,
+      "data": null,
+      "conclusion": "unverified",
+      "conclusion_note": "无参数返回 data:null，符合占位动作。"
+    },
+    {
+      "op": "msg.word_slices",
+      "action": ".get_word_slices",
+      "params": {},
+      "http_status": 200,
+      "retcode": 100,
+      "status": "failed",
+      "wording": "not yet implemented",
+      "data": null,
+      "conclusion": "unverified",
+      "conclusion_note": "无论带不带 text 都返回 retcode 100「not yet implemented」。"
+    },
+    {
+      "op": "msg.word_slices",
+      "action": ".get_word_slices",
+      "params": {
+        "text": "hello world"
+      },
+      "http_status": 200,
+      "retcode": 100,
+      "status": "failed",
+      "wording": "not yet implemented",
+      "data": null,
+      "conclusion": "unverified",
+      "conclusion_note": "无论带不带 text 都返回 retcode 100「not yet implemented」。"
+    },
+    {
+      "op": "file.collection_create",
+      "action": "create_collection",
+      "params": {},
+      "http_status": 200,
+      "retcode": 100,
+      "status": "failed",
+      "wording": "not yet implemented",
+      "data": null,
+      "conclusion": "unverified",
+      "conclusion_note": "空参数返回 retcode 100「not yet implemented」，未落库。"
+    },
+    {
+      "op": "account.qzone.detail",
+      "action": "get_qzone_msg_detail",
+      "params": {
+        "tid": "553894db3dbf75689abb0000"
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "data": {
+        "tid": "553894db3dbf75689abb0000",
+        "content_chars": 58,
+        "comment_num": 0,
+        "comments_count": 0
+      },
+      "conclusion": "verified",
+      "conclusion_note": "用 get_qzone_msg_list 取到两个有效 tid 后调用，返回 tid/content/comment_num/comments；参数 tid 有效，成功返回结构确认。"
+    },
+    {
+      "op": "account.qzone.detail",
+      "action": "get_qzone_msg_detail",
+      "params": {
+        "tid": "553894db717fb767916d0000"
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "data": {
+        "tid": "553894db717fb767916d0000",
+        "content_chars": 11,
+        "comment_num": 0,
+        "comments_count": 0
+      },
+      "conclusion": "verified",
+      "conclusion_note": "用 get_qzone_msg_list 取到两个有效 tid 后调用，返回 tid/content/comment_num/comments；参数 tid 有效，成功返回结构确认。"
+    }
+  ]
+}

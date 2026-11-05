@@ -235,12 +235,12 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 **计数（2026-11-05，批次 9 之后）**：25 项中 2 项不适用；
 适用 23 项 = 已实现 19 + 部分 2 + 未实现 2（#2 HTTP API 与 #5 `wss://`）。
 #17 表情回应、#22 QQ 空间、#23 收藏/闪传已由批次 9 补齐；#19 的动作已全，
-但 15 个 `Unverified` op 要等实验完成才算完全实现。
+但 13 个 `Unverified` op 要等实验完成才算完全实现。
 
 **动作级覆盖**：
 - 现有 `ROUTES` 192 个层级 op / 200 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
-- 其中 **15 个 op** 带 `Verification::Unverified`（批次 8 的 4 个、审计后仍无出处的
-  3 个、白名单清零的 8 个），按 critical 档管理；5 个平台别名挂在主 op 的
+- 其中 **13 个 op** 带 `Verification::Unverified`（批次 8 的 3 个、审计后仍无出处的
+  2 个、白名单清零的 8 个），按 critical 档管理；5 个平台别名挂在主 op 的
   `aliases` 上，继承主 op 的 `Verified`。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 逐动作「已暴露 / 未暴露 + 原因分类」见 [snowluma-action-coverage.md](snowluma-action-coverage.md)：
@@ -253,7 +253,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 3. `get_version_info` 已采集三层版本并写进依赖元数据（批次 1）。
 
 动作覆盖面已收口：200 个中文动作全部有 op / 别名归属，白名单为空。
-现在的主要风险转为 15 个 `Unverified` 语义与 QQ 空间等账号级写操作的实机行为。
+现在的主要风险转为 13 个 `Unverified` 语义与 QQ 空间等账号级写操作的实机行为。
 
 ---
 
@@ -907,9 +907,10 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   `msg.mark_read_group` / `msg.mark_read_private` 仍是独立 op，语义等于已核实的
   `mark_msg_as_read`。
 - 批次 9 审计后，55 个中 52 个按 SnowLuma 动作目录的摘要+参数改 `Verified`；
-  3 个保留 `Unverified`（`account.qzone.detail` / `account.qzone.unlike` /
-  `msg.tuwen_ark`）。白名单清零的 8 个平台占位/mock 也标 `Unverified`。
-  全表 `Unverified` 15 个（4 + 3 + 8）。
+  2 个保留 `Unverified`（`account.qzone.unlike` / `msg.tuwen_ark`）。
+  `account.qzone.detail` 由 2026-11-05 只读实验改 `Verified`（有效 tid 返回
+  tid/content/comment_num/comments）；白名单清零的 8 个平台占位/mock 仍标
+  `Unverified`。全表 `Unverified` 13 个（批次 8 的 3 + 2 + 8）。
 
 **证据**
 - `every_op_is_hierarchical_tagged_and_routed`：192 个 op 逐个检查层级名、risk tag、
@@ -919,15 +920,77 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - `action_coverage_matrix_is_complete_and_exceptions_have_reasons`：直接解析
   `snowluma-action-coverage.md`，断言 200 已暴露 / 0 未暴露；`UNEXPOSED` 为空时
   仍保留「非空则每条必须有理由」。
-- `catalog_lists_the_unverified_ops`：15 个 unverified op 的逐字清单。
+- `catalog_lists_the_unverified_ops`：13 个 unverified op 的逐字清单。
 - **配置**：无新增配置项；风险仍由 `allow_destructive` + 票据审批控制。
+
+### `Verified` 依据与快照版本（2026-11-05）
+
+52 个批次 9 op 的 `Verified` 依据统一指向
+`docs/plan/catalog-snapshots/snowluma-2026-09-29-190-actions.json#<action>`。
+
+- **快照来源**：上游 Node bridge 仓库 `/home/nixos/Documents/code/qq-bridge/_snowluma-catalog.json`
+  原样复制；该文件在该仓库 release `v0.1.7`（commit `ce726bb`，2026-09-27 21:39 +0800）
+  引入，文件 mtime 为 2026-09-29 21:54 +0800。
+- **导出方式**：上游没有记录生成脚本，也没有版本字段；它不是 Rust 适配器生成的。
+  快照是 190 个动作的 `name / readOnly / summary / params` 数组，形状与运行时动作
+  目录一致。
+- **版本参照**：2026-11-05 运行实例返回 `SnowLuma 2.2.1-node` / `protocol_version=v11`。
+  这只是运行实例版本，**不能证明快照由该版本导出**。
+- **校验**：`verified_sources_resolve_to_snapshot_or_experiment` 解析快照 JSON，
+  对每个快照型 `Verified` source 取 `#` 后的 action，断言它存在于快照；同时反向
+  核对 `SNAPSHOT_ACTIONS` 的 52 条 op/action 与目录里的 source 完全一致。
+- **过期规则**：升级 SnowLuma 后必须重新导出快照、逐条复核 `Verified` 的 action
+  与参数；否则依据过期，应降回 `Unverified`。快照换版时测试会先失败，不会静默失效。
+
+### 2026-11-05 只读真机实验
+
+记录资产：`docs/plan/catalog-snapshots/snowluma-2026-11-05-readonly-experiments.json`
+（SnowLuma `2.2.1-node`，账号 `3683924053`，端点 `http://127.0.0.1:53000`）。
+桥对 `Unverified` 的 `platform_call` 一律拒绝，console 没有 tool_call 入口；只读
+探针直接打同一实例的 OneBot HTTP API，使用桥配置里的同一 token。写入类未执行。
+
+| op | 动作 | 请求参数 | retcode / 关键返回 | 结论 |
+|---|---|---|---|---|
+| `account.qzone.detail` | `get_qzone_msg_detail` | `tid=553894db3dbf75689abb0000` | `0`；`data.tid/content/comment_num/comments` | **Verified**：参数与成功结构确认 |
+| `group.tag_list` | `get_group_tags` | `group_class=0` | `0`；`data.tags=[]` | **Verified**：读取契约确认；分类语义仍只有目录出处 |
+| `account.qzone.unlike` | `unlike_qzone` | `tid=0` | `0`；`data=null` | 保留 `Unverified`：端点存在，但没有真实点赞可取消，无法确认状态变化 |
+| `msg.tuwen_ark` | `send_tuwen_ark` | `{}` | `1400`；`title: is required` | 保留 `Unverified`：动作存在、`title` 必填；发送类未执行有效调用 |
+| `account.model_show` | `_get_model_show` | `model=test` | `0`；`variants.model_show=test` | 保留 `Unverified`：mock echo，无语义 |
+| `friend.recent_contacts` | `get_recent_contact` | `count=5` | `0`；`data=[]` | 保留 `Unverified`：占位动作，无真实会话数据 |
+| `system.packet_status` | `nc_get_packet_status` | `{}` | `0`；`data=null` | 保留 `Unverified`：占位动作 |
+| `msg.word_slices` | `.get_word_slices` | `{}` / `{text}` | `100`；`not yet implemented` | 保留 `Unverified`：平台明确未实现 |
+| `file.collection_create` | `create_collection` | `{}` | `100`；`not yet implemented` | 保留 `Unverified`：平台明确未实现，未落库 |
+
+**占位/mock 标注**：`account.model_show`、`account.model_show_set`、`msg.word_slices`、
+`file.collection_create`、`friend.recent_contacts`、`system.packet_status`、
+`group.anonymous`、`group.anonymous_ban` 返回 ok/null 或「not yet implemented」
+**不代表生效**；文档、日志与票据结果里不得把这类返回值当成操作成功。
+
+### 写入/破坏性实验清单（只出清单与脚本，未执行）
+
+**必须用测试群/测试号**；下列动作会改真实状态，脚本不会自动运行。验证步骤统一是
+「先读基线 → 执行一次 → 再读一次对比 → 回滚 → 再读一次确认」。
+
+| op | 会改什么 | 影响范围 | 回滚 | 预期可观测结果 |
+|---|---|---|---|---|
+| `group.add_option` | 群加群方式（`add_type`） | 目标测试群的入群审批 | 执行前 `get_group_admin_settings` 记基线，实验后按基线写回 | 群设置/客户端加群页变化；`get_group_admin_settings` 前后值不同 |
+| `group.anonymous` | 群匿名聊天开关 | 测试群全体成员 | 记录 `enable` 基线，执行后反向设回 | 群设置里匿名开关变化；成员端是否可匿名发言 |
+| `group.anonymous_ban` | 匿名成员禁言 | 测试群里的匿名发言者 | 用 `duration=0` 解除，或按基线回写 | 被禁言者发言被拒；群禁言列表出现该成员 |
+| `group.tag_add` | 群分类标签 | 测试群资料/分类目录（语义待确认） | 用 `group.tag_delete` 删除新增标签 | `group.tag_list(group_class)` 前后标签集合变化；群资料是否显示 |
+| `group.tag_delete` | 删除群分类标签 | 测试群资料/分类目录 | 用 `group.tag_add` 加回原标签 | `group.tag_list` 标签集合减少；群资料是否变化 |
+| `account.model_show_set` | 账号机型展示 | 机器人账号自身 | 用 `_set_model_show` 写回原值；平台是占位，先确认是否真的生效 | 再读 `_get_model_show` 对比 `model_show`；若仍为 mock 值则未生效 |
+
+脚本：`docs/plan/catalog-snapshots/snowluma-2026-11-05-write-experiments.sh`。
+脚本默认只打印计划；必须显式设置 `ACB_TEST_GROUP`、`ACB_TEST_ACCOUNT` 并加
+`--execute` 才会调用平台。**未在本次任务中执行。**
 
 ### 批次 9 审计表（2026-11-05）
 
-审计输入：`_snowluma-catalog.json`（190 个运行目录动作，含 summary / params）与
-中文 API 索引的 200 个动作。逐条结论如下；表里 `Verified` 表示目录有摘要与参数、
-catalog 已按目录对齐参数；`Unverified` 表示目录自述未核实、运行目录无条目，或
-平台标注 mock/占位/未实现（协议可调用但没有可观察语义）。
+审计输入：`docs/plan/catalog-snapshots/snowluma-2026-09-29-190-actions.json`
+（190 个运行目录动作，含 summary / params）与中文 API 索引的 200 个动作。
+正式 `Verified` source 是 `docs/plan/catalog-snapshots/snowluma-2026-09-29-190-actions.json#<action>`；
+下表「查了哪里」是审计时的摘要。`Unverified` 表示目录自述未核实、运行目录无条目，
+或平台标注 mock/占位/未实现（协议可调用但没有可观察语义）。
 
 | op | 动作 | 查了哪里 | 结论 |
 |---|---|---|---|
@@ -983,7 +1046,7 @@ catalog 已按目录对齐参数；`Unverified` 表示目录自述未核实、�
 | `account.qzone.comment` | `comment_qzone` | 运行目录条目「评论一条说说（QQ 空间，支持纯文字或带图；传 images 自动上传）」；参数：tid, content, target_uin, images | Verified：摘要与参数对齐 |
 | `account.qzone.delete` | `delete_qzone_msg` | 运行目录条目「删除一条说说（QQ 空间，按 tid）」；参数：tid | Verified：摘要与参数对齐 |
 | `account.qzone.feeds` | `get_qzone_feeds` | 运行目录条目「获取 QQ 空间好友动态（feed）；page_num 仅首页可靠，深翻页需时间游标（暂未实现）」；参数：page_num, count | Verified：摘要与参数对齐 |
-| `account.qzone.detail` | `get_qzone_msg_detail` | 运行目录（_snowluma-catalog.json）无条目；只见于中文索引 | Unverified：参数/返回结构无出处 |
+| `account.qzone.detail` | `get_qzone_msg_detail` | 运行目录（_snowluma-catalog.json）无条目；2026-11-05 只读实验 | **Verified**：有效 tid 返回 tid/content/comment_num/comments（实验记录） |
 | `account.qzone.list` | `get_qzone_msg_list` | 运行目录条目「获取 QQ 空间说说列表（默认机器人自己的空间）」；参数：target_uin, pos, num | Verified：摘要与参数对齐 |
 | `account.qzone.like` | `like_qzone` | 运行目录条目「给一条说说点赞（QQ 空间）」；参数：tid, target_uin, abstime | Verified：摘要与参数对齐 |
 | `account.qzone.send` | `send_qzone_msg` | 运行目录条目「发表说说（QQ 空间，支持纯文字或带图；传 images 自动上传；可设置查看权限）」；参数：content, images, ugc_right, target_uins | Verified：摘要与参数对齐 |

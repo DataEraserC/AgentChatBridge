@@ -2191,6 +2191,57 @@
   - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode
     `npm test` 全绿。
 
+## 2026-11-05 — Verified 依据入库 + 只读真机实验
+
+- 做了什么：
+  - 新增 `docs/plan/catalog-snapshots/snowluma-2026-09-29-190-actions.json`：
+    上游 Node bridge 仓库 `_snowluma-catalog.json` 原样复制（该仓库 release
+    `v0.1.7` / commit `ce726bb` 引入，mtime 2026-09-29 21:54 +0800）。上游没有
+    记录生成脚本，也没有版本字段；运行实例 2026-11-05 报 `SnowLuma 2.2.1-node`，
+    只作版本参照，不能证明快照由该版本导出。来源/导出方式/过期规则写在
+    `docs/plan/catalog-snapshots/README.md`。
+  - `catalog.rs` 新增 `CATALOG_SNAPSHOT` / `EXPERIMENT_READONLY` /
+    `SNAPSHOT_ACTIONS` / `EXPERIMENT_VERIFIED`。52 个批次 9 op 的 `Verified`
+    source 由 `SNAPSHOT_ACTIONS` 生成，格式是
+    `docs/plan/catalog-snapshots/snowluma-2026-09-29-190-actions.json#<action>`；
+    `group.tag_list` / `account.qzone.detail` 的 source 指向只读实验记录。
+  - 新增测试 `verified_sources_resolve_to_snapshot_or_experiment`：解析快照 JSON，
+    对每个快照型 source 取 `#` 后的 action 断言存在；反向核对 52 条
+    `SNAPSHOT_ACTIONS` 与目录 source；实验型 source 必须命中
+    `conclusion=verified` 的探针。
+  - 只读真机实验（SnowLuma `2.2.1-node`，账号 `3683924053`）：桥对 `Unverified`
+    的 `platform_call` 一律拒绝、console 没有 tool_call 入口，只读探针直接打同一
+    实例的 OneBot HTTP API（桥配置里的同一 token），写入类未执行。结果写进
+    `docs/plan/catalog-snapshots/snowluma-2026-11-05-readonly-experiments.json`
+    与 `adapter-snowluma.md` 的实验表。
+  - 实验结论：`account.qzone.detail` 用有效 tid 返回 tid/content/comment_num/
+    comments → `Verified`；`group.tag_list` 用 `group_class=0` 返回
+    `tags:[]` → `Verified`。其余保留 `Unverified`：`account.qzone.unlike`
+    （端点 ok 但无法确认状态变化）、`msg.tuwen_ark`（动作存在、title 必填、发送类
+    未执行）、`account.model_show`（mock echo）、`friend.recent_contacts` /
+    `system.packet_status`（占位返回空/null）、`msg.word_slices` /
+    `file.collection_create`（not yet implemented）。`Unverified` 15 → 13。
+  - 写入/破坏性档只出清单与脚本：
+    `docs/plan/catalog-snapshots/snowluma-2026-11-05-write-experiments.sh`
+    （默认 dry-run，必须 `--execute` + `ACB_TEST_GROUP`/`ACB_TEST_ACCOUNT`），
+    覆盖 `group.add_option` / `group.anonymous` / `group.anonymous_ban` /
+    `group.tag_add` / `group.tag_delete` / `account.model_show_set` 的
+    基线、执行、读回、回滚步骤。**未执行**。
+- 取舍：
+  - 快照不硬标 SnowLuma 版本：上游没留版本字段/脚本，照实写「版本未知，运行实例
+    2.2.1-node 只作参照」比编一个版本号可靠。
+  - 只读实验能用有效 tid 确证 `account.qzone.detail`，但 `unlike_qzone` 不能靠
+    tid=0 的 ok 确证，保留 `Unverified`，不为了降数量放宽。
+  - 写入类一律不执行，脚本默认 dry-run，避免为了实验改真实群/号。
+  - 占位/mock 动作单独标注「返回值不代表生效」。
+- 证据：
+  - `verified_sources_resolve_to_snapshot_or_experiment`（新）
+  - `catalog_lists_the_unverified_ops`：13 个（15 → 13）
+  - `account.qzone.detail` / `group.tag_list` 的 source 指向
+    `docs/plan/catalog-snapshots/snowluma-2026-11-05-readonly-experiments.json#<op>`
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode
+    `npm test` 全绿。
+
 ## 部署注意事项（nix-config 打包）
 
 - `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置
