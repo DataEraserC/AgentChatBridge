@@ -296,7 +296,18 @@ impl EventDedup {
             return true;
         }
         if self.seen.len() >= DEDUP_CAPACITY {
-            self.seen.clear();
+            // 到上限时按时间淘汰最老的一批，别让高事件量把表撑爆，也别一次清空
+            // 导致刚去重过的事件又被收一遍。
+            let evict = DEDUP_CAPACITY / 4;
+            let mut entries: Vec<(String, Instant)> = self
+                .seen
+                .iter()
+                .map(|(key, at)| (key.clone(), *at))
+                .collect();
+            entries.sort_unstable_by_key(|(_, at)| *at);
+            for (key, _) in entries.into_iter().take(evict) {
+                self.seen.remove(&key);
+            }
         }
         self.seen.insert(key, now);
         false
@@ -1919,6 +1930,39 @@ mod tests {
         });
         assert!(!dedup.duplicate(&heartbeat));
         assert!(!dedup.duplicate(&heartbeat), "心跳永远不该被去重");
+    }
+
+    #[test]
+    fn event_dedup_evicts_the_oldest_entries_at_capacity() {
+        let mut dedup = EventDedup::default();
+        for index in 0..DEDUP_CAPACITY + 64 {
+            let event = json!({
+                "post_type": "notice",
+                "notice_type": "group_upload",
+                "self_id": 999,
+                "group_id": 456,
+                "user_id": 10001,
+                "file": {"id": format!("f{index}")},
+                "time": 1_793_000_000,
+            });
+            assert!(!dedup.duplicate(&event), "每条新事件都该入库");
+        }
+        assert!(
+            dedup.seen.len() <= DEDUP_CAPACITY,
+            "去重表必须保持有界：{}",
+            dedup.seen.len()
+        );
+        // 最老的一批已被按时间淘汰；刚插入的仍能命中重复。
+        let newest = json!({
+            "post_type": "notice",
+            "notice_type": "group_upload",
+            "self_id": 999,
+            "group_id": 456,
+            "user_id": 10001,
+            "file": {"id": format!("f{}", DEDUP_CAPACITY + 63)},
+            "time": 1_793_000_000,
+        });
+        assert!(dedup.duplicate(&newest), "最新条目应仍在表里");
     }
 
     #[test]

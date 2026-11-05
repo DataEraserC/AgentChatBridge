@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acb_supervisor::{
-    BuiltinPolicy, Clock, CommandSpec, Config, ExitInfo, Parts, Policy, PolicySettings, Probe,
-    Runner, Sleeper, Supervisor,
+    BuiltinPolicy, Clock, CommandSpec, Config, EXIT_GIVE_UP, EXIT_ROLLBACK, ExitInfo, Parts,
+    Policy, PolicySettings, Probe, RollbackMode, Runner, Sleeper, Supervisor, load_current,
 };
 use acb_supervisor_policy::{Decision, DecisionKind, PolicyConfig, Snapshot};
 use serde_json::Value;
@@ -203,6 +203,7 @@ fn config(dir: &std::path::Path, lkg: Option<&str>) -> Config {
         state_dir: dir.to_string_lossy().into_owned(),
         probe_interval_secs: 1,
         stable_window_secs: 60,
+        rollback_mode: RollbackMode::Internal,
         policy: PolicySettings::default(),
     }
 }
@@ -511,6 +512,138 @@ fn hold_restart_uses_the_backoff_ladder() {
         sleeper.sleeps(),
         vec![1000, 2000, 4000, 8000, 30_000],
         "退避阶梯要按 hold 次数增长"
+    );
+}
+
+#[test]
+fn external_rollback_writes_pointer_and_exits_75_without_starting_lkg() {
+    let dir = temp_dir("external-rollback");
+    let clock = Arc::new(AtomicI64::new(0));
+    let runner = SharedRunner::new();
+    let probe = SharedProbe::new(vec![true]);
+    let sleeper = SharedSleeper::default();
+    let policy: Arc<dyn Policy> = Arc::new(FakePolicy::hold());
+    let mut config = config(&dir, Some("/lkg"));
+    config.rollback_mode = RollbackMode::External;
+    config.policy.options.consecutive_failures = 1;
+    config.policy.options.startup_grace_secs = 0;
+    config.policy.options.window_failures = 0;
+    config.policy.options.unhealthy_secs = 0;
+    config.policy.options.unhealthy_probes = 0;
+    let mut supervisor = supervisor(
+        config,
+        Arc::clone(&clock),
+        runner.clone(),
+        probe,
+        sleeper,
+        Arc::clone(&policy),
+    );
+
+    runner.set_exited(1);
+    supervisor.tick();
+
+    assert!(supervisor.stopped(), "回滚请求后 launcher 必须退出");
+    assert_eq!(supervisor.exit_code(), Some(EXIT_ROLLBACK));
+    assert_eq!(supervisor.current().program, "/lkg");
+    assert_eq!(runner.starts().len(), 1, "launcher 不自己起 LKG");
+    assert_eq!(runner.stops(), 0, "子进程已经退出，不需要再停");
+    assert_eq!(
+        load_current(&dir).expect("current.json 已写").program,
+        "/lkg"
+    );
+    let events = audit_events(&supervisor);
+    assert!(
+        find_event(&events, "execute")
+            .iter()
+            .any(|event| event["result"] == "rollback_requested"),
+        "审计要写回滚请求：{events:?}"
+    );
+}
+
+#[test]
+fn external_fail_is_terminal_and_exits_78() {
+    let dir = temp_dir("external-fail");
+    let clock = Arc::new(AtomicI64::new(0));
+    let runner = SharedRunner::new();
+    let probe = SharedProbe::new(vec![true]);
+    let sleeper = SharedSleeper::default();
+    let policy: Arc<dyn Policy> = Arc::new(FakePolicy::hold());
+    let mut config = config(&dir, None);
+    config.rollback_mode = RollbackMode::External;
+    config.policy.options.consecutive_failures = 1;
+    config.policy.options.startup_grace_secs = 0;
+    config.policy.options.window_failures = 0;
+    config.policy.options.unhealthy_secs = 0;
+    config.policy.options.unhealthy_probes = 0;
+    let mut supervisor = supervisor(
+        config,
+        Arc::clone(&clock),
+        runner.clone(),
+        probe,
+        sleeper,
+        Arc::clone(&policy),
+    );
+
+    runner.set_exited(1);
+    supervisor.tick();
+
+    assert!(supervisor.stopped());
+    assert_eq!(supervisor.exit_code(), Some(EXIT_GIVE_UP));
+    assert!(supervisor.failed().is_some());
+    assert_eq!(runner.stops(), 1, "终态失败要停掉子进程");
+}
+
+/// 回滚后 systemd 用新 launcher 起 LKG；LKG 也失败时没有第二个 LKG，必须 78 停机。
+#[test]
+fn second_failure_after_rollback_is_terminal_78() {
+    let dir = temp_dir("external-second-fail");
+    let clock = Arc::new(AtomicI64::new(0));
+    let runner = SharedRunner::new();
+    let probe = SharedProbe::new(vec![true]);
+    let sleeper = SharedSleeper::default();
+    let policy: Arc<dyn Policy> = Arc::new(FakePolicy::hold());
+    let mut first = config(&dir, Some("/lkg"));
+    first.rollback_mode = RollbackMode::External;
+    first.policy.options.consecutive_failures = 1;
+    first.policy.options.startup_grace_secs = 0;
+    first.policy.options.window_failures = 0;
+    first.policy.options.unhealthy_secs = 0;
+    first.policy.options.unhealthy_probes = 0;
+    let mut first_supervisor = supervisor(
+        first,
+        Arc::clone(&clock),
+        runner.clone(),
+        probe.clone(),
+        sleeper.clone(),
+        Arc::clone(&policy),
+    );
+    runner.set_exited(1);
+    first_supervisor.tick();
+    assert_eq!(first_supervisor.exit_code(), Some(EXIT_ROLLBACK));
+
+    // 模拟 systemd 拉起 launcher：current.json 指向 LKG，配置里的 LKG 已与应用相同。
+    let mut second = config(&dir, Some("/lkg"));
+    second.program = "/lkg".to_owned();
+    second.rollback_mode = RollbackMode::External;
+    second.policy.options.consecutive_failures = 1;
+    second.policy.options.startup_grace_secs = 0;
+    second.policy.options.window_failures = 0;
+    second.policy.options.unhealthy_secs = 0;
+    second.policy.options.unhealthy_probes = 0;
+    let mut second_supervisor = supervisor(
+        second,
+        Arc::clone(&clock),
+        runner.clone(),
+        probe,
+        sleeper,
+        policy,
+    );
+    runner.set_exited(1);
+    second_supervisor.tick();
+    assert_eq!(
+        second_supervisor.exit_code(),
+        Some(EXIT_GIVE_UP),
+        "回滚后的版本再失败必须终态退出，不能无限回滚"
     );
 }
 

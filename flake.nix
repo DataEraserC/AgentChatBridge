@@ -13,6 +13,9 @@
     {
       packages.${system} = rec {
         default = acb-bridge;
+        # acb-launcher 与 acb-bridge 是同一个 workspace 构建产物；这个别名方便
+        # deploy/nix/*.nix 的 package 选项直接引用。
+        acb-launcher = acb-bridge;
         acb-bridge = pkgs.rustPlatform.buildRustPackage {
           pname = "acb-bridge";
           version = "0.1.0";

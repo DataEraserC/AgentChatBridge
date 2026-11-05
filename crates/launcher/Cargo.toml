@@ -1,0 +1,20 @@
+[package]
+name = "acb-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "ACB systemd 入口：读 current.json，监督当前版本，回滚时以 75 退出"
+
+[[bin]]
+name = "acb-launcher"
+path = "src/main.rs"
+
+[dependencies]
+acb-supervisor = { path = "../supervisor" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

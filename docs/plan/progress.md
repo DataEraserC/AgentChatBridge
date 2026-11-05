@@ -2043,6 +2043,35 @@
   - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode `npm test`、
     `node --check harnesses/shared/tools.mjs` 全绿。
 
+## 2026-11-05 — supervisor 接入 systemd（acb-launcher）
+
+- 做了什么：
+  - 新增 `crates/launcher`（`acb-launcher`）：读 `state_dir/current.json` 决定启动
+    哪个命令，嵌入 supervisor 策略循环；回滚时写 `current.json`=LKG、停子进程、
+    以 `EXIT_ROLLBACK=75` 退出，systemd 拉起后自然换版本。
+  - `acb-supervisor` 新增 `RollbackMode::{Internal, External}`、`EXIT_OK=0` /
+    `EXIT_ROLLBACK=75` / `EXIT_GIVE_UP=78`；External 下 `fail`/回滚写指针失败/
+    回滚后版本再失败都以 78 终态退出，不再无限重启。
+  - 修复「决策延迟期间子进程退出被 hold 悄悄重启」：延迟后重新检查进程状态，
+    退出计入失败并重新评估策略。
+  - 新增 `deploy/systemd/acb-launcher.service`（`Type=notify`、`WatchdogSec=120`、
+    `Restart=on-failure`、`RestartSec=1`、`RestartForceExitStatus=75`、
+    `RestartPreventExitStatus=78`、`StartLimitBurst=3/60s`、`StartLimitAction=none`）。
+  - 新增可选 Nix module：`deploy/nix/nixos.nix`、`deploy/nix/home-manager.nix`，
+    默认不启用，不依赖 NixOS generation。
+  - `EventDedup` 满 4096 条时按时间淘汰最老 1/4，避免高事件量下无界增长。
+  - 设计/重启表/退出码契约/实测记录：`docs/plan/supervisor-systemd.md`。
+- 证据：
+  - `external_rollback_writes_pointer_and_exits_75_without_starting_lkg`
+  - `external_fail_is_terminal_and_exits_78`
+  - `second_failure_after_rollback_is_terminal_78`
+  - `event_dedup_evicts_the_oldest_entries_at_capacity`
+  - `./deploy/verify-launcher.sh`：正常重启 MainPID 不变、回滚日志
+    `status=75/TEMPFAIL` + `current.json selects lkg`、连续失败 `status=78/CONFIG`
+    + `Active: failed` + `MainPID=0`。
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode `npm test`、
+    `node --check harnesses/shared/tools.mjs` 全绿。
+
 
 ## 部署注意事项（nix-config 打包）
 

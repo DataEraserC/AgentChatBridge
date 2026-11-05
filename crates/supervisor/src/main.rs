@@ -5,13 +5,12 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use acb_supervisor::{
-    BuiltinPolicy, CommandPolicy, Config, HttpProbe, Parts, ProcessRunner, Supervisor, SystemClock,
-    SystemSleeper, load_config,
+    AlwaysHealthy, HttpProbe, Parts, ProcessRunner, Supervisor, SystemClock, SystemSleeper,
+    build_policy, load_config,
 };
 
 fn main() -> ExitCode {
@@ -23,7 +22,7 @@ fn main() -> ExitCode {
         Ok(config) => config,
         Err(error) => {
             eprintln!("acb-supervisor: {error}");
-            return ExitCode::from(78);
+            return ExitCode::from(acb_supervisor::EXIT_GIVE_UP as u8);
         }
     };
 
@@ -31,7 +30,7 @@ fn main() -> ExitCode {
         Ok(policy) => policy,
         Err(error) => {
             eprintln!("acb-supervisor: {error}");
-            return ExitCode::from(78);
+            return ExitCode::from(acb_supervisor::EXIT_GIVE_UP as u8);
         }
     };
     let probe: Box<dyn acb_supervisor::Probe> = match &config.health_url {
@@ -52,7 +51,7 @@ fn main() -> ExitCode {
         Ok(supervisor) => supervisor,
         Err(error) => {
             eprintln!("acb-supervisor: {error}");
-            return ExitCode::from(78);
+            return ExitCode::from(acb_supervisor::EXIT_GIVE_UP as u8);
         }
     };
 
@@ -77,29 +76,4 @@ fn config_path() -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn build_policy(config: &Config) -> Result<Arc<dyn acb_supervisor::Policy>, String> {
-    match config.policy.provider.as_str() {
-        "acb.supervisor.default" | "default" => Ok(Arc::new(BuiltinPolicy)),
-        "command" => {
-            let command = config
-                .policy
-                .command
-                .as_deref()
-                .map(str::trim)
-                .filter(|command| !command.is_empty())
-                .ok_or_else(|| "policy.provider=command requires policy.command".to_owned())?;
-            Ok(Arc::new(CommandPolicy::new(command)))
-        }
-        other => Err(format!("unknown supervisor policy provider: {other}")),
-    }
-}
-
-struct AlwaysHealthy;
-
-impl acb_supervisor::Probe for AlwaysHealthy {
-    fn healthy(&mut self) -> bool {
-        true
-    }
 }

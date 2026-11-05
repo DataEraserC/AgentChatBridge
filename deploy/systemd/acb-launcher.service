@@ -1,0 +1,31 @@
+[Unit]
+Description=ACB launcher (supervisor front-end, reads current.json)
+After=network.target
+# launcher 层重启上限：3 次 / 60 秒。达到后停在 failed，不自动复活。
+StartLimitIntervalSec=60
+StartLimitBurst=3
+StartLimitAction=none
+
+[Service]
+Type=notify
+NotifyAccess=main
+# supervisor 的 unhealthy_secs=60 先于 watchdog=120 触发；watchdog 只兜 launcher/监督循环本身挂死。
+WatchdogSec=120
+# 普通 Linux 安装示例；按实际路径改。
+ExecStart=/usr/local/bin/acb-launcher --config /etc/acb/supervisor.toml
+WorkingDirectory=/var/lib/acb
+# 只有异常退出才拉起 launcher。子进程的退避在 supervisor 内部，不叠 systemd 的 RestartSec。
+Restart=on-failure
+RestartSec=1
+# 75 = 回滚后重启（current.json 已换到 LKG）；即使将来加了 SuccessExitStatus 也必须重启。
+RestartForceExitStatus=75
+# 78 = 监督器放弃自动恢复（回滚失败 / 无 LKG / 写指针失败）：不再拉起。
+RestartPreventExitStatus=78
+# systemd stop 时 SIGTERM 发给整个 cgroup；acb 默认排空约 30s，留余量。
+TimeoutStopSec=45
+KillMode=control-group
+StandardOutput=append:/var/log/acb-launcher.log
+StandardError=append:/var/log/acb-launcher.log
+
+[Install]
+WantedBy=multi-user.target
