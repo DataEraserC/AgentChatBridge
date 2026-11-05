@@ -38,7 +38,7 @@ import {
   renderPersona,
   renderTurn,
 } from "../../opencode/plugin/acb-wire.mjs"
-import { TOOLS } from "../../shared/tools.mjs"
+import { RESIDENT_TOOL_NAMES, toolsForSurface, withLocalSchema } from "../../shared/tools.mjs"
 import { McpServer } from "./mcp-server.mjs"
 import { McpHttpServer } from "./mcp-http-server.mjs"
 import { DshClient, DshError } from "./dsh-client.mjs"
@@ -130,11 +130,8 @@ async function main() {
 
   // MCP server：暴露桥上的工具，工具调用转成 tool_call（带当前 ticket）。
   // 工具面两份（stdio / streamable-http）共用同一套定义和同一个 onCall。
-  const toolDefs = TOOLS.map((t) => ({
-    name: t.name,
-    description: t.description,
-    inputSchema: t.schema,
-  }))
+  // `tools` 是函数：每次 tools/list 都按 driver 当前轮次/会话的 surface 算。
+  const toolDefs = () => driver.toolDefs()
   const onCall = async (name, args) => {
     const started = Date.now()
     log(
@@ -253,6 +250,61 @@ class TurnDriver {
     // 重置代次：reset 过的会话换新 id（-r<代次>），避开同 id + 不同 cwd 的冲突。
     this.generations = new Map()
     this.chain = Promise.resolve()
+    // 本轮可见工具面；启动时只有常驻白名单，开轮后用桥的 capabilities scope=surface 更新。
+    this.surface = {
+      resident: RESIDENT_TOOL_NAMES,
+      visible: RESIDENT_TOOL_NAMES,
+      catalog: [],
+    }
+  }
+
+  /** 当前 MCP tools/list 要返回的工具定义。 */
+  toolDefs() {
+    return toolDefsForSurface(this.surface)
+  }
+
+  /** 用桥算出的 surface 替换本轮可见面；形状不对就保留上一次。 */
+  setSurface(surface) {
+    if (
+      !surface ||
+      !Array.isArray(surface.resident) ||
+      !Array.isArray(surface.visible) ||
+      !Array.isArray(surface.catalog)
+    ) {
+      throw new Error("tool surface shape is invalid")
+    }
+    this.surface = surface
+  }
+
+  /**
+   * 开轮后、投话前向桥要一次 surface。失败只记日志并沿用上一次的工具面：
+   * 工具面是辅助信息，不能因为它把一轮对话拖死。
+   */
+  async #refreshSurface(link, session) {
+    try {
+      const result = await callBridge(
+        link,
+        "capabilities",
+        { scope: "surface" },
+        { internal: true },
+      )
+      const surface = JSON.parse(result)
+      this.setSurface(surface)
+      this.log(
+        "info",
+        t("dsh.tool_surface_loaded", {
+          session,
+          resident: surface.counts?.resident ?? surface.resident.length,
+          visible: surface.counts?.visible ?? surface.visible.length,
+          hidden: surface.counts?.hidden ?? surface.hidden?.length ?? 0,
+        }),
+      )
+    } catch (error) {
+      this.log(
+        "warn",
+        t("dsh.tool_surface_failed", { error: error?.message ?? String(error) }),
+      )
+    }
   }
 
   /** 这个 acb 会话对应的固定 dsh sessionId（重置过后带代次后缀）。 */
@@ -331,6 +383,7 @@ class TurnDriver {
     let failureInfo = null
     try {
       let sessionId = await this.#session(delivery.session, link)
+      await this.#refreshSurface(link, delivery.session)
       const modelRef = this.#modelFor(delivery)
       await this.#pinModel(sessionId, modelRef)
       let text = this.#composePrompt(delivery)
@@ -741,7 +794,7 @@ function classifyTurnReason(reason) {
   return null
 }
 
-async function callBridge(link, name, args) {
+async function callBridge(link, name, args, options = {}) {
   let wire
   try {
     wire = normalizeToolArgs(name, args)
@@ -749,7 +802,12 @@ async function callBridge(link, name, args) {
     throw new Error(error.message)
   }
   try {
-    const result = await link.call(name, wire)
+    const raw = await link.call(name, wire, options)
+    // capabilities scope=tool 的完整 schema 在 harness 本地；桥只返回权限判定。
+    const result =
+      name === "capabilities" && wire.scope === "tool" && wire.name
+        ? withLocalSchema(wire.name, raw)
+        : raw
     // 桥返回空 = 平台没有可返回的数据（例如撤回成功）；给一个机器可读的成功标记，
     // 不要替平台编一句人话。
     if (result === null || result === undefined) return JSON.stringify({ ok: true })
@@ -758,6 +816,15 @@ async function callBridge(link, name, args) {
     const code = error instanceof BridgeError ? error.code : "internal"
     throw new Error(`${name} failed (${code}): ${error.message}`)
   }
+}
+
+/** 按 surface 选 MCP 工具定义；dsh 与 opencode 共用 shared/tools.mjs 的选择逻辑。 */
+export function toolDefsForSurface(surface = {}) {
+  return toolsForSurface(surface).map(({ name, description, schema }) => ({
+    name,
+    description,
+    inputSchema: schema,
+  }))
 }
 
 // 作为主模块（node src/driver.mjs）时直接跑；被测试 import 时不动。

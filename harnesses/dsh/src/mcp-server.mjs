@@ -17,8 +17,9 @@ import { t } from "../../shared/i18n.mjs"
 const PROTOCOL_VERSION = "2024-11-05"
 
 /**
- * 一个 MCP server。`tools` 是 [{ name, description, inputSchema }]，
- * `onCall(name, args)` 收到 tools/call 时被调，返回结果对象或抛错。
+ * 一个 MCP server。`tools` 是 [{ name, description, inputSchema }]，或返回这份数组
+ * 的同步函数（按轮次/会话算可见面时用）。`onCall(name, args)` 收到 tools/call 时
+ * 被调，返回结果对象或抛错。
  */
 export class McpServer {
   constructor({ name = "acb", version = "0.1.0", tools = [], onCall, log = () => {} } = {}) {
@@ -74,13 +75,16 @@ export class McpServer {
       case "ping":
         this.#respond(message.id, {})
         return
-      case "tools/list":
-        this.#respond(message.id, { tools: this.tools.map((t) => ({
+      case "tools/list": {
+        const current = typeof this.tools === "function" ? this.tools() : this.tools
+        const list = Array.isArray(current) ? current : []
+        this.#respond(message.id, { tools: list.map((t) => ({
           name: t.name,
           description: t.description ?? "",
           inputSchema: t.inputSchema ?? { type: "object", properties: {} },
         })) })
         return
+      }
       case "tools/call":
         this.#handleCall(message)
         return

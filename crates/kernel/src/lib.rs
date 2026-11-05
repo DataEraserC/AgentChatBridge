@@ -84,7 +84,9 @@ pub use storage::{
     Transcript, Watermarks, unread,
 };
 pub use task::{TaskHandler, TaskOutcome};
-pub use tools::TOOL_NAMES;
+pub use tools::{
+    RESIDENT_TOOLS, TOOL_CATALOG, TOOL_NAMES, ToolCatalogEntry, catalog_entry, is_resident,
+};
 
 /// 协议类型顺手转出去：下游（接入点、适配器）依赖 kernel 一个 crate 就够。
 pub use acb_proto::{

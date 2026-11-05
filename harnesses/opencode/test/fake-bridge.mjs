@@ -6,6 +6,8 @@
 import net from "node:net"
 import assert from "node:assert/strict"
 
+import { RESIDENT_TOOL_NAMES, TOOLS } from "../../shared/tools.mjs"
+
 export const TICKET = "main-1"
 
 export function delivery(overrides = {}) {
@@ -30,10 +32,57 @@ export function delivery(overrides = {}) {
   }
 }
 
+/**
+ * 测试用 surface：常驻白名单 + 长尾目录。`extensions_*` 默认不可直接执行，
+ * 用来验证隐藏工具仍留在目录里但不进可见集。
+ */
+export function surface(overrides = {}) {
+  const resident = overrides.resident ?? RESIDENT_TOOL_NAMES
+  const catalog =
+    overrides.catalog ??
+    TOOLS.filter((tool) => !resident.includes(tool.name)).map((tool) => ({
+      tool: tool.name,
+      layer: "catalog",
+      purpose: `测试用途：${tool.name}`,
+      when: "测试需要时",
+      available: !tool.name.startsWith("extensions_"),
+      direct_executable: !tool.name.startsWith("extensions_"),
+      requestable: ["notes", "wait_message"].includes(tool.name),
+      ticket_required: false,
+      reason: tool.name.startsWith("extensions_") ? "admin_only" : null,
+    }))
+  const visible = overrides.visible ?? [
+    ...resident,
+    ...catalog.filter((entry) => entry.direct_executable).map((entry) => entry.tool),
+  ]
+  const hidden = overrides.hidden ?? catalog.filter((entry) => !entry.direct_executable)
+  return {
+    scope: "surface",
+    session: "main",
+    room: "qq:group/158296748",
+    subject: "user",
+    place: "group",
+    allow_destructive: "none",
+    resident: resident,
+    catalog,
+    visible,
+    hidden,
+    counts: {
+      tools_total: TOOLS.length,
+      resident: resident.length,
+      catalog: catalog.length,
+      visible: visible.length,
+      hidden: hidden.length,
+    },
+    ...overrides,
+  }
+}
+
 export class FakeBridge {
-  constructor({ sessions = ["main"], token = "t-main" } = {}) {
+  constructor({ sessions = ["main"], token = "t-main", surface: surfaceFixture = surface() } = {}) {
     this.sessions = sessions
     this.token = token
+    this.surface = surfaceFixture
     this.frames = []
     this.socket = null
     this.connected = null
@@ -50,7 +99,44 @@ export class FakeBridge {
       this.socket = socket
       this.sockets.add(socket)
       socket.setEncoding("utf8")
-      this.lines = new LineQueue(socket)
+      this.lines = new LineQueue(socket, (frame) => {
+        // 工具面查询是 harness 内部动作：回了就到，不进 next() 的轮次帧序列。
+        if (
+          frame.frame === "tool_call" &&
+          frame.tool === "capabilities" &&
+          frame.args?.scope === "surface"
+        ) {
+          this.frames.push(frame)
+          this.#write({ frame: "tool_result", id: frame.id, result: this.surface })
+          return true
+        }
+        // capabilities scope=tool：给一个最小权限结果，让 harness 拼本地 schema。
+        if (
+          frame.frame === "tool_call" &&
+          frame.tool === "capabilities" &&
+          frame.args?.scope === "tool" &&
+          frame.args?.name
+        ) {
+          this.frames.push(frame)
+          this.#write({
+            frame: "tool_result",
+            id: frame.id,
+            result: {
+              scope: "tool",
+              kind: "tool",
+              tool: frame.args.name,
+              layer: "catalog",
+              available: true,
+              direct_executable: true,
+              requestable: frame.args.name === "notes",
+              ticket_required: false,
+              reason: null,
+            },
+          })
+          return true
+        }
+        return false
+      })
       this.connected()
       // 收尾时新连接可能还挂着等 hello，别让它变成未处理的 rejection。
       void this.#greet().catch(() => {})
@@ -102,10 +188,11 @@ export class FakeBridge {
 }
 
 class LineQueue {
-  constructor(socket) {
+  constructor(socket, onMessage = () => false) {
     this.buffer = ""
     this.waiting = []
     this.lines = []
+    this.onMessage = onMessage
     socket.on("data", (chunk) => {
       this.buffer += chunk
       for (;;) {
@@ -113,7 +200,8 @@ class LineQueue {
         if (at < 0) return
         const line = this.buffer.slice(0, at)
         this.buffer = this.buffer.slice(at + 1)
-        this.#push(JSON.parse(line))
+        const value = JSON.parse(line)
+        if (!this.onMessage(value)) this.#push(value)
       }
     })
   }

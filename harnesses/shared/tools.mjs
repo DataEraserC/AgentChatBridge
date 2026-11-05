@@ -148,9 +148,11 @@ get_platform_events，wait_message，或 platform_call:<op>（如 platform_call:
   },
   {
     name: "capabilities",
-    description: `只读自检：回答「此刻能不能用」，不回答「世界上有什么」。
+    description: `只读自检：回答「此刻能不能用」，也回答「长尾有什么」。
 scope=session 给整体处境与计数；scope=room 看某房间的读写与 op 风险 / allow_destructive；
-scope=tool 看单个工具或平台 op（name）。
+scope=catalog 列长尾工具目录（名字 / 一句话用途 / 何时用 / 可用性 / 可申请）；
+scope=surface 给 harness 算本轮可见集；scope=tool 看单个工具或平台 op（name），
+工具会附完整 schema（本地工具定义），平台 op 只给目录里的参数。
 遇到 forbidden / room_not_subscribed / destructive_disabled 先查这里，别盲目重试。
 「有什么」仍用 platform_call（不给 op）、plugin_tools、describe_plugins。`,
     schema: {
@@ -158,7 +160,7 @@ scope=tool 看单个工具或平台 op（name）。
       properties: {
         scope: {
           type: "string",
-          enum: ["session", "room", "tool"],
+          enum: ["session", "room", "tool", "catalog", "surface"],
           description: "默认 session",
         },
         room: ROOM_SCHEMA,
@@ -787,3 +789,81 @@ add 暂存改动（path 留空=全部）；commit 提交已暂存内容（要 me
 
 /** 名字 → 工具，方便按名查。 */
 export const TOOLS_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]))
+
+/**
+ * 常驻工具：**显式白名单**，两条 harness 都只把这一层当启动时的初始工具面。
+ *
+ * 这份清单必须与 `crates/kernel/src/tools.rs` 的 `RESIDENT_TOOLS` 逐项一致；
+ * Rust 侧有跨层测试锁住。不要写「除长尾外都常驻」——新增工具会自动膨胀。
+ */
+export const RESIDENT_TOOL_NAMES = [
+  "send_message",
+  "send_message_to",
+  "list_rooms",
+  "capabilities",
+  "platform_call",
+  "access_request",
+  "access_ticket_get",
+  "ack_messages",
+  "fetch_records",
+  "get_history",
+]
+
+const CATALOG_SCHEMA = {
+  type: "object",
+  description: "参数形状见 capabilities {scope:\"tool\",name:\"<工具>\"} 返回的完整 schema",
+  additionalProperties: true,
+}
+
+function catalogSpec(spec, entry) {
+  const purpose = entry?.purpose || spec.description.split("\n")[0]
+  const when = entry?.when ? `。何时用：${entry.when}` : ""
+  const status =
+    entry && entry.direct_executable === false
+      ? `。当前不可直接执行（${entry.reason ?? "unavailable"}）`
+      : ""
+  return {
+    name: spec.name,
+    description: `${purpose}${when}${status}。完整参数用 capabilities scope=tool name="${spec.name}" 查。`,
+    schema: CATALOG_SCHEMA,
+  }
+}
+
+/**
+ * 按 core 的 `capabilities scope=surface` 选本轮工具面。
+ *
+ * - `resident` 里的工具给完整 schema（高频路径不搞两阶段）；
+ * - `visible` 里的长尾工具给最小占位 schema（目录层）；
+ * - 其余（hidden）不注入，但仍可从 `capabilities scope=catalog/session` 查到。
+ * 没有 surface（例如还没开过轮）时只返回常驻层。
+ */
+export function toolsForSurface(surface = {}) {
+  const resident = new Set(
+    Array.isArray(surface.resident) && surface.resident.length
+      ? surface.resident
+      : RESIDENT_TOOL_NAMES,
+  )
+  const visible = new Set(Array.isArray(surface.visible) ? surface.visible : [...resident])
+  const catalog = new Map(
+    (Array.isArray(surface.catalog) ? surface.catalog : []).map((entry) => [entry.tool, entry]),
+  )
+  const out = []
+  for (const spec of TOOLS) {
+    if (resident.has(spec.name)) {
+      out.push(spec)
+    } else if (visible.has(spec.name)) {
+      out.push(catalogSpec(spec, catalog.get(spec.name)))
+    }
+  }
+  return out
+}
+
+/**
+ * `capabilities scope=tool` 的完整 schema 在 harness 本地：把桥返回的权限结果
+ * 和本地工具定义拼起来。权限判定仍只来自桥，harness 不复制第二份逻辑。
+ */
+export function withLocalSchema(name, result) {
+  const spec = TOOLS_BY_NAME.get(name)
+  if (!spec || !result || typeof result !== "object") return result
+  return { ...result, description: spec.description, schema: spec.schema }
+}

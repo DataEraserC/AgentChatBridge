@@ -7,7 +7,8 @@ use acb_kernel::{
     AccessAction, AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Bridge, CallError,
     CallOutcome, Capability, Config, Effect, Element, ExtensionPoint, MemoryStore, MethodSpec,
     Outbound, OutboundError, PLUGIN_API_VERSION, PluginManager, ProviderDescriptor, ProviderId,
-    RecordDraft, RecordMode, Risk, RoomId, Scope, Sender, Sent, TOOL_NAMES, Verification,
+    RESIDENT_TOOLS, RecordDraft, RecordMode, Risk, RoomId, Scope, Sender, Sent, TOOL_NAMES,
+    Verification,
 };
 use serde_json::{Value, json};
 
@@ -192,6 +193,10 @@ fn message(room: &str, sender: &str, text: &str) -> RecordDraft {
 }
 
 fn bridge() -> Bridge<MemoryStore> {
+    bridge_with_config(config())
+}
+
+fn bridge_with_config(text: &str) -> Bridge<MemoryStore> {
     let mut plugins = PluginManager::with_native_builtins();
     plugins
         .register_access(
@@ -205,7 +210,7 @@ fn bridge() -> Bridge<MemoryStore> {
         )
         .expect("能注册自定义 access provider");
     Bridge::with_plugins(
-        Config::parse(config()).expect("配置合法"),
+        Config::parse(text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder { catalog: catalog() }),
         plugins,
@@ -241,18 +246,25 @@ fn session_scope_summarizes_tools_rooms_and_tickets() {
         .find(|tool| tool["tool"] == "capabilities")
         .expect("capabilities 自己也在清单里");
     assert_eq!(capabilities["available"], true);
+    assert_eq!(capabilities["requestable"], false, "能力自检本身不申请");
+    assert_eq!(capabilities["layer"], "resident");
     let extensions = tools
         .iter()
         .find(|tool| tool["tool"] == "extensions_list")
         .expect("有 extensions_list");
     assert_eq!(extensions["available"], false);
     assert_eq!(extensions["reason"], "admin_only");
+    assert_eq!(extensions["requestable"], false, "admin 工具不在票据词表");
+    assert_eq!(extensions["layer"], "catalog");
     let send = tools
         .iter()
         .find(|tool| tool["tool"] == "send_message")
         .expect("有 send_message");
     assert_eq!(send["available"], false);
     assert_eq!(send["reason"], "forbidden", "订阅但 provider 拒绝写");
+    assert_eq!(send["requestable"], true, "被过滤仍可用 TICKET_OPS 申请");
+    assert_eq!(send["ticket_required"], true);
+    assert_eq!(send["layer"], "resident", "被过滤不改变常驻层");
 
     let rooms = value["rooms"].as_array().expect("rooms 是数组");
     assert_eq!(rooms.len(), 1);
@@ -365,6 +377,8 @@ fn tool_scope_reports_stable_reasons() {
     assert_eq!(admin_only["kind"], "tool");
     assert_eq!(admin_only["available"], false);
     assert_eq!(admin_only["reason"], "admin_only");
+    assert_eq!(admin_only["layer"], "catalog");
+    assert_eq!(admin_only["requestable"], false);
 
     let blocked_send = bridge
         .tool_call(
@@ -375,6 +389,10 @@ fn tool_scope_reports_stable_reasons() {
         )
         .expect("能查");
     assert_eq!(blocked_send["reason"], "forbidden");
+    assert_eq!(blocked_send["layer"], "resident");
+    assert_eq!(blocked_send["direct_executable"], false);
+    assert_eq!(blocked_send["requestable"], true);
+    assert_eq!(blocked_send["ticket_required"], true);
 
     let destructive = bridge
         .tool_call(
@@ -419,6 +437,194 @@ fn tool_scope_reports_stable_reasons() {
         )
         .expect("能查");
     assert_eq!(notes["available"], true);
+}
+
+#[test]
+fn surface_splits_resident_catalog_and_hidden() {
+    let mut bridge = bridge();
+    let ticket = open_turn(&mut bridge, "qq:group/123");
+    let value = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "surface"}),
+        )
+        .expect("能查");
+
+    assert_eq!(value["scope"], "surface");
+    assert_eq!(value["place"], "group");
+    assert_eq!(value["allow_destructive"], "none");
+    assert_eq!(value["counts"]["tools_total"], TOOL_NAMES.len());
+    assert_eq!(value["counts"]["resident"], RESIDENT_TOOLS.len());
+    assert_eq!(
+        value["counts"]["catalog"],
+        TOOL_NAMES.len() - RESIDENT_TOOLS.len()
+    );
+
+    let resident: std::collections::BTreeSet<&str> = value["resident"]
+        .as_array()
+        .expect("resident 是数组")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let expected: std::collections::BTreeSet<&str> = RESIDENT_TOOLS.iter().copied().collect();
+    assert_eq!(resident, expected, "常驻层必须逐字等于显式白名单");
+
+    let visible: Vec<&str> = value["visible"]
+        .as_array()
+        .expect("visible 是数组")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for tool in RESIDENT_TOOLS {
+        assert!(visible.contains(tool), "常驻工具 {tool} 永远可见");
+    }
+    assert!(
+        !visible.contains(&"extensions_list"),
+        "admin-only 工具不进本轮可见集"
+    );
+
+    let catalog = value["catalog"].as_array().expect("catalog 是数组");
+    assert_eq!(catalog.len(), TOOL_NAMES.len() - RESIDENT_TOOLS.len());
+    assert!(
+        catalog
+            .iter()
+            .any(|entry| entry["tool"] == "extensions_list"),
+        "被过滤工具仍要留在目录索引里"
+    );
+    assert!(
+        !catalog.iter().any(|entry| entry["tool"] == "send_message"),
+        "常驻工具不重复进目录层"
+    );
+
+    let hidden = value["hidden"].as_array().expect("hidden 是数组");
+    let extension = hidden
+        .iter()
+        .find(|entry| entry["tool"] == "extensions_list")
+        .expect("extensions_list 在 hidden 里");
+    assert_eq!(extension["reason"], "admin_only");
+    assert_eq!(extension["direct_executable"], false);
+    assert_eq!(extension["requestable"], false);
+    assert_eq!(extension["ticket_required"], false);
+    assert!(
+        extension["purpose"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "目录条目要有用途"
+    );
+}
+
+#[test]
+fn catalog_scope_is_the_long_tail_index() {
+    let mut bridge = bridge();
+    let ticket = open_turn(&mut bridge, "qq:group/123");
+    let value = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "catalog"}),
+        )
+        .expect("能查");
+
+    assert_eq!(value["scope"], "catalog");
+    assert_eq!(value["resident"].as_array().expect("resident").len(), 10);
+    let tools = value["tools"].as_array().expect("tools 是数组");
+    assert_eq!(tools.len(), TOOL_NAMES.len() - RESIDENT_TOOLS.len());
+    assert!(
+        tools.iter().all(|entry| entry["layer"] == "catalog"),
+        "目录层只放非驻留工具"
+    );
+    let extension = tools
+        .iter()
+        .find(|entry| entry["tool"] == "extensions_list")
+        .expect("extensions_list 在目录里");
+    assert_eq!(extension["reason"], "admin_only");
+    assert!(
+        extension["purpose"]
+            .as_str()
+            .is_some_and(|text| text.contains("扩展")),
+        "用途要写清楚：{extension}"
+    );
+    assert!(
+        extension["when"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "何时用不能空"
+    );
+}
+
+#[test]
+fn resident_entry_points_are_never_filtered_out() {
+    let mut bridge = bridge();
+    let ticket = open_turn(&mut bridge, "qq:group/123");
+    let value = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "surface"}),
+        )
+        .expect("能查");
+    let visible: Vec<&str> = value["visible"]
+        .as_array()
+        .expect("visible")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for tool in [
+        "access_request",
+        "access_ticket_get",
+        "capabilities",
+        "ack_messages",
+    ] {
+        assert!(
+            visible.contains(&tool),
+            "入口/结束轮次工具 {tool} 永不被过滤"
+        );
+    }
+}
+
+#[test]
+fn access_request_stays_visible_without_an_approver() {
+    let text = config().replace(
+        "        [grants.system_admin]\n        connection = \"qq\"\n        account = \"admin\"\n",
+        "",
+    );
+    let mut bridge = bridge_with_config(&text);
+    let ticket = open_turn(&mut bridge, "qq:group/123");
+    let value = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "surface"}),
+        )
+        .expect("能查");
+    let visible: Vec<&str> = value["visible"]
+        .as_array()
+        .expect("visible")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        visible.contains(&"access_request"),
+        "没有审批人时 access_request 仍必须可见"
+    );
+
+    let detail = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "tool", "name": "access_request"}),
+        )
+        .expect("能查");
+    assert_eq!(detail["available"], false);
+    assert_eq!(detail["reason"], "no_approver");
+    assert_eq!(detail["layer"], "resident");
+    assert_eq!(detail["requestable"], false);
 }
 
 #[test]

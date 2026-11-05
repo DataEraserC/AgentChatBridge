@@ -60,6 +60,26 @@ test("tools/list 返回全部工具", async () => {
   assert.ok(names.includes("send_message_to"))
 })
 
+test("tools/list 支持函数形式的工具面（按轮次算）", async () => {
+  let current = [{ name: "send_message", description: "常驻", inputSchema: { type: "object" } }]
+  const { lines, output } = collect()
+  const server = new McpServer({ tools: () => current, onCall: async () => ({}) })
+  const { input, push } = feed([])
+  server.start({ input, output })
+
+  push({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(lines[0].result.tools.length, 1)
+
+  current = [...current, { name: "notes", description: "长尾", inputSchema: { type: "object" } }]
+  push({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(
+    lines[1].result.tools.map((tool) => tool.name),
+    ["send_message", "notes"],
+  )
+})
+
 test("tools/call 调用 onCall 并把结果包成 content", async () => {
   let called = null
   const { lines, output } = collect()
