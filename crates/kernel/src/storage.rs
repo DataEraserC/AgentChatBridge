@@ -54,6 +54,10 @@ pub struct RecordDraft {
     /// 只进流水，不投递、不唤醒、不计未读。适配器自己决定哪些事件属于这一类；
     /// 标记会落库，之后新加的订阅者也按同一规则处理。
     pub suppressed: bool,
+    /// 适配器对房间结构的声明。`None` = 未声明；core 按 MultiParty 处理。
+    pub room_scope: Option<crate::grants::RoomScope>,
+    /// 适配器给房间打的标签（如 `console`）；core 只做展示/场所映射。
+    pub room_labels: Vec<String>,
 }
 
 impl RecordDraft {
@@ -77,7 +81,21 @@ impl RecordDraft {
             target_platform_id: None,
             target_labels: Vec::new(),
             suppressed: false,
+            room_scope: None,
+            room_labels: Vec::new(),
         }
+    }
+
+    /// 声明房间结构事实。缺省不调用 = 未声明，core 按 MultiParty 处理。
+    pub fn with_room_scope(mut self, scope: crate::grants::RoomScope) -> Self {
+        self.room_scope = Some(scope);
+        self
+    }
+
+    /// 附加房间标签（如 `console`）。
+    pub fn with_room_labels(mut self, labels: Vec<String>) -> Self {
+        self.room_labels = labels;
+        self
     }
 
     /// 一个平台事件（拍一拍就是 `event: "poke"`）。
@@ -107,6 +125,8 @@ impl RecordDraft {
             target_platform_id: None,
             target_labels: Vec::new(),
             suppressed: false,
+            room_scope: None,
+            room_labels: Vec::new(),
         }
     }
 

@@ -7,7 +7,7 @@
 //! - 群 → `<连接>:group/<群号>`
 //! - 私聊 → `<连接>:private/<对方号>`
 
-use acb_kernel::{Element, RecordDraft, RoomId, Sender, SenderRole};
+use acb_kernel::{Element, RecordDraft, RoomId, RoomScope, Sender, SenderRole};
 use serde_json::Value;
 
 use crate::segment;
@@ -115,6 +115,7 @@ fn message(
         self_id,
     );
 
+    let scope = room_scope(&room);
     Ok(Parsed::Record(
         RecordDraft::message(
             room,
@@ -123,6 +124,8 @@ fn message(
             elements,
             at_self,
         )
+        // 适配器声明结构事实；core 不再从 `private/` / `group/` 路径猜场所。
+        .with_room_scope(scope)
         // 平台消息编号留着：别人引用了某条消息时，桥要靠它反查「被引用的是谁发的」。
         .with_platform_id(id_of(event.get("message_id"))),
     ))
@@ -163,6 +166,7 @@ fn notice(
         }
     };
     let room = notice_room(connection, event, &sender_id)?;
+    let scope = room_scope(&room);
     let sender = sender_of(event, &sender_id, admin_qqs);
 
     // 拍一拍：被拍的是 target_id。拍到我，`at_self` 才为真（唤醒策略据此判定）。
@@ -183,6 +187,7 @@ fn notice(
                 vec![Element::text(body.clone())],
                 at_self,
             )
+            .with_room_scope(scope)
             .with_event_meta(
                 vec!["poke".to_owned(), "notice".to_owned()],
                 Some(event.clone()),
@@ -228,6 +233,7 @@ fn notice(
         tags.push("recall".to_owned());
     }
     let mut draft = RecordDraft::event(room, sender, at, event_name, elements, false)
+        .with_room_scope(scope)
         .with_event_meta(tags, Some(event.clone()), summary);
     if recall {
         // 撤回事件只进流水备查，不投递/不唤醒；core 只看到通用的 suppressed 和 target。
@@ -251,6 +257,7 @@ fn request(
         .ok_or(EventError::Missing("request_type"))?;
     let sender_id = id_of(event.get("user_id"));
     let room = notice_room(connection, event, &sender_id)?;
+    let scope = room_scope(&room);
     let body = format!("[请求 {request_type}] {}", comment_of(event));
 
     Ok(Parsed::Record(
@@ -262,6 +269,7 @@ fn request(
             vec![Element::text(body.clone())],
             false,
         )
+        .with_room_scope(scope)
         .with_event_meta(
             vec!["request".to_owned(), request_type.to_owned()],
             Some(event.clone()),
@@ -284,6 +292,14 @@ fn notice_room(connection: &str, event: &Value, who: &str) -> Result<RoomId, Eve
 
 fn room(connection: &str, part: &str) -> Result<RoomId, EventError> {
     RoomId::new(connection, part).map_err(|error| EventError::BadRoom(error.to_string()))
+}
+
+/// OneBot 自己的房间路径 → 通用结构事实。这是适配器知识，core 不重复解析。
+fn room_scope(room: &RoomId) -> RoomScope {
+    match room.path.first().map(String::as_str) {
+        Some("private") => RoomScope::Direct,
+        _ => RoomScope::MultiParty,
+    }
 }
 
 /// 显示名优先用群名片，其次昵称，都没有就用号码。
@@ -509,6 +525,11 @@ mod tests {
         assert_eq!(draft.sender.name, "老王八", "群名片优先");
         assert!(draft.at_self, "被 @ 了");
         assert_eq!(draft.at, 1_793_000_000_000, "秒要换成毫秒");
+        assert_eq!(
+            draft.room_scope,
+            Some(RoomScope::MultiParty),
+            "群消息由适配器声明为多人群"
+        );
     }
 
     #[test]
@@ -559,6 +580,11 @@ mod tests {
         assert_eq!(
             draft.room,
             RoomId::new("qq", "private/10001").expect("合法")
+        );
+        assert_eq!(
+            draft.room_scope,
+            Some(RoomScope::Direct),
+            "私聊由适配器声明为一对一"
         );
         assert!(!draft.at_self);
     }

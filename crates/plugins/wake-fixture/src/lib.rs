@@ -56,6 +56,7 @@ pub extern "C" fn acb_adapter_entry_v1() -> *const AdapterV1 {
 unsafe extern "C" fn wake_manifest() -> *mut c_char {
     let extension = fixture_extension();
     let manifest = WireManifest {
+        direct_room: None,
         id: format!("fixture.{extension}"),
         platform: "fixture".into(),
         kind: String::new(),

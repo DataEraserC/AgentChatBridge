@@ -2363,3 +2363,36 @@
     `TOOL_NAMES` / `RESIDENT_TOOLS` / `ON_DEMAND_TOOLS` / harness `TOOLS`。
 - 偏离说明：阶段 1 仍不做 webhook 服务端直投与 Wake；第 6 节对应两项标 `[~]`。
 - 下一步入口：阶段 2 的 Wake/outbox 游标补投（复用 `event_deliveries`）。
+
+## 2026-11-05 — 授权场所轴拆分 + 审批路由
+
+- 任务：把场所从「房间路径第一段」改成适配器声明的结构事实；审批目标改为配置
+  驱动的路由表；群内批准与审计补齐。
+- 做了什么：
+  - `grants.rs`：`Place { Console, Room(RoomScope), None }`、`RoomScope { Direct,
+    MultiParty }`、`Trust { Untrusted, Trusted }`；`Place` 不再和 Trust 合成一个值。
+  - `config.rs` 侧新增 `[grants.rooms."<room_id>"]`（`trust` / `members` /
+    `approval_route`）与 `[grants.accounts."<connection>:<account>"]`
+    （`approval_route`）；解析期校验 room id / 路由目标。
+  - 适配器：`WireManifest.direct_room`、`WireRecord.room_scope` / `room_labels`
+    进协议；OneBot 适配器按自己的路径声明 Direct/MultiParty；manifest 实例化时
+    提供 `direct_room`；缺失/未知一律 MultiParty + Untrusted。
+  - `engine.rs`：删除 `place_of` 路径猜测；房间结构存 `room_profiles`；审批路由
+    按房间级 > 账号级 > 适配器默认解析，core 不再拼 `private/{account}`；不可达
+    记 `route_unavailable` 且不回退申请房间；群内批准要求 trusted + members +
+    ticket id；多目标首个批准生效并给其余目标发 superseded；票据/审计落
+    `approval_route` / `approval_room` / `approval_place` / `approver` /
+    `trusted_group`。
+  - `tickets.rs`：票据字段与 `ApprovalMeta`；PENDING_TTL 过期单测。
+  - `check_target_params`：按显式 `room_kind` + 完整剩余路径比较，修 `stream.*`
+    子路径误判。
+- 证据：
+  - `cargo test -p acb-kernel` → 全部通过（含新增
+    `place_approval_flow` 8 条、`access_ticket_flow` 17 条、engine 子路径单测）。
+  - `cargo test --workspace` → 全部通过（退出码 0）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` → 0 warning。
+  - core 工具数仍 29（`tool_schema_consistency` / `issue_tool_surface`）。
+- 偏离/遗留：审批目标必须被某个会话订阅；`approval_route` 已交付到目标时若其它
+  目标发送失败，不会做 per-target 重试（只保留 route_unavailable 审计）。
+  console 目前没有专门的 route_unavailable 面板，只能从票据查询/日志看。
+

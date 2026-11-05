@@ -163,23 +163,99 @@ impl GrantSubject {
     }
 }
 
-/// 本轮发生的场所。它是独立维度：同一个账号在私信和群里的权限不同。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// 房间的结构事实：一对一还是多人。**由适配器声明，core 只消费**。
+///
+/// 缺省值必须是 `MultiParty`：旧适配器/旧配置没有这个字段时，宁可多问几次，
+/// 也不能因为缺字段把多人房间误当成私信而放宽。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GrantPlace {
-    Private,
-    Group,
+pub enum RoomScope {
+    /// 一对一（私信、单聊）。
+    Direct,
+    /// 多人（群组、频道、多人会话）。
+    MultiParty,
+}
+
+impl RoomScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::MultiParty => "multi_party",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "direct" => Some(Self::Direct),
+            "multi_party" | "multiparty" => Some(Self::MultiParty),
+            _ => None,
+        }
+    }
+}
+
+/// 本轮发生的场所。结构事实，不含政策判断。
+///
+/// `Room` 只带 `RoomScope`（一对一/多人）；Trust 是配置轴，不折进这里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Place {
     Console,
+    Room(RoomScope),
     None,
 }
 
-impl GrantPlace {
+impl Place {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Private => "private",
-            Self::Group => "group",
             Self::Console => "console",
+            Self::Room(RoomScope::Direct) => "private",
+            Self::Room(RoomScope::MultiParty) => "group",
             Self::None => "none",
+        }
+    }
+
+    pub fn room_scope(self) -> Option<RoomScope> {
+        match self {
+            Self::Room(scope) => Some(scope),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for Place {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Place {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        match value.trim() {
+            "private" | "direct" => Ok(Self::Room(RoomScope::Direct)),
+            "group" | "multi_party" | "multiparty" => Ok(Self::Room(RoomScope::MultiParty)),
+            "console" => Ok(Self::Console),
+            "none" => Ok(Self::None),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown place {other:?}; expected private/group/console/none"
+            ))),
+        }
+    }
+}
+
+/// 配置轴：这个房间是否可信。默认 `Untrusted`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trust {
+    #[default]
+    Untrusted,
+    Trusted,
+}
+
+impl Trust {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Untrusted => "untrusted",
+            Self::Trusted => "trusted",
         }
     }
 }
@@ -236,11 +312,33 @@ impl GrantCapability {
 #[serde(deny_unknown_fields)]
 pub struct GrantRule {
     pub subject: GrantSubject,
-    pub place: GrantPlace,
+    pub place: Place,
     pub scope: GrantScope,
     #[serde(default)]
     pub target: Option<AccessTarget>,
     pub capability: Vec<GrantCapability>,
+}
+
+/// 房间级授权政策。结构事实（`RoomScope`）由适配器声明，这里只放政策判断。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomGrant {
+    #[serde(default)]
+    pub trust: Trust,
+    /// 可信成员名单。空 = 按 `trust` 生效（风险更高，文档里明说）。
+    #[serde(default)]
+    pub members: Vec<String>,
+    /// 覆盖默认审批目标；空 = 走账号级，再走全局默认。
+    #[serde(default)]
+    pub approval_route: Vec<String>,
+}
+
+/// 账号级审批路由；键形如 `qq:10001`（连接:账号）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountGrant {
+    #[serde(default)]
+    pub approval_route: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -273,6 +371,12 @@ pub struct GrantsConfig {
     pub bot_admin: Option<BotAdminGrant>,
     #[serde(default)]
     pub system_admin: Option<SystemAdminGrant>,
+    /// 房间级政策：`[grants.rooms."qq:group/1"]`。
+    #[serde(default)]
+    pub rooms: std::collections::BTreeMap<String, RoomGrant>,
+    /// 账号级审批路由：`[grants.accounts."qq:10001"]`。
+    #[serde(default)]
+    pub accounts: std::collections::BTreeMap<String, AccountGrant>,
 }
 
 impl GrantsConfig {
@@ -359,15 +463,47 @@ impl GrantsConfig {
                 }
             }
         }
+        for (room, grant) in &self.rooms {
+            RoomId::parse(room)
+                .map_err(|error| format!("grants.rooms key {room:?} is not a room id: {error}"))?;
+            for member in &grant.members {
+                if member.trim().is_empty() {
+                    return Err(format!(
+                        "grants.rooms.{room}.members must not contain empty ids"
+                    ));
+                }
+            }
+            for target in &grant.approval_route {
+                RoomId::parse(target).map_err(|error| {
+                    format!(
+                        "grants.rooms.{room}.approval_route target {target:?} is not a room id: {error}"
+                    )
+                })?;
+            }
+        }
+        for (account, grant) in &self.accounts {
+            let Some((connection, id)) = account.split_once(':') else {
+                return Err(format!(
+                    "grants.accounts key {account:?} must be connection:account"
+                ));
+            };
+            if connection.trim().is_empty() || id.trim().is_empty() {
+                return Err(format!(
+                    "grants.accounts key {account:?} must be connection:account"
+                ));
+            }
+            for target in &grant.approval_route {
+                RoomId::parse(target).map_err(|error| {
+                    format!(
+                        "grants.accounts.{account}.approval_route target {target:?} is not a room id: {error}"
+                    )
+                })?;
+            }
+        }
         Ok(())
     }
 
-    pub fn subject_for(
-        &self,
-        connection: &str,
-        sender: Option<&str>,
-        place: GrantPlace,
-    ) -> GrantSubject {
+    pub fn subject_for(&self, connection: &str, sender: Option<&str>) -> GrantSubject {
         let Some(sender) = sender else {
             return GrantSubject::System;
         };
@@ -385,19 +521,36 @@ impl GrantsConfig {
         }) {
             return GrantSubject::BotAdmin;
         }
-        let _ = place;
         GrantSubject::User
     }
 
-    pub fn place_of(origin: &RoomId, has_human: bool) -> GrantPlace {
-        if !has_human {
-            return GrantPlace::None;
-        }
-        match origin.path.first().map(String::as_str) {
-            Some("private") => GrantPlace::Private,
-            Some("group") => GrantPlace::Group,
-            _ => GrantPlace::Console,
-        }
+    /// 房间级政策；没有配置就是 None（由调用方按 fail-safe 处理）。
+    pub fn room(&self, room: &RoomId) -> Option<&RoomGrant> {
+        self.rooms.get(&room.to_string())
+    }
+
+    pub fn room_trust(&self, room: &RoomId) -> Trust {
+        self.room(room).map(|grant| grant.trust).unwrap_or_default()
+    }
+
+    /// 空名单 = 未设置；调用方据此决定是否只按 trust。
+    pub fn room_members(&self, room: &RoomId) -> Option<&[String]> {
+        self.room(room)
+            .map(|grant| grant.members.as_slice())
+            .filter(|members| !members.is_empty())
+    }
+
+    pub fn room_approval_route(&self, room: &RoomId) -> &[String] {
+        self.room(room)
+            .map(|grant| grant.approval_route.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn account_approval_route(&self, connection: &str, account: &str) -> &[String] {
+        self.accounts
+            .get(&format!("{connection}:{account}"))
+            .map(|grant| grant.approval_route.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -406,7 +559,7 @@ impl GrantsConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct GrantQuery<'a> {
     pub subject: GrantSubject,
-    pub place: GrantPlace,
+    pub place: Place,
     pub capability: GrantCapability,
     pub target: &'a AccessTarget,
     pub subscriptions: &'a [RoomId],
@@ -437,7 +590,7 @@ impl GrantDecision {
     pub fn audit_line(
         &self,
         subject: GrantSubject,
-        place: GrantPlace,
+        place: Place,
         capability: GrantCapability,
         target: &str,
         session: &str,
@@ -515,8 +668,8 @@ pub fn evaluate_access_request(grants: &GrantsConfig, query: &GrantQuery<'_>) ->
         return decision;
     }
     match (query.subject, query.place) {
-        (GrantSubject::SystemAdmin | GrantSubject::BotAdmin, GrantPlace::Private)
-        | (GrantSubject::SystemAdmin | GrantSubject::BotAdmin, GrantPlace::Console) => {
+        (GrantSubject::SystemAdmin | GrantSubject::BotAdmin, Place::Room(RoomScope::Direct))
+        | (GrantSubject::SystemAdmin | GrantSubject::BotAdmin, Place::Console) => {
             GrantDecision::allow(
                 "base:admin_private",
                 "admin may request tickets for any target from private/console",
@@ -672,25 +825,40 @@ mod tests {
             )
         };
         assert!(
-            !decide(GrantSubject::User, GrantPlace::Group, &subscriptions).allow,
+            !decide(
+                GrantSubject::User,
+                Place::Room(RoomScope::MultiParty),
+                &subscriptions
+            )
+            .allow,
             "群友默认不能申请未订阅目标"
         );
         assert!(
             decide(
                 GrantSubject::SystemAdmin,
-                GrantPlace::Private,
+                Place::Room(RoomScope::Direct),
                 &subscriptions
             )
             .allow,
             "system_admin 私信可以申请任意目标"
         );
         assert!(
-            decide(GrantSubject::BotAdmin, GrantPlace::Private, &subscriptions).allow,
+            decide(
+                GrantSubject::BotAdmin,
+                Place::Room(RoomScope::Direct),
+                &subscriptions
+            )
+            .allow,
             "bot_admin 私信可以申请任意目标"
         );
         let subscribed = vec![target.clone()];
         assert!(
-            decide(GrantSubject::User, GrantPlace::Group, &subscribed).allow,
+            decide(
+                GrantSubject::User,
+                Place::Room(RoomScope::MultiParty),
+                &subscribed
+            )
+            .allow,
             "已订阅目标默认可申请"
         );
     }
@@ -699,7 +867,7 @@ mod tests {
     fn any_does_not_escape_the_sessions_reachable_targets() {
         let grants = config(vec![rule(
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantScope::Any,
             None,
             &[GrantCapability::RoomRead],
@@ -709,7 +877,7 @@ mod tests {
         let decision = eval_access(
             &grants,
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomRead,
             &AccessTarget::room(&outside),
             std::slice::from_ref(&inside),
@@ -721,7 +889,7 @@ mod tests {
         let allowed = eval_access(
             &grants,
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomRead,
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
@@ -732,7 +900,7 @@ mod tests {
     fn eval_access(
         grants: &GrantsConfig,
         subject: GrantSubject,
-        place: GrantPlace,
+        place: Place,
         capability: GrantCapability,
         target: &AccessTarget,
         subscriptions: &[RoomId],
@@ -752,7 +920,7 @@ mod tests {
     fn eval_tool(
         grants: &GrantsConfig,
         subject: GrantSubject,
-        place: GrantPlace,
+        place: Place,
         target: &AccessTarget,
         subscriptions: &[RoomId],
     ) -> GrantDecision {
@@ -770,7 +938,7 @@ mod tests {
 
     fn rule(
         subject: GrantSubject,
-        place: GrantPlace,
+        place: Place,
         scope: GrantScope,
         target: Option<&str>,
         capability: &[GrantCapability],
@@ -793,6 +961,8 @@ mod tests {
             rules,
             bot_admin: None,
             system_admin: None,
+            rooms: Default::default(),
+            accounts: Default::default(),
         }
     }
 
@@ -804,7 +974,7 @@ mod tests {
         let decision = eval_access(
             &grants,
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomRead,
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
@@ -815,7 +985,7 @@ mod tests {
         let decision = eval_access(
             &grants,
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomRead,
             &AccessTarget::room(&outside),
             std::slice::from_ref(&inside),
@@ -833,7 +1003,7 @@ mod tests {
         let deny = eval_access(
             &grants,
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomRead,
             &AccessTarget::room(&outside),
             std::slice::from_ref(&inside),
@@ -842,7 +1012,7 @@ mod tests {
         assert!(deny.should_audit(), "普通主体越权必须留一条 deny 审计");
         let line = deny.audit_line(
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomRead,
             &outside.to_string(),
             "main",
@@ -856,7 +1026,7 @@ mod tests {
         let allow = eval_access(
             &grants,
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomRead,
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
@@ -872,14 +1042,14 @@ mod tests {
         let decision = eval_access(
             &GrantsConfig::default(),
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomRead,
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
         let line = decision.audit_line(
             GrantSubject::User,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomRead,
             &target,
             "main",
@@ -893,7 +1063,7 @@ mod tests {
         let inside = RoomId::parse("qq:group/1").expect("房间");
         let grants = config(vec![rule(
             GrantSubject::BotAdmin,
-            GrantPlace::Private,
+            Place::Room(RoomScope::Direct),
             GrantScope::Subscribed,
             None,
             &[GrantCapability::RoomWrite],
@@ -901,7 +1071,7 @@ mod tests {
         let decision = eval_access(
             &grants,
             GrantSubject::BotAdmin,
-            GrantPlace::Private,
+            Place::Room(RoomScope::Direct),
             GrantCapability::RoomWrite,
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
@@ -913,7 +1083,7 @@ mod tests {
         let decision = eval_access(
             &grants,
             GrantSubject::BotAdmin,
-            GrantPlace::Private,
+            Place::Room(RoomScope::Direct),
             GrantCapability::RoomRead,
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
@@ -927,7 +1097,7 @@ mod tests {
         let grants = GrantsConfig {
             rules: vec![rule(
                 GrantSubject::BotAdmin,
-                GrantPlace::Private,
+                Place::Room(RoomScope::Direct),
                 GrantScope::Subscribed,
                 None,
                 &[GrantCapability::RoomWrite, GrantCapability::Plugin],
@@ -939,13 +1109,15 @@ mod tests {
                 }],
             }),
             system_admin: None,
+            rooms: Default::default(),
+            accounts: Default::default(),
         };
         assert_eq!(
-            grants.subject_for("qq", Some("10001"), GrantPlace::Private),
+            grants.subject_for("qq", Some("10001")),
             GrantSubject::BotAdmin
         );
         assert_eq!(
-            grants.subject_for("qq", Some("10001"), GrantPlace::Group),
+            grants.subject_for("qq", Some("10001")),
             GrantSubject::BotAdmin,
             "主体不变；场所维度会阻止私信规则命中群聊"
         );
@@ -953,7 +1125,7 @@ mod tests {
         let decision = eval_access(
             &grants,
             GrantSubject::BotAdmin,
-            GrantPlace::Group,
+            Place::Room(RoomScope::MultiParty),
             GrantCapability::RoomWrite,
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
@@ -967,14 +1139,11 @@ mod tests {
         let inside = RoomId::parse("qq:group/1").expect("房间");
         let outside = RoomId::parse("qq:group/2").expect("房间");
         let grants = GrantsConfig::default();
-        assert_eq!(
-            grants.subject_for("qq", None, GrantPlace::None),
-            GrantSubject::System
-        );
+        assert_eq!(grants.subject_for("qq", None), GrantSubject::System);
         let decision = eval_access(
             &grants,
             GrantSubject::System,
-            GrantPlace::None,
+            Place::None,
             GrantCapability::RoomRead,
             &AccessTarget::room(&outside),
             std::slice::from_ref(&inside),
@@ -990,7 +1159,7 @@ mod tests {
         let decision = eval_tool(
             &grants,
             GrantSubject::BotAdmin,
-            GrantPlace::Private,
+            Place::Room(RoomScope::Direct),
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );

@@ -132,6 +132,10 @@ pub struct WireManifest {
     /// 给 agent / 控制台看的说明。描述不是保证，效果由 core 审计。
     #[serde(default)]
     pub metadata: WirePluginMetadata,
+    /// 这条连接的默认一对一房间（完整 room id，如 `qq:private/10001`）。
+    /// 审批路由的全局默认只从这里取，core 不再拼 `private/{account}`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_room: Option<String>,
 }
 
 /// 插件作者声明的描述；core 原样搬进 Root 目录。
@@ -349,6 +353,12 @@ pub struct WireRecord {
     /// 只进流水，不投递、不唤醒、不计未读。标记会落库，之后新加的订阅者也生效。
     #[serde(default)]
     pub suppressed: bool,
+    /// 房间结构事实：`direct` / `multi_party`。缺省 = 未声明，core 按 `multi_party`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_scope: Option<String>,
+    /// 可选房间标签（如 `console`）。core 只做展示/场所映射。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub room_labels: Vec<String>,
 }
 
 /// 一个方法参数的 wire 形状。
@@ -560,6 +570,10 @@ pub struct WireAdapterInfo {
 }
 
 /// 适配器 → core。
+///
+/// `WireRecord` 天然比 hello/reply 大；这是行协议的解码结果，不做装箱以避免
+/// 每条消息多一次分配。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AdapterMessage {
@@ -711,6 +725,8 @@ mod tests {
                 target_platform_id: None,
                 target_labels: Vec::new(),
                 suppressed: false,
+                room_scope: Some("multi_party".into()),
+                room_labels: Vec::new(),
             },
         };
         let line = encode_line(&event).expect("能编码");

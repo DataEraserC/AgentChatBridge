@@ -941,6 +941,15 @@ impl Outbounds {
         self.manifests.get(connection).cloned()
     }
 
+    /// 适配器提供的默认一对一房间（完整 room id）。没有就 None；
+    /// **core 不自己拼 `private/{account}`**。
+    pub fn direct_room(&self, connection: &str) -> Option<String> {
+        self.manifests
+            .get(connection)
+            .and_then(|manifest| manifest.direct_room.as_deref())
+            .map(str::to_owned)
+    }
+
     /// 已经接了哪些连接。
     pub fn connections(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.by_connection.keys().map(String::as_str).collect();

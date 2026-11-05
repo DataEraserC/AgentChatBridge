@@ -48,8 +48,8 @@ pub use event_queue::{
     EventQueue, EventReceiver, QueueSnapshot, QueueStats, SubmitError, drain_events,
 };
 pub use grants::{
-    AccessTarget, AccessTargetKind, GrantCapability, GrantDecision, GrantPlace, GrantScope,
-    GrantSubject, GrantsConfig,
+    AccessTarget, AccessTargetKind, AccountGrant, GrantCapability, GrantDecision, GrantScope,
+    GrantSubject, GrantsConfig, Place, RoomGrant, RoomScope, Trust,
 };
 pub use lkg::{LkgEntry, LkgInfo, LkgState, PluginLkg};
 pub use notice::{NoticeEvent, NoticeSink};

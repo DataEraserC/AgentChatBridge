@@ -69,6 +69,8 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
         docs_url: None,
         options_schema: None,
     },
+    // 静态声明不知道连接/账号；实例化时补上。
+    direct_room: None,
 };
 
 /// OneBot SnowLuma 的工厂。一个连接一个 `LinkSlot`，`launch` 里起守护线程。
@@ -125,6 +127,13 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
             connection.id.clone(),
         ));
 
+        // 默认审批路由的一对一房间由适配器提供，core 不再拼 private/{account}。
+        let mut manifest = MANIFEST.clone();
+        manifest.direct_room = Some(Cow::Owned(format!(
+            "{}:private/{}",
+            connection.id, connection.account
+        )));
+
         let connection = connection.clone();
         let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
             supervise(slot, connection, host.shutdown, host.events, host.status);
@@ -133,7 +142,7 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
         Ok(AdapterInstance {
             outbound,
             launch,
-            manifest: MANIFEST.clone(),
+            manifest,
         })
     }
 }

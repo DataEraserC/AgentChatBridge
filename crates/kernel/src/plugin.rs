@@ -623,7 +623,7 @@ pub struct ToolAccessContext<'a> {
     pub session: &'a str,
     pub room: &'a RoomId,
     pub subject: crate::grants::GrantSubject,
-    pub place: crate::grants::GrantPlace,
+    pub place: crate::grants::Place,
     pub platform: &'a str,
     pub origin_sender: Option<&'a str>,
     pub is_admin: bool,
@@ -731,7 +731,7 @@ pub struct AccessRequest<'a> {
     pub room: Option<&'a RoomId>,
     /// 本轮主体与场所。外部 provider 可据此做 RBAC/外接策略。
     pub subject: crate::grants::GrantSubject,
-    pub place: crate::grants::GrantPlace,
+    pub place: crate::grants::Place,
     /// 当前轮次是从哪个房间触发的。工具调用时一定有；连接级请求也保留。
     ///
     /// 和目标 `room` 分开：`send_message_to` 的目标可以是别的房间，来源仍是本轮房间。
@@ -3918,7 +3918,7 @@ mod tests {
                 connection: "qq",
                 room,
                 subject: crate::grants::GrantSubject::User,
-                place: crate::grants::GrantPlace::Group,
+                place: crate::grants::Place::Room(crate::grants::RoomScope::MultiParty),
                 origin_room: room,
                 action,
                 subscriptions,
@@ -3946,7 +3946,7 @@ mod tests {
             connection: "dc",
             room: None,
             subject: crate::grants::GrantSubject::User,
-            place: crate::grants::GrantPlace::None,
+            place: crate::grants::Place::None,
             origin_room: None,
             action: AccessAction::Connection,
             subscriptions: &subscriptions,
@@ -4273,7 +4273,7 @@ mod tests {
             session: "main",
             room: &room,
             subject: crate::grants::GrantSubject::User,
-            place: crate::grants::GrantPlace::Group,
+            place: crate::grants::Place::Room(crate::grants::RoomScope::MultiParty),
             platform: "qq",
             origin_sender: None,
             is_admin: false,

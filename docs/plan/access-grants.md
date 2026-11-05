@@ -186,6 +186,63 @@ capability = ["room_read", "room_write", "connection_read", "platform", "destruc
 - 外部 evaluator 通过 `[sessions.access] provider = "..."` 整体替换；此时该会话不跑内置 grants。
 - 不把 system admin 自动加进 `connections[].admin_qqs`；两者语义不同。
 
+### 5.1.1 场所轴与房间政策（2026-11-05）
+
+**结构事实由适配器声明，core 不再猜**。适配器在入站记录 / 身份探测里声明
+`RoomScope`（`direct` / `multi_party`），wire 字段为 `room_scope`，可选
+`room_labels`（如 `console`）。缺失、未知或旧适配器没这个字段时，core 一律按
+`multi_party` + `untrusted` 处理；**缺省不是 `direct`**，宁可多问几次。
+
+```rust
+enum Place { Console, Room(RoomScope), None }
+enum RoomScope { Direct, MultiParty }
+enum Trust { Untrusted, Trusted }
+```
+
+`Trust` 是配置轴，不折进 `Place`。`Place` 只用于审计和规则匹配；审批时再单独读
+`Trust` / `members`。
+
+```toml
+# 房间级政策：键是完整 room id
+[grants.rooms."qq:group/123"]
+trust = "trusted"        # untrusted（默认）| trusted
+members = ["10002"]      # 可选；空 = 只按 trust 生效（风险更高）
+approval_route = ["qq:private/10002", "qq:group/456"]
+
+# 账号级审批路由：键是 connection:account
+[grants.accounts."qq:10001"]
+approval_route = ["qq:private/10002"]
+```
+
+审批路由解析顺序：**房间级 > 账号级 > 全局默认**。全局默认只取适配器在 manifest
+里声明的 `direct_room`（完整 room id，如 `qq:private/10001`）；core **不再**
+拼 `private/{account}`。适配器没声明、目标房间没被任何会话订阅、连接不存在或
+载体 down 都算路由不可达。
+
+**路由不可达的硬约束**：
+
+- 不回退到申请房间；票据保持 `pending_approval`，记录 `route_unavailable`，
+  下一次收工重试；到 `PENDING_TTL` 自然过期。
+- 多目标任一成功即可见；第一个有效批准定案，其余目标收到 superseded 通知；
+  票据一旦离开 `pending_approval`，再次批准直接拒绝。
+- 批准人身份在**批准房间**内判定：申请来自 A、批准发生在 B 时，读的是 B 的
+  `trust`/`members` 和 B 的路由成员关系，不读 A 的成员表。
+
+**群内批准**（仅 `Room(MultiParty)`）：
+
+- 必须 `trust = "trusted"`，且批准人 sender 在 `members` 里；`members` 空时只按
+  `trust` 生效——这等于「群里任何人都能批准」，只在完全可信的群这样配。
+- 必须绑定 ticket id：`/approve <ticket-id> <nonce>` 或 `/deny <ticket-id> <nonce>`；
+  `/approve <batch-id>` 和无 id 的宽松指令在群里一律拒绝。`/revoke <ticket-id>`
+  仍接受单 id。
+- `Room(Direct)` / `Console` 仍要求 `system_admin` 或 `bot_admin` 身份；
+  `Place::None` 一律拒绝。
+
+**审计**：票据批准记录同时落 `approval_route`（路由目标）、`approval_room`
+（实际批准房间）、`approval_place`（private/group/console）、`approver`；
+群内批准另标 `trusted_group=true`。`trust` / `members` / `approval_route`
+的启动加载与热更新变化各写一行 `[access-config]` 审计。
+
 ### 5.2 评估顺序
 
 1. **tool_access 兼容否决层**：只做工具级 deny；它不是第二套授权实现，不能 Allow 覆盖 core。
@@ -267,6 +324,12 @@ AccessTicket {
   expires_at,
   state,             // pending_approval / active / used / expired / revoked / denied
   request_turn,      // 申请轮次，只用于审计溯源，不是使用范围
+  approval_route,    // 申请时解析出的审批目标（房间 id 列表）
+  approval_room,     // 实际批准/拒绝所在房间
+  approval_place,    // 实际批准场所：private / group / console
+  approver,          // 实际批准人：<connection>:<sender>
+  trusted_group,     // 是否在 trusted 群内批准
+  route_unavailable, // 最近一次路由不可达的原因 + 时间（发送成功后清空）
   approval_ref,      // 批准/拒绝命令的记录标识：<room>#<record-id>
   execution,         // { status, executed_at, result, failure_reason, audit_ref }
 }
@@ -339,9 +402,12 @@ fail-closed 预检。deny / 预检失败都不建票、不发审批私信，并�
 5. `critical` 允许申请（票据能力含 `critical`），但常驻授予仍被配置校验拒绝；
 6. 冷却与额度不变：会话 60s、管理员全局 30s、每轮 3 组、每会话活票上限 8。
 
-审批身份：`/approve` / `/deny` / `/revoke` 只在私信里生效；允许的身份是
-`grants.subject_for(...) ∈ {system_admin, bot_admin}`，不再硬编码某一条账号。
-每次命令（允许或拒绝）都写 `[access-approval]` 审计行。
+审批身份（2026-11-05 更新）：`Room(Direct)` / `Console` 仍要求
+`grants.subject_for(...) ∈ {system_admin, bot_admin}`；`Room(MultiParty)` 改由
+房间政策判定：`trust = trusted` 且 sender ∈ `members`（空名单时只按 trust）。
+群内批准必须带 ticket id + nonce，无 id 的宽松指令一律拒绝。批准房间必须在票据的
+`approval_route` 内；申请房间的成员表不参与 B 房间的判定。每次命令（允许或拒绝）
+都写 `[access-approval]` 审计行，带 `place` / `trusted_group` / `approval_route`。
 
 审批私信除 target / ops / 参数摘要 / capabilities / session / principal / place / turn 外，
 新增 `申请者：<id>（<显示名>）`；显示名从最近记录里按 id 查，只用于展示，不参与身份判定。
@@ -497,6 +563,12 @@ ticket id、state、principal、place、capability、target、ops、session、tu
    只读 op 不执行，票据保持 `active` 由会话在有效期内重试。
 5. **审计**：已完成。system admin 逐次、deny、票据六事件、批量批准/拒绝汇总行、destructive 拒绝。
 6. **测试**：已完成。场所/主体矩阵、无主体轮次、票据生命周期、单次使用、群内零常驻、fail closed。
+7. **场所轴拆分 + 审批路由（2026-11-05）**：已完成。适配器声明
+   `room_scope` / `room_labels` / `direct_room`；`Place` 只保留
+   `Console` / `Room(RoomScope)` / `None`，`Trust` 独立成配置轴；房间 > 账号 >
+   适配器默认的审批路由；群内批准要求 trusted + members + ticket id；路由不可达
+   不回退、票据保持 pending 并记 `route_unavailable`；多目标首个批准生效，其余
+   superseded。测试见 `crates/kernel/tests/place_approval_flow.rs`。
 
 ---
 

@@ -51,6 +51,8 @@ fn main() -> std::io::Result<()> {
                 target_platform_id: None,
                 target_labels: Vec::new(),
                 suppressed: false,
+                room_scope: Some("multi_party".into()),
+                room_labels: Vec::new(),
             },
         },
     )?;

@@ -146,6 +146,11 @@ fn config() -> &'static str {
         [sessions.subscriptions.wake]
         at_mention = true
 
+        # 审批目标房间必须被某个会话订阅，路由才算可达。
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "private/admin"
+
         [[sessions]]
         id = "other"
         harness = "dsh"
@@ -166,6 +171,10 @@ fn config() -> &'static str {
         [grants.system_admin]
         connection = "qq"
         account = "admin"
+
+        # 房间级路由覆盖全局默认；core 不再拼 private/{account}。
+        [grants.rooms."qq:group/123"]
+        approval_route = ["qq:private/admin"]
 
         [[grants.rules]]
         subject = "user"
@@ -200,8 +209,15 @@ fn bridge() -> (Bridge<MemoryStore>, Sends) {
 }
 
 fn message(room: &str, sender: &str, text: &str, at_self: bool) -> RecordDraft {
+    let room = RoomId::parse(room).expect("房间合法");
+    // 适配器声明结构事实；测试里按路径模拟适配器，不把它塞回 core。
+    let scope = if room.path.first().map(String::as_str) == Some("private") {
+        acb_kernel::RoomScope::Direct
+    } else {
+        acb_kernel::RoomScope::MultiParty
+    };
     RecordDraft::message(
-        RoomId::parse(room).expect("房间合法"),
+        room,
         Sender {
             id: sender.to_owned(),
             name: sender.to_owned(),
@@ -211,6 +227,7 @@ fn message(room: &str, sender: &str, text: &str, at_self: bool) -> RecordDraft {
         vec![Element::text(text)],
         at_self,
     )
+    .with_room_scope(scope)
 }
 
 fn text_of(elements: &[Element]) -> String {
@@ -697,10 +714,15 @@ fn group_user_defaults_to_subscribed_targets_only() {
 
 #[test]
 fn bot_admin_can_approve_but_ordinary_user_cannot() {
-    let text = config().replace(
-        "[grants.system_admin]",
-        "[grants.bot_admin]\n        accounts = [{ connection = \"qq\", account = \"botadmin\" }]\n\n        [grants.system_admin]",
-    );
+    let text = config()
+        .replace(
+            "[grants.system_admin]",
+            "[grants.bot_admin]\n        accounts = [{ connection = \"qq\", account = \"botadmin\" }]\n\n        [grants.system_admin]",
+        )
+        .replace(
+            "approval_route = [\"qq:private/admin\"]",
+            "approval_route = [\"qq:private/admin\", \"qq:private/botadmin\"]",
+        );
     let (mut bridge, sends) = bridge_with(&text);
     bridge
         .ingest(message("qq:group/123", "user1", "申请", true))

@@ -1,0 +1,639 @@
+//! 场所轴（适配器声明）与审批路由（配置驱动）的集成测试。
+
+use std::borrow::Cow;
+use std::sync::{Arc, Mutex};
+
+use acb_kernel::{
+    ADAPTER_API_VERSION, AdapterCapability, AdapterManifest, Bridge, CallError, CallOutcome,
+    Config, Effect, Element, Ingest, MemoryStore, MethodSpec, Outbound, OutboundError, Outbounds,
+    ParamSpec, PluginManager, RecordDraft, RecordMode, Risk, RoomId, RoomScope, Scope, Sender,
+    Sent, Verification,
+};
+use serde_json::{Value, json};
+
+const AT: i64 = 1_793_000_000_000;
+
+type Sends = Arc<Mutex<Vec<(RoomId, Vec<Element>)>>>;
+
+struct Recorder {
+    sends: Sends,
+}
+
+impl Outbound for Recorder {
+    fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
+        let mut sends = self.sends.lock().expect("没被毒死");
+        sends.push((room.clone(), elements.to_vec()));
+        Ok(Sent {
+            platform_id: format!("p-{}", sends.len()),
+            at: AT,
+        })
+    }
+
+    fn catalog(&self, connection: &str) -> Arc<[MethodSpec]> {
+        if connection == "qq" {
+            Arc::from(vec![MethodSpec {
+                name: "send.mock".into(),
+                aliases: Cow::Borrowed(&[]),
+                summary: "假发送".into(),
+                tags: Vec::new().into(),
+                risk: Risk::Write,
+                scope: Scope::Room,
+                params: vec![ParamSpec::required("text", "文本")].into(),
+                targets: Vec::new().into(),
+                effect: Effect::Write,
+                record: RecordMode::None,
+                verification: Verification::verified("place/approval test fake"),
+            }])
+        } else {
+            Arc::from(Vec::<MethodSpec>::new())
+        }
+    }
+
+    fn call(
+        &mut self,
+        _room: &RoomId,
+        _method: &str,
+        _params: &Value,
+    ) -> Result<CallOutcome, CallError> {
+        Ok(CallOutcome::value(json!({"done": true})))
+    }
+}
+
+fn config() -> String {
+    r#"
+        [[connections]]
+        id = "qq"
+        platform = "qq"
+        kind = "onebot11"
+        url = "ws://127.0.0.1:3001"
+        account = "bot"
+
+        [[personas]]
+        id = "p"
+        name = "人格"
+        text = "你是桥。"
+
+        [[harnesses]]
+        id = "dsh"
+        name = "DeepSeek"
+
+        [[sessions]]
+        id = "main"
+        harness = "dsh"
+        persona = "p"
+        token = "t-main"
+
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/123"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/124"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/127"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/128"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/130"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/131"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/456"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/789"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "private/admin"
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "private/ghost"
+
+        [tickets]
+        request_cooldown_secs = 0
+        admin_cooldown_secs = 0
+
+        [grants.system_admin]
+        connection = "qq"
+        account = "admin"
+
+        [grants.rooms."qq:group/123"]
+        approval_route = ["qq:private/admin", "qq:group/456", "qq:group/789", "qq:private/ghost"]
+
+        [grants.rooms."qq:group/124"]
+        trust = "trusted"
+        members = ["u1"]
+        approval_route = ["qq:group/456"]
+
+        [grants.rooms."qq:group/127"]
+        approval_route = ["qq:private/unreachable"]
+
+        [grants.rooms."qq:group/128"]
+        approval_route = ["qq:group/128"]
+
+        # 账号级路由：请求房间没有房间级配置时使用。
+        [grants.accounts."qq:bot"]
+        approval_route = ["qq:private/admin"]
+
+        [grants.rooms."qq:group/456"]
+        trust = "trusted"
+        members = ["alice"]
+
+        [grants.rooms."qq:group/789"]
+        trust = "trusted"
+        members = ["bob"]
+
+        [[grants.rules]]
+        subject = "user"
+        place = "group"
+        scope = "connection"
+        target = { kind = "connection", id = "qq" }
+        capability = ["access_request"]
+    "#
+    .to_owned()
+}
+
+fn bridge() -> (Bridge<MemoryStore>, Sends) {
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let bridge = Bridge::new(
+        Config::parse(&config()).expect("配置合法"),
+        MemoryStore::new(),
+        Box::new(Recorder {
+            sends: sends.clone(),
+        }),
+    );
+    (bridge, sends)
+}
+
+fn message(room: &str, sender: &str, text: &str, at_self: bool) -> RecordDraft {
+    let room = RoomId::parse(room).expect("房间合法");
+    let scope = if room.path.first().map(String::as_str) == Some("private") {
+        RoomScope::Direct
+    } else {
+        RoomScope::MultiParty
+    };
+    RecordDraft::message(
+        room,
+        Sender {
+            id: sender.to_owned(),
+            name: sender.to_owned(),
+            role: None,
+        },
+        AT,
+        vec![Element::text(text)],
+        at_self,
+    )
+    .with_room_scope(scope)
+}
+
+/// 未知声明：故意不带 room_scope，模拟旧适配器。
+fn message_unknown(room: &str, sender: &str, text: &str, at_self: bool) -> RecordDraft {
+    RecordDraft::message(
+        RoomId::parse(room).expect("房间合法"),
+        Sender {
+            id: sender.to_owned(),
+            name: sender.to_owned(),
+            role: None,
+        },
+        AT,
+        vec![Element::text(text)],
+        at_self,
+    )
+}
+
+fn text_of(elements: &[Element]) -> String {
+    elements
+        .iter()
+        .filter_map(Element::as_text)
+        .collect::<String>()
+}
+
+fn sent_to(sends: &Sends, room: &str) -> Vec<String> {
+    sends
+        .lock()
+        .expect("没被毒死")
+        .iter()
+        .filter(|(target, _)| target.to_string() == room)
+        .map(|(_, elements)| text_of(elements))
+        .collect()
+}
+
+fn approval_text(sends: &Sends, room: &str) -> String {
+    sent_to(sends, room)
+        .into_iter()
+        .rev()
+        .find(|text| text.contains("[ACB 授权申请]"))
+        .unwrap_or_else(|| panic!("{room} 没收到审批消息"))
+}
+
+fn nonce_of(text: &str) -> String {
+    text.split_whitespace()
+        .find_map(|token| token.strip_prefix("nonce="))
+        .expect("审批消息里有 nonce")
+        .to_owned()
+}
+
+fn start_request(
+    bridge: &mut Bridge<MemoryStore>,
+    room: &str,
+    sender: &str,
+    target: &str,
+) -> Result<Value, acb_kernel::ToolError> {
+    bridge
+        .ingest(message(room, sender, "申请", true))
+        .expect("能入库");
+    let turn = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let request = bridge.tool_call(
+        &turn,
+        &["main".to_owned()],
+        "access_request",
+        json!({"items": [{
+            "target": target,
+            "ops": ["send_message_to"],
+            "params": {"elements": [{"type": "text", "text": "approved"}]}
+        }]}),
+    );
+    bridge.end_turn(&turn, None).expect("收工");
+    request
+}
+
+fn ticket_state(bridge: &mut Bridge<MemoryStore>, room: &str, id: &str) -> Value {
+    bridge
+        .ingest(message(room, "u1", "再开一轮", true))
+        .expect("能入库");
+    let turn = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let value = bridge
+        .tool_call(
+            &turn,
+            &["main".to_owned()],
+            "access_ticket_get",
+            json!({"id": id}),
+        )
+        .expect("能查票据");
+    bridge.end_turn(&turn, None).expect("收工");
+    value
+}
+
+fn approve(
+    bridge: &mut Bridge<MemoryStore>,
+    room: &str,
+    sender: &str,
+    id: &str,
+    nonce: &str,
+) -> Ingest {
+    bridge
+        .ingest(message(
+            room,
+            sender,
+            &format!("/approve {id} {nonce}"),
+            false,
+        ))
+        .expect("命令能入库")
+}
+
+#[test]
+fn unknown_private_looking_room_is_multi_party_and_untrusted() {
+    let (mut bridge, _sends) = bridge();
+    // 私信路径但没有适配器声明：申请按 MultiParty + Untrusted 判定，admin_private 不生效。
+    bridge
+        .ingest(message_unknown("qq:private/ghost", "admin", "申请", true))
+        .expect("能入库");
+    let turn = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let denied = bridge.tool_call(
+        &turn,
+        &["main".to_owned()],
+        "access_request",
+        json!({"items": [{"target": "qq:group/999", "ops": ["send_message_to"]}]}),
+    );
+    assert!(
+        denied.is_err(),
+        "未知声明不能被当成 Direct 放宽: {denied:?}"
+    );
+    bridge.end_turn(&turn, None).expect("收工");
+}
+
+#[test]
+fn trusted_group_member_can_approve_non_member_cannot() {
+    let (mut bridge, sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/123", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nonce = nonce_of(&approval_text(&sends, "qq:private/admin"));
+
+    let denied = approve(&mut bridge, "qq:group/456", "mallory", &id, &nonce);
+    assert!(
+        !matches!(denied, Ingest::Handled { .. }),
+        "非 members 不能批准"
+    );
+
+    let handled = approve(&mut bridge, "qq:group/456", "alice", &id, &nonce);
+    assert!(
+        matches!(handled, Ingest::Handled { .. }),
+        "trusted 群成员可以批准"
+    );
+
+    let ticket = ticket_state(&mut bridge, "qq:group/123", &id);
+    // send_message_to 由 core 直接执行，批准后立即用掉；批准字段仍保留。
+    assert_eq!(ticket["state"], "used");
+    assert_eq!(ticket["approval_place"], "group");
+    assert_eq!(ticket["trusted_group"], true, "审计要标 trusted_group");
+    assert_eq!(ticket["approval_room"], "qq:group/456");
+    assert_eq!(ticket["approver"], "qq:alice");
+    assert!(
+        ticket["approval_route"]
+            .as_array()
+            .is_some_and(|route| route.iter().any(|item| item == "qq:group/456")),
+        "票据结果要落 approval_route: {ticket}"
+    );
+}
+
+#[test]
+fn untrusted_multi_party_group_cannot_approve() {
+    let (mut bridge, sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/128", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nonce = nonce_of(&approval_text(&sends, "qq:group/128"));
+
+    let denied = approve(&mut bridge, "qq:group/128", "u1", &id, &nonce);
+    assert!(
+        !matches!(denied, Ingest::Handled { .. }),
+        "未配置 trusted 的群不能批准"
+    );
+}
+
+#[test]
+fn group_approval_requires_ticket_id_and_nonce() {
+    let (mut bridge, sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/123", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nonce = nonce_of(&approval_text(&sends, "qq:private/admin"));
+
+    let loose = bridge
+        .ingest(message(
+            "qq:group/456",
+            "alice",
+            &format!("/approve {id}"),
+            false,
+        ))
+        .expect("命令能入库");
+    assert!(
+        !matches!(loose, Ingest::Handled { .. }),
+        "群内无 nonce 的宽松批准必须拒绝"
+    );
+
+    let bare = bridge
+        .ingest(message("qq:group/456", "alice", "/approve", false))
+        .expect("命令能入库");
+    assert!(
+        !matches!(bare, Ingest::Handled { .. }),
+        "群内无 id 的批准必须拒绝"
+    );
+
+    // 同一张票据仍然 pending，带 id+nonce 后仍可正常批准。
+    assert_eq!(
+        ticket_state(&mut bridge, "qq:group/123", &id)["state"],
+        "pending_approval"
+    );
+    let handled = approve(&mut bridge, "qq:group/456", "alice", &id, &nonce);
+    assert!(matches!(handled, Ingest::Handled { .. }));
+}
+
+#[test]
+fn routes_to_private_and_another_group_are_both_usable() {
+    let (mut bridge, sends) = bridge();
+    let private = start_request(&mut bridge, "qq:group/123", "u1", "qq:group/999").expect("能申请");
+    let private_id = private["tickets"][0]["ticket"].as_str().unwrap().to_owned();
+    let private_nonce = nonce_of(&approval_text(&sends, "qq:private/admin"));
+    let handled = approve(
+        &mut bridge,
+        "qq:private/admin",
+        "admin",
+        &private_id,
+        &private_nonce,
+    );
+    assert!(
+        matches!(handled, Ingest::Handled { .. }),
+        "路由到私聊可批准"
+    );
+    let ticket = ticket_state(&mut bridge, "qq:group/123", &private_id);
+    assert_eq!(ticket["approval_place"], "private");
+    assert_eq!(ticket["approval_room"], "qq:private/admin");
+    // 其余目标收到 superseded，不再执行第二次批准。
+    let group_text = sent_to(&sends, "qq:group/456")
+        .into_iter()
+        .find(|text| text.contains("无需再处理"))
+        .expect("另一个群收到 superseded");
+    assert!(group_text.contains(&private_id));
+
+    let group = start_request(&mut bridge, "qq:group/123", "u1", "qq:group/997").expect("能申请");
+    let group_id = group["tickets"][0]["ticket"].as_str().unwrap().to_owned();
+    let group_nonce = nonce_of(&approval_text(&sends, "qq:private/admin"));
+    let handled = approve(
+        &mut bridge,
+        "qq:group/456",
+        "alice",
+        &group_id,
+        &group_nonce,
+    );
+    assert!(
+        matches!(handled, Ingest::Handled { .. }),
+        "路由到另一个群可批准"
+    );
+    let ticket = ticket_state(&mut bridge, "qq:group/123", &group_id);
+    assert_eq!(ticket["approval_place"], "group");
+    assert_eq!(ticket["approval_room"], "qq:group/456");
+
+    // 已经 active 的票据再次批准不会改写批准房间/批准人。
+    let again = approve(
+        &mut bridge,
+        "qq:private/admin",
+        "admin",
+        &group_id,
+        &group_nonce,
+    );
+    assert!(
+        matches!(again, Ingest::Handled { .. }),
+        "命令仍由 core 消费"
+    );
+    let ticket = ticket_state(&mut bridge, "qq:group/123", &group_id);
+    assert_eq!(ticket["state"], "used");
+    assert_eq!(ticket["approval_room"], "qq:group/456");
+    assert_eq!(ticket["approver"], "qq:alice");
+}
+
+#[test]
+fn unreachable_route_keeps_ticket_pending_and_never_falls_back() {
+    let (mut bridge, sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/127", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    // 目标私聊没有订阅 → route_unavailable；申请房间不能收到审批消息。
+    assert!(
+        sent_to(&sends, "qq:group/127")
+            .iter()
+            .all(|text| !text.contains("[ACB 授权申请]")),
+        "路由不可达时绝不能回退到申请房间"
+    );
+    assert!(
+        sent_to(&sends, "qq:private/unreachable").is_empty(),
+        "未订阅目标不应该收到投递"
+    );
+
+    let ticket = ticket_state(&mut bridge, "qq:group/127", &id);
+    assert_eq!(ticket["state"], "pending_approval");
+    assert!(
+        ticket["route_unavailable"].is_string(),
+        "路由不可达要记录原因，便于 console/审计查看: {ticket}"
+    );
+}
+
+#[test]
+fn cross_room_approval_checks_the_approving_room() {
+    let (mut bridge, sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/124", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nonce = nonce_of(&approval_text(&sends, "qq:group/456"));
+
+    // u1 是申请房间 A 的 members，但不是批准房间 B 的成员：必须按 B 判定。
+    let denied = approve(&mut bridge, "qq:group/456", "u1", &id, &nonce);
+    assert!(
+        !matches!(denied, Ingest::Handled { .. }),
+        "不能用申请房间的成员表批准"
+    );
+
+    let handled = approve(&mut bridge, "qq:group/456", "alice", &id, &nonce);
+    assert!(
+        matches!(handled, Ingest::Handled { .. }),
+        "B 房间成员可以批准"
+    );
+    let ticket = ticket_state(&mut bridge, "qq:group/124", &id);
+    assert_eq!(ticket["approval_room"], "qq:group/456");
+
+    // 未路由到 C 房间的批准也要拒绝。
+    let wrong_room = bridge
+        .ingest(message(
+            "qq:group/789",
+            "bob",
+            &format!("/approve {id} {nonce}"),
+            false,
+        ))
+        .expect("命令能入库");
+    assert!(
+        !matches!(wrong_room, Ingest::Handled { .. }),
+        "只有路由目标可以批准"
+    );
+}
+
+#[test]
+fn account_route_is_used_when_the_room_has_no_override() {
+    let (mut bridge, sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/130", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nonce = nonce_of(&approval_text(&sends, "qq:private/admin"));
+    let handled = approve(&mut bridge, "qq:private/admin", "admin", &id, &nonce);
+    assert!(matches!(handled, Ingest::Handled { .. }));
+    let ticket = ticket_state(&mut bridge, "qq:group/130", &id);
+    assert_eq!(
+        ticket["approval_route"],
+        json!(["qq:private/admin"]),
+        "房间级没有配置时应落到账号级"
+    );
+}
+
+#[test]
+fn adapter_default_direct_room_is_the_last_resort() {
+    let text = config().replace(
+        "[grants.accounts.\"qq:bot\"]\n        approval_route = [\"qq:private/admin\"]",
+        "",
+    );
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let manifest = AdapterManifest {
+        id: Cow::Borrowed("test.adapter"),
+        platform: Cow::Borrowed("qq"),
+        kind: Cow::Borrowed("onebot11"),
+        transports: Vec::new().into(),
+        api_version: ADAPTER_API_VERSION,
+        capabilities: Vec::<AdapterCapability>::new().into(),
+        events: Vec::new().into(),
+        event_tags: Vec::new().into(),
+        supports_at: true,
+        supports_reply: true,
+        text_limit: None,
+        metadata: acb_kernel::PluginMetadata::EMPTY,
+        direct_room: Some(Cow::Owned("qq:private/admin".to_owned())),
+    };
+    let outbounds = Outbounds::new()
+        .with(
+            "qq",
+            Box::new(Recorder {
+                sends: sends.clone(),
+            }),
+        )
+        .with_manifest("qq", manifest);
+    let mut bridge = Bridge::with_outbounds(
+        Config::parse(&text).expect("配置合法"),
+        MemoryStore::new(),
+        outbounds,
+        PluginManager::with_native_builtins(),
+    );
+    let request = start_request(&mut bridge, "qq:group/131", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nonce = nonce_of(&approval_text(&sends, "qq:private/admin"));
+    let handled = approve(&mut bridge, "qq:private/admin", "admin", &id, &nonce);
+    assert!(matches!(handled, Ingest::Handled { .. }));
+    let ticket = ticket_state(&mut bridge, "qq:group/131", &id);
+    assert_eq!(
+        ticket["approval_route"],
+        json!(["qq:private/admin"]),
+        "没有房间/账号路由时应使用适配器 direct_room"
+    );
+}
+
+#[test]
+fn ticket_result_keeps_audit_fields() {
+    let (mut bridge, sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/123", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nonce = nonce_of(&approval_text(&sends, "qq:private/admin"));
+    approve(&mut bridge, "qq:group/456", "alice", &id, &nonce);
+    let ticket = ticket_state(&mut bridge, "qq:group/123", &id);
+    assert!(ticket["approval_route"].is_array());
+    assert_eq!(ticket["approval_room"], "qq:group/456");
+    assert_eq!(ticket["approval_place"], "group");
+    assert_eq!(ticket["trusted_group"], true);
+    assert_eq!(ticket["approver"], "qq:alice");
+    assert!(
+        ticket["approval_ref"]
+            .as_str()
+            .is_some_and(|reference| reference.starts_with("qq:group/456#")),
+        "审批记录要带真正的批准房间: {ticket}"
+    );
+}
