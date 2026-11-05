@@ -15,6 +15,7 @@ import {
   parseEndpoint,
   personaSignature,
   renderElements,
+  renderIssueUnread,
   renderPersona,
   renderPrompts,
   renderTurn,
@@ -292,6 +293,35 @@ test("空记录的一轮也要说清楚是例行检查", () => {
   const text = renderTurn({ ...delivery(), records: [], reason: "clock" })
   assert.match(text, /定时例行检查/)
   assert.match(text, /没有新记录/)
+})
+
+test("issue 未读渲染成一行系统事件，只给前 3 条摘要", () => {
+  const unread = {
+    count: 4,
+    event_ids: ["ev_1", "ev_2", "ev_3", "ev_4"],
+    events: [
+      { event_id: "ev_1", issue_id: "is_1", title: "登录失败", kind: "issue.created" },
+      { event_id: "ev_2", issue_id: "is_2", title: "导出超时", kind: "issue.status_changed" },
+      { event_id: "ev_3", issue_id: "is_3", title: "第三条", kind: "issue.comment_added" },
+      { event_id: "ev_4", issue_id: "is_4", title: "第四条", kind: "issue.created" },
+    ],
+  }
+  const line = renderIssueUnread(unread)
+  assert.match(line, /\[系统事件 issue_unread\] 4 条未读/)
+  assert.match(line, /is_1 登录失败/)
+  assert.match(line, /is_3 第三条/)
+  assert.doesNotMatch(line, /is_4 第四条/, "前 3 条之外只报计数")
+  assert.match(line, /另有 1 条/)
+  assert.match(line, /issue_my_work/)
+  assert.equal(line.includes("\n"), false, "必须是一行")
+
+  // 空记录轮也要带上这一行。
+  const text = renderTurn({ ...delivery(), records: [], issue_unread: unread })
+  assert.match(text, /\[系统事件 issue_unread\]/)
+  assert.match(text, /没有新记录/)
+
+  assert.equal(renderIssueUnread({ count: 0, events: [] }), "")
+  assert.equal(renderIssueUnread(null), "")
 })
 
 test("插件上下文独立成块，排在记录之前并带来源", () => {

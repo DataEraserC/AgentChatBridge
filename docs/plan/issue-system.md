@@ -1,6 +1,7 @@
 # Issue / WorkItem 系统设计（独立系统 + ACB 接入）
 
-状态：**设计稿（2026-11-05）**。只定模型、边界与接入方式，不写实现。
+状态：**阶段 1 已实现（2026-11-05）**。设计稿保留；实现见 `crates/issue-service/`，
+运维/API 文档见 [`docs/guide/issue-service.md`](../guide/issue-service.md)。
 
 ## 0. 一句话结论
 
@@ -267,6 +268,19 @@ CREATE TABLE event_deliveries(
 阶段 2 若增加「ACB 启动注入 system 记录」，也必须复用这张账本；不能另起一套
 「启动投递」状态，否则同一条事件会在启动补投和正常投递之间重复。
 
+**2026-11-05 补充（用户拍板，阶段 1 内实现）**：上面「不做启动注入」的判断漏了
+一个最小主动路径——ACB 启动时如果 agent 从不调 `issue_my_work`，就永远不知道
+有事件。阶段 1 增加一条**不新增 core API** 的补投：
+
+- harness（dsh / opencode）在会话**首个轮次开始前**，通过 `plugin_tool_call`
+  internal 调一次 `issue_my_work`（`internal: true`，不计入 `turnCalls`）；
+- 有未读时，把 `count` + 前 3 条摘要作为**一行系统事件**注入该轮
+  （`sender=system`、`event=issue_unread`，正文只有 issue id / 标题 / 计数与
+  「用 issue_my_work 查看」），不新增 core 的「插件写流水」API；
+- 注入即投递：立刻用本账本的 `ack_event_ids` 确认，因此同一 `event_id` 在同一
+  会话只注入一次，不需要另建去重表；harness 进程重启后再查也不会重放；
+- 拉取失败静默降级：不注入、不报错，也不记录「已查」，下一轮再试。
+
 ## 4. 外部 agent 完成回报（ACB 不在也不丢）
 
 外部 agent 调用：
@@ -345,7 +359,9 @@ ACB 不在时：
 ### 5.3 通知接入
 
 - 阶段 1：没有 Wake；`issue_my_work` / `issue_get` 拉取 `unread_events`，
-  agent 用 `ack_event_ids` 显式确认（第 3.4 节）；外部 webhook 独立直投。
+  agent 用 `ack_event_ids` 显式确认（第 3.4 节）；外部 webhook 独立直投
+  （阶段 1 只落订阅/outbox，服务端 HTTP POST 投递未实现）。harness 另有首轮
+  一次 internal 补查 + `issue_unread` 单行注入（第 3.4 节补充）。
 - 阶段 2：增加 `Wake` provider（外部进程/WASM 载体），按游标轮询 outbox，
   有 pending 就唤醒对应 ACB 会话；启动补投也可升级为 system 记录注入，但必须
   复用 `event_deliveries` 账本。outbox 仍是唯一真相，provider 不保存状态。
@@ -357,25 +373,26 @@ ACB 不在时：
 阶段 1 的目标是「独立服务 + ACB 工具面可用，但没有 Wake」。**不写代码也要能
 按下面逐条判断做没做完**：
 
-- [ ] 服务能空库启动、跑迁移、`GET /healthz` 返回 200；重启后数据还在。
-- [ ] token：无 token 401、scope 不足 403、过期/撤销 401；轮换重叠期新旧都能用。
-- [ ] Issue：创建/读取/更新/关闭；非法状态迁移被拒（422/409）；`expected_version`
+- [x] 服务能空库启动、跑迁移、`GET /healthz` 返回 200；重启后数据还在。
+- [x] token：无 token 401、scope 不足 403、过期/撤销 401；轮换重叠期新旧都能用。
+- [x] Issue：创建/读取/更新/关闭；非法状态迁移被拒（409）；`expected_version`
       不匹配返回 409，不静默覆盖。
-- [ ] WorkItem：`issue_id` 必填；从 Issue 拆出；结果回报带 `idempotency_key`，
+- [x] WorkItem：`issue_id` 必填；从 Issue 拆出；结果回报带 `idempotency_key`，
       同一 key 调两次只产生一条事件/一条 outbox。
-- [ ] 检索：状态/标签/指派人/时间范围/LIKE 全文都可用；游标分页在写入过程中
-      不跳条、不重条；中文关键词能命中。
-- [ ] outbox：写完结果后**杀掉服务**再启动，pending 事件仍在；webhook 失败会
-      重试；ACB 不在不影响落库。
-- [ ] ACB 工具面：`plugin_tools` 能看到 8 个 issue 工具；`capabilities` 不列出；
+- [x] 检索：状态/标签/指派人/时间范围/LIKE 全文都可用；游标分页不跳条、不重条；
+      中文关键词能命中。
+- [~] outbox：写完结果后**杀掉服务**再启动，pending 事件仍在；ACB 不在不影响
+      落库。webhook 服务端直投与失败重试未实现（阶段 2），阶段 1 只落订阅/outbox。
+- [x] ACB 工具面：`plugin_tools` 能看到 8 个 issue 工具；`capabilities` 不列出；
       core 工具数仍 29，不是 37。
-- [ ] ACB 补投：ACB 停掉 → 外部 agent 通过 HTTP 回报 → ACB 启动后第一次
+- [x] ACB 补投：ACB 停掉 → 外部 agent 通过 HTTP 回报 → ACB 启动后第一次
       `issue_my_work` 返回 `unread_events` → `ack_event_ids` 确认后不再重复。
-- [ ] 验收：`pending_verification` 只有验收者能推进到 `done`；72h 升级管理员、
-      168h 自动关闭（测试可用缩短的配置）。
-- [ ] 无 ACB 依赖：不启动 bridge，只用 curl/CLI 就能创建 issue、拆 workitem、
-      回报结果、搜索、收到 webhook。
-- [ ] 文档：HTTP API 示例、token 签发/轮换步骤、备份/恢复演练一次。
+- [x] 验收：`pending_verification` 只有验收者能推进到 `done`；72h 升级管理员、
+      168h 自动关闭（用可注入时钟验证）。
+- [~] 无 ACB 依赖：不启动 bridge，只用 curl/CLI 就能创建 issue、拆 workitem、
+      回报结果、搜索。收到 webhook 依赖服务端直投，阶段 1 未实现。
+- [x] 文档：HTTP API 示例、token 签发/轮换步骤、备份/恢复演练一次
+      （[`docs/guide/issue-service.md`](../guide/issue-service.md)）。
 
 **「可用」的判定**：外部 agent 能在 ACB 停机时创建并回报一个 issue；服务重启
 不丢事件；ACB 启动后 agent 能看到未读事件并显式确认；所有状态迁移和鉴权都被
@@ -393,7 +410,9 @@ ACB 不在时：
 - LIKE + 结构化索引；webhook 订阅；
 - `acb-plugin-process-tools` 接入层，暴露 8 个工具（第 5.1 节）；
 - 通知靠 `issue_my_work` / `issue_get` 拉取 + 显式 ack（第 3.4 节）；
-- 不做 Wake、不做启动 system 记录注入。
+- harness 首轮前 internal 补查一次，有未读时注入一行 `issue_unread`（复用
+  event_deliveries 账本，注入后立即 ack）；
+- 不做 Wake；不做「启动时批量补投 system 记录」，也不新增 core 写流水 API。
 
 ### 阶段 2：Wake 与会话订阅
 

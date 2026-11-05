@@ -448,10 +448,36 @@ export function renderPrompts(prompts) {
   return lines.length > 1 ? lines.join("\n") : ""
 }
 
+/**
+ * issue 未读事件 → 一行系统事件。
+ *
+ * 阶段 1 没有 Wake：harness 在会话首轮前 internal 调一次 `issue_my_work`，
+ * 有未读时把计数和前 3 条摘要拼成这一行。正文只给 issue id / 标题 / 计数，
+ * 详细内容让 agent 自己用 issue_my_work 查；event_id 用于 ack 去重，不塞进正文。
+ */
+export function renderIssueUnread(unread, { max = 3 } = {}) {
+  if (!unread || typeof unread !== "object") return ""
+  const events = Array.isArray(unread.events) ? unread.events : []
+  const count = Number(unread.count ?? events.length)
+  if (!Number.isFinite(count) || count <= 0) return ""
+  const shown = events.slice(0, max)
+  const items = shown.map((event) => {
+    const id = String(event?.issue_id ?? event?.event_id ?? "?")
+    const title = String(event?.title ?? "").trim()
+    return title ? `${id} ${title}` : id
+  })
+  const rest = count - shown.length
+  const summary = items.length ? items.join("；") : `${count} 条`
+  const tail = rest > 0 ? `；另有 ${rest} 条` : ""
+  return `[系统事件 issue_unread] ${count} 条未读：${summary}${tail}；用 issue_my_work 查看并确认。`
+}
+
 export function renderTurn(delivery, { now = Date.now() } = {}) {
   const lines = []
   const prompts = renderPrompts(delivery.prompts)
   if (prompts) lines.push(prompts)
+  const issueUnread = renderIssueUnread(delivery.issue_unread)
+  if (issueUnread) lines.push(issueUnread)
   const room = roomText(delivery.room)
   const count = delivery.records.length
   const why = delivery.reason === "clock" ? "定时例行检查" : "有新消息"

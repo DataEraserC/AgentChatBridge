@@ -145,6 +145,35 @@ fn on_demand_names_match_the_shared_schema() {
     assert_eq!(kernel.len(), 2, "按需集合固定 2 个");
 }
 
+/// issue 工具只走 process-tools 插件面，不占 core 的 29 个工具位。
+#[test]
+fn issue_tools_stay_off_the_core_tool_surface() {
+    const ISSUE_TOOLS: [&str; 8] = [
+        "issue_create",
+        "issue_get",
+        "issue_search",
+        "issue_update",
+        "issue_subscribe",
+        "issue_unsubscribe",
+        "issue_report_result",
+        "issue_my_work",
+    ];
+
+    assert_eq!(TOOL_NAMES.len(), 29, "core 工具数固定 29");
+    let js = js_tool_names(&tools_mjs());
+    assert_eq!(js.len(), 29, "harness 共享工具面也只能是 29");
+
+    for name in ISSUE_TOOLS {
+        assert!(
+            !TOOL_NAMES.contains(&name),
+            "{name} 不能进 core TOOL_NAMES（29 + 8 会超过 30 上限）"
+        );
+        assert!(!RESIDENT_TOOLS.contains(&name), "{name} 不能进常驻层");
+        assert!(!ON_DEMAND_TOOLS.contains(&name), "{name} 不能进按需层");
+        assert!(!js.contains(name), "{name} 只能由 plugin_tools 发现");
+    }
+}
+
 #[test]
 fn access_request_description_lists_exactly_the_kernel_ticket_ops() {
     let described = access_request_ops(&tools_mjs());

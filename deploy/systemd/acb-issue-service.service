@@ -1,0 +1,34 @@
+[Unit]
+Description=ACB issue service (SQLite + HTTP API)
+Documentation=https://github.com/your-org/acb/blob/main/docs/guide/issue-service.md
+After=network.target
+# 坏库/坏配置不要打成无限重启；连续失败后停在 failed，等人处理。
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# 按实际安装路径改；模板不绑定某台机器的仓库路径。
+ExecStart=/usr/local/bin/acb-issue-service serve
+WorkingDirectory=/var/lib/acb-issue
+Environment=ACB_ISSUE_DB=/var/lib/acb-issue/issues.db
+Environment=ACB_ISSUE_LISTEN=127.0.0.1:7800
+Environment=ACB_ISSUE_ADMIN_PRINCIPAL=admin
+# token 明文不写进单元文件：service token 由 token-create 生成后放进 0600 文件。
+EnvironmentFile=-/etc/acb/issue.env
+# 独立库单独备份；不要和 ACB 的 state_dir 混在一起。
+StateDirectory=acb-issue
+StateDirectoryMode=0750
+User=acb-issue
+Group=acb-issue
+Restart=on-failure
+RestartSec=5
+# 服务是同步短请求，给 systemd 留 10s 排空余量。
+TimeoutStopSec=15
+# 健康探针只做 curl；/healthz 是公开路径，不需要 token。
+ExecStartPost=/bin/sh -c 'sleep 1; curl -fsS --max-time 5 http://127.0.0.1:7800/healthz >/dev/null'
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

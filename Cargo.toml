@@ -21,6 +21,7 @@ members = [
     "crates/supervisor",
     "crates/launcher",
     "crates/memory-steward",
+    "crates/issue-service",
     "crates/bridge",
 ]
 

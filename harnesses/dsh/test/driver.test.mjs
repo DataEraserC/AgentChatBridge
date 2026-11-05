@@ -144,6 +144,53 @@ test("轮次驱动：turn_start → prompt → 等 turn/end → turn_end", async
   assert.equal(turnEnd.ticket, TICKET)
 })
 
+test("首轮前 internal 补查 issue 未读：注入一行且不计 turnCalls", async (t) => {
+  const bridge = await new FakeBridge({
+    issueUnread: {
+      count: 2,
+      event_ids: ["ev_1", "ev_2"],
+      events: [
+        { event_id: "ev_1", issue_id: "is_1", title: "登录失败", kind: "issue.created", created_at: 1 },
+        { event_id: "ev_2", issue_id: "is_2", title: "导出超时", kind: "issue.status_changed", created_at: 2 },
+      ],
+    },
+  }).start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  // 这个测试绕过 wire 直接驱动一轮，但内部补查要带当前轮次的票。
+  link.ticket = TICKET
+  const runPromise = driver.run(delivery(), link)
+  await waitFor(() => dsh.prompts.length === 1, "prompt 没被调")
+
+  const text = dsh.prompts[0].content[0].text
+  assert.match(text, /\[系统事件 issue_unread\] 2 条未读/)
+  assert.match(text, /is_1 登录失败/)
+  assert.equal(link.turnCalls, 0, "内部补查不计入 turnCalls")
+  assert.equal(bridge.issueCalls.length, 2, "一次读取 + 一次 ack")
+  assert.equal(bridge.issueCalls[0].args.arguments.subscriber, "session:main")
+
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
+  await runPromise
+  await nextTurnEnd(bridge)
+
+  // 同一会话第二轮：不再补查，也不再注入。
+  link.ticket = "main-2"
+  const second = driver.run(delivery({ ticket: "main-2" }), link)
+  await waitFor(() => dsh.prompts.length === 2, "第二轮 prompt 没被调")
+  assert.equal(bridge.issueCalls.length, 2, "同一会话不再补查")
+  assert.doesNotMatch(dsh.prompts[1].content[0].text, /issue_unread/)
+  assert.equal(link.turnCalls, 0, "内部补查仍不计入 turnCalls")
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t2" } })
+  await second
+  await nextTurnEnd(bridge)
+})
+
 test("turn/end 后回 turn_end 帧（无错误）", async (t) => {
   const bridge = await new FakeBridge().start()
   const dsh = new ControllableDsh()
