@@ -397,9 +397,80 @@ fn validate_call_params(method: &str, params: &Value) -> Result<(), CallError> {
                 )));
             }
         }
+        "group.file.folder_create" => {
+            required_text(map, "name")?;
+        }
+        "group.file.folder_delete" => {
+            required_text(map, "folder_id")?;
+        }
+        "group.file.move" => {
+            required_text(map, "file_id")?;
+            required_text(map, "parent_directory")?;
+            required_text(map, "target_directory")?;
+        }
+        "group.file.rename" => {
+            required_text(map, "file_id")?;
+            required_text(map, "new_name")?;
+        }
+        "file.private_url" => {
+            let positive = map
+                .get("user_id")
+                .and_then(Value::as_i64)
+                .is_some_and(|id| id > 0);
+            if !positive {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.private_file_target_required"
+                )));
+            }
+            required_text(map, "file_id")?;
+        }
+        "msg.reactions" | "msg.reaction_users" => {
+            required_text(map, "message_id")?;
+            if method == "msg.reaction_users" {
+                required_text(map, "emojiId")?;
+            }
+        }
+        "group.reaction" => {
+            required_text(map, "message_id")?;
+            required_text(map, "code")?;
+        }
+        "face.custom_delete" | "face.custom_modify" => {
+            required_text(map, "emoji_id")?;
+        }
+        "face.system_search" => {
+            required_text(map, "query")?;
+        }
+        "face.entity" => {
+            let valid = map
+                .get("face_id")
+                .and_then(Value::as_i64)
+                .is_some_and(|id| id >= 0);
+            if !valid {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.face_id_invalid"
+                )));
+            }
+        }
         _ => {}
     }
     Ok(())
+}
+
+/// 必填字符串在 core 那层只查「给了没有」；这里再把空串/纯空白挡掉。
+fn required_text<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, CallError> {
+    map.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CallError::BadParams(acb_i18n::t!(
+                "adapter.onebot11.required_value_empty",
+                field = key
+            ))
+        })
 }
 
 /// 群方法：当前房间必须是 group；params 里给了 group_id 就只能等于当前群。
@@ -974,7 +1045,14 @@ mod tests {
             "member.card",
             "group.name",
             "group.file.upload",
+            "group.file.folder_create",
+            "group.file.folder_delete",
+            "group.file.move",
+            "group.file.rename",
             "msg.face",
+            "msg.reactions",
+            "msg.reaction_users",
+            "group.reaction",
             "msg.poke",
             "like.send",
         ] {
@@ -1004,6 +1082,14 @@ mod tests {
                     | "friend.doubt_approve"
                     | "group.list"
                     | "group.ignored_requests"
+                    | "file.private_url"
+                    | "face.custom_list"
+                    | "face.custom_detail"
+                    | "face.custom_delete"
+                    | "face.custom_modify"
+                    | "face.system_list"
+                    | "face.system_search"
+                    | "face.entity"
                     | "like.send"
                     | "system.check_url"
             );
@@ -1093,7 +1179,7 @@ mod tests {
     #[test]
     fn every_op_is_hierarchical_tagged_and_routed() {
         let methods = catalog();
-        assert_eq!(methods.len(), 68, "批次 3 后应有 68 个层级 op");
+        assert_eq!(methods.len(), 83, "批次 4 后应有 83 个层级 op");
         assert!(!methods.is_empty());
         for method in methods.iter() {
             let name = method.name.as_ref();
@@ -1318,6 +1404,218 @@ mod tests {
         let notice = method("group.notice.delete");
         assert_eq!(notice.effect, Effect::Delete);
         assert_eq!(notice.record, RecordMode::None);
+
+        let folder = method("group.file.folder_delete");
+        assert_eq!(folder.effect, Effect::Delete, "删文件夹要标成删除");
+        assert_eq!(folder.record, RecordMode::None);
+
+        let face = method("face.custom_delete");
+        assert_eq!(face.effect, Effect::Delete, "删收藏表情要标成删除");
+        assert_eq!(face.record, RecordMode::None);
+    }
+
+    /// 批次 4 的新 op：risk 显式、路由确定；删除类必须能看出「删了什么」。
+    #[test]
+    fn batch_four_ops_have_explicit_risk_and_routes() {
+        let methods = catalog();
+        for (name, risk, action, effect) in [
+            (
+                "group.file.folder_create",
+                Risk::Write,
+                "create_group_file_folder",
+                Effect::Write,
+            ),
+            (
+                "group.file.folder_delete",
+                Risk::Destructive,
+                "delete_group_file_folder",
+                Effect::Delete,
+            ),
+            (
+                "group.file.move",
+                Risk::Write,
+                "move_group_file",
+                Effect::Write,
+            ),
+            (
+                "group.file.rename",
+                Risk::Write,
+                "rename_group_file",
+                Effect::Write,
+            ),
+            (
+                "file.private_url",
+                Risk::Read,
+                "get_private_file_url",
+                Effect::Read,
+            ),
+            (
+                "msg.reactions",
+                Risk::Read,
+                "get_msg_emoji_likes",
+                Effect::Read,
+            ),
+            (
+                "msg.reaction_users",
+                Risk::Read,
+                "fetch_emoji_like",
+                Effect::Read,
+            ),
+            (
+                "group.reaction",
+                Risk::Write,
+                "set_group_reaction",
+                Effect::Write,
+            ),
+            (
+                "face.custom_list",
+                Risk::Read,
+                "fetch_custom_face",
+                Effect::Read,
+            ),
+            (
+                "face.custom_detail",
+                Risk::Read,
+                "fetch_custom_face_detail",
+                Effect::Read,
+            ),
+            (
+                "face.custom_delete",
+                Risk::Destructive,
+                "delete_custom_face",
+                Effect::Delete,
+            ),
+            (
+                "face.custom_modify",
+                Risk::Write,
+                "modify_custom_face",
+                Effect::Write,
+            ),
+            (
+                "face.system_list",
+                Risk::Read,
+                "fetch_sys_faces",
+                Effect::Read,
+            ),
+            (
+                "face.system_search",
+                Risk::Read,
+                "search_sys_faces",
+                Effect::Read,
+            ),
+            ("face.entity", Risk::Read, "fetch_face_entity", Effect::Read),
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("没有 {name}"));
+            assert_eq!(method.risk, risk, "{name} 的 risk 标错了");
+            assert_eq!(method.effect, effect, "{name} 的 effect 标错了");
+            if risk == Risk::Destructive {
+                assert!(
+                    method.has_tag(acb_kernel::outbound::tags::DESTRUCTIVE),
+                    "{name} 缺少 destructive 标签"
+                );
+            }
+            let route = ROUTES
+                .iter()
+                .find(|route| route.method == name)
+                .unwrap_or_else(|| panic!("{name} 没有路由"));
+            match route.target {
+                Target::Fixed(target) => assert_eq!(target, action, "{name} 路由不对"),
+                Target::ByRoom { .. } => panic!("{name} 不该按房间分叉"),
+            }
+        }
+    }
+
+    /// 删除/移动这类有状态前提的动作，前提必须写在描述里，不能让模型去猜。
+    #[test]
+    fn state_dependent_ops_state_their_preconditions() {
+        let methods = catalog();
+        for (name, keyword) in [
+            ("group.file.folder_delete", "必须存在"),
+            ("group.file.move", "必须存在于"),
+            ("group.file.rename", "必须存在于"),
+            ("face.custom_delete", "必须存在于"),
+            ("msg.reaction_users", "必须在该消息的回应里"),
+            ("group.reaction", "必须存在"),
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("没有 {name}"));
+            assert!(
+                method.summary.contains(keyword),
+                "{name} 的描述没写清前提「{keyword}」：{}",
+                method.summary
+            );
+        }
+    }
+
+    #[test]
+    fn group_file_crud_requires_non_empty_values() {
+        assert!(validate_call_params("group.file.folder_create", &json!({"name": "  "})).is_err());
+        assert!(
+            validate_call_params("group.file.folder_delete", &json!({"folder_id": ""})).is_err()
+        );
+        assert!(
+            validate_call_params(
+                "group.file.move",
+                &json!({"file_id": "1", "parent_directory": "/", "target_directory": ""})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_call_params(
+                "group.file.rename",
+                &json!({"file_id": "1", "new_name": " "})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_call_params(
+                "group.file.move",
+                &json!({"file_id": "1", "parent_directory": "/", "target_directory": "/a"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn private_file_url_requires_a_positive_user() {
+        assert!(
+            validate_call_params("file.private_url", &json!({"user_id": 0, "file_id": "f1"}))
+                .is_err()
+        );
+        assert!(
+            validate_call_params(
+                "file.private_url",
+                &json!({"user_id": 10001, "file_id": "f1"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn face_and_reaction_identifiers_are_validated() {
+        assert!(validate_call_params("face.custom_delete", &json!({"emoji_id": ""})).is_err());
+        assert!(validate_call_params("face.system_search", &json!({"query": " "})).is_err());
+        assert!(validate_call_params("face.entity", &json!({"face_id": -1})).is_err());
+        assert!(
+            validate_call_params(
+                "msg.reaction_users",
+                &json!({"message_id": "1", "emojiId": ""})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_call_params("group.reaction", &json!({"message_id": "1", "code": ""}))
+                .is_err()
+        );
+        assert!(
+            validate_call_params("group.reaction", &json!({"message_id": "1", "code": "abc"}))
+                .is_ok()
+        );
     }
 
     /// 批次 3 的新 op 必须逐个显式标 risk，并有确定的路由；破坏性群管理默认被

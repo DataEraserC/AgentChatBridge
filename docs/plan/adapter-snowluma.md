@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 7 项、部分实现 8 项、未实现 8 项**。动作级：现有 catalog 暴露 68 个层级 op / 71 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 7 项、部分实现 8 项、未实现 8 项**。动作级：现有 catalog 暴露 83 个层级 op / 86 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -116,7 +116,8 @@
 - **连接**：只做正向 WebSocket（`ws-client`）；`ws-server` 未实现，manifest 会让注册表拒绝（[config.rs](../../crates/kernel/src/config.rs#L3145-L3150)）。
 - **鉴权**：`Authorization: Bearer`，地址里的 `?access_token=` 原样保留（[link.rs](../../crates/adapters/onebot11/src/link.rs#L94-L149)）。
 - **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、自定义收藏表情（`msg.face`）、合并转发发送与读取。
-- **平台方法**：`catalog.rs` 的 `ROUTES` 共 68 个层级 op，映射 71 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
+- **平台方法**：`catalog.rs` 的 `ROUTES` 共 83 个层级 op，映射 86 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
+- **目录体积**：不带 `op` 列目录时，83 个 op 的原始清单约 17 KB；索引化后约 12 KB，仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3–4 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
 - **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略（`reportSelfMessage = true` 时不重复记账）；`meta_event/heartbeat` 只刷新平台依赖条目的 `lastOkAt`，生命周期忽略；`bot_status` / `bot_offline` 走账号状态，不再写进私聊房间；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot-snowluma/src/event.rs#L55-L200)）。
 - **账号**：连上后另起线程调 `get_login_info` 核对 `account`，并调 `get_version_info` / `get_status` 采集三层版本与在线状态（[link.rs](../../crates/adapters/onebot-snowluma/src/link.rs)）。
 - **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 写进 `accountOnline` / `accountGood`；`bot_status` 的上下线按失败阈值迁移依赖状态，心跳只刷新 `lastOkAt`。版本信息写进 `version`。
@@ -219,9 +220,9 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 12 | 好友 | 3 + 扩展 | **已实现** | 列表/陌生人/删好友/备注/分组/单向好友 |
 | 13 | 请求处理 | 2 + 扩展 | **已实现** | 好友/加群请求处理、可疑好友申请列表与处理、被过滤加群请求 |
 | 14 | 群公告 | 3 | **已实现** | 获取/发送/删除 |
-| 15 | 群文件 | 12 | **部分** | 根/子目录列表、下载链接、系统信息、群/私聊上传、群删除有；缺文件夹 CRUD、移动/重命名、私聊下载链接、分享链接、转存 |
+| 15 | 群文件 | 12 | **部分** | 根/子目录列表、下载链接、系统信息、群/私聊上传、群删除、文件夹创建/删除、文件移动/重命名、私聊下载链接有；缺文件夹重命名（两个名称参数优先级未成文）、群文件分享链接（`get_share_link` 只收 `fileset_id`）、转存（`trans_group_file` 没有目标参数） |
 | 16 | 流式传输 | 6 | **未实现** | 没有 HTTP 流式通道；现有文件中继（ADR-0025）不是流式 |
-| 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **部分** | 只有 `set_msg_emoji_like`；缺读取/用户列表/群回应/自定义表情/系统表情 |
+| 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **部分** | `set_msg_emoji_like` / `set_group_reaction`、回应汇总、回应用户列表、收藏表情列表/详情/改/删、系统表情列表/搜索/单查有；缺收藏表情新增（`file` 格式未成文）、置顶、`get_emoji_likes`（与 `fetch_emoji_like` 重叠） |
 | 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **部分** | `get_record` / `get_image` 有；缺语音转写、OCR、AI 语音、音乐签名、`get_file` |
 | 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 启动已调用 `get_login_info` / `get_status` / `get_version_info`；三层版本 + 兼容下限进依赖元数据。仍缺 `can_send_*`、资料设置、在线状态设置 |
 | 20 | 事件类型 | message / message_sent / notice / request / meta | **部分** | 有分流；notice 只解析 6 类 + poke；`bot_status` / `bot_offline` 已走账号状态并驱动依赖健康，心跳只刷新 `lastOkAt`，`message_sent` 已忽略。仍缺 `group_upload`、`essence`、`notify.*` 的字段解析（SnowLuma 未成文），未知 notice 保留 Opaque |
@@ -237,10 +238,12 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 但缺口从「`bot_status` 污染私聊房间、心跳不更新健康」缩小为「`group_upload` / `essence` /
 `notify.*` 的字段未成文，只能显式降级」。批次 3 完成后：#8 补上自定义收藏表情，
 #11 群信息 / #12 好友 / #13 请求 / #14 公告从「部分」升为「已实现」；
-#10 群管理仍是「部分」，缺口缩为加群选项、群搜索、群分类标签。其余域不变。
+#10 群管理仍是「部分」，缺口缩为加群选项、群搜索、群分类标签。批次 4 完成后计数不变：
+#15 群文件 / #17 表情回应仍是「部分」，缺口分别缩为文件夹重命名/分享链接/转存与
+收藏表情新增/置顶。其余域不变。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 68 个层级 op / 71 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 现有 `ROUTES` 83 个层级 op / 86 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。这是「完整实现 SnowLuma 能力」的主要工作量。
 
@@ -569,7 +572,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **前置**：无；可与批次 2 并行。
 
-### 批次 4：文件 CRUD 与表情扩展
+### 批次 4：文件 CRUD 与表情扩展（已完成，2026-11-05）
 
 **能力范围**
 - 群文件：文件夹创建/删除/重命名、文件移动/重命名、私聊下载链接、分享链接、转存。
@@ -577,15 +580,55 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - 仍走 WS；不引入流式。
 
 **涉及文件**
-- `crates/adapters/onebot11/src/catalog.rs`
-- `crates/adapters/onebot11/src/outbound.rs`
-- `crates/adapters/onebot11/src/forward.rs`（如果转发/文件路径共用）
+- `crates/adapters/onebot-snowluma/src/catalog.rs`
+- `crates/adapters/onebot-snowluma/src/outbound.rs`
+- `crates/kernel/src/engine.rs`、`crates/kernel/src/tools.rs`（目录分页）
+- `crates/i18n/locales/{zh-CN,en}.json`
+- `harnesses/shared/tools.mjs`
 - 测试与文档
 
 **验证方式**
 - 目录快照 + 假平台回包。
 - 文件上传仍受 45 秒超时与大小限制；失败不重试。
 - 表情回应发送走 `set_msg_emoji_like` 的现有路径，新读取方法只读。
+
+**实际落地**
+- **新增 15 个 op（68 → 83），映射 15 个新 action（71 → 86）**：
+  - 群文件：`group.file.folder_create` → `create_group_file_folder`；`group.file.folder_delete` →
+    `delete_group_file_folder`（Destructive，`Effect::Delete`）；`group.file.move` →
+    `move_group_file`；`group.file.rename` → `rename_group_file`；
+    `file.private_url` → `get_private_file_url`（连接级，要求显式 `user_id`）。
+  - 表情回应：`msg.reactions` → `get_msg_emoji_likes`；`msg.reaction_users` →
+    `fetch_emoji_like`；`group.reaction` → `set_group_reaction`（按房间补 `group_id`）。
+  - 收藏/系统表情：`face.custom_list`、`face.custom_detail`、`face.custom_delete`
+    （Destructive，`Effect::Delete`）、`face.custom_modify`、`face.system_list`、
+    `face.system_search`、`face.entity`。
+- **状态前提写进描述**：`group.file.folder_delete`、`group.file.move`、
+  `group.file.rename`、`face.custom_delete`、`msg.reaction_users`、`group.reaction`
+  都写明「id/路径/回应必须已存在」。平台返回非 0 retcode 时由既有
+  `parse_call_response` 分类成 `bad_params` / `forbidden` / `not_implemented`，
+  只有 `retcode = 0/1` 算成功，不会静默成功。
+- **删除语义**：`group.file.folder_delete` 与 `face.custom_delete` 都进
+  `DELETE_METHODS`，`Effect::Delete`；审计能看到删的是文件/表情，而不是只看到调了 op。
+- **参数校验**（core 校验必填/类型/枚举，适配器补空值与范围）：
+  - 文件夹名、文件夹 id、文件 id、源/目标目录、新文件名不能为空。
+  - `file.private_url` 的 `user_id` 必须是正整数，避免猜文件属于谁。
+  - `msg.reaction_users` / `group.reaction` 的消息 id、`emojiId` / `code` 不能为空。
+  - `face.system_search` 的 `query` 不能为空；`face.entity` 的 `face_id` 必须 >= 0。
+- **目录体积实测与分页**：83 个 op 的未分页清单原始约 17,329 B，索引化后约
+  11,975 B（都超过 `LIST_INDEX_BYTES = 4096`）。因此 `platform_call` 在列目录时
+  自动只回一页：默认 20 个 op，约 2.9 KB 的 ops 主体（另加 tags 概览与信封），
+  `_page` 给 `total` / `offset` / `returned` / `has_more` / `next_offset`；
+  列目录也可显式给 `limit` / `offset`（上限 60 条/页），或按 `path` / `tags` 收窄。
+- **按文档判断不做（记缺口）**：
+  - `rename_group_file_folder`：`new_folder_name` 与 `name` 两个名称参数都存在且默认空，
+    优先级未成文，不猜。
+  - `get_share_link`：只接受 `fileset_id`（闪传文件集），不接受群 `file_id`，不属于群文件域。
+  - `trans_group_file`：没有任何目标参数，文档没说转存到哪里，不暴露。
+  - `add_custom_face`：`file` 的格式（URL / 本地路径 / base64）未成文，且属附件上传通道，
+    先不暴露，避免 core 变成替模型搬文件的通道。
+  - `get_emoji_likes`：与 `fetch_emoji_like` 重叠，只保留后者（支持 count/cookie 翻页）。
+- **没有新增 `PlatformTag`，没有第二张 op→risk 表**；全部走 `catalog()` + `ROUTES`。
 
 **前置**：批次 3 的 catalog 结构可复用。
 

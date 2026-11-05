@@ -1590,6 +1590,55 @@
 - 未决/风险：没有真实 SnowLuma 实例联调；`get_group_ignored_notifies` 等扩展动作的实际
   回包形状按文档字段声明，字段差异只会体现在返回内容，不影响 catalog 与风险闸门。
 
+## 2026-11-05 — 批次 4：文件 CRUD 与表情扩展
+
+- 任务编号：adapter-snowluma 批次 4
+- 做了什么：
+  - `crates/adapters/onebot-snowluma/src/catalog.rs`：新增 15 个层级 op、15 条路由；
+    68 op / 71 action → 83 op / 86 action。
+  - 群文件：`group.file.folder_create`、`group.file.folder_delete`（Destructive，
+    `Effect::Delete`）、`group.file.move`、`group.file.rename`；`file.private_url`
+    连接级取私聊文件链接，强制显式 `user_id`。
+  - 表情回应：`msg.reactions`（get_msg_emoji_likes）、`msg.reaction_users`
+    （fetch_emoji_like）、`group.reaction`（set_group_reaction，按房间补 group_id）。
+  - 收藏/系统表情：`face.custom_list`、`face.custom_detail`、`face.custom_delete`
+    （Destructive，`Effect::Delete`）、`face.custom_modify`、`face.system_list`、
+    `face.system_search`、`face.entity`。
+  - `crates/adapters/onebot-snowluma/src/outbound.rs`：`validate_call_params` 增加
+    空值与范围校验（文件夹名/目录/文件名、私聊 user_id、消息 id、emojiId/code、
+    query、face_id）。
+  - `crates/kernel/src/engine.rs` + `tools.rs`：目录清单分页。`LIST_INDEX_BYTES`
+    之外新增 `CATALOG_PAGE_DEFAULT = 20` / `CATALOG_PAGE_MAX = 60`；列目录支持
+    `limit` / `offset`，返回 `_page`，无过滤且超过 4 KiB 时自动只回一页。
+  - `harnesses/shared/tools.mjs`：`platform_call` 的 limit/offset 说明覆盖目录分页。
+  - `crates/i18n/locales/{zh-CN,en}.json`：新增 3 条参数校验文案。
+- 新增 op：**15 个**（全部在 `catalog()` 的 `methods()` 里，catalog 是唯一 op→risk 表）。
+  没有新增 `PlatformTag`，没有第二张 risk 表，没有兼容别名。
+- 目录体积实测（临时测量测试，测完已删除）：
+  - 83 op 未分页清单：约 **17,329 B**；
+  - 索引化（去 tags、摘要截 80 字符）后：约 **11,975 B**；
+  - 一页 20 个索引化 op：约 **2,893 B**（engine 还会加 tags 概览与 `_page` 信封）。
+  两个全量值都超过 `LIST_INDEX_BYTES = 4096`，所以自动分页生效。
+- 按文档判断不做（记缺口）：
+  - `rename_group_file_folder`：`new_folder_name` / `name` 两个参数并存且默认空，优先级未成文。
+  - `get_share_link`：只收 `fileset_id`，不接受群 `file_id`，不属于群文件域。
+  - `trans_group_file`：没有目标参数，转存到哪里未文档化。
+  - `add_custom_face`：`file` 格式未成文，且属附件上传通道。
+  - `get_emoji_likes`：与 `fetch_emoji_like` 重叠，只保留后者。
+- 证据：
+  - `batch_four_ops_have_explicit_risk_and_routes`（15 个新 op 的 risk / action / effect 逐个断言）
+  - `state_dependent_ops_state_their_preconditions`（删除/移动/回应类描述含「必须存在」前提）
+  - `group_file_crud_requires_non_empty_values`、`private_file_url_requires_a_positive_user`、
+    `face_and_reaction_identifiers_are_validated`
+  - `catalog_declares_effect_and_record`（文件夹删除、收藏表情删除均为 `Effect::Delete`）
+  - `catalog_list_pages_by_offset_and_limit`、`catalog_list_still_rejects_execution_shaping_fields`
+  - `every_op_is_hierarchical_tagged_and_routed`（83 op 全部层级名、有 tag、有路由）
+  - `cargo test --workspace`、clippy `-D warnings`、dsh/opencode 测试、`node --check` 全绿。
+- 能力状态：功能域计数仍是 **7 完全 / 8 部分 / 8 未实现**；#15 群文件与 #17 表情回应
+  仍为「部分」，但缺口分别缩为文件夹重命名/分享链接/转存与收藏表情新增/置顶。
+- 未决/风险：没有真实 SnowLuma 实例联调；`fetch_sys_faces` 等返回结构按文档字段声明，
+  字段差异只影响结果内容，不影响 catalog 与风险闸门。
+
 
 
 ## 部署注意事项（nix-config 打包）

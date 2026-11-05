@@ -299,6 +299,8 @@ tags 是封闭枚举，多个 tag 取 AND；query 按关键词搜 op/说明/标�
 
 **结果查询**（仅执行）：where / fields / order_by / group_by 在桥这边过滤投影排序分组；
 limit/offset 分页，默认 100、上限 500，_page 里有 total/returned/has_more/next_offset。
+**目录分页**：不给 op 时也可以给 limit/offset；目录超过预算会自动只回一页，
+按 _page.next_offset 接着翻，或按 path / tags / query 收窄。
 报错分类：unknown_op（会给近似候选）、bad_params、unknown_tag、unsupported_platform、
 not_implemented、forbidden。`,
     schema: {
@@ -372,11 +374,11 @@ not_implemented、forbidden。`,
         limit: {
           type: "number",
           description:
-            "执行：结果里的列表最多给几条，默认 100、上限 500。_page 里有 total/returned/has_more/next_offset",
+            "执行：结果里的列表最多给几条，默认 100、上限 500。列目录：一页最多几条，默认按预算自动取。_page 里有 total/returned/has_more/next_offset",
         },
         offset: {
           type: "number",
-          description: "执行：从第几条开始给，翻页时填上一次的 _page.next_offset",
+          description: "执行或列目录：从第几条开始给，翻页时填上一次的 _page.next_offset",
         },
         where: {
           type: "array",
