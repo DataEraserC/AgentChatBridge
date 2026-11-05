@@ -6,11 +6,9 @@
 //! 状态只活在本进程：重启后 pending / active 票据全部失效，不发通知、不恢复。
 //! 这是 fail closed 的取舍，见 `docs/plan/access-grants.md`。
 
-use std::collections::hash_map::RandomState;
 use std::collections::{BTreeSet, HashMap};
-use std::hash::{BuildHasher, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::fs::File;
+use std::io::Read;
 
 use acb_proto::RoomId;
 use serde::Deserialize;
@@ -55,8 +53,10 @@ pub const MAX_OPS: usize = 8;
 pub const MAX_OP_CHARS: usize = 64;
 /// 内存里最多保留多少张票据（含终态）。
 pub const MAX_TICKETS: usize = 200;
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+/// 同一审批人在窗口内允许的 nonce 失败次数；达到后临时拒绝。
+pub const NONCE_FAILURE_LIMIT: usize = 5;
+/// nonce 失败计数的滑动窗口，与 `PENDING_TTL_MS` 对齐。
+pub const NONCE_FAILURE_WINDOW_MS: i64 = PENDING_TTL_MS;
 
 /// 票据状态。终态：`used` / `expired` / `revoked` / `denied`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +204,8 @@ pub struct AccessTickets {
     session_notified_at: HashMap<String, i64>,
     /// 最近一条发给 system admin 的审批私信时间。
     admin_notified_at: Option<i64>,
+    /// 审批人 → 窗口内 nonce 失败时间戳；用于错 nonce 计数与临时拒绝。
+    nonce_failures: HashMap<String, Vec<i64>>,
     #[cfg(test)]
     audit_log: Vec<String>,
 }
@@ -723,7 +725,8 @@ impl AccessTickets {
         now: i64,
     ) -> Result<TicketReply, String> {
         self.sweep(now);
-        let snapshot = {
+        self.check_nonce_attempts(&meta.approver, now)?;
+        let (snapshot, nonce_matched) = {
             let ticket = self
                 .tickets
                 .get_mut(id)
@@ -735,16 +738,55 @@ impl AccessTickets {
                 ));
             }
             if ticket.nonce != nonce {
-                return Err("nonce mismatch".to_owned());
+                (ticket.snapshot(), false)
+            } else {
+                ticket.state = TicketState::Active;
+                ticket.expires_at = now.saturating_add(ACTIVE_TTL_MS);
+                apply_approval(ticket, meta);
+                ticket.nonce.clear();
+                (ticket.snapshot(), true)
             }
-            ticket.state = TicketState::Active;
-            ticket.expires_at = now.saturating_add(ACTIVE_TTL_MS);
-            apply_approval(ticket, meta);
-            ticket.nonce.clear();
-            ticket.snapshot()
         };
+        if !nonce_matched {
+            let failures = self.record_nonce_failure(&meta.approver, now);
+            let reason = format!(
+                "nonce mismatch ({failures}/{NONCE_FAILURE_LIMIT} attempts in {} min)",
+                NONCE_FAILURE_WINDOW_MS / 60_000
+            );
+            self.audit("deny", &snapshot, &reason);
+            return Err("nonce mismatch".to_owned());
+        }
+        self.nonce_failures.remove(&meta.approver);
         self.audit("approve", &snapshot, "approved");
         Ok(reply(&snapshot, false))
+    }
+
+    /// 错 nonce 超过阈值后临时拒绝；窗口随时间滑动。
+    fn check_nonce_attempts(&mut self, approver: &str, now: i64) -> Result<(), String> {
+        let window_start = now.saturating_sub(NONCE_FAILURE_WINDOW_MS);
+        let failures = match self.nonce_failures.get_mut(approver) {
+            Some(attempts) => {
+                attempts.retain(|at| *at > window_start);
+                attempts.len()
+            }
+            None => 0,
+        };
+        if failures >= NONCE_FAILURE_LIMIT {
+            return Err(format!(
+                "nonce failure limit reached ({failures}/{NONCE_FAILURE_LIMIT} in {} min); approval temporarily rejected",
+                NONCE_FAILURE_WINDOW_MS / 60_000
+            ));
+        }
+        Ok(())
+    }
+
+    /// 记一次错 nonce，返回窗口内累计次数。
+    fn record_nonce_failure(&mut self, approver: &str, now: i64) -> usize {
+        let window_start = now.saturating_sub(NONCE_FAILURE_WINDOW_MS);
+        let attempts = self.nonce_failures.entry(approver.to_owned()).or_default();
+        attempts.push(now);
+        attempts.retain(|at| *at > window_start);
+        attempts.len()
     }
 
     /// 单张拒绝（带审批场所元数据）。
@@ -990,6 +1032,11 @@ impl AccessTickets {
         for ticket in &expired {
             self.audit("expire", ticket, "expired");
         }
+        let failure_window_start = now.saturating_sub(NONCE_FAILURE_WINDOW_MS);
+        self.nonce_failures.retain(|_, attempts| {
+            attempts.retain(|at| *at > failure_window_start);
+            !attempts.is_empty()
+        });
         self.prune();
     }
 
@@ -1125,14 +1172,17 @@ pub fn normalize_ops(ops: &[String]) -> Result<Vec<String>, String> {
 }
 
 fn random_hex() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u64(now);
-    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
-    format!("{:016x}", hasher.finish())
+    // 固定长度读取 OS 熵源，绝不无界读；32 字节只取前 8 字节组成 16 hex。
+    let mut bytes = [0u8; 32];
+    File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .expect("open and read 32 bytes from /dev/urandom");
+    format!(
+        "{:016x}",
+        u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ])
+    )
 }
 
 #[cfg(test)]
@@ -1141,6 +1191,16 @@ mod tests {
 
     fn target() -> AccessTarget {
         AccessTarget::room(&RoomId::parse("qq:group/999").expect("房间"))
+    }
+
+    fn meta(approver: &str) -> ApprovalMeta {
+        ApprovalMeta {
+            approval_room: "qq:private/1".to_owned(),
+            approval_place: "private".to_owned(),
+            approver: approver.to_owned(),
+            approval_ref: "qq:private/1#9".to_owned(),
+            trusted_group: false,
+        }
     }
 
     fn request(now: i64, ops: &[&str]) -> TicketRequest {
@@ -1474,6 +1534,92 @@ mod tests {
                 .is_err(),
             "批准消息不能重放"
         );
+    }
+
+    #[test]
+    fn wrong_nonce_is_audited_as_deny_and_only_success_audits_approve() {
+        let mut tickets = AccessTickets::new();
+        let reply = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        let approver = meta("qq:alice");
+        let error = tickets
+            .approve_with_meta(&reply.id, "not-the-nonce", &approver, 2000)
+            .expect_err("错 nonce 必须拒绝");
+        assert_eq!(error, "nonce mismatch");
+        assert_eq!(
+            tickets.get(&reply.id).expect("还在簿上").state,
+            TicketState::PendingApproval
+        );
+        assert!(
+            tickets
+                .audit_log
+                .iter()
+                .any(|line| line.contains("event=deny") && line.contains(&reply.id)),
+            "错 nonce 必须留 deny 审计：{:?}",
+            tickets.audit_log
+        );
+        assert!(
+            !tickets
+                .audit_log
+                .iter()
+                .any(|line| line.contains("event=approve") && line.contains(&reply.id)),
+            "校验失败不能记 approve：{:?}",
+            tickets.audit_log
+        );
+
+        tickets
+            .approve_with_meta(&reply.id, &reply.nonce, &approver, 2000)
+            .expect("批准");
+        assert!(
+            tickets
+                .audit_log
+                .iter()
+                .any(|line| line.contains("event=approve") && line.contains(&reply.id)),
+            "成功批准才记 approve：{:?}",
+            tickets.audit_log
+        );
+    }
+
+    #[test]
+    fn repeated_bad_nonces_are_throttled_per_approver() {
+        let mut tickets = AccessTickets::new();
+        let reply = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        let alice = meta("qq:alice");
+        for attempt in 0..NONCE_FAILURE_LIMIT {
+            let error = tickets
+                .approve_with_meta(&reply.id, "not-the-nonce", &alice, 2000 + attempt as i64)
+                .expect_err("错 nonce 必须拒绝");
+            assert_eq!(error, "nonce mismatch");
+        }
+        let throttled = tickets
+            .approve_with_meta(&reply.id, &reply.nonce, &alice, 2010)
+            .expect_err("超过阈值后即使 nonce 正确也临时拒绝");
+        assert!(
+            throttled.contains("temporarily rejected"),
+            "拒绝原因要说明临时拒绝: {throttled}"
+        );
+
+        let approved = tickets
+            .approve_with_meta(&reply.id, &reply.nonce, &meta("qq:admin"), 2010)
+            .expect("其他审批人不受影响");
+        assert_eq!(approved.state, TicketState::Active);
+    }
+
+    #[test]
+    fn random_hex_is_16_hex_and_unique() {
+        let mut seen = BTreeSet::new();
+        for _ in 0..1024 {
+            let value = random_hex();
+            assert_eq!(value.len(), 16, "nonce 仍是 16 hex: {value}");
+            assert!(
+                value.chars().all(|ch| ch.is_ascii_hexdigit()),
+                "nonce 必须是 hex: {value}"
+            );
+            assert!(seen.insert(value.clone()), "nonce 不能重复: {value}");
+        }
     }
 
     #[test]

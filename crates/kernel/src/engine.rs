@@ -2646,23 +2646,42 @@ impl<S: Store> Bridge<S> {
             approval_ref,
             trusted_group,
         };
-        eprintln!(
-            "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} approval_route={} result=allow",
-            verb,
-            room,
-            draft.sender.id,
-            subject.as_str(),
-            place.as_str(),
-            trusted_group,
-            place.as_str(),
-            first
-                .map(|id| self
-                    .access_tickets
-                    .get(id)
-                    .map(|ticket| ticket.approval_route.join("|"))
-                    .unwrap_or_else(|| "-".to_owned()))
-                .unwrap_or_else(|| "-".to_owned()),
-        );
+        let approval_route = first
+            .and_then(|id| self.access_tickets.get(id))
+            .map(|ticket| ticket.approval_route.join("|"))
+            .unwrap_or_else(|| "-".to_owned());
+        // 审计只在动作真正成功后记 allow；失败记 deny 并带原因。
+        let access_approval_log = |result: &str, reason: &str| {
+            let reason = reason.replace('"', "'");
+            if reason.is_empty() {
+                eprintln!(
+                    "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} approval_route={} result={}",
+                    verb,
+                    room,
+                    draft.sender.id,
+                    subject.as_str(),
+                    place.as_str(),
+                    trusted_group,
+                    place.as_str(),
+                    approval_route,
+                    result,
+                );
+            } else {
+                eprintln!(
+                    "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} approval_route={} result={} reason=\"{}\"",
+                    verb,
+                    room,
+                    draft.sender.id,
+                    subject.as_str(),
+                    place.as_str(),
+                    trusted_group,
+                    place.as_str(),
+                    approval_route,
+                    result,
+                    reason,
+                );
+            }
+        };
         let now = now_millis();
         let mut approved = Vec::new();
         let mut superseded = Vec::new();
@@ -2671,6 +2690,7 @@ impl<S: Store> Bridge<S> {
                 (Some(id), Some(nonce)) => {
                     match self.access_tickets.approve_with_meta(id, nonce, &meta, now) {
                         Ok(reply) => {
+                            access_approval_log("allow", "");
                             approved.push(reply.id.clone());
                             if let Some(ticket) = self.access_tickets.get(&reply.id).cloned() {
                                 superseded.push((ticket, "approved"));
@@ -2681,7 +2701,10 @@ impl<S: Store> Bridge<S> {
                                 ACTIVE_TTL_MS / 60_000
                             )
                         }
-                        Err(reason) => format!("授权命令失败：{reason}"),
+                        Err(reason) => {
+                            access_approval_log("deny", &reason);
+                            format!("授权命令失败：{reason}")
+                        }
                     }
                 }
                 (Some(batch_id), None) if batch_id.starts_with("bt-") => {
@@ -2690,6 +2713,7 @@ impl<S: Store> Bridge<S> {
                         .approve_batch_with_meta(batch_id, &meta, now)
                     {
                         Ok(replies) => {
+                            access_approval_log("allow", "");
                             approved.extend(replies.iter().map(|reply| reply.id.clone()));
                             for reply in &replies {
                                 if let Some(ticket) = self.access_tickets.get(&reply.id).cloned() {
@@ -2703,21 +2727,31 @@ impl<S: Store> Bridge<S> {
                                 ACTIVE_TTL_MS / 60_000
                             )
                         }
-                        Err(reason) => format!("授权命令失败：{reason}"),
+                        Err(reason) => {
+                            access_approval_log("deny", &reason);
+                            format!("授权命令失败：{reason}")
+                        }
                     }
                 }
-                _ => "用法：/approve <ticket-id> <nonce> 或 /approve <batch_id>".to_owned(),
+                _ => {
+                    access_approval_log("deny", "usage");
+                    "用法：/approve <ticket-id> <nonce> 或 /approve <batch_id>".to_owned()
+                }
             },
             "/deny" => match (first, second) {
                 (Some(id), Some(nonce)) => {
                     match self.access_tickets.deny_with_meta(id, nonce, &meta, now) {
                         Ok(reply) => {
+                            access_approval_log("allow", "");
                             if let Some(ticket) = self.access_tickets.get(&reply.id).cloned() {
                                 superseded.push((ticket, "denied"));
                             }
                             format!("票据 {} 已拒绝。", reply.id)
                         }
-                        Err(reason) => format!("授权命令失败：{reason}"),
+                        Err(reason) => {
+                            access_approval_log("deny", &reason);
+                            format!("授权命令失败：{reason}")
+                        }
                     }
                 }
                 (Some(batch_id), None) if batch_id.starts_with("bt-") => {
@@ -2726,6 +2760,7 @@ impl<S: Store> Bridge<S> {
                         .deny_batch_with_meta(batch_id, &meta, now)
                     {
                         Ok(replies) => {
+                            access_approval_log("allow", "");
                             for reply in &replies {
                                 if let Some(ticket) = self.access_tickets.get(&reply.id).cloned() {
                                     superseded.push((ticket, "denied"));
@@ -2733,17 +2768,32 @@ impl<S: Store> Bridge<S> {
                             }
                             format!("批次 {} 已整批拒绝，共 {} 项。", batch_id, replies.len())
                         }
-                        Err(reason) => format!("授权命令失败：{reason}"),
+                        Err(reason) => {
+                            access_approval_log("deny", &reason);
+                            format!("授权命令失败：{reason}")
+                        }
                     }
                 }
-                _ => "用法：/deny <ticket-id> <nonce> 或 /deny <batch_id>".to_owned(),
+                _ => {
+                    access_approval_log("deny", "usage");
+                    "用法：/deny <ticket-id> <nonce> 或 /deny <batch_id>".to_owned()
+                }
             },
             "/revoke" => match first {
                 Some(id) => match self.access_tickets.revoke_with_meta(id, &meta, now) {
-                    Ok(reply) => format!("票据 {} 已撤销。", reply.id),
-                    Err(reason) => format!("撤销失败：{reason}"),
+                    Ok(reply) => {
+                        access_approval_log("allow", "");
+                        format!("票据 {} 已撤销。", reply.id)
+                    }
+                    Err(reason) => {
+                        access_approval_log("deny", &reason);
+                        format!("撤销失败：{reason}")
+                    }
                 },
-                None => "用法：/revoke <ticket-id>".to_owned(),
+                None => {
+                    access_approval_log("deny", "usage");
+                    "用法：/revoke <ticket-id>".to_owned()
+                }
             },
             _ => unreachable!("verb already matched"),
         };
@@ -6176,50 +6226,57 @@ impl<S: Store> Bridge<S> {
             }
             let text = approval_batch_text(&tickets);
             let mut delivered = false;
-            let mut last_failure = None;
+            let mut failures: Vec<String> = Vec::new();
             for target in &route {
                 let room = match RoomId::parse(target) {
                     Ok(room) => room,
                     Err(error) => {
                         let reason = format!("bad room: {}", error.to_string().replace('"', "'"));
-                        last_failure = Some(reason.clone());
-                        eprintln!(
-                            "[access-ticket] event=route_unavailable target={} reason=\"{}\"",
-                            target, reason
-                        );
+                        failures.push(format!("{target}: {reason}"));
+                        Self::log_route_target_failure(&tickets, target, &reason);
                         continue;
                     }
                 };
                 if let Err(reason) = self.approval_target_available(config, &room) {
-                    last_failure = Some(reason.clone());
-                    eprintln!(
-                        "[access-ticket] event=route_unavailable ticket={} target={} reason=\"{}\"",
-                        ids.first().map(String::as_str).unwrap_or("-"),
-                        room,
-                        reason.replace('"', "'")
-                    );
+                    let reason = reason.replace('"', "'");
+                    failures.push(format!("{room}: {reason}"));
+                    Self::log_route_target_failure(&tickets, &room.to_string(), &reason);
                     continue;
                 }
                 match self.send_admin_text(&room, &text) {
                     Ok(()) => delivered = true,
                     Err(error) => {
                         let reason = error.replace('"', "'");
-                        last_failure = Some(reason.clone());
-                        eprintln!(
-                            "[access-ticket] event=route_unavailable ticket={} target={} reason=\"{}\"",
-                            ids.first().map(String::as_str).unwrap_or("-"),
-                            room,
-                            reason
-                        );
+                        failures.push(format!("{room}: {reason}"));
+                        Self::log_route_target_failure(&tickets, &room.to_string(), &reason);
                     }
                 }
             }
             if delivered {
                 self.access_tickets.mark_announced(&ids, now);
-            } else if let Some(reason) = last_failure {
+            } else if !failures.is_empty() {
+                // 只有全部目标失败才把票据标记为投递失败；部分成功已经投递。
+                let reason = failures.join("; ");
                 self.access_tickets
                     .mark_route_unavailable(&ids, &reason, now);
+                for ticket in &tickets {
+                    eprintln!(
+                        "[access-ticket] event=route_unavailable ticket={} target=- reason=\"{}\"",
+                        ticket.id,
+                        reason.replace('"', "'")
+                    );
+                }
             }
+        }
+    }
+
+    /// 逐目标记录投递失败；单个目标失败不阻断其他目标。
+    fn log_route_target_failure(tickets: &[AccessTicket], target: &str, reason: &str) {
+        for ticket in tickets {
+            eprintln!(
+                "[access-ticket] event=route_target_failed ticket={} target={} reason=\"{}\"",
+                ticket.id, target, reason
+            );
         }
     }
 
