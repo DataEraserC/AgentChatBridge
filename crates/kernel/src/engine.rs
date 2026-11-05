@@ -97,6 +97,22 @@ const NOTE_LIST_LIMIT: usize = 100;
 /// `memory_git log` 默认 10 条，单次上限与其它列表一致。
 const MEMORY_GIT_LOG_LIMIT: usize = 100;
 
+/// 票据词表：`access_request` 明确接受的 op 与对应能力。
+///
+/// `platform_call:<op>` 是模式，不在这个表里。这个表同时被
+/// `ticket_capabilities` 和跨层一致性测试消费；harness 描述里的 op 必须与它一致。
+pub const TICKET_OPS: &[(&str, GrantCapability)] = &[
+    ("send_message", GrantCapability::RoomWrite),
+    ("send_message_to", GrantCapability::RoomWrite),
+    ("get_history", GrantCapability::RoomRead),
+    ("fetch_records", GrantCapability::RoomRead),
+    ("notes:list", GrantCapability::RoomRead),
+    ("notes:set", GrantCapability::RoomRead),
+    ("notes:del", GrantCapability::RoomRead),
+    ("get_platform_events", GrantCapability::RoomRead),
+    ("wait_message", GrantCapability::RoomRead),
+];
+
 /// 高信任模块直接唤醒的频率上限：每个来源在窗口内最多请求几次。
 const WAKE_REQUEST_LIMIT: usize = 6;
 /// 直接唤醒的限流窗口（Unix 毫秒）。
@@ -4953,19 +4969,12 @@ impl<S: Store> Bridge<S> {
     ) -> Result<BTreeSet<GrantCapability>, ToolError> {
         let mut capabilities = BTreeSet::new();
         for op in ops {
+            if let Some((_, capability)) = TICKET_OPS.iter().find(|(name, _)| *name == op.as_str())
+            {
+                capabilities.insert(*capability);
+                continue;
+            }
             match op.as_str() {
-                "send_message" | "send_message_to" => {
-                    capabilities.insert(GrantCapability::RoomWrite);
-                }
-                "get_history"
-                | "fetch_records"
-                | "notes:list"
-                | "notes:set"
-                | "notes:del"
-                | "get_platform_events"
-                | "wait_message" => {
-                    capabilities.insert(GrantCapability::RoomRead);
-                }
                 other if other.starts_with("platform_call:") => {
                     let op_name = &other["platform_call:".len()..];
                     let methods = self.outbound.catalog(&target.connection);

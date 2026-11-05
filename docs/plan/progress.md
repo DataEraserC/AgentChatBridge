@@ -1925,6 +1925,20 @@
   - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode、
     `node --check` 全绿。
 
+## 2026-11-05 — 工具清单与票据词表的跨层一致性测试
+
+- 做了什么：
+  - 新增 `crates/kernel/tests/tool_schema_consistency.rs`：轻量解析
+    `harnesses/shared/tools.mjs` 的 4 空格 `name:` 字段，与 `TOOL_NAMES` 双向比对；
+    失败信息分列「harness 有、内核没有」和「内核有、harness 没有」。
+  - 把 `ticket_capabilities` 的固定 op 表抽成 `engine::TICKET_OPS`，行为与测试共用
+    同一份常量；测试解析 `access_request` 描述里的 op 词表并双向比对。
+- 取舍：不引入 JS 运行时；用缩进 + `name: "..."` 的窄解析避免匹配嵌套 schema。
+- 证据：
+  - `tool_names_match_the_shared_schema`
+  - `access_request_description_lists_exactly_the_kernel_ticket_ops`
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings` 全绿。
+
 
 ## 部署注意事项（nix-config 打包）
 
