@@ -28,6 +28,7 @@ use acb_memory_steward::{
     Notifier as MemoryNotifier, Steward, StewardConfig, SyncNotice, Target as MemoryTarget,
 };
 use acb_plugin_lua::LuaLoader;
+use acb_plugin_process_provider::{ProcessProviderConfig, ProcessProviderLoader};
 use acb_plugin_process_tools::{ProcessNotifier, ProcessToolLoader};
 use acb_plugin_trusted::TrustedLoader;
 
@@ -95,6 +96,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let config = Config::parse(&text)?;
     // 记忆管家的配置独立校验：开关、调度器、合并策略都在这里定，core 不硬编码。
     let steward_config = StewardConfig::from_toml(&text)?;
+    // 外置进程 provider 同样独立校验；列表为空就不启动任何子进程。
+    let process_providers = ProcessProviderConfig::from_toml(&text)?;
     print_summary(&config, &options.config);
     if let Some(admin) = &config.grants.system_admin {
         eprintln!(
@@ -188,6 +191,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // 外置进程工具：只承载第三方工具，第一方工具仍走进程内 ToolLoader。
     if !config.tool_plugins.is_empty() {
         plugins.install_loader_owned(Arc::new(ProcessToolLoader::new(&config.tool_plugins)))?;
+    }
+    // 外置进程策略 provider：核心不认识 wasm，只按命令启动宿主并转发 decide。
+    // 列表为空 = 不装宿主；配置里有但宿主起不来 = 启动期硬失败。
+    if !process_providers.is_empty() {
+        plugins.install_loader_owned(Arc::new(ProcessProviderLoader::new(&process_providers)))?;
+        println!(
+            "process-provider: installed {} external provider(s)",
+            process_providers.len()
+        );
     }
     // 动态扩展目录（ADR-0029 P1）：只从 ACB_DYNAMIC_DIR 发现声明式 route 模块。
     if let Some(extensions) = acb_extensions::DynamicRouteManager::from_env()? {
@@ -450,6 +462,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     println!("{}", acb_i18n::t!("bridge.main.running"));
     let exit_code = wait_for_stop(&bridge, &route_worker, &shutdown);
     shutdown.store(true, Ordering::SeqCst);
+    // 外置进程 manager 在这里收尾：停子进程，避免手动运行时留孤儿。
+    {
+        let bridge = bridge
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        bridge.shutdown_plugins();
+    }
     Ok(exit_code)
 }
 

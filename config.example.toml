@@ -86,6 +86,19 @@ path = "state/acb.db"
 max_records_per_room = 5000
 max_age_days = 90
 
+# 外置进程策略 provider（最小面：access）。core 不认识 wasm，只按 command 启动宿主。
+# 列表为空 = 不启动任何宿主；配置里有但宿主起不来 = 启动期硬失败（退出 78）。
+# [[process_providers]]
+# id = "demo.wasm_access"
+# extension = "access"
+# command = ["/绝对路径/acb-wasm-host", "--module", "/绝对路径/access.wasm", "--provider", "demo.wasm_access"]
+# startup_timeout_secs = 10
+# timeout_ms = 5000
+# env = { RUST_BACKTRACE = "0" }        # 可选
+# cwd = "/绝对路径"                      # 可选
+#
+# 会话用 [sessions].access.provider = "demo.wasm_access" 引用它。
+
 # 记忆管家：后台把「会话 × 记忆」的 worktree 推到远端、把远端提交合回来。
 # 不写在 core 的轮次路径里；失败/冲突只记状态并通知会话，不挡对话。
 # enabled = false（默认）时不起线程。
