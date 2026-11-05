@@ -429,12 +429,6 @@ impl<S: Store + Send + 'static> Console<S> {
                 "token": c.token.as_deref().map(mask_secret),
                 "account": c.account,
                 "admin_qqs": c.admin_qqs,
-                "risk": {
-                    "write": c.risk.write.as_str(),
-                    "destructive": c.risk.destructive.as_str(),
-                    "critical": c.risk.critical.as_str(),
-                    "destructive_exempt": c.risk.destructive_exempt,
-                },
             })).collect::<Vec<_>>(),
             "file_relay": config.file_relay.as_ref().map(|r| json!({
                 "mode": r.mode,

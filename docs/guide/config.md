@@ -102,25 +102,22 @@ url = "ws://127.0.0.1:3001"  # ws-client 必填；ws-server 用 options.listen
 token = ""                 # OneBot 的 access token，没设就空着
 account = "10001"          # 这个号自己的 QQ 号——桥靠它认出「哪句是 agent 自己说的」
 admin_qqs = []             # 这些号在记录里标成 system_admin；lua.stop_command 据此放行 /stop
-
-# 风险策略（连接级）：只回答「这一类操作默认要不要人点」
-[connections.policy.risk]
-destructive = "approval"   # 默认；破坏性操作走票据 + 审批
-# destructive = "allow"    # 等价于旧的 allow_destructive = true：直调
-destructive_exempt = ["member.kick"]  # 可选：名单里的破坏性方法直调，其余仍走票据
-# write = "allow"          # 默认；写操作直调
-# critical 固定 "approval"，配成 "allow" 会启动失败
 ```
 
 - `account` 一定要填对：agent 自己发的消息不计入未读，靠的就是它。
-- **旧键 `allow_destructive` 已移除**：配置里再写（`true` / `false` / 方法名数组）会
-  直接启动失败，错误指向 `[connections.policy.risk]`，不静默映射。
-  - `allow_destructive = true` → `destructive = "allow"`
-  - `allow_destructive = ["member.kick", "group.mute"]` →
-    `destructive = "approval"` + `destructive_exempt = ["member.kick", "group.mute"]`
-  - `allow_destructive = false` → 删掉该行（新默认是票据 + 审批，不再是硬拒）
+- **风险等级不参与鉴权**：`Read/Write/Destructive/Critical` 只是操作属性，决定默认查哪个
+  capability。默认 `base:subscription` 只授 read/write，所以 destructive / critical
+  默认落回票据 + 审批；要直调必须由 `[grants]` 规则显式授予对应 capability。
+- **旧键 `allow_destructive` 已移除**：`true` / `false` / 方法名数组都会直接启动失败，
+  报错给出可抄的 `[[grants.rules]]` 写法。
+  - `allow_destructive = true` → 给对应 subject/place 的规则加 `capability = ["destructive"]`
+    （见下面「访问授权」的完整示例）。
+  - 方法名数组 → 每条方法一条 `scope = "platform_op"` 规则，
+    `target = { kind = "platform_op", id = "member.kick", sub = "qq" }`。
+  - `allow_destructive = false` → 删掉该行；默认就是票据 + 审批。
+- `[connections.policy.risk]` 也已整体移除：出现即启动失败，直接删掉。
 - 默认下破坏性操作直调会被拒，但 `access_request` 仍可发起：生成票据、私信审批后由
-  core 执行。`critical` 永远不能直调，也不接受任何配置放行。
+  core 执行。规则显式授予 `critical` 后 critical 也可直调，但强烈不建议。
 - OneBot 连接会带 `options`；`options.snowluma_min_version` 可覆盖适配器默认的 SnowLuma
   兼容下限（默认 `2.4.0`）。低于下限只在启动日志警告，不拒绝连接：
   在 `[[connections]]` 里写 `options = { snowluma_min_version = "2.4.0" }`。
@@ -323,13 +320,38 @@ capability = ["room_read", "room_write", "connection_read"]
 ```
 
 - `scope = "subscribed"` 只覆盖本会话可达的 kind / 目标，不是无条件全开；跨目标要显式写
-  `scope = "room"` / `"connection"` 并给 typed target：
-  `target = { kind = "room", id = "qq:group/123" }` 或
-  `target = { kind = "connection", id = "qq" }`。旧字符串 target 会在启动期报错。
+  `scope = "room"` / `"connection"` / `"platform_op"` 并给 typed target：
+  `target = { kind = "room", id = "qq:group/123" }`、
+  `target = { kind = "connection", id = "qq" }` 或
+  `target = { kind = "platform_op", id = "group.mute", sub = "qq" }`。
+  旧字符串 target 会在启动期报错。
 - 能力词表：`room_read` / `room_write` / `connection_read` / `platform` / `destructive` /
-  `access_request` / `account_read` / `plugin`。`critical` 与 `account_secret` 不可常驻授予，
-  只能走票据。
+  `critical` / `access_request` / `account_read` / `plugin`。`account_secret` 不可常驻授予，
+  只能走票据；`critical` 可被规则显式授予（写了就直调），但强烈不建议。
+- 想让 agent 直调破坏性方法，必须显式授予 `destructive`。完整示例（群内普通用户）：
 
+```toml
+[[grants.rules]]
+subject = "user"
+place = "group"
+scope = "connection"
+target = { kind = "connection", id = "qq" }
+capability = ["room_write", "platform", "destructive"]
+```
+
+- 只放行单条方法（等价于旧的 `allow_destructive = ["group.mute"]`）：
+
+```toml
+[[grants.rules]]
+subject = "user"
+place = "group"
+scope = "platform_op"
+target = { kind = "platform_op", id = "group.mute", sub = "qq" }
+capability = ["room_write", "platform", "destructive"]
+```
+
+- 规则命中但没列对应 capability 时按 deny 处理（fail closed）；默认没有规则时
+  destructive / critical 不直调，改走票据。
 - `[sessions.access]` 只用于接入外部 access provider；不写就由内置 `[grants]` 评估器判定。
 - 旧键 `all_rooms` / `elevated_in_rooms` / `privileged_origins`（以及 `[sessions.access]`
   的 `rooms` / `origins`）已移除；配置里再出现会**直接启动失败**，错误会明确指向
@@ -342,8 +364,7 @@ capability = ["room_read", "room_write", "connection_read"]
   只读 op 的票据保持 `active` 由会话在有效期内重试。执行结果以系统事件 `ticket_result`
   写回原房间，完整结果用 `access_ticket_get` 查。
   `[tickets]` 可配申请冷却与管理员消息冷却（默认 60s / 30s）。`access_ticket_get` 只能查本会话的票据。
-- 授权只管「能碰到哪里」；破坏性等风险等级由连接的 `[connections.policy.risk]` 单独
-  决定要不要票据 + 审批，授权不能顶替它。
+- 未验证（unverified）操作是硬不变量：不论规则怎么授予，直调一律拒绝，只能票据 + 审批。
 - `scope = "any"` 已移除（与 `subscribed` 语义相同）：配置里再写会在启动解析期报错，
   提示改用 `subscribed`，不静默映射。
 - 外部 provider 只能落在**配置里存在的连接**上——连接本身没配登录账号，发不出去。

@@ -68,7 +68,6 @@ export function surface(overrides = {}) {
     room: "qq:group/158296748",
     subject: "user",
     place: "group",
-    risk: { write: "allow", destructive: "approval", critical: "approval", destructive_exempt: [] },
     resident: resident,
     catalog,
     counts: {

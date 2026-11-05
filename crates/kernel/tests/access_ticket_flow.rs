@@ -813,11 +813,7 @@ fn destructive_access_request_creates_a_ticket_by_default() {
 
 #[test]
 fn critical_never_runs_directly_and_only_via_ticket() {
-    let text = format!(
-        "{}\n[connections.policy.risk]\ndestructive = \"allow\"\n",
-        config()
-    );
-    let (mut bridge, sends, calls) = bridge_with_calls(&text);
+    let (mut bridge, sends, calls) = bridge_with_calls(config());
     bridge
         .ingest(message("qq:group/123", "user1", "查凭据", true))
         .expect("能记下来");
@@ -844,16 +840,18 @@ fn critical_never_runs_directly_and_only_via_ticket() {
             "platform_call",
             json!({"op": "account.cookies", "params": {"domain": "qun.qq.com"}}),
         )
-        .expect_err("critical 不能直接调用");
-    assert_eq!(direct.code, ErrorCode::ToolNotAllowed);
+        .expect_err("没有规则授予 critical 时不能直接调用");
     assert!(
-        direct.message.contains("critical"),
-        "错误要说清是 critical：{}",
-        direct.message
+        matches!(
+            direct.code,
+            ErrorCode::ToolNotAllowed | ErrorCode::RoomNotSubscribed
+        ),
+        "默认 critical 必须被拒绝：{:?}",
+        direct.code
     );
     assert!(
         calls.lock().expect("没被毒死").is_empty(),
-        "destructive = allow 不能放行 critical，平台一次都不该被调用"
+        "默认 critical 不能绕过票据，平台一次都不该被调用"
     );
 
     let request = bridge
@@ -1051,19 +1049,99 @@ fn mixed_target_kinds_are_refused_before_a_ticket_exists() {
 }
 
 #[test]
-fn config_cannot_grant_critical_capability() {
-    for capability in ["critical", "account_secret"] {
-        let text = format!(
-            "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"subscribed\"\n        capability = [\"{capability}\"]\n",
-            config()
-        );
-        let error = Config::parse(&text).expect_err("高敏能力常驻授予必须启动失败");
-        let detail = format!("{error:?}").to_lowercase();
-        assert!(
-            detail.contains(&capability.to_lowercase()),
-            "错误要说清 {capability} 只能走票据：{error:?}"
-        );
-    }
+fn critical_runs_directly_when_a_rule_grants_it() {
+    let text = format!(
+        "{}\n[[grants.rules]]\nsubject = \"user\"\nplace = \"group\"\nscope = \"connection\"\ntarget = {{ kind = \"connection\", id = \"qq\" }}\ncapability = [\"connection_read\", \"critical\"]\n",
+        config()
+    );
+    let (mut bridge, _sends, calls) = bridge_with_calls(&text);
+    bridge
+        .ingest(message("qq:group/123", "user1", "查凭据", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let capability = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "tool", "name": "account.cookies"}),
+        )
+        .expect("能查");
+    assert_eq!(
+        capability["direct_executable"], true,
+        "规则显式授予 critical 后就是直调"
+    );
+    assert_eq!(capability["ticket_required"], false);
+
+    let result = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"op": "account.cookies", "params": {"domain": "qun.qq.com"}}),
+        )
+        .expect("规则授予 critical 时直调");
+    assert_eq!(result["cookies"], "SECRET-COOKIE");
+    assert_eq!(
+        calls.lock().expect("没被毒死").as_slice(),
+        ["account.cookies"]
+    );
+}
+
+#[test]
+fn unverified_op_stays_ticket_only_even_when_rules_grant_critical() {
+    let text = format!(
+        "{}\n[[grants.rules]]\nsubject = \"user\"\nplace = \"group\"\nscope = \"connection\"\ntarget = {{ kind = \"connection\", id = \"qq\" }}\ncapability = [\"connection_read\", \"platform\", \"destructive\", \"critical\"]\n",
+        config()
+    );
+    let (mut bridge, _sends, calls) = bridge_with_calls(&text);
+    bridge
+        .ingest(message("qq:group/123", "user1", "想改群设置", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let direct = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"op": "group.unverified"}),
+        )
+        .expect_err("unverified 是硬不变量，规则授予也不放行直调");
+    assert_eq!(direct.code, ErrorCode::ToolNotAllowed);
+    assert!(direct.message.contains("unverified"), "{}", direct.message);
+    assert!(
+        calls.lock().expect("没被毒死").is_empty(),
+        "被拒的直调不能碰平台"
+    );
+
+    let request = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{"target": "qq:group/999", "ops": ["platform_call:group.unverified"]}]}),
+        )
+        .expect("unverified 仍可申请票据");
+    assert_eq!(request["tickets"][0]["state"], "pending_approval");
+}
+
+#[test]
+fn config_can_grant_critical_but_not_account_secret() {
+    let allowed = format!(
+        "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"connection\"\n        target = {{ kind = \"connection\", id = \"qq\" }}\n        capability = [\"critical\"]\n",
+        config()
+    );
+    Config::parse(&allowed).expect("critical 允许被规则显式授予");
+
+    let text = format!(
+        "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"subscribed\"\n        capability = [\"account_secret\"]\n",
+        config()
+    );
+    let error = Config::parse(&text).expect_err("account_secret 仍只能走票据");
+    let detail = format!("{error:?}").to_lowercase();
+    assert!(detail.contains("account_secret"), "{error:?}");
 }
 
 #[test]

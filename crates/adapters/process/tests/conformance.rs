@@ -29,7 +29,6 @@ fn connection(command: Option<&str>) -> Connection {
         token: None,
         account: "bot".into(),
         admin_qqs: Vec::new(),
-        risk: Default::default(),
         receive: Default::default(),
         routes: Vec::new(),
     }

@@ -30,8 +30,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::config::{
-    ClockPolicy, Config, InBandNoticeConfig, RiskAction, TurnErrorAction, WakeDecision, WakePolicy,
-    WakeVerdict,
+    ClockPolicy, Config, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy, WakeVerdict,
 };
 use crate::deps::{DependencyKind, DependencyRegistry};
 use crate::grants::{
@@ -4487,8 +4486,8 @@ impl<S: Store> Bridge<S> {
         }
         let spec = find_platform_op(&methods, &args.op)?;
 
-        // critical 不接受任何常驻授权或风险策略直调：直接调用一律拒绝，
-        // 只允许由已批准的 access_request 票据在 core 内执行。unverified 同档。
+        // 未验证是硬不变量：不论 grants 怎么授予，直调一律拒绝，
+        // 只允许由已批准的 access_request 票据在 core 内执行。
         if spec.verification.is_unverified() {
             return Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
@@ -4499,18 +4498,6 @@ impl<S: Store> Bridge<S> {
                     spec.name,
                     spec.verification.reason().unwrap_or("no reason declared"),
                     spec.name
-                ),
-            ));
-        }
-        if spec.risk == Risk::Critical {
-            return Err(ToolError::new(
-                ErrorCode::ToolNotAllowed,
-                format!(
-                    "[forbidden] {} is a critical operation; it always requires a ticket approved \
-                     in private and cannot be enabled by [connections.policy.risk]. File an \
-                     access_request with op \"platform_call:{}\" and wait for private approval \
-                     before retrying",
-                    spec.name, spec.name
                 ),
             ));
         }
@@ -4531,7 +4518,9 @@ impl<S: Store> Bridge<S> {
             }
         }
 
-        // 平台动作的额外能力（platform / destructive）。只有内置授权 evaluator 生效；
+        // 平台动作的能力检查。风险等级只决定「查哪个 capability」；鉴权结果
+        // 只来自四元组规则。默认 base:subscription 只授 read/write，所以
+        // destructive / critical 没有显式规则时自然落回票据。
         // 外部 access provider 已经整体替换了授权判据。
         if let Some(session) = ctx.config.session(&ctx.session) {
             let provider_id = session.access.provider.to_string();
@@ -4541,14 +4530,7 @@ impl<S: Store> Bridge<S> {
                     .config
                     .grants
                     .subject_for(&ctx.room.connection, ctx.origin_sender.as_deref());
-                let capability = if spec.risk == Risk::Destructive {
-                    GrantCapability::Destructive
-                } else if spec.access_kind() == AccessTargetKind::Account {
-                    // 账号资料读与连接读分开：账号级 op 不能靠 connection_read 顺手放行。
-                    GrantCapability::AccountRead
-                } else {
-                    GrantCapability::Platform
-                };
+                let capability = platform_capability(spec);
                 let subscriptions: Vec<RoomId> = session
                     .subscriptions
                     .iter()
@@ -4561,24 +4543,45 @@ impl<S: Store> Bridge<S> {
                     capability,
                     target: &target,
                     subscriptions: &subscriptions,
+                    platform_op: Some(spec.name.as_ref()),
                 };
-                if let Some(decision) = grants::evaluate_platform(&ctx.config.grants, &query) {
-                    if decision.should_audit() {
-                        self.audit_grant(
-                            &ctx.session,
-                            subject,
-                            place,
-                            capability,
-                            &target,
-                            &decision,
-                        );
+                match grants::evaluate_platform(&ctx.config.grants, &query) {
+                    Some(decision) => {
+                        if decision.should_audit() {
+                            self.audit_grant(
+                                &ctx.session,
+                                subject,
+                                place,
+                                capability,
+                                &target,
+                                &decision,
+                            );
+                        }
+                        if !decision.allow {
+                            return Err(ToolError::new(
+                                ErrorCode::ToolNotAllowed,
+                                format!("[forbidden] {}", decision.reason),
+                            ));
+                        }
                     }
-                    if !decision.allow {
+                    // base:subscription 只授 read/write；高敏能力没有显式授予
+                    // 时不直调，改走票据。
+                    None if matches!(
+                        capability,
+                        GrantCapability::Destructive | GrantCapability::Critical
+                    ) =>
+                    {
                         return Err(ToolError::new(
                             ErrorCode::ToolNotAllowed,
-                            format!("[forbidden] {}", decision.reason),
+                            format!(
+                                "[forbidden] {} requires an explicit grant or an access_request \
+                                 ticket. File an access_request with op \"platform_call:{}\" \
+                                 and wait for approval before retrying",
+                                spec.name, spec.name
+                            ),
                         ));
                     }
+                    None => {}
                 }
             }
         }
@@ -4613,66 +4616,10 @@ impl<S: Store> Bridge<S> {
                     ErrorCode::ToolNotAllowed,
                     format!(
                         "[forbidden] {} is unverified and requires an approved access_request \
-                         ticket; [connections.policy.risk] and persistent grants do not apply",
+                         ticket; grants do not apply to unverified operations",
                         spec.name
                     ),
                 ));
-            }
-        } else {
-            match spec.risk {
-                Risk::Critical => {
-                    let approved_critical = approved.is_some_and(|ticket| {
-                        ticket.capabilities.contains(&GrantCapability::Critical)
-                    });
-                    if !approved_critical {
-                        return Err(ToolError::new(
-                            ErrorCode::ToolNotAllowed,
-                            format!(
-                                "[forbidden] {} is a critical operation; it requires an approved \
-                                 access_request ticket and cannot be enabled by \
-                                 [connections.policy.risk]",
-                                spec.name
-                            ),
-                        ));
-                    }
-                }
-                Risk::Destructive
-                    if !approved.is_some_and(|ticket| {
-                        ticket.capabilities.contains(&GrantCapability::Destructive)
-                    }) && !Self::allows_destructive(
-                        &config,
-                        &room.connection,
-                        spec.name.as_ref(),
-                    ) =>
-                {
-                    return Err(ToolError::new(
-                        ErrorCode::ToolNotAllowed,
-                        format!(
-                            "[forbidden] {} is a destructive operation; connection {} uses \
-                             policy.risk.destructive = \"approval\" and the method is not in \
-                             destructive_exempt. File an access_request with op \
-                             \"platform_call:{}\" and wait for private approval before retrying",
-                            spec.name, room.connection, spec.name
-                        ),
-                    ));
-                }
-                Risk::Write
-                    if approved.is_none()
-                        && config
-                            .connection(&room.connection)
-                            .is_some_and(|item| item.risk.write == RiskAction::Approval) =>
-                {
-                    return Err(ToolError::new(
-                        ErrorCode::ToolNotAllowed,
-                        format!(
-                            "[forbidden] {} is a write operation; policy.risk.write is \
-                             \"approval\". File an access_request with op \"platform_call:{}\" \
-                             and wait for approval before retrying",
-                            spec.name, spec.name
-                        ),
-                    ));
-                }
-                _ => {}
             }
         }
 
@@ -4989,6 +4936,7 @@ impl<S: Store> Bridge<S> {
             capability: GrantCapability::Plugin,
             target: &plugin_target,
             subscriptions: &subscriptions,
+            platform_op: None,
         };
         let decision = grants::evaluate_tool(&ctx.config.grants, &query);
         if decision.should_audit() {
@@ -5215,6 +5163,7 @@ impl<S: Store> Bridge<S> {
                     capability: GrantCapability::AccessRequest,
                     target: &target,
                     subscriptions: &subscriptions,
+                    platform_op: None,
                 },
             );
             if !decision.allow {
@@ -5495,19 +5444,9 @@ impl<S: Store> Bridge<S> {
             .iter()
             .map(|connection| {
                 let methods = self.outbound.catalog(connection);
-                let destructive_enabled = methods
+                let destructive = methods
                     .iter()
-                    .filter(|spec| {
-                        spec.risk == Risk::Destructive
-                            && Self::allows_destructive(config, connection, spec.name.as_ref())
-                    })
-                    .count();
-                let destructive_blocked = methods
-                    .iter()
-                    .filter(|spec| {
-                        spec.risk == Risk::Destructive
-                            && !Self::allows_destructive(config, connection, spec.name.as_ref())
-                    })
+                    .filter(|spec| spec.risk == Risk::Destructive)
                     .count();
                 let critical = methods
                     .iter()
@@ -5517,10 +5456,8 @@ impl<S: Store> Bridge<S> {
                     "connection": connection,
                     "catalog": !methods.is_empty(),
                     "ops": methods.len(),
-                    "destructive_enabled": destructive_enabled,
-                    "destructive_blocked": destructive_blocked,
+                    "destructive": destructive,
                     "critical": critical,
-                    "risk": risk_policy_json(config, connection),
                 })
             })
             .collect();
@@ -5609,18 +5546,13 @@ impl<S: Store> Bridge<S> {
         let connection_reason =
             self.probe_connection_reason(config, session, &room.connection, &ctx.room);
 
+        let (subject, place) = self.subject_place(config, session, Some(&ctx.room));
         let methods = self.outbound.catalog(&room.connection);
         let ops: Vec<Value> = methods
             .iter()
             .map(|spec| {
-                cap_op_json(
-                    config,
-                    &room.connection,
-                    spec,
-                    read_reason,
-                    send_reason,
-                    connection_reason,
-                )
+                let granted = high_risk_grant(config, session, subject, place, room, spec);
+                cap_op_json(spec, read_reason, send_reason, connection_reason, granted)
             })
             .collect();
         let mut response = json!({
@@ -5631,7 +5563,6 @@ impl<S: Store> Bridge<S> {
             "readable": read_reason.is_none(),
             "sendable": send_reason.is_none(),
             "reason": if read_reason.is_none() { send_reason } else { read_reason },
-            "risk": risk_policy_json(config, &room.connection),
             "ops": ops,
         });
         maybe_index_list(
@@ -5689,13 +5620,13 @@ impl<S: Store> Bridge<S> {
         );
         let connection_reason =
             self.probe_connection_reason(config, session, &ctx.room.connection, &ctx.room);
+        let (subject, place) = self.subject_place(config, session, Some(&ctx.room));
         let mut value = cap_op_json(
-            config,
-            &ctx.room.connection,
             spec,
             read_reason,
             send_reason,
             connection_reason,
+            high_risk_grant(config, session, subject, place, &ctx.room, spec),
         );
         value["scope"] = json!("tool");
         value["kind"] = json!("op");
@@ -5791,7 +5722,6 @@ impl<S: Store> Bridge<S> {
                     "room": ctx.room.to_string(),
                     "subject": subject.as_str(),
                     "place": place.as_str(),
-                    "risk": risk_policy_json(config, &ctx.room.connection),
                     "resident": resident,
                     "catalog": catalog,
                     "counts": {
@@ -5812,7 +5742,6 @@ impl<S: Store> Bridge<S> {
                     "room": ctx.room.to_string(),
                     "subject": subject.as_str(),
                     "place": place.as_str(),
-                    "risk": risk_policy_json(config, &ctx.room.connection),
                     "resident": resident,
                     "tools": tools,
                     "counts": {
@@ -5838,7 +5767,6 @@ impl<S: Store> Bridge<S> {
                     "room": ctx.room.to_string(),
                     "subject": subject.as_str(),
                     "place": place.as_str(),
-                    "risk": risk_policy_json(config, &ctx.room.connection),
                     "tools": tools,
                     "counts": {
                         "tools_total": TOOL_NAMES.len(),
@@ -6732,6 +6660,7 @@ impl<S: Store> Bridge<S> {
                     capability,
                     target: &target,
                     subscriptions: &subscriptions,
+                    platform_op: None,
                 };
                 let decision = grants::evaluate_access(&config.grants, &query);
                 (decision.allow, decision.basis.clone(), Some(decision))
@@ -9288,11 +9217,6 @@ impl<S: Store> Bridge<S> {
             .unwrap_or("unknown")
     }
 
-    /// 这条连接的配置放不放行这个破坏性方法。查不到连接 = 不放行。
-    fn allows_destructive(config: &Config, connection: &str, method: &str) -> bool {
-        connection_allows_destructive(config, connection, method)
-    }
-
     /// 参数里没给房间就用本轮的房间；给了就解析。
     fn resolve(&self, given: &Option<String>, turn_room: &RoomId) -> Result<RoomId, ToolError> {
         match given {
@@ -10201,6 +10125,17 @@ fn access_error_code(error: ToolError) -> &'static str {
     }
 }
 
+/// 风险等级 → 授权能力。风险只负责「查哪个 capability」，不参与 allow/deny。
+fn platform_capability(spec: &MethodSpec) -> GrantCapability {
+    match spec.risk {
+        Risk::Destructive => GrantCapability::Destructive,
+        Risk::Critical => GrantCapability::Critical,
+        // 账号资料读与连接读分开：账号级 op 不能靠 connection_read 顺手放行。
+        _ if spec.access_kind() == AccessTargetKind::Account => GrantCapability::AccountRead,
+        _ => GrantCapability::Platform,
+    }
+}
+
 fn access_target_for_spec(config: &Config, room: &RoomId, spec: &MethodSpec) -> AccessTarget {
     match spec.access_kind() {
         AccessTargetKind::Account => {
@@ -10216,35 +10151,50 @@ fn access_target_for_spec(config: &Config, room: &RoomId, spec: &MethodSpec) -> 
     }
 }
 
-fn connection_allows_destructive(config: &Config, connection: &str, method: &str) -> bool {
-    config
-        .connection(connection)
-        .is_some_and(|item| match item.risk.destructive {
-            RiskAction::Allow => true,
-            // approval 下只对豁免名单里的方法直调；其余走票据 + 审批。
-            RiskAction::Approval => item
-                .risk
-                .destructive_exempt
-                .iter()
-                .any(|name| name == method),
-        })
-}
-
-fn connection_risk_policy(config: &Config, connection: &str) -> crate::config::RiskPolicy {
-    config
-        .connection(connection)
-        .map(|item| item.risk.clone())
-        .unwrap_or_default()
-}
-
-fn risk_policy_json(config: &Config, connection: &str) -> Value {
-    let policy = connection_risk_policy(config, connection);
-    json!({
-        "write": policy.write.as_str(),
-        "destructive": policy.destructive.as_str(),
-        "critical": policy.critical.as_str(),
-        "destructive_exempt": policy.destructive_exempt,
-    })
+/// 展示用：这条高危 op 在当前主体/场所/目标下是否被规则显式授予。
+/// `None` = 非高危（走默认 read/write 基础访问）；`Some(true/false)` = 规则是否放行。
+fn high_risk_grant(
+    config: &Config,
+    session: &str,
+    subject: GrantSubject,
+    place: Place,
+    room: &RoomId,
+    spec: &MethodSpec,
+) -> Option<bool> {
+    let capability = platform_capability(spec);
+    if !matches!(
+        capability,
+        GrantCapability::Destructive | GrantCapability::Critical
+    ) {
+        return None;
+    }
+    let session_cfg = config.session(session)?;
+    if !matches!(
+        session_cfg.access.provider.to_string().as_str(),
+        GRANTS_ACCESS_PROVIDER | DEFAULT_ACCESS_PROVIDER
+    ) {
+        // 外部 provider 自己决定；展示层按保守口径标成票据路径。
+        return Some(false);
+    }
+    let subscriptions: Vec<RoomId> = session_cfg
+        .subscriptions
+        .iter()
+        .map(|subscription| subscription.room.clone())
+        .collect();
+    let target = access_target_for_spec(config, room, spec);
+    let query = grants::GrantQuery {
+        subject,
+        place,
+        capability,
+        target: &target,
+        subscriptions: &subscriptions,
+        platform_op: Some(spec.name.as_ref()),
+    };
+    Some(
+        grants::evaluate_platform(&config.grants, &query)
+            .map(|decision| decision.allow)
+            .unwrap_or(false),
+    )
 }
 
 /// 这个工具是否有票据可申请的入口。
@@ -10262,12 +10212,11 @@ fn tool_requestable(tool: &str) -> bool {
 }
 
 fn cap_op_json(
-    config: &Config,
-    connection: &str,
     spec: &MethodSpec,
     read_reason: Option<&'static str>,
     send_reason: Option<&'static str>,
     connection_reason: Option<&'static str>,
+    high_risk_granted: Option<bool>,
 ) -> Value {
     let access_reason = if spec.scope == Scope::Connection {
         connection_reason
@@ -10281,27 +10230,21 @@ fn cap_op_json(
             (false, Some("unverified_requires_ticket"), true, true)
         } else {
             match spec.risk {
-                Risk::Critical => (false, Some("critical_requires_ticket"), true, true),
+                Risk::Critical => {
+                    if high_risk_granted == Some(true) {
+                        (true, None, false, false)
+                    } else {
+                        (false, Some("critical_requires_ticket"), true, true)
+                    }
+                }
                 Risk::Destructive => {
-                    if connection_allows_destructive(config, connection, spec.name.as_ref()) {
+                    if high_risk_granted == Some(true) {
                         (true, None, false, false)
                     } else {
                         (false, Some("destructive_requires_ticket"), true, true)
                     }
                 }
-                Risk::Write => {
-                    if connection_risk_policy(config, connection).write == RiskAction::Approval {
-                        (
-                            false,
-                            Some("write_requires_ticket"),
-                            true,
-                            spec.scope == Scope::Room,
-                        )
-                    } else {
-                        (true, None, false, spec.scope == Scope::Room)
-                    }
-                }
-                Risk::Read => (true, None, false, spec.scope == Scope::Room),
+                Risk::Read | Risk::Write => (true, None, false, spec.scope == Scope::Room),
             }
         };
     if direct_executable {

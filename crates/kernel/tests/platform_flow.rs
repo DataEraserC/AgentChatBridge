@@ -298,19 +298,13 @@ fn config() -> &'static str {
 }
 
 fn setup() -> (Bridge<MemoryStore>, Calls) {
-    setup_with_qq_risk("")
+    setup_with_grants("")
 }
 
-/// 给 qq 连接追加 `[connections.policy.risk]`（插在 dc 连接之前，
-/// 保证子表挂在 qq 这个数组元素上）。
-fn setup_with_qq_risk(policy: &str) -> (Bridge<MemoryStore>, Calls) {
+/// 在配置末尾追加顶层 grants 规则。
+fn setup_with_grants(rules: &str) -> (Bridge<MemoryStore>, Calls) {
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
-    let text = config().replace(
-        "[[connections]]\n        id = \"dc\"",
-        &format!(
-            "[connections.policy.risk]\n        {policy}\n\n        [[connections]]\n        id = \"dc\""
-        ),
-    );
+    let text = format!("{}\n{rules}", config());
     let mut plugins = PluginManager::with_native_builtins();
     plugins
         .register_adapter(Arc::new(FakeAdapterFactory))
@@ -944,10 +938,19 @@ fn destructive_method_is_refused_by_default() {
     assert!(calls.lock().expect("没被毒死").is_empty());
 }
 
-/// 显式 `destructive = "allow"` 等价于旧 `allow_destructive = true`：直调放行。
+/// 显式 grants 授予 destructive 时直调；默认没有规则则走票据。
 #[test]
-fn destructive_method_runs_when_policy_allows_it() {
-    let (mut bridge, calls) = setup_with_qq_risk("destructive = \"allow\"");
+fn destructive_method_runs_when_rule_grants_it() {
+    let (mut bridge, calls) = setup_with_grants(
+        r#"
+[[grants.rules]]
+subject = "user"
+place = "group"
+scope = "connection"
+target = { kind = "connection", id = "qq" }
+capability = ["room_write", "platform", "destructive"]
+"#,
+    );
     let ticket = open_turn(&mut bridge);
 
     let result = bridge
@@ -957,17 +960,25 @@ fn destructive_method_runs_when_policy_allows_it() {
             "platform_call",
             json!({"op": "member.kick", "params": {"user_id": "1"}}),
         )
-        .expect("开了就放行");
+        .expect("规则授予 destructive 就放行");
 
     assert_eq!(result["done"], true);
     assert_eq!(calls.lock().expect("没被毒死").len(), 1);
 }
 
-/// 按方法名豁免保留：名单里的 destructive 直调，名单外的仍走票据。
+/// 方法名白名单落到 `scope = "platform_op"`：名单里的直调，名单外仍走票据。
 #[test]
-fn destructive_exempt_method_runs_directly() {
-    let (mut bridge, calls) =
-        setup_with_qq_risk("destructive = \"approval\"\ndestructive_exempt = [\"group.mute\"]");
+fn destructive_platform_op_rule_only_opens_the_named_method() {
+    let (mut bridge, calls) = setup_with_grants(
+        r#"
+[[grants.rules]]
+subject = "user"
+place = "group"
+scope = "platform_op"
+target = { kind = "platform_op", id = "group.mute", sub = "qq" }
+capability = ["room_write", "platform", "destructive"]
+"#,
+    );
     let ticket = open_turn(&mut bridge);
 
     let refused = bridge
@@ -977,7 +988,7 @@ fn destructive_exempt_method_runs_directly() {
             "platform_call",
             json!({"op": "member.kick", "params": {"user_id": "1"}}),
         )
-        .expect_err("不在豁免名单里，直调拒绝");
+        .expect_err("不在白名单里，默认走票据");
     assert!(refused.message.contains("forbidden"));
 
     let allowed = bridge
@@ -987,7 +998,7 @@ fn destructive_exempt_method_runs_directly() {
             "platform_call",
             json!({"op": "group.mute", "params": {"user_id": "1"}}),
         )
-        .expect("在豁免名单里，直调放行");
+        .expect("在白名单里，直调放行");
     assert_eq!(allowed["done"], true);
     assert_eq!(calls.lock().expect("没被毒死").len(), 1);
 }

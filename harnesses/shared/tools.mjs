@@ -94,8 +94,9 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
 批准后 core 按申请时保存的 params 快照直接执行 send_message / send_message_to / platform_call:<method>；
 快照必须完整（例如 send 的 elements、平台方法的全部参数），批准后不能再改。
 只读 op（get_history 等）不由 core 执行：批准后票据保持 active，由会话在有效期内自己重试一次。
-风险策略只约束直调：destructive 的 approval/allow、destructive_exempt 决定能否直接调用；
-票据批准后由 core 执行。critical 永远只能靠票据 + 私信审批放行，
+风险等级只决定查哪个 capability；是否直调由 grants 规则决定。destructive / critical 默认没有授予，走票据；
+规则显式授予对应 capability 才直调。critical 授予后也能直调，但强烈不建议；
+unverified 是硬不变量：不论规则怎么授予，直调一律拒绝，只能票据 + 审批。
 结果默认只进 access_ticket_get，不进房间流水或投递正文。
 同一个会话的审批消息会聚合成一条，在本轮结束时发出；冷却期内的申请会被明确拒绝并给出剩余秒数。
 op 列表要具体：send_message，send_message_to，get_history，fetch_records，notes:list，notes:set，notes:del，
@@ -150,7 +151,7 @@ get_platform_events，wait_message，或 platform_call:<op>（如 platform_call:
   {
     name: "capabilities",
     description: `只读自检：回答「此刻能不能用」，也回答「长尾有什么」。
-scope=session 给整体处境与计数；scope=room 看某房间的读写与 op 风险 / 连接风险策略；
+scope=session 给整体处境与计数；scope=room 看某房间的读写与 op 风险等级；
 scope=catalog 列长尾工具目录（名字 / 一句话用途 / 何时用 / 可用性 / 可申请）；
 scope=surface 给 harness 算本轮可见集；scope=tool 看单个工具或平台 op（name），
 工具会附完整 schema（本地工具定义），平台 op 只给目录里的参数。
@@ -326,9 +327,10 @@ list 返回 total / returned / has_more / next_offset；超过 4 KiB 会只给�
     description: `平台能力单入口：给 op 执行，不给 op 列目录。
 
 **执行**：op 用层级名，如 msg.send、member.list、group.mute；params 的形状先用不带 op 的调用查。
-risk 由 op→risk 策略表决定，未知 op 直接拒绝；破坏性 op 默认不直调（报 forbidden，提示申请票据），
-连接配置 [connections.policy.risk] 的 destructive = "allow" 或 destructive_exempt 名单才直接执行。
-critical op（账号凭据、原始 SSO 包、进程运维）不受风险策略放行，直接调用一定 forbidden；
+risk 由 op→risk 策略表决定，未知 op 直接拒绝；破坏性 op 默认走票据（报 forbidden，提示申请票据），
+连接上的 [[grants.rules]] 显式授予 destructive 后才直接执行（方法名白名单用 scope = "platform_op"）。
+critical op（账号凭据、原始 SSO 包、进程运维）默认也只能票据；规则显式授予 critical 才直调（强烈不建议）；
+unverified op 不论规则怎么授予都只能票据。
 先申请 platform_call:<op> 票据、私信审批后由 core 执行，结果用 access_ticket_get 查。
 room 决定目标房间：不给就是当前轮次；给别的房间必须在本会话订阅内。
 不要在 params 里改 group_id/user_id 换目标——params 里的 user_id 只表示「踢谁/拍谁」这类成员目标。
