@@ -14,11 +14,17 @@
 //!
 //! 配置从 TOML 读进来后**完全校验**：非法配置在这里就死，不会带病启动。
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
 use acb_proto::RoomId;
 use serde::Deserialize;
 use thiserror::Error;
 
 use crate::plugin::ProviderId;
+
+/// 控制台保存专用的最高优先级分片文件名。
+pub const CONSOLE_CONFIG_FILENAME: &str = "90-console.toml";
 
 /// 没配「攒多少条」时的默认值。来源：实现默认，可推翻。
 pub const DEFAULT_ACCUMULATE: u32 = 10;
@@ -105,6 +111,25 @@ pub struct Config {
     /// 打断的 harness 按各自兜底），打断算这轮失败、走 `on_turn_error` 通知。
     /// 之前 dsh 驱动里写死 5 分钟、到点干等，长任务必被腰斩（2026-10-31 用户裁定可配）。
     pub turn_timeout_secs: u64,
+}
+
+/// 一份实际参与合并的配置文件及其贡献的条目数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSource {
+    pub path: String,
+    pub connections: usize,
+    pub sessions: usize,
+    pub rules: usize,
+}
+
+/// 加载结果：生效配置、按加载顺序列出各文件的贡献、以及合并后的 TOML 文本。
+#[derive(Debug, Clone)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub sources: Vec<ConfigSource>,
+    /// 合并后的 TOML（无分片时就是 base 原文）。供 memory-steward / process-provider
+    /// 这类独立解析器复用同一份生效文本。
+    pub merged_toml: String,
 }
 
 /// 配置里对某个 provider 的一次引用：id + 稳定位置串。
@@ -996,6 +1021,28 @@ fn matches_any(names: &[String], text: &str) -> bool {
 pub enum ConfigError {
     #[error("{}", acb_i18n::t!("kernel.config.parse_failed", detail = detail))]
     ParseFailed { detail: String },
+    #[error("{}", acb_i18n::t!("kernel.config.file_read_failed", path = path, detail = detail))]
+    FileReadFailed { path: String, detail: String },
+    #[error("{}", acb_i18n::t!("kernel.config.dir_read_failed", path = path, detail = detail))]
+    DirReadFailed { path: String, detail: String },
+    #[error("{}", acb_i18n::t!("kernel.config.file_parse_failed", path = path, detail = detail))]
+    FileParseFailed { path: String, detail: String },
+    #[error(
+        "{}",
+        acb_i18n::t!(
+            "kernel.config.duplicate_across_files",
+            kind = kind,
+            id = id,
+            first = first,
+            second = second
+        )
+    )]
+    DuplicateAcrossFiles {
+        kind: String,
+        id: String,
+        first: String,
+        second: String,
+    },
     #[error("{}", acb_i18n::t!("kernel.config.missing_env", name = name))]
     MissingEnv { name: String },
     #[error("{}", acb_i18n::t!("kernel.config.bad_env_ref", detail = detail))]
@@ -1254,6 +1301,103 @@ impl Config {
                 detail: error.to_string(),
             })?;
         Self::from_raw(raw)
+    }
+
+    /// 从 base 文件加载，并按 `config_dir` 合并分片。
+    ///
+    /// `config_dir` 为 `None` 或目录不存在时等同于未启用分片：行为与 [`Config::parse`]
+    /// 完全一致。目录存在时只读取其中的 `*.toml`（按文件名字典序），子目录与其他后缀
+    /// 忽略；`90-console.toml` 最后加载并覆盖它包含的顶层键。
+    pub fn load(base_path: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
+        let base_text = read_config_file(base_path)?;
+        let Some(config_dir) = config_dir.filter(|dir| dir.exists()) else {
+            return load_single(base_path, &base_text);
+        };
+        if !config_dir.is_dir() {
+            return Err(ConfigError::DirReadFailed {
+                path: config_dir.display().to_string(),
+                detail: acb_i18n::t!("kernel.config.not_a_directory"),
+            });
+        }
+        let fragments = list_config_fragments(config_dir)?;
+        let normal: Vec<PathBuf> = fragments
+            .iter()
+            .filter(|path| path.file_name() != Some(std::ffi::OsStr::new(CONSOLE_CONFIG_FILENAME)))
+            .cloned()
+            .collect();
+        let console = fragments
+            .iter()
+            .find(|path| path.file_name() == Some(std::ffi::OsStr::new(CONSOLE_CONFIG_FILENAME)))
+            .cloned();
+        if normal.is_empty() && console.is_none() {
+            // 目录存在但没有任何分片：保持旧路径，错误信息和解析行为都不变。
+            return load_single(base_path, &base_text);
+        }
+
+        let mut files = vec![parse_config_file(base_path, &base_text)?];
+        for path in &normal {
+            let text = read_config_file(path)?;
+            files.push(parse_config_file(path, &text)?);
+        }
+        check_duplicate_ids(&files)?;
+
+        let mut merged = files[0].value.clone();
+        for file in files.iter().skip(1) {
+            merge_document(&mut merged, file.value.clone());
+        }
+        let mut sources: Vec<ConfigSource> = files.iter().map(|file| file.source.clone()).collect();
+
+        if let Some(path) = console {
+            let text = read_config_file(&path)?;
+            let overlay = parse_config_file(&path, &text)?;
+            check_duplicate_ids(std::slice::from_ref(&overlay))?;
+            apply_console_overlay(&mut merged, overlay.value.clone());
+            sources.push(overlay.source);
+        }
+
+        finish_loaded(merged, sources)
+    }
+
+    /// 用一段控制台文本作为 `90-console.toml` 的覆盖层，合并出最终配置。
+    ///
+    /// 供控制台在落盘前校验/暂存使用：不会写文件，只把这段文本当作最高优先级层。
+    pub fn load_with_console_overlay(
+        base_path: &Path,
+        config_dir: &Path,
+        overlay_text: &str,
+    ) -> Result<LoadedConfig, ConfigError> {
+        let base_text = read_config_file(base_path)?;
+        let fragments = if config_dir.exists() {
+            list_config_fragments(config_dir)?
+        } else {
+            Vec::new()
+        };
+        let normal: Vec<PathBuf> = fragments
+            .iter()
+            .filter(|path| path.file_name() != Some(std::ffi::OsStr::new(CONSOLE_CONFIG_FILENAME)))
+            .cloned()
+            .collect();
+
+        let mut files = vec![parse_config_file(base_path, &base_text)?];
+        for path in &normal {
+            let text = read_config_file(path)?;
+            files.push(parse_config_file(path, &text)?);
+        }
+        check_duplicate_ids(&files)?;
+
+        let mut merged = files[0].value.clone();
+        for file in files.iter().skip(1) {
+            merge_document(&mut merged, file.value.clone());
+        }
+        let mut sources: Vec<ConfigSource> = files.iter().map(|file| file.source.clone()).collect();
+
+        let overlay_path = config_dir.join(CONSOLE_CONFIG_FILENAME);
+        let overlay = parse_config_file(&overlay_path, overlay_text)?;
+        check_duplicate_ids(std::slice::from_ref(&overlay))?;
+        apply_console_overlay(&mut merged, overlay.value.clone());
+        sources.push(overlay.source);
+
+        finish_loaded(merged, sources)
     }
 
     fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
@@ -2796,6 +2940,279 @@ struct RawWake {
     options: toml::value::Table,
 }
 
+struct ParsedConfigFile {
+    value: toml::Value,
+    source: ConfigSource,
+}
+
+fn read_config_file(path: &Path) -> Result<String, ConfigError> {
+    std::fs::read_to_string(path).map_err(|error| ConfigError::FileReadFailed {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    })
+}
+
+fn list_config_fragments(dir: &Path) -> Result<Vec<PathBuf>, ConfigError> {
+    let entries = std::fs::read_dir(dir).map_err(|error| ConfigError::DirReadFailed {
+        path: dir.display().to_string(),
+        detail: error.to_string(),
+    })?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| ConfigError::DirReadFailed {
+            path: dir.display().to_string(),
+            detail: error.to_string(),
+        })?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+        paths.push(path);
+    }
+    paths.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    Ok(paths)
+}
+
+fn parse_config_file(path: &Path, text: &str) -> Result<ParsedConfigFile, ConfigError> {
+    let label = path.display().to_string();
+    let expanded = expand_env_vars(text).map_err(|error| ConfigError::FileParseFailed {
+        path: label.clone(),
+        detail: error.to_string(),
+    })?;
+    let value: toml::Value =
+        toml::from_str(&expanded).map_err(|error| ConfigError::FileParseFailed {
+            path: label.clone(),
+            detail: error.to_string(),
+        })?;
+    // 逐文件先按 RawConfig 校验一次：fragment 里的未知字段/缺必填字段必须在
+    // 这里带着文件名失败，不能等到合并后才报一个无来源的错误。
+    let _raw: RawConfig =
+        toml::from_str(&expanded).map_err(|error| ConfigError::FileParseFailed {
+            path: label.clone(),
+            detail: error.to_string(),
+        })?;
+    let source = ConfigSource {
+        path: label,
+        connections: array_count(&value, "connections"),
+        sessions: array_count(&value, "sessions"),
+        rules: rules_count(&value),
+    };
+    Ok(ParsedConfigFile { value, source })
+}
+
+fn load_single(base_path: &Path, text: &str) -> Result<LoadedConfig, ConfigError> {
+    let config = Config::parse(text)?;
+    Ok(LoadedConfig {
+        sources: vec![ConfigSource {
+            path: base_path.display().to_string(),
+            connections: config.connections.len(),
+            sessions: config.sessions.len(),
+            rules: config.grants.rules.len(),
+        }],
+        config,
+        merged_toml: text.to_owned(),
+    })
+}
+
+fn finish_loaded(
+    mut merged: toml::Value,
+    sources: Vec<ConfigSource>,
+) -> Result<LoadedConfig, ConfigError> {
+    dedupe_admin_lists(&mut merged);
+    let merged_toml = toml::to_string(&merged).map_err(|error| ConfigError::ParseFailed {
+        detail: error.to_string(),
+    })?;
+    let raw: RawConfig =
+        toml::from_str(&merged_toml).map_err(|error| ConfigError::ParseFailed {
+            detail: error.to_string(),
+        })?;
+    Ok(LoadedConfig {
+        config: Config::from_raw(raw)?,
+        sources,
+        merged_toml,
+    })
+}
+
+fn array_count(value: &toml::Value, key: &str) -> usize {
+    value
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .map_or(0, Vec::len)
+}
+
+fn rules_count(value: &toml::Value) -> usize {
+    value
+        .get("grants")
+        .and_then(|grants| grants.get("rules"))
+        .and_then(toml::Value::as_array)
+        .map_or(0, Vec::len)
+}
+
+fn array_ids(value: &toml::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(toml::Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn check_duplicate_ids(files: &[ParsedConfigFile]) -> Result<(), ConfigError> {
+    let mut connections: BTreeMap<String, String> = BTreeMap::new();
+    let mut sessions: BTreeMap<String, String> = BTreeMap::new();
+    for file in files {
+        for id in array_ids(&file.value, "connections") {
+            if let Some(first) = connections.insert(id.clone(), file.source.path.clone()) {
+                return Err(ConfigError::DuplicateAcrossFiles {
+                    kind: "connections".to_owned(),
+                    id,
+                    first,
+                    second: file.source.path.clone(),
+                });
+            }
+        }
+        for id in array_ids(&file.value, "sessions") {
+            if let Some(first) = sessions.insert(id.clone(), file.source.path.clone()) {
+                return Err(ConfigError::DuplicateAcrossFiles {
+                    kind: "sessions".to_owned(),
+                    id,
+                    first,
+                    second: file.source.path.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_document(acc: &mut toml::Value, next: toml::Value) {
+    match next {
+        toml::Value::Table(next_table) => {
+            let Some(acc_table) = acc.as_table_mut() else {
+                *acc = toml::Value::Table(next_table);
+                return;
+            };
+            for (key, value) in next_table {
+                if key == "grants" {
+                    merge_grants(acc_table, value);
+                } else {
+                    merge_entry(acc_table, key, value);
+                }
+            }
+        }
+        other => *acc = other,
+    }
+}
+
+fn merge_entry(acc: &mut toml::Table, key: String, value: toml::Value) {
+    if let Some(existing) = acc.get_mut(&key) {
+        match (existing, value) {
+            (toml::Value::Array(current), toml::Value::Array(next)) => current.extend(next),
+            // 普通表按「后出现者覆盖」处理：分片要改表内字段，就在分片里写完整那张表。
+            // grants 的 rooms/accounts/rules 在 merge_grants 里另有按键/追加规则。
+            (existing, value) => *existing = value,
+        }
+        return;
+    }
+    acc.insert(key, value);
+}
+
+fn merge_grants(acc: &mut toml::Table, value: toml::Value) {
+    let next = match value {
+        toml::Value::Table(next) => next,
+        other => {
+            acc.insert("grants".to_owned(), other);
+            return;
+        }
+    };
+    if acc.get("grants").and_then(toml::Value::as_table).is_none() {
+        acc.insert("grants".to_owned(), toml::Value::Table(next));
+        return;
+    }
+    let current = acc
+        .get_mut("grants")
+        .and_then(toml::Value::as_table_mut)
+        .expect("checked above");
+    for (key, value) in next {
+        match key.as_str() {
+            "rules" => merge_entry(current, key, value),
+            "rooms" | "accounts" => merge_keyed_table(current, key, value),
+            _ => {
+                current.insert(key, value);
+            }
+        }
+    }
+}
+
+fn merge_keyed_table(acc: &mut toml::Table, key: String, value: toml::Value) {
+    let next = match value {
+        toml::Value::Table(next) => next,
+        other => {
+            acc.insert(key, other);
+            return;
+        }
+    };
+    if let Some(current) = acc.get_mut(&key).and_then(toml::Value::as_table_mut) {
+        for (entry_key, entry_value) in next {
+            current.insert(entry_key, entry_value);
+        }
+        return;
+    }
+    acc.insert(key, toml::Value::Table(next));
+}
+
+fn apply_console_overlay(merged: &mut toml::Value, overlay: toml::Value) {
+    match overlay {
+        toml::Value::Table(next) => {
+            let Some(table) = merged.as_table_mut() else {
+                *merged = toml::Value::Table(next);
+                return;
+            };
+            for (key, value) in next {
+                table.insert(key, value);
+            }
+        }
+        other => *merged = other,
+    }
+}
+
+fn dedupe_admin_lists(value: &mut toml::Value) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, child) in table.iter_mut() {
+                if key == "admin_qqs" {
+                    if let toml::Value::Array(items) = child {
+                        let mut seen = Vec::new();
+                        items.retain(|item| {
+                            if seen.contains(item) {
+                                false
+                            } else {
+                                seen.push(item.clone());
+                                true
+                            }
+                        });
+                    }
+                }
+                dedupe_admin_lists(child);
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                dedupe_admin_lists(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4123,5 +4540,328 @@ mod tests {
             unread: 99,
         };
         assert_eq!(policy.decide(&input), WakeDecision::Stay);
+    }
+
+    // -----------------------------------------------------------------
+    // config.d 分片
+    // -----------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "acb-config-drop-in-{label}-{}-{}",
+                std::process::id(),
+                TEMP_DIR_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&path).expect("创建临时目录");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_config(path: &Path, text: &str) {
+        std::fs::write(path, text).expect("写测试配置");
+    }
+
+    fn drop_in_base() -> String {
+        format!(
+            "delivery_limit = 10\n\n{}\n\n{}",
+            config_with(ONE_CONNECTION, ONE_SESSION).trim(),
+            r#"
+[grants]
+
+[[grants.rules]]
+subject = "user"
+place = "group"
+scope = "subscribed"
+capability = ["room_read"]
+
+[grants.rooms."qq:group/123"]
+members = ["10001"]
+
+[grants.accounts."qq:10001"]
+approval_route = ["qq:group/123"]
+"#
+        )
+    }
+
+    const DROP_IN_FRAGMENT: &str = r#"
+delivery_limit = 20
+
+[[connections]]
+id = "qq2"
+platform = "qq"
+kind = "onebot11"
+url = "ws://127.0.0.1:3002"
+account = "10002"
+
+[[grants.rules]]
+subject = "user"
+place = "group"
+scope = "subscribed"
+capability = ["room_read"]
+
+[grants.rooms."qq:group/123"]
+members = ["10002"]
+
+[grants.accounts."qq:10001"]
+approval_route = ["qq:group/456"]
+"#;
+
+    fn load_with_fragments(
+        label: &str,
+        base: &str,
+        fragments: &[(&str, &str)],
+    ) -> (TempDir, Result<LoadedConfig, ConfigError>) {
+        let dir = TempDir::new(label);
+        let base_path = dir.path().join("base.toml");
+        let config_dir = dir.path().join("config.d");
+        std::fs::create_dir_all(&config_dir).expect("创建 config.d");
+        write_config(&base_path, base);
+        for (name, text) in fragments {
+            write_config(&config_dir.join(name), text);
+        }
+        let loaded = Config::load(&base_path, Some(&config_dir));
+        (dir, loaded)
+    }
+
+    #[test]
+    fn drop_in_scalar_override_and_array_append() {
+        let (_dir, loaded) = load_with_fragments(
+            "scalar-array",
+            &drop_in_base(),
+            &[("10-fragment.toml", DROP_IN_FRAGMENT)],
+        );
+        let loaded = loaded.expect("分片应能加载");
+        assert_eq!(loaded.config.delivery_limit, 20, "标量后出现者覆盖");
+        assert_eq!(loaded.config.connections.len(), 2, "数组追加 connection");
+        assert_eq!(loaded.config.grants.rules.len(), 2, "数组追加 rule");
+        let room = loaded
+            .config
+            .grants
+            .rooms
+            .get("qq:group/123")
+            .expect("房间政策在");
+        assert_eq!(room.members, vec!["10002"], "grants.rooms 按键覆盖");
+        let account = loaded
+            .config
+            .grants
+            .accounts
+            .get("qq:10001")
+            .expect("账号政策在");
+        assert_eq!(
+            account.approval_route,
+            vec!["qq:group/456"],
+            "grants.accounts 按键覆盖"
+        );
+        assert_eq!(loaded.sources.len(), 2);
+        assert_eq!(loaded.sources[0].connections, 1);
+        assert_eq!(loaded.sources[1].connections, 1);
+        assert_eq!(loaded.sources[0].rules, 1);
+        assert_eq!(loaded.sources[1].rules, 1);
+    }
+
+    #[test]
+    fn drop_in_admin_qqs_are_deduped() {
+        let fragment = "[[connections]]\nid = \"qq2\"\nplatform = \"qq\"\nkind = \"onebot11\"\nurl = \"ws://127.0.0.1:3002\"\naccount = \"10002\"\nadmin_qqs = [\"10002\", \"10002\", \"10003\"]\n";
+        let (_dir, loaded) = load_with_fragments(
+            "admin-dedupe",
+            &drop_in_base(),
+            &[("10-admin.toml", fragment)],
+        );
+        let loaded = loaded.expect("分片应能加载");
+        let connection = loaded
+            .config
+            .connections
+            .iter()
+            .find(|connection| connection.id == "qq2")
+            .expect("新连接在");
+        assert_eq!(connection.admin_qqs, vec!["10002", "10003"]);
+    }
+
+    #[test]
+    fn drop_in_ignores_non_toml_and_subdirectories() {
+        let dir = TempDir::new("ignore");
+        let base_path = dir.path().join("base.toml");
+        let config_dir = dir.path().join("config.d");
+        std::fs::create_dir_all(&config_dir).expect("创建 config.d");
+        write_config(&base_path, &drop_in_base());
+        write_config(
+            &config_dir.join("10-fragment.toml"),
+            "delivery_limit = 20\n",
+        );
+        write_config(
+            &config_dir.join("10-fragment.toml.bak"),
+            "delivery_limit = 99\n",
+        );
+        std::fs::write(config_dir.join("README.md"), "not config").expect("写非 toml");
+        let nested = config_dir.join("sub");
+        std::fs::create_dir_all(&nested).expect("创建子目录");
+        write_config(&nested.join("20-nested.toml"), "delivery_limit = 99\n");
+
+        let loaded = Config::load(&base_path, Some(&config_dir)).expect("能加载");
+        assert_eq!(loaded.config.delivery_limit, 20);
+        assert_eq!(loaded.sources.len(), 2, "只加载 base + 一个 .toml 文件");
+    }
+
+    #[test]
+    fn drop_in_fragments_load_in_filename_order() {
+        let base = drop_in_base();
+        let (_dir, loaded) = load_with_fragments(
+            "order",
+            &base,
+            &[
+                ("30-c.toml", "delivery_limit = 3\n"),
+                ("10-a.toml", "delivery_limit = 1\n"),
+                ("20-b.toml", "delivery_limit = 2\n"),
+            ],
+        );
+        let loaded = loaded.expect("三个分片应能加载");
+        assert_eq!(loaded.config.delivery_limit, 3, "字典序最后一个覆盖");
+        let names: Vec<&str> = loaded
+            .sources
+            .iter()
+            .map(|source| source.path.as_str())
+            .collect();
+        assert!(names[1].contains("10-a.toml"), "{names:?}");
+        assert!(names[2].contains("20-b.toml"), "{names:?}");
+        assert!(names[3].contains("30-c.toml"), "{names:?}");
+    }
+
+    #[test]
+    fn drop_in_duplicate_connection_id_names_both_files() {
+        let fragment = "[[connections]]\nid = \"qq\"\nplatform = \"qq\"\nkind = \"onebot11\"\nurl = \"ws://127.0.0.1:3002\"\naccount = \"10002\"\n";
+        let (_dir, loaded) = load_with_fragments(
+            "dup-connection",
+            &drop_in_base(),
+            &[("10-dup.toml", fragment)],
+        );
+        match loaded.expect_err("重复 connection id 必须失败") {
+            ConfigError::DuplicateAcrossFiles {
+                kind,
+                id,
+                first,
+                second,
+            } => {
+                assert_eq!(kind, "connections");
+                assert_eq!(id, "qq");
+                assert!(first.contains("base.toml"), "{first}");
+                assert!(second.contains("10-dup.toml"), "{second}");
+            }
+            other => panic!("错误类型不对：{other}"),
+        }
+    }
+
+    #[test]
+    fn drop_in_duplicate_session_id_names_both_files() {
+        let fragment = "[[sessions]]\nid = \"main\"\nharness = \"dsh\"\npersona = \"default\"\ntoken = \"t2\"\n";
+        let (_dir, loaded) =
+            load_with_fragments("dup-session", &drop_in_base(), &[("10-dup.toml", fragment)]);
+        match loaded.expect_err("重复 session id 必须失败") {
+            ConfigError::DuplicateAcrossFiles {
+                kind,
+                id,
+                first,
+                second,
+            } => {
+                assert_eq!(kind, "sessions");
+                assert_eq!(id, "main");
+                assert!(first.contains("base.toml"), "{first}");
+                assert!(second.contains("10-dup.toml"), "{second}");
+            }
+            other => panic!("错误类型不对：{other}"),
+        }
+    }
+
+    #[test]
+    fn drop_in_syntax_error_names_the_file() {
+        let (_dir, loaded) = load_with_fragments(
+            "syntax",
+            &drop_in_base(),
+            &[("10-bad.toml", "delivery_limit =\n")],
+        );
+        match loaded.expect_err("语法错误必须失败") {
+            ConfigError::FileParseFailed { path, .. } => {
+                assert!(path.contains("10-bad.toml"), "{path}");
+            }
+            other => panic!("错误类型不对：{other}"),
+        }
+    }
+
+    #[test]
+    fn drop_in_unknown_grants_field_names_the_file() {
+        let (_dir, loaded) = load_with_fragments(
+            "unknown-grants",
+            &drop_in_base(),
+            &[("10-bad.toml", "[grants]\nbogus = true\n")],
+        );
+        match loaded.expect_err("grants 未知字段必须失败") {
+            ConfigError::FileParseFailed { path, .. } => {
+                assert!(path.contains("10-bad.toml"), "{path}");
+            }
+            other => panic!("错误类型不对：{other}"),
+        }
+    }
+
+    #[test]
+    fn drop_in_fragment_uses_the_same_interpolation_as_base() {
+        let path = std::env::var("PATH").expect("测试环境一定有 PATH");
+        let base = format!(
+            "worktrees_root = \"${{PATH}}\"\n\n{}",
+            drop_in_base().trim()
+        );
+        let (_dir, loaded) = load_with_fragments(
+            "interpolation",
+            &base,
+            &[("10-fragment.toml", "worktrees_root = \"${PATH}\"\n")],
+        );
+        let loaded = loaded.expect("分片插值应能加载");
+        assert_eq!(loaded.config.worktrees_root, path);
+    }
+
+    #[test]
+    fn console_overlay_is_last_and_survives_base_regeneration() {
+        let dir = TempDir::new("console-overlay");
+        let base_path = dir.path().join("base.toml");
+        let config_dir = dir.path().join("config.d");
+        std::fs::create_dir_all(&config_dir).expect("创建 config.d");
+        write_config(&base_path, &drop_in_base());
+        write_config(
+            &config_dir.join(CONSOLE_CONFIG_FILENAME),
+            "delivery_limit = 90\n",
+        );
+
+        let first = Config::load(&base_path, Some(&config_dir)).expect("首次加载");
+        assert_eq!(first.config.delivery_limit, 90, "90-console 最高优先级");
+        assert_eq!(first.sources.len(), 2);
+        assert!(
+            first.sources[1].path.contains(CONSOLE_CONFIG_FILENAME),
+            "{:?}",
+            first.sources
+        );
+
+        let regenerated = drop_in_base().replace("delivery_limit = 10", "delivery_limit = 20");
+        write_config(&base_path, &regenerated);
+        let second = Config::load(&base_path, Some(&config_dir)).expect("重生成后加载");
+        assert_eq!(
+            second.config.delivery_limit, 90,
+            "base 被重新生成后控制台覆盖仍然生效"
+        );
     }
 }
