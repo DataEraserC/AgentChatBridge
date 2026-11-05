@@ -15,6 +15,10 @@
 `require_approval`。只读调查确认 SnowLuma 只有一条写入该字段的接口，且平台未应用写入；
 **只能人工在 QQ 客户端恢复**，不要继续用接口重试。其余已读回字段与基线一致，标签目录为空。
 
+**第二批候选**（2026-11-05 21:42–21:46）：`group.search` 被平台拒绝（OIDB 1288），
+无副作用；`group.member_permissions` 成功且已确证；`member.card` 写入成功但回滚失败，
+bot 在测试群的群名片残留 `acb-test-card`。详见「第二批候选」一节。
+
 **脚本未被修改。** 已确认两处脚本问题，见文末。
 
 ## 环境与权限
@@ -272,17 +276,155 @@ dry-run 里的 `ACB_TEST_ACCOUNT` 是 bot 自身账号，按任务要求**没有
 - `group.anonymous` 的 `run` 同样是 `() => okResponse()`；`account.model_show_set` 的
   `run` 是 `async () => okResponse()`。这两条没有可核对的写入语义，移出清单。
 
+本轮已执行上表中的三条，结果见下一节「第二批候选」。
+
+## 第二批候选（2026-11-05）
+
+执行协议与第一批一致：读基线 → 执行 → 读回 → 回滚 → 再读。三条逐条状态如下。
+
+| 动作 | 结果 | 是否确证生效 | 说明 |
+|---|---|---|---|
+| `group.search`（`set_group_search`） | 失败（OIDB 1288） | 否 | 不是只读查询，也没有分页；幂等基线值调用被平台拒绝，读回无变化 |
+| `group.member_permissions`（`set_group_member_permissions`） | 成功且已确证 | 是 | `allow_member_upload_album` 由 `true` 改为 `false`，读回一致，再写回 `true` |
+| `member.card`（`set_group_card`） | 写入成功且已确证；回滚失败 | 写入是 | 名片由空写为 `acb-test-card`，新鲜读回确认；清空回滚 OIDB 1007，残留 |
+
+### 1. `group.search`（失败，无副作用）
+
+先更正对象：`group.search` 在 SnowLuma 中映射到 `set_group_search`，是**写入动作**，
+不是只读查询；该动作也没有分页参数或分页返回，无法验证「分页行为」。本轮没有做真实
+开关变更，只用当前基线值 `1/1` 做幂等调用，确认响应结构。
+
+基线（完整管理设置）：
+
+```json
+{"status":"ok","retcode":0,"data":{"add_type":2,"group_question":"","group_answer":"","robot_member_switch":0,"robot_member_examine":0,"member_invite_policy":"require_approval","allow_member_upload_album":true,"allow_member_temporary_session":true,"allow_member_create_group":true,"new_member_history_visible":false,"no_finger_open":1,"no_code_finger_open":1}}
+```
+
+执行（幂等，写入基线值）：
+
+```text
+POST /set_group_search {"group_id":1134811973,"no_finger_open":1,"no_code_finger_open":1}
+```
+
+响应：
+
+```json
+{"status":"failed","retcode":100,"data":null,"wording":"OIDB error 1288 on 0x89a_0: "}
+```
+
+读回：与基线完全一致（`no_finger_open=1`、`no_code_finger_open=1`，其余字段也未变）。
+
+回滚：同一幂等调用，返回相同错误；第二次读回仍与基线一致。
+
+说明：这两次相同调用是在同一个命令序列里发出的，第一次结果未先检查就执行了「回滚」
+调用；两次都失败，此后没有再次重试。读回确认没有状态变化，因此没有副作用。
+
+结论：**失败**，平台未应用写入；无法确证开关语义。由于它是写入接口，若后续要确证开关
+语义，需要单独授权一次真实变更；本轮按「不产生副作用」的意图没有做真实变更。
+
+### 2. `group.member_permissions`（成功且已确证）
+
+基线（完整管理设置）：
+
+```json
+{"status":"ok","retcode":0,"data":{"add_type":2,"group_question":"","group_answer":"","robot_member_switch":0,"robot_member_examine":0,"member_invite_policy":"require_approval","allow_member_upload_album":true,"allow_member_temporary_session":true,"allow_member_create_group":true,"new_member_history_visible":false,"no_finger_open":1,"no_code_finger_open":1}}
+```
+
+执行（只改一个权限位）：
+
+```text
+POST /set_group_member_permissions {"group_id":1134811973,"allow_member_upload_album":false}
+```
+
+响应：`{"status":"ok","retcode":0,"data":null}`
+
+读回：
+
+```json
+{"status":"ok","retcode":0,"data":{"add_type":2,"group_question":"","group_answer":"","robot_member_switch":0,"robot_member_examine":0,"member_invite_policy":"require_approval","allow_member_upload_album":false,"allow_member_temporary_session":true,"allow_member_create_group":true,"new_member_history_visible":false,"no_finger_open":1,"no_code_finger_open":1}}
+```
+
+回滚：
+
+```text
+POST /set_group_member_permissions {"group_id":1134811973,"allow_member_upload_album":true}
+```
+
+响应：`{"status":"ok","retcode":0,"data":null}`
+
+回滚后读回：
+
+```json
+{"status":"ok","retcode":0,"data":{"add_type":2,"group_question":"","group_answer":"","robot_member_switch":0,"robot_member_examine":0,"member_invite_policy":"require_approval","allow_member_upload_album":true,"allow_member_temporary_session":true,"allow_member_create_group":true,"new_member_history_visible":false,"no_finger_open":1,"no_code_finger_open":1}}
+```
+
+结论：**成功且已确证**。`allow_member_upload_album` 三态读回一致，回滚回到基线；
+`member_invite_policy` 仍为 `require_approval`，未被这次写入连带修改。无残留。
+
+### 3. `member.card`（写入成功，回滚失败，有残留）
+
+基线（`get_group_member_info`，默认缓存读）：
+
+```json
+{"role":"owner","card":"","card_len":0}
+```
+
+执行：
+
+```text
+POST /set_group_card {"group_id":1134811973,"user_id":"<bot 自身 user_id>","card":"acb-test-card"}
+```
+
+响应：`{"status":"ok","retcode":0,"data":null}`
+
+读回（默认缓存）：`{"role":"owner","card":"","card_len":0}` —— 缓存未刷新，不能作为结论。
+
+新鲜读回（`no_cache:true`）：
+
+```json
+{"role":"owner","card":"acb-test-card","card_len":13}
+```
+
+回滚（写回基线空字符串）：
+
+```text
+POST /set_group_card {"group_id":1134811973,"user_id":"<bot 自身 user_id>","card":""}
+```
+
+响应：
+
+```json
+{"status":"failed","retcode":100,"data":null,"wording":"OIDB error 1007 on 0x8fc_3: "}
+```
+
+回滚后新鲜读回：
+
+```json
+{"role":"owner","card":"acb-test-card","card_len":13}
+```
+
+结论：**写入成功且已确证；回滚失败，有残留**。平台接受了非空名片写入，但拒绝用空字符串
+清空（OIDB 1007）。`set_group_card` 的实现把 `card` 直接作为 `targetName` 发送，没有提供
+单独的「清空」参数；按指令没有重试。当前 bot 在测试群的群名片残留为 `acb-test-card`，
+需要人工在 QQ 客户端清空。
+
 ## 当前状态与人工确认项
 
 - 测试群 `1134811973`：`add_type=2`（与基线一致）；`member_invite_policy=require_approval`
-  （基线为 `disabled`，**残留**）；其余读回字段与基线一致。
+  （基线为 `disabled`，**残留**）；`allow_member_upload_album=true`（已回滚）；
+  `no_finger_open=1`、`no_code_finger_open=1`（`group.search` 失败，未变）；
+  `allow_member_temporary_session=true`、`allow_member_create_group=true`；其余读回字段
+  与基线一致。
+- bot 在测试群的群名片：`acb-test-card`（**残留**，基线为空字符串）。
 - 群分类标签：分类 `0` 与分类 `1134811973` 均为空，无 `acb-test` 残留。
 - 未创建、未修改、未删除任何其他群或账号的数据。
 - **需要人工在 QQ 客户端确认/恢复**：
   1. 把测试群「成员邀请方式」恢复为关闭/不允许（对应 `disabled`），并截图留档。
      接口没有第二条可写路径，`set_group_member_invite_policy` 已确认未被平台应用；
      不要再用接口重试。
-  2. `group.anonymous` / `group.anonymous_ban` / `account.model_show_set` 已确认是平台
+  2. 把 bot 在测试群的群名片清空（基线为空字符串），并截图留档。
+     `set_group_card` 用空字符串清空被平台拒绝（OIDB 1007），不要用接口重试。
+  3. `group.anonymous` / `group.anonymous_ban` / `account.model_show_set` 已确认是平台
      空实现/占位，已移出实验清单，不需要再补客户端截图。
 
 ## 脚本问题（只报告，未就地修改）
