@@ -144,6 +144,10 @@ fn commit_threshold_triggers_a_sync_and_push() {
     );
     let remote_log = git(&remote, &["log", "--oneline", "main"]);
     assert!(remote_log.contains('b'), "本地提交应已推送：{remote_log}");
+    assert!(
+        !root.join("state/memory-merge/m1/s1").exists(),
+        "成功后演练 worktree 也必须收掉"
+    );
 }
 
 #[test]
@@ -186,6 +190,7 @@ fn conflict_stops_without_losing_the_local_side() {
     write_commit(&local, "shared.md", "local", "local");
     write_commit(&other, "shared.md", "remote", "remote");
     git(&other, &["push", "origin", "main"]);
+    let head_before = git(&local, &["rev-parse", "HEAD"]);
 
     let outcomes = steward.run_once(2000);
     assert_eq!(outcomes.len(), 1);
@@ -194,6 +199,22 @@ fn conflict_stops_without_losing_the_local_side() {
         outcomes[0].conflict_files,
         vec!["shared.md".to_owned()],
         "冲突文件要列出来"
+    );
+    assert_eq!(
+        git(&local, &["rev-parse", "HEAD"]),
+        head_before,
+        "演练期间主工作区 HEAD 不能动"
+    );
+    assert_eq!(
+        git(&local, &["status", "--porcelain"]).trim(),
+        "",
+        "冲突 abort 后主工作区仍要干净"
+    );
+    let merge_path = root.join("state/memory-merge/m1/s1");
+    assert!(!merge_path.exists(), "临时演练 worktree 必须收掉");
+    assert!(
+        !git(&local, &["worktree", "list", "--porcelain"]).contains(merge_path.to_str().unwrap()),
+        "git worktree 列表里不能留演练残留"
     );
     let local_content = std::fs::read_to_string(local.join("shared.md")).expect("local file");
     assert_eq!(local_content, "local", "默认策略不能静默取远端一侧");
@@ -291,6 +312,138 @@ fn remote_unreachable_only_records_status() {
             SyncNotice::Failure { reason } if reason.contains("fetch")
         )),
         "失败要通知：{notices:?}"
+    );
+}
+
+#[test]
+fn rebase_rehearsal_lands_on_main() {
+    let root = temp("rebase");
+    let (remote, local) = setup_remote_and_local(&root);
+    let other = root.join("other");
+    git(
+        &root,
+        &["clone", remote.to_str().unwrap(), other.to_str().unwrap()],
+    );
+    git(&other, &["config", "user.email", "other@example.com"]);
+    git(&other, &["config", "user.name", "Other"]);
+
+    let target = target(&local);
+    let mut config = config(&root, 0, 1);
+    config.merge_strategy = MergeStrategy::Rebase;
+    let mut steward =
+        Steward::new(config, vec![target.clone()], Arc::new(Recorder::default())).expect("steward");
+    assert!(steward.run_once(1000).is_empty(), "先建基线");
+
+    write_commit(&local, "local.md", "local", "local");
+    write_commit(&other, "remote.md", "remote", "remote");
+    git(&other, &["push", "origin", "main"]);
+
+    let outcomes = steward.run_once(2000);
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].result, "rebased");
+    let log = git(&local, &["log", "--oneline", "main"]);
+    assert!(log.contains("local"), "本地提交要在：{log}");
+    assert!(log.contains("remote"), "远端提交要在：{log}");
+    assert!(!root.join("state/memory-merge/m1/s1").exists());
+}
+
+#[test]
+fn stale_merge_worktree_is_cleaned_on_start() {
+    let root = temp("stale");
+    let (_remote, local) = setup_remote_and_local(&root);
+    let stale = root.join("state/memory-merge/m1/s1");
+    std::fs::create_dir_all(stale.parent().expect("merge parent")).expect("merge parent");
+    git(
+        &local,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            stale.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(stale.exists(), "先造一个残留演练 worktree");
+
+    let _steward = Steward::new(
+        config(&root, 60, 0),
+        vec![target(&local)],
+        Arc::new(Recorder::default()),
+    )
+    .expect("steward");
+
+    assert!(!stale.exists(), "启动时清理残留目录");
+    assert!(
+        !git(&local, &["worktree", "list", "--porcelain"]).contains(stale.to_str().unwrap()),
+        "启动时也要 prune 掉 admin 元数据"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn external_write_during_rehearsal_is_not_overwritten() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp("concurrent-write");
+    let (remote, local) = setup_remote_and_local(&root);
+    let other = root.join("other");
+    git(
+        &root,
+        &["clone", remote.to_str().unwrap(), other.to_str().unwrap()],
+    );
+    git(&other, &["config", "user.email", "other@example.com"]);
+    git(&other, &["config", "user.name", "Other"]);
+
+    let target = target(&local);
+    let recorder = Arc::new(Recorder::default());
+    let mut steward =
+        Steward::new(config(&root, 0, 1), vec![target.clone()], recorder.clone()).expect("steward");
+    assert!(steward.run_once(1000).is_empty(), "先建基线");
+
+    write_commit(&local, "local.md", "local", "local");
+    write_commit(&other, "remote.md", "remote", "remote");
+    git(&other, &["push", "origin", "main"]);
+    let head_before = git(&local, &["rev-parse", "HEAD"]);
+
+    // 在 merge 期间（post-merge hook 跑在演练 worktree 里）往主工作区写一个文件，
+    // 模拟外部 agent / shell 不经过 core 的写入。
+    let hooks = local.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).expect("hooks dir");
+    let hook = hooks.join("post-merge");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho concurrent >> \"{}\"\n",
+            local.join("concurrent.md").display()
+        ),
+    )
+    .expect("write hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod hook");
+
+    let outcomes = steward.run_once(2000);
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].result, "concurrent_write");
+    assert_eq!(
+        git(&local, &["rev-parse", "HEAD"]),
+        head_before,
+        "检测到并发写就不能落地"
+    );
+    assert_eq!(
+        std::fs::read_to_string(local.join("concurrent.md")).expect("concurrent file"),
+        "concurrent\n",
+        "外部写入不能被覆盖或删掉"
+    );
+    assert!(
+        !root.join("state/memory-merge/m1/s1").exists(),
+        "失败也必须收掉演练 worktree"
+    );
+    let notices = recorder.0.lock().expect("recorder");
+    assert!(
+        notices.iter().any(|(_, notice)| matches!(
+            notice,
+            SyncNotice::Failure { reason } if reason.contains("concurrent_write")
+        )),
+        "并发写要通知：{notices:?}"
     );
 }
 

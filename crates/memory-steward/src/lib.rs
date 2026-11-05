@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acb_proto::RoomId;
 use serde::{Deserialize, Serialize};
@@ -35,15 +35,18 @@ pub enum MergeStrategy {
 }
 
 /// 冲突自动策略。默认 `none`：停下、列文件、通知会话，绝不静默取一侧。
+///
+/// `local` / `remote` **不是**内容级自动合并，而是按文件整体取一侧：另一侧在该文件
+/// 里的改动会被丢弃。默认关闭就是因为这会丢数据；要开必须显式写进配置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoResolve {
     /// 不自动解决，冲突即停。
     #[default]
     None,
-    /// 冲突文件保留本地一侧。
+    /// 冲突文件整体取本地一侧；远端在这些文件里的改动被丢弃。
     Local,
-    /// 冲突文件保留远端一侧。
+    /// 冲突文件整体取远端一侧；本地在这些文件里的改动被丢弃。
     Remote,
 }
 
@@ -164,7 +167,7 @@ pub struct SyncState {
     pub last_attempt_ms: Option<i64>,
     pub last_success_ms: Option<i64>,
     /// ok / pushed / merged / rebased / conflict / dirty / no_remote /
-    /// remote_unreachable / error。
+    /// remote_unreachable / concurrent_write / landing_failed / error。
     pub last_result: Option<String>,
     pub conflict_files: Vec<String>,
     pub error: Option<String>,
@@ -180,7 +183,11 @@ impl SyncState {
     fn is_failure(&self) -> bool {
         matches!(
             self.last_result.as_deref(),
-            Some("conflict") | Some("remote_unreachable") | Some("error")
+            Some("conflict")
+                | Some("remote_unreachable")
+                | Some("concurrent_write")
+                | Some("landing_failed")
+                | Some("error")
         )
     }
 }
@@ -237,6 +244,8 @@ impl Steward {
             updated_at_ms: 0,
             targets: BTreeMap::new(),
         });
+        // 上次进程留下的演练 worktree 可能是半死的；先清掉再开始。
+        cleanup_stale_merge_worktrees(&config, &targets);
         let scheduler = config.scheduler();
         Ok(Self {
             config,
@@ -350,16 +359,234 @@ impl TargetOutcome {
     }
 }
 
-/// 同步一个 worktree：脏工作区跳过；fetch → merge/rebase → push。
+/// 临时演练 worktree 的根目录。`state_dir` 是相对路径时按**桥的启动目录**解析，
+/// 再传给 `git`（git 的 `current_dir` 是主 worktree，不能拿相对路径直接拼）。
+fn merge_root(config: &StewardConfig) -> PathBuf {
+    let state_dir = Path::new(&config.state_dir);
+    let base = if state_dir.is_absolute() {
+        state_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(state_dir)
+    };
+    base.join("memory-merge")
+}
+
+/// 临时演练 worktree 的路径：`state_dir/memory-merge/<记忆>/<会话>`。
+fn merge_worktree_path(config: &StewardConfig, target: &Target) -> PathBuf {
+    merge_root(config)
+        .join(&target.memory)
+        .join(&target.session)
+}
+
+/// 演练用的 linked worktree。Drop 时无论成功失败都尝试 `git worktree remove`。
+struct TempWorktree {
+    main: PathBuf,
+    path: PathBuf,
+    timeout: Duration,
+}
+
+impl TempWorktree {
+    fn create(main: &Path, path: &Path, head: &str, timeout: Duration) -> Result<Self, String> {
+        if path.exists() {
+            remove_merge_worktree(main, path, timeout);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+        }
+        let path_text = path.to_string_lossy().into_owned();
+        let add = git(
+            main,
+            &["worktree", "add", "--detach", &path_text, head],
+            timeout,
+        );
+        if !add.success {
+            return Err(format!("git worktree add failed: {}", add.detail()));
+        }
+        Ok(Self {
+            main: main.to_path_buf(),
+            path: path.to_path_buf(),
+            timeout,
+        })
+    }
+}
+
+impl Drop for TempWorktree {
+    fn drop(&mut self) {
+        remove_merge_worktree(&self.main, &self.path, self.timeout);
+    }
+}
+
+fn remove_merge_worktree(main: &Path, path: &Path, timeout: Duration) {
+    let path_text = path.to_string_lossy().into_owned();
+    let _ = git(
+        main,
+        &["worktree", "remove", "--force", &path_text],
+        timeout,
+    );
+    if path.exists() {
+        let _ = std::fs::remove_dir_all(path);
+    }
+    let _ = git(main, &["worktree", "prune"], timeout);
+}
+
+/// 启动时清理 `state_dir/memory-merge/*` 残留。配置里已经不存在的会话也会删目录，
+/// 然后对现有目标跑一次 `git worktree prune`，避免 admin 元数据越积越多。
+fn cleanup_stale_merge_worktrees(config: &StewardConfig, targets: &[Target]) {
+    let timeout = Duration::from_secs(config.git_timeout_secs);
+    for target in targets {
+        let path = merge_worktree_path(config, target);
+        if path.exists() {
+            remove_merge_worktree(&target.worktree, &path, timeout);
+        }
+    }
+
+    let root = merge_root(config);
+    let known: std::collections::BTreeSet<PathBuf> = targets
+        .iter()
+        .map(|target| merge_worktree_path(config, target))
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for memory_entry in entries.flatten() {
+            let memory_path = memory_entry.path();
+            if !memory_path.is_dir() {
+                continue;
+            }
+            if let Ok(sessions) = std::fs::read_dir(&memory_path) {
+                for session_entry in sessions.flatten() {
+                    let path = session_entry.path();
+                    if path.is_dir() && !known.contains(&path) {
+                        let _ = std::fs::remove_dir_all(&path);
+                    }
+                }
+            }
+        }
+    }
+
+    for target in targets {
+        let _ = git(&target.worktree, &["worktree", "prune"], timeout);
+    }
+}
+
+/// 主工作区的指纹：HEAD + `git status` + 文件（相对路径、大小、mtime、内容哈希）。
+///
+/// 用于检测「演练期间有人直接改文件/提交」。mtime 单独不够（同一时间戳可被保留），
+/// 所以再加上文件内容；大文件只算元数据，避免把一次同步拖成全盘扫描。
+fn worktree_fingerprint(worktree: &Path, timeout: Duration) -> Result<String, String> {
+    let head = head_of(worktree, timeout).ok_or_else(|| "cannot read HEAD".to_owned())?;
+    let status = git(
+        worktree,
+        &["status", "--porcelain", "-z", "--untracked-files=all"],
+        timeout,
+    );
+    if !status.success {
+        return Err(format!("git status failed: {}", status.detail()));
+    }
+    let mut files = Vec::new();
+    collect_files(worktree, &mut files)?;
+    files.sort();
+
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash = fnv1a(head.as_bytes(), hash);
+    hash = fnv1a(status.stdout.as_bytes(), hash);
+    for file in files {
+        let rel = file
+            .strip_prefix(worktree)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .into_owned();
+        hash = fnv1a(rel.as_bytes(), hash);
+        let Ok(meta) = std::fs::metadata(&file) else {
+            continue;
+        };
+        hash = fnv1a(&meta.len().to_le_bytes(), hash);
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        hash = fnv1a(&mtime.to_le_bytes(), hash);
+        if meta.len() <= 4 * 1024 * 1024 {
+            if let Ok(content) = std::fs::read(&file) {
+                hash = fnv1a(&content, hash);
+            }
+        }
+    }
+    Ok(format!("{hash:016x}"))
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read dir entry: {error}"))?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("cannot stat {}: {error}", path.display()))?;
+        if file_type.is_dir() {
+            collect_files(&path, out)?;
+        } else if file_type.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn fnv1a(bytes: &[u8], mut hash: u64) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+/// 把演练结果落到主工作区。失败时尝试 `reset --hard expected_head` 回滚，绝不把
+/// 半落地的状态当成成功。
+fn land_result(
+    main: &Path,
+    result_sha: &str,
+    expected_head: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let reset = git(main, &["reset", "--hard", result_sha], timeout);
+    // 只看「reset 是否成功 + HEAD 是否到位」。reset 之后再出现的外部写入属于
+    // 落地之后的新改动，不能因为它反过来 reset 回旧 HEAD 把人家覆盖掉。
+    let verified = reset.success && head_of(main, timeout).as_deref() == Some(result_sha);
+    if verified {
+        return Ok(());
+    }
+
+    let detail = if reset.success {
+        "landing verification failed".to_owned()
+    } else {
+        format!("git reset --hard failed: {}", reset.detail())
+    };
+    let rollback = git(main, &["reset", "--hard", expected_head], timeout);
+    if rollback.success {
+        Err(format!("{detail}; rolled back to {expected_head}"))
+    } else {
+        Err(format!("{detail}; rollback failed: {}", rollback.detail()))
+    }
+}
+
+/// 同步一个目标：主工作区只做「检查 + 收尾」，fetch/merge/rebase/冲突全在临时
+/// worktree 里演练。演练期间主工作区保持干净不动，落地只持一小段写锁。
 fn sync_target(target: &Target, config: &StewardConfig, now_ms: i64) -> (SyncState, TargetOutcome) {
     let mut state = SyncState {
         last_attempt_ms: Some(now_ms),
         ..SyncState::default()
     };
-    let worktree = &target.worktree;
+    let main = &target.worktree;
     let timeout = Duration::from_secs(config.git_timeout_secs);
 
-    let status = git(worktree, &["status", "--porcelain"], timeout);
+    let status = git(main, &["status", "--porcelain"], timeout);
     if !status.success {
         state.error = Some(format!("git status failed: {}", status.detail()));
         state.last_result = Some("error".to_owned());
@@ -372,7 +599,7 @@ fn sync_target(target: &Target, config: &StewardConfig, now_ms: i64) -> (SyncSta
         return (state, TargetOutcome::new("dirty"));
     }
 
-    let branch_out = git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"], timeout);
+    let branch_out = git(main, &["rev-parse", "--abbrev-ref", "HEAD"], timeout);
     if !branch_out.success {
         state.error = Some(format!(
             "cannot determine current branch: {}",
@@ -382,7 +609,7 @@ fn sync_target(target: &Target, config: &StewardConfig, now_ms: i64) -> (SyncSta
         let error = state.error.clone();
         return (state, failed_notice(error, "error"));
     }
-    let branch = branch_out.stdout.trim();
+    let branch = branch_out.stdout.trim().to_owned();
     if branch.is_empty() || branch == "HEAD" {
         state.error = Some("cannot determine current branch".to_owned());
         state.last_result = Some("error".to_owned());
@@ -390,13 +617,41 @@ fn sync_target(target: &Target, config: &StewardConfig, now_ms: i64) -> (SyncSta
         return (state, failed_notice(error, "error"));
     }
 
-    if !git(worktree, &["remote", "get-url", "origin"], timeout).success {
+    if !git(main, &["remote", "get-url", "origin"], timeout).success {
         state.error = Some("no origin remote configured".to_owned());
         state.last_result = Some("no_remote".to_owned());
         return (state, TargetOutcome::new("no_remote"));
     }
 
-    let fetch = git(worktree, &["fetch", "--prune", "origin"], timeout);
+    let Some(start_head) = head_of(main, timeout) else {
+        state.error = Some("cannot read main HEAD".to_owned());
+        state.last_result = Some("error".to_owned());
+        let error = state.error.clone();
+        return (state, failed_notice(error, "error"));
+    };
+    let start_fp = match worktree_fingerprint(main, timeout) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            state.error = Some(error);
+            state.last_result = Some("error".to_owned());
+            let error = state.error.clone();
+            return (state, failed_notice(error, "error"));
+        }
+    };
+
+    let temp_path = merge_worktree_path(config, target);
+    let temp = match TempWorktree::create(main, &temp_path, &start_head, timeout) {
+        Ok(temp) => temp,
+        Err(error) => {
+            state.error = Some(error);
+            state.last_result = Some("error".to_owned());
+            let error = state.error.clone();
+            return (state, failed_notice(error, "error"));
+        }
+    };
+    let rehearsal = &temp.path;
+
+    let fetch = git(rehearsal, &["fetch", "--prune", "origin"], timeout);
     if !fetch.success {
         state.error = Some(format!("fetch failed: {}", fetch.detail()));
         state.last_result = Some("remote_unreachable".to_owned());
@@ -406,18 +661,19 @@ fn sync_target(target: &Target, config: &StewardConfig, now_ms: i64) -> (SyncSta
 
     let upstream = format!("refs/remotes/origin/{branch}");
     if !git(
-        worktree,
+        rehearsal,
         &["rev-parse", "--verify", "--quiet", &upstream],
         timeout,
     )
     .success
     {
         // 远端还没有这个分支：第一次同步就是把本地分支推上去。
-        return finish_push(worktree, branch, config, state, "pushed", now_ms);
+        drop(temp);
+        return finish_push(main, &branch, config, state, "pushed", now_ms);
     }
 
     let counts = git(
-        worktree,
+        rehearsal,
         &[
             "rev-list",
             "--left-right",
@@ -435,89 +691,141 @@ fn sync_target(target: &Target, config: &StewardConfig, now_ms: i64) -> (SyncSta
     let (ahead, behind) = parse_counts(&counts.stdout).unwrap_or((0, 0));
 
     if behind == 0 {
+        drop(temp);
         if ahead > 0 {
-            return finish_push(worktree, branch, config, state, "pushed", now_ms);
+            return finish_push(main, &branch, config, state, "pushed", now_ms);
         }
         state.last_result = Some("ok".to_owned());
         state.error = None;
         state.last_success_ms = Some(now_ms);
-        state.last_head = head_of(worktree, timeout);
+        state.last_head = head_of(main, timeout);
         return (state, TargetOutcome::new("ok"));
     }
 
     let remote_ref = format!("origin/{branch}");
     let integrate = match config.merge_strategy {
         MergeStrategy::Merge => git(
-            worktree,
+            rehearsal,
             &["-c", "core.editor=true", "merge", "--no-edit", &remote_ref],
             timeout,
         ),
-        MergeStrategy::Rebase => git(worktree, &["rebase", &remote_ref], timeout),
+        MergeStrategy::Rebase => git(rehearsal, &["rebase", &remote_ref], timeout),
     };
 
-    if integrate.success {
-        let result = match config.merge_strategy {
-            MergeStrategy::Merge => "merged",
-            MergeStrategy::Rebase => "rebased",
-        };
-        return finish_push(worktree, branch, config, state, result, now_ms);
+    if !integrate.success {
+        let conflicts = conflict_files(rehearsal, timeout);
+        if conflicts.is_empty() {
+            abort_integration(rehearsal, config.merge_strategy, timeout);
+            state.error = Some(format!("git integration failed: {}", integrate.detail()));
+            state.last_result = Some("error".to_owned());
+            let error = state.error.clone();
+            return (state, failed_notice(error, "error"));
+        }
+
+        if config.auto_resolve == AutoResolve::None {
+            abort_integration(rehearsal, config.merge_strategy, timeout);
+            state.error = Some(
+                "merge conflict; stopped without choosing a side (auto_resolve is none)".to_owned(),
+            );
+            state.last_result = Some("conflict".to_owned());
+            state.conflict_files = conflicts.clone();
+            let notice = SyncNotice::Conflict {
+                files: conflicts.clone(),
+            };
+            return (
+                state,
+                TargetOutcome {
+                    result: "conflict",
+                    notice: Some(notice),
+                },
+            );
+        }
+
+        match resolve_conflicts(rehearsal, config, &conflicts, timeout) {
+            Ok(()) => {}
+            Err(error) => {
+                abort_integration(rehearsal, config.merge_strategy, timeout);
+                state.error = Some(format!(
+                    "auto_resolve failed: {error}; conflict files: {}",
+                    conflicts.join(", ")
+                ));
+                state.last_result = Some("error".to_owned());
+                state.conflict_files = conflicts.clone();
+                return (
+                    state,
+                    TargetOutcome {
+                        result: "error",
+                        notice: Some(SyncNotice::Failure {
+                            reason: format!("auto_resolve failed: {error}"),
+                        }),
+                    },
+                );
+            }
+        }
     }
 
-    let conflicts = conflict_files(worktree, timeout);
-    if conflicts.is_empty() {
-        state.error = Some(format!("git integration failed: {}", integrate.detail()));
+    let Some(result_sha) = head_of(rehearsal, timeout) else {
+        state.error = Some("cannot read rehearsal HEAD".to_owned());
         state.last_result = Some("error".to_owned());
-        abort_integration(worktree, config.merge_strategy, timeout);
         let error = state.error.clone();
         return (state, failed_notice(error, "error"));
-    }
+    };
 
-    if config.auto_resolve == AutoResolve::None {
-        abort_integration(worktree, config.merge_strategy, timeout);
-        state.error = Some(
-            "merge conflict; stopped without choosing a side (auto_resolve is none)".to_owned(),
-        );
-        state.last_result = Some("conflict".to_owned());
-        state.conflict_files = conflicts.clone();
-        let notice = SyncNotice::Conflict {
-            files: conflicts.clone(),
-        };
+    // 演练结束、落地之前：主工作区必须仍是同一 HEAD、同一指纹、仍然干净。
+    let end_head = head_of(main, timeout);
+    let end_fp = worktree_fingerprint(main, timeout).ok();
+    let end_status = git(main, &["status", "--porcelain"], timeout);
+    if end_head.as_deref() != Some(start_head.as_str())
+        || end_fp.as_deref() != Some(start_fp.as_str())
+        || !end_status.success
+        || !end_status.stdout.trim().is_empty()
+    {
+        state.error =
+            Some("concurrent write detected during merge rehearsal; landing skipped".to_owned());
+        state.last_result = Some("concurrent_write".to_owned());
         return (
             state,
             TargetOutcome {
-                result: "conflict",
-                notice: Some(notice),
+                result: "concurrent_write",
+                notice: Some(SyncNotice::Failure {
+                    reason: "concurrent_write: main worktree changed during merge rehearsal"
+                        .to_owned(),
+                }),
             },
         );
     }
 
-    match resolve_conflicts(worktree, config, &conflicts, timeout) {
-        Ok(()) => {
-            let result = match config.merge_strategy {
-                MergeStrategy::Merge => "merged",
-                MergeStrategy::Rebase => "rebased",
-            };
-            finish_push(worktree, branch, config, state, result, now_ms)
+    // 只在这一小段持锁：重新检查 + 落地。演练全程不持锁。
+    let land = {
+        let lock = acb_kernel::memory::worktree_write_lock(main);
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let locked_head = head_of(main, timeout);
+        let locked_fp = worktree_fingerprint(main, timeout).ok();
+        let locked_status = git(main, &["status", "--porcelain"], timeout);
+        let changed = locked_head.as_deref() != Some(start_head.as_str())
+            || locked_fp.as_deref() != Some(start_fp.as_str())
+            || !locked_status.success
+            || !locked_status.stdout.trim().is_empty();
+        if changed {
+            Err("concurrent_write: main worktree changed while acquiring lock".to_owned())
+        } else {
+            land_result(main, &result_sha, &start_head, timeout)
         }
-        Err(error) => {
-            abort_integration(worktree, config.merge_strategy, timeout);
-            state.error = Some(format!(
-                "auto_resolve failed: {error}; conflict files: {}",
-                conflicts.join(", ")
-            ));
-            state.last_result = Some("error".to_owned());
-            state.conflict_files = conflicts.clone();
-            (
-                state,
-                TargetOutcome {
-                    result: "error",
-                    notice: Some(SyncNotice::Failure {
-                        reason: format!("auto_resolve failed: {error}"),
-                    }),
-                },
-            )
-        }
+    };
+
+    drop(temp);
+
+    if let Err(error) = land {
+        state.error = Some(error.clone());
+        state.last_result = Some("landing_failed".to_owned());
+        return (state, failed_notice(Some(error), "landing_failed"));
     }
+
+    let result = match config.merge_strategy {
+        MergeStrategy::Merge => "merged",
+        MergeStrategy::Rebase => "rebased",
+    };
+    finish_push(main, &branch, config, state, result, now_ms)
 }
 
 fn failed_notice(reason: Option<String>, result: &'static str) -> TargetOutcome {
@@ -784,4 +1092,63 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("acb-steward-{name}-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&path).expect("temp dir");
+        path
+    }
+
+    #[test]
+    fn landing_failure_rolls_back_to_old_head() {
+        let root = test_dir("landing");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let timeout = Duration::from_secs(10);
+        assert!(git(&repo, &["init", "-b", "main"], timeout).success);
+        assert!(
+            git(
+                &repo,
+                &["config", "user.email", "test@example.com"],
+                timeout
+            )
+            .success
+        );
+        assert!(git(&repo, &["config", "user.name", "Test"], timeout).success);
+        std::fs::write(repo.join("a.md"), "a").expect("file");
+        assert!(git(&repo, &["add", "a.md"], timeout).success);
+        assert!(git(&repo, &["commit", "-m", "a"], timeout).success);
+        let head = head_of(&repo, timeout).expect("head");
+
+        let error = land_result(
+            &repo,
+            "0000000000000000000000000000000000000000",
+            &head,
+            timeout,
+        )
+        .expect_err("不存在的 result 必须落地失败");
+        assert!(error.contains("reset"), "{error}");
+        assert_eq!(
+            head_of(&repo, timeout).as_deref(),
+            Some(head.as_str()),
+            "失败后必须回到旧 HEAD"
+        );
+        let status = git(&repo, &["status", "--porcelain"], timeout);
+        assert!(
+            status.success && status.stdout.trim().is_empty(),
+            "回滚后主工作区必须干净"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

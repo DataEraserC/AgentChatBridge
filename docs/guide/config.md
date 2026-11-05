@@ -399,14 +399,18 @@ interval_secs = 300       # 时间触发；0 = 关闭
 commit_threshold = 5      # 本地新增提交数触发；0 = 关闭（两者至少开一个）
 poll_secs = 30            # 后台检查间隔，不是同步周期
 merge_strategy = "merge"  # merge | rebase
-auto_resolve = "none"     # none：冲突停下并列文件；local / remote 必须显式开启
-state_dir = "state/memory-steward"
+auto_resolve = "none"     # none：冲突停下并列文件；local / remote 会按文件取一侧、丢弃另一侧
+state_dir = "state/memory-steward"   # 合并演练写在 state_dir/memory-merge/ 下
 git_timeout_secs = 120
 ```
 
 - 时间与提交量两个触发器可以组合，**先到者触发**。
 - 默认 `auto_resolve = "none"`：冲突时 abort 合并、列出冲突文件、通知会话，
-  不会静默取一侧。
+  不会静默取一侧。`local` / `remote` 是按文件整体取一侧，会丢弃另一侧在冲突文件
+  里的改动，默认关闭就是因为会丢数据。
+- 合并演练在 `state_dir/memory-merge/<记忆>/<会话>` 的临时 worktree 里做，主工作区
+  只在最后「检查干净 + 落地」时持锁；演练期间外部写主工作区会被检测为
+  `concurrent_write` 并放弃本次落地，不覆盖别人刚写的内容。
 - 状态写在 `state_dir/status.json`，控制台 `GET /api/memory-steward` 只读暴露；
   字段包括最近一次同步时间、结果、冲突文件数与失败原因。
 - 远端就是普通的 `origin`；没有远端、worktree 尚不存在都只记状态/跳过，不影响轮次。

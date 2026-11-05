@@ -15,11 +15,29 @@
 //! worktree 路径固定为 `worktrees_root/<记忆id>/<会话id>`。固定路径是「惰性初始化能否
 //! 幂等」的前提：路径上已经是个有效 worktree 就复用，异常就报错，绝不 `rm -rf` 重建。
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use acb_proto::{ErrorCode, ToolError};
+
+/// 每个 worktree 一把写锁。记忆管家落地时拿同一把；core 的文件写入 / add / commit
+/// 也拿它，保证「检查干净 → 落地」这一小段没有本地写者。
+///
+/// 锁按 canonical path 共享：worktree 路径在不同调用里可能是相对/绝对写法。
+static WORKTREE_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+/// 取某个 worktree 的写锁。调用方只应在真正的写动作前后持锁；读操作不要拿。
+pub fn worktree_write_lock(worktree: &Path) -> Arc<Mutex<()>> {
+    let key = fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let locks = WORKTREE_WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+}
 
 /// 记忆仓库管理器：持有 worktree 根目录，负责把「记忆 id + 会话 id」解析成 worktree
 /// 路径并保证它存在。
@@ -340,6 +358,8 @@ pub fn read_file(worktree: &Path, rel: &str) -> Result<String, ToolError> {
 
 /// 写一个文件（覆盖）。父目录不存在就建。限 worktree 内。
 pub fn write_file(worktree: &Path, rel: &str, content: &str) -> Result<(), ToolError> {
+    let lock = worktree_write_lock(worktree);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = MemoryRepo::resolve_inside(worktree, rel)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -535,6 +555,8 @@ pub fn git_diff(worktree: &Path) -> Result<String, ToolError> {
 
 /// `git add`：暂存指定路径（相对 worktree；空串暂存全部）。
 pub fn git_add(worktree: &Path, rel: &str) -> Result<(), ToolError> {
+    let lock = worktree_write_lock(worktree);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let repo = git2::Repository::open(worktree).map_err(|error| {
         ToolError::new(
             ErrorCode::Internal,
@@ -579,6 +601,8 @@ pub fn git_add(worktree: &Path, rel: &str) -> Result<(), ToolError> {
 
 /// `git commit`：提交已暂存的内容。`message` 是提交信息。
 pub fn git_commit(worktree: &Path, message: &str) -> Result<String, ToolError> {
+    let lock = worktree_write_lock(worktree);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let repo = git2::Repository::open(worktree).map_err(|error| {
         ToolError::new(
             ErrorCode::Internal,

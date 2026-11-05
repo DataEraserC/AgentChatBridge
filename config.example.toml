@@ -108,8 +108,8 @@ max_age_days = 90
 # commit_threshold = 5      # 本地新增提交数触发；0 = 关闭
 # poll_secs = 30            # 后台检查间隔，不是同步周期
 # merge_strategy = "merge"  # merge | rebase
-# auto_resolve = "none"     # none（默认：冲突停下并列文件）| local | remote
-# state_dir = "state/memory-steward"
+# auto_resolve = "none"     # none（默认：冲突停下并列文件）；local / remote 会丢弃另一侧
+# state_dir = "state/memory-steward"   # 合并演练写在 state_dir/memory-merge/ 下
 # git_timeout_secs = 120
 
 # ---------------------------------------------------------------------------
