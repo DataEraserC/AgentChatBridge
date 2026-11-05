@@ -31,6 +31,26 @@ pub const DEFAULT_DECISION_TIMEOUT_MS: u64 = 1000;
 pub const DEFAULT_POLICY_ERROR_FAIL_AFTER: u32 = 3;
 pub const MAX_DECISION_DELAY_MS: u64 = 300_000;
 
+/// 退出码契约。systemd unit 的 `RestartForceExitStatus` / `RestartPreventExitStatus`
+/// 必须与这三个值一致；不要在各处写魔法数字。
+pub const EXIT_OK: i32 = 0;
+/// 需要回滚后重启：launcher 已把 `current.json` 换成 LKG，systemd 拉起后自然换版本。
+pub const EXIT_ROLLBACK: i32 = 75;
+/// 监督器放弃自动恢复（Fail / 回滚写指针失败 / 连续回滚失败）：systemd 不应再拉起。
+pub const EXIT_GIVE_UP: i32 = 78;
+
+/// 回滚由谁执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackMode {
+    /// supervisor 自己停旧进程、起 LKG（`acb-supervisor` 独立进程用）。
+    #[default]
+    Internal,
+    /// 写 `current.json` 后以 [`EXIT_ROLLBACK`] 退出，让 systemd 重新拉起 launcher
+    /// 并读到新指针（`acb-launcher` 用）。
+    External,
+}
+
 /// 一条可执行的命令。LKG 指针保存的就是这个形状。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
@@ -47,7 +67,7 @@ impl CommandSpec {
         }
     }
 
-    fn id(&self) -> String {
+    pub fn id(&self) -> String {
         if self.args.is_empty() {
             self.program.clone()
         } else {
@@ -126,6 +146,8 @@ pub struct Config {
     pub probe_interval_secs: u64,
     #[serde(default = "default_stable_window")]
     pub stable_window_secs: u64,
+    #[serde(default)]
+    pub rollback_mode: RollbackMode,
     #[serde(default)]
     pub policy: PolicySettings,
 }
@@ -406,6 +428,8 @@ pub struct Supervisor {
     consecutive_holds: u32,
     policy_errors: u32,
     failed: Option<String>,
+    /// launcher 模式下给 systemd 看的退出码；`Some` 后 tick 不再做任何事。
+    exit_code: Option<i32>,
     audit: PathBuf,
 }
 
@@ -445,6 +469,7 @@ impl Supervisor {
             consecutive_holds: 0,
             policy_errors: 0,
             failed: None,
+            exit_code: None,
             audit,
         };
         supervisor.runner.start(&current).map_err(|error| {
@@ -471,13 +496,28 @@ impl Supervisor {
         self.failed.as_deref()
     }
 
+    /// launcher 模式下的退出码；`None` = 继续监督。
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.exit_code.is_some()
+    }
+
+    /// 外部停止（手动运行 launcher 时）：停掉子进程并返回正常退出。
+    pub fn shutdown(&mut self) {
+        let _ = self.runner.stop();
+        self.exit_code = Some(EXIT_OK);
+    }
+
     pub fn audit_path(&self) -> &Path {
         &self.audit
     }
 
     /// 一个采样周期。主循环按固定间隔调用。
     pub fn tick(&mut self) {
-        if self.failed.is_some() {
+        if self.stopped() || self.failed.is_some() {
             return;
         }
         let now = self.clock.now_ms();
@@ -699,6 +739,30 @@ impl Supervisor {
             DecisionKind::Hold => {
                 self.consecutive_holds = self.consecutive_holds.saturating_add(1);
                 if !self.runner.running() {
+                    // 决策延迟期间子进程退出时，tick 开始时看到的“还在运行”已经失效。
+                    // 这一次退出必须计入失败，不能只悄悄重启；否则连续失败永远不涨，
+                    // 回滚阈值永远达不到。
+                    let class = self
+                        .runner
+                        .last_exit()
+                        .map(|exit| {
+                            if exit.code == Some(101) {
+                                "panic".to_owned()
+                            } else {
+                                "exit".to_owned()
+                            }
+                        })
+                        .unwrap_or_else(|| "exit".to_owned());
+                    self.record_failure(now, &class);
+                    let snapshot = self.snapshot(now);
+                    if let Ok(decision) = self
+                        .builtin
+                        .evaluate(&snapshot, &self.config.policy.options)
+                        && decision.decision != DecisionKind::Hold
+                    {
+                        self.execute("process_exit", decision);
+                        return;
+                    }
                     let spec = self.current.clone();
                     match self.runner.start(&spec) {
                         Ok(()) => {
@@ -712,6 +776,9 @@ impl Supervisor {
                         }
                         Err(error) => {
                             self.failed = Some(format!("restart failed: {error}"));
+                            if self.config.rollback_mode == RollbackMode::External {
+                                self.exit_code = Some(EXIT_GIVE_UP);
+                            }
                             self.audit(json!({
                                 "event": "execute",
                                 "at_ms": now,
@@ -732,6 +799,10 @@ impl Supervisor {
             }
             DecisionKind::Fail => {
                 self.failed = Some(decision.reason.clone());
+                if self.config.rollback_mode == RollbackMode::External {
+                    let _ = self.runner.stop();
+                    self.exit_code = Some(EXIT_GIVE_UP);
+                }
                 self.audit(json!({
                     "event": "execute",
                     "at_ms": now,
@@ -747,6 +818,63 @@ impl Supervisor {
                     self.execute(trigger, decision);
                     return;
                 };
+                if self.config.rollback_mode == RollbackMode::External {
+                    if self.runner.running() {
+                        if let Err(error) = self.runner.stop() {
+                            self.failed = Some(format!("rollback stop failed: {error}"));
+                            self.exit_code = Some(EXIT_GIVE_UP);
+                            self.audit(json!({
+                                "event": "execute",
+                                "at_ms": now,
+                                "decision": "rollback",
+                                "result": "stop_failed",
+                                "target": target,
+                                "error": error,
+                            }));
+                            return;
+                        }
+                    }
+                    if let Err(error) =
+                        save_current(&PathBuf::from(&self.config.state_dir), &target, now)
+                    {
+                        // 写不了 current.json 就必须停下：systemd 重新拉起仍会读旧指针，
+                        // 变成无限回滚循环。
+                        self.failed = Some(format!("rollback pointer write failed: {error}"));
+                        self.exit_code = Some(EXIT_GIVE_UP);
+                        self.audit(json!({
+                            "event": "execute",
+                            "at_ms": now,
+                            "decision": "rollback",
+                            "result": "current_write_failed",
+                            "target": target,
+                            "error": error,
+                        }));
+                        return;
+                    }
+                    self.current = target.clone();
+                    self.lkg = None;
+                    self.startup_at_ms = now;
+                    self.healthy_since_ms = None;
+                    self.ever_healthy = false;
+                    self.consecutive_unhealthy = 0;
+                    self.unhealthy_since_ms = None;
+                    self.consecutive_failures = 0;
+                    self.consecutive_holds = 0;
+                    self.failures.clear();
+                    self.exit_code = Some(EXIT_ROLLBACK);
+                    self.audit(json!({
+                        "event": "execute",
+                        "at_ms": now,
+                        "decision": "rollback",
+                        "result": "rollback_requested",
+                        "target": self.current,
+                    }));
+                    eprintln!(
+                        "supervisor rollback requested -> {} (exit {EXIT_ROLLBACK})",
+                        self.current.id()
+                    );
+                    return;
+                }
                 if self.runner.running() {
                     if let Err(error) = self.runner.stop() {
                         self.failed = Some(format!("rollback stop failed: {error}"));
@@ -862,6 +990,31 @@ fn lkg_path(state_dir: &Path) -> PathBuf {
     state_dir.join("lkg.json")
 }
 
+fn current_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("current.json")
+}
+
+/// 读 launcher 应该启动的版本指针。文件不存在/损坏返回 `None`，由调用方回退配置。
+pub fn load_current(state_dir: &Path) -> Option<CommandSpec> {
+    let text = std::fs::read_to_string(current_path(state_dir)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    serde_json::from_value(value.get("command")?.clone()).ok()
+}
+
+/// 原子替换 `current.json`。launcher 启动时写一次；回滚时 supervisor 改写它。
+pub fn save_current(state_dir: &Path, command: &CommandSpec, now: i64) -> Result<(), String> {
+    let record = json!({"command": command, "updated_at_ms": now, "updated_by": "acb-launcher"});
+    let path = current_path(state_dir);
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(
+        &temp,
+        serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("cannot write {}: {error}", temp.display()))?;
+    std::fs::rename(&temp, &path)
+        .map_err(|error| format!("cannot replace {}: {error}", path.display()))
+}
+
 fn load_lkg(state_dir: &Path) -> Option<CommandSpec> {
     let text = std::fs::read_to_string(lkg_path(state_dir)).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
@@ -881,9 +1034,41 @@ fn save_lkg(state_dir: &Path, command: &CommandSpec, now: i64) -> Result<(), Str
         .map_err(|error| format!("cannot replace {}: {error}", path.display()))
 }
 
+/// 按配置构造策略实现。`acb-supervisor` 与 `acb-launcher` 共用这一份选择逻辑。
+pub fn build_policy(config: &Config) -> Result<Arc<dyn Policy>, String> {
+    match config.policy.provider.as_str() {
+        "acb.supervisor.default" | "default" => Ok(Arc::new(BuiltinPolicy)),
+        "command" => {
+            let command = config
+                .policy
+                .command
+                .as_deref()
+                .map(str::trim)
+                .filter(|command| !command.is_empty())
+                .ok_or_else(|| "policy.provider=command requires policy.command".to_owned())?;
+            Ok(Arc::new(CommandPolicy::new(command)))
+        }
+        other => Err(format!("unknown supervisor policy provider: {other}")),
+    }
+}
+
+/// 没配 `health_url` 时的探针：进程活着就算健康，判断交给进程退出路径。
+pub struct AlwaysHealthy;
+
+impl Probe for AlwaysHealthy {
+    fn healthy(&mut self) -> bool {
+        true
+    }
+}
+
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or_default()
+}
+
+/// 给 launcher 用的当前时间。
+pub fn now_ms() -> i64 {
+    now_millis()
 }

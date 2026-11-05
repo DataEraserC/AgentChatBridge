@@ -386,6 +386,14 @@ provider = "acb.supervisor.default"   # 缺省用内置
 
 ### 9.3 systemd 边界（最小接入）
 
+**2026-11-05 起 systemd 部署入口是 `acb-launcher`**，因为 `ExecStart` 是静态的，
+回滚要在运行期换版本。launcher 读 `state_dir/current.json`、监督子进程，策略要求
+回滚时写新指针并以 75 退出；systemd 只负责「进程没了就拉起」。完整重启表、退出码
+契约与 watchdog 取值见 [supervisor-systemd.md](supervisor-systemd.md)。
+
+`acb-supervisor` 仍用于没有 systemd 的手动/容器场景（`RollbackMode::Internal`，
+自己起 LKG）：
+
 - 单元文件：`deploy/systemd/acb-supervisor.service`；配置样例：
   `deploy/supervisor.example.toml`。
 - systemd 只负责：拉起 `acb-supervisor`、supervisor 崩溃时重启它、收集日志。
@@ -400,13 +408,16 @@ provider = "acb.supervisor.default"   # 缺省用内置
 
 ### 9.4 测试证据
 
-`crates/supervisor/tests/rollback.rs` 共 8 个测试，全部读真实审计文件断言「执行了
+`crates/supervisor/tests/rollback.rs` 共 11 个测试，全部读真实审计文件断言「执行了
 什么」，而不是只断言决策结果：
 
 | 测试 | 证明的执行事实 |
 |---|---|
 | `rollback_is_executed_and_switches_to_lkg` | runner 收到第二次 `start`，目标是 `/lkg`；审计 `execute.result=rolled_back` |
 | `rollback_start_failure_is_visible_and_stops_recovery` | LKG 启动失败 → `failed` + `rollback_failed`，之后不再重启 |
+| `external_rollback_writes_pointer_and_exits_75_without_starting_lkg` | launcher 模式：写 `current.json`=LKG、不自己起 LKG、`exit_code=75` |
+| `external_fail_is_terminal_and_exits_78` | 无 LKG → `fail` + 停子进程 + `exit_code=78` |
+| `second_failure_after_rollback_is_terminal_78` | 回滚后的版本再失败 → 78，不会二次回滚 |
 | `policy_timeout_holds_then_three_errors_fail` | 策略睡 200ms、超时 100ms → 3 次 `policy_error` 后执行 `fail` |
 | `consecutive_policy_errors_hold_then_fail` | 前两次错误执行 `hold`，第三次执行 `fail` |
 | `startup_grace_keeps_restarting_without_rollback` | 宽限期内 3 次退出都重启当前版本，决策 `startup_grace` |

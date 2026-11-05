@@ -122,6 +122,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "acb-launcher"
+version = "0.1.0"
+dependencies = [
+ "acb-supervisor",
+ "libc",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "acb-notifier-process"
 version = "0.1.0"
 dependencies = [

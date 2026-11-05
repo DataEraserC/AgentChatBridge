@@ -13,11 +13,15 @@ args = ["--config", "/绝对路径/config.toml"]
 # 桥的健康端点。启用 console 时才有；不配置则「进程存活即健康」。
 health_url = "http://127.0.0.1:3100/healthz"
 
-# LKG 指针与审计都在这个目录：lkg.json、supervisor.log。
+# LKG 指针与审计都在这个目录：current.json、lkg.json、supervisor.log。
 state_dir = "state/supervisor"
 probe_interval_secs = 5
 # 连续健康这么久才把当前版本提升为 LKG；回滚成功后也要重新等满这个窗口。
 stable_window_secs = 60
+# internal（默认）= supervisor 停旧进程并自己起 LKG；
+# external = 把 LKG 写进 current.json 后以 75 退出，交给 systemd 拉起 launcher
+# （acb-launcher 会强制 external，不需要在这里写）。
+# rollback_mode = "internal"
 
 [supervisor.policy]
 # acb.supervisor.default = 内置策略；command = 外部进程（stdin/stdout JSON）。
