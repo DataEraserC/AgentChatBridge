@@ -1939,6 +1939,32 @@
   - `access_request_description_lists_exactly_the_kernel_ticket_ops`
   - 全量验证：`cargo test --workspace`、clippy `-D warnings` 全绿。
 
+## 2026-11-05 — 新增只读 `capabilities` 工具（第 29 个）
+
+- 做了什么：
+  - 新工具 `capabilities`：`scope=session` 给整体摘要与计数；`scope=room` 给房间
+    订阅/可读/可写与平台 op 的 risk、direct_executable、ticket_required、
+    requestable、allow_destructive；`scope=tool` 给单个工具或 op 的稳定原因码。
+  - 判定复用现有路径：`check_access` 增加 `probe=true` 分支，只回答不消费票据；
+    `grants` / 外部 access provider / `connection_allows_destructive` / `TICKET_OPS`
+    都是同一套实现，没有第二套判断。
+  - tickets 块只统计本会话；`AccessTickets` 新增只读 `live_counts` 与
+    `live_groups_for_turn`，不触发过期扫描。
+  - 目录/大列表超过 4 KiB 走 `maybe_index_list` 降级；`scope=room` 的 118 个 op
+    会自动索引。
+  - `send_message` / `send_message_to` / `access_request` 描述加了「被拒先查
+    capabilities」的指引；`tools.mjs` 与 `TOOL_NAMES` 同步到 29，跨层一致性测试
+    自动覆盖。
+- 取舍：`scope=tool` 的未知 op 返回 `{found:false,reason:"unknown_op"}` 而不是抛错，
+  便于模型一次改对；工具不可用原因用稳定短码，不返回别的会话的票据信息。
+- 证据：
+  - `session_scope_summarizes_tools_rooms_and_tickets`
+  - `room_scope_separates_subscription_read_and_write`
+  - `tool_scope_reports_stable_reasons`
+  - `ticket_counts_do_not_leak_other_sessions`
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode、
+    `node --check` 全绿。
+
 
 ## 部署注意事项（nix-config 打包）
 

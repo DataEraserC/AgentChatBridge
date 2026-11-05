@@ -58,6 +58,7 @@ ${ELEMENTS_DOC}
 
 回执是真的回执：只有返回里 ok=true 才算发出去了，那时才有 platform_id 和 at。
 失败了会直接给你 error——**不要**在失败之后跟群里说「已经发了」。
+被 forbidden / room_not_subscribed 挡下时，先查 capabilities（scope=session 或 scope=room）确认原因，别盲目重试。
 回执里 modified_by 非空 = 桥的发送前钩子改过正文（按顺序列出 provider），群里看到的不是你写的原文。`,
     schema: {
       type: "object",
@@ -70,6 +71,7 @@ ${ELEMENTS_DOC}
     description: `发到另一个房间。参数和 send_message 一样，只多一个 to。
 to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/323622442。
 只能发到「当前会话订阅过的房间」——订阅表在桥的配置里，改不了也不该改。
+被拒绝时先查 capabilities（scope=room）确认读写与原因，不要盲目重试。
 跨会话发送已经砍掉：你不能替别的人格/会话发言。
 回执里 modified_by 非空 = 发送前钩子改过正文，群里看到的不是你写的原文。`,
     schema: {
@@ -138,6 +140,30 @@ get_platform_events，wait_message，或 platform_call:<op>（如 platform_call:
       properties: {
         id: { type: "string", description: "单张票据 id，形如 tk-..." },
         batch_id: { type: "string", description: "批次 id，形如 bt-..." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "capabilities",
+    description: `只读自检：回答「此刻能不能用」，不回答「世界上有什么」。
+scope=session 给整体处境与计数；scope=room 看某房间的读写与 op 风险 / allow_destructive；
+scope=tool 看单个工具或平台 op（name）。
+遇到 forbidden / room_not_subscribed / destructive_disabled 先查这里，别盲目重试。
+「有什么」仍用 platform_call（不给 op）、plugin_tools、describe_plugins。`,
+    schema: {
+      type: "object",
+      properties: {
+        scope: {
+          type: "string",
+          enum: ["session", "room", "tool"],
+          description: "默认 session",
+        },
+        room: ROOM_SCHEMA,
+        name: {
+          type: "string",
+          description: "scope=tool：工具名或平台 op，如 notes / msg.send",
+        },
       },
       additionalProperties: false,
     },

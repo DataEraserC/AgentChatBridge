@@ -51,7 +51,7 @@
 
 ## 工具面
 
-来源：用户裁定——不止有 send，还要有 get 等读取类工具。下表是**现状**（ADR-0017 之后、ADR-0020～0023 之后），不再是提案。共 **28 个工具**（`TOOL_NAMES`）。
+来源：用户裁定——不止有 send，还要有 get 等读取类工具。下表是**现状**（ADR-0017 之后、ADR-0020～0023 之后），不再是提案。共 **29 个工具**（`TOOL_NAMES`）。
 
 | 工具 | 参数 | 行为 |
 |------|------|------|
@@ -59,6 +59,7 @@
 | `send_message_to` | elements, to | 发到别的房间。`to` 的默认可选目标 = **本会话订阅的房间**，越界拒绝；会话可用 `[sessions.access]` 放宽边界（ADR-0026）。跨会话发送已砍（ADR-0017） |
 | `access_request` | items（target / ops / params） | 申请一次性票据。op 用具体名字（`send_message_to`、`notes:list`、`platform_call:<op>`）；批准后 core 执行写类动作，只读 op 留 active 由会话重试 |
 | `access_ticket_get` | id / batch_id | 只读查询本会话发起的票据：状态、能力、执行结果与失败原因 |
+| `capabilities` | scope(session/room/tool), room, name | 只读自检：工具可用性、平台 op 风险与 allow_destructive、权限边界、票据额度与可申请 op；不改变任何判定 |
 | `ack_messages` | ids | 确认消息处理完毕，水位前推。**幂等**；未确认的下轮重投（ADR-0010 修订） |
 | `get_history` | room, before, after, limit, columns | 查房间的流水。带 `total` / `has_more` / `next_before` / `next_after`；给了 `after` 就从旧往新翻（补看新消息），`columns` 里有 `quote_ref`（引用对到本房间编号，ADR-0024） |
 | `fetch_records` | room, ids, columns | 按水位编号精确查一批（补投递被截断的部分）；这轮读到的编号可以 `ack_messages` |
