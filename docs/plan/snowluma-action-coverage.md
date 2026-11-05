@@ -8,12 +8,17 @@
 - 未暴露：**0 个**。8 个平台占位/未实现动作也按用户口径暴露成 `Unverified`
   （协议上有合法调用，只是没有可观察语义）；白名单为空，测试仍要求「非空则每条
   必须有理由」。
-- 批次 9 审计后 `Unverified` 从 59 降到 **14**：批次 8 的 3 个
-  （`group.tag_add` / `group.tag_delete` / `group.add_option`）、审计后仍无出处
-  或语义未确证的 3 个（`account.qzone.unlike` / `msg.tuwen_ark` /
-  `group.tag_list`）、白名单清零新增的 8 个。其余 52 个按 SnowLuma 动作目录的
+- 批次 9 审计后 `Unverified` 从 59 降到 **14**；2026-11-05 第二批写入实验再降
+  `group.search` / `member.card`，当前 **16**。分组：批次 8 的 4 个
+  （`group.tag_add` / `group.tag_delete` / `group.tag_list` / `group.add_option`）、
+  审计后仍无出处或语义未确证的 2 个（`account.qzone.unlike` / `msg.tuwen_ark`）、
+  白名单清零新增的 8 个、本次实测降级的 2 个。其余 52 个按 SnowLuma 动作目录的
   摘要+参数改 `Verified`；`account.qzone.detail` 由 2026-11-05 只读实验改
   `Verified`；`group.tag_list` 只到「契约已确认」，仍 `Unverified`。
+- **本表括号里的 Unverified 是各批次审计时的历史备注；运行时状态以
+  `catalog.rs` 的 `verification_of` 为准。** 批次 9 后 52 个快照型 op 在代码里是
+  `Verified`，表中部分行仍保留旧备注，尚未逐行刷新；本次只修正了本次涉及的
+  `group.search` / `member.card` / 分类标签 / 占位动作与 `can_send_*` 行。
 - 风险分级逐条按动作：rkey / 文件集下载 / 闪传下载地址为 `Critical`；删除、取消、
   匿名禁言、QQ 空间代表账号对外发布为 `Destructive`；资料/在线状态/群待办为
   `Write`；纯查询为 `Read`。
@@ -162,16 +167,16 @@
 
 | 动作 | 状态 | op / 原因 |
 |---|---|---|
-| `add_group_tag` | 已暴露 | `group.tag_add`（Unverified：分类语义待实验） |
-| `delete_group_tag` | 已暴露 | `group.tag_delete`（Unverified：分类语义待实验） |
+| `add_group_tag` | 已暴露 | `group.tag_add`（Unverified：operates on group classification tags, not group tags） |
+| `delete_group_tag` | 已暴露 | `group.tag_delete`（Unverified：operates on group classification tags, not group tags） |
 | `get_group_admin_settings` | 已暴露 | `group.admin_settings` |
-| `get_group_tags` | 已暴露 | `group.tag_list`（Unverified + 契约已确认：六个 group_class 都返回空 tags，语义未确证） |
-| `set_group_add_option` | 已暴露 | `group.add_option`（Unverified：add_type 0/1-3 待实验） |
+| `get_group_tags` | 已暴露 | `group.tag_list`（Unverified：operates on group classification tags, not group tags；六个 group_class 都返回空 tags） |
+| `set_group_add_option` | 已暴露 | `group.add_option`（Unverified：仅 add_type=3 有读回；member_invite_policy 副作用不可回滚） |
 | `set_group_admin` | 已暴露 | `member.admin` |
-| `set_group_anonymous` | 已暴露 | `group.anonymous`（Unverified） |
-| `set_group_anonymous_ban` | 已暴露 | `group.anonymous_ban`（Unverified） |
+| `set_group_anonymous` | 已暴露 | `group.anonymous`（Unverified：placeholder handler, no observable state change） |
+| `set_group_anonymous_ban` | 已暴露 | `group.anonymous_ban`（Unverified：placeholder handler, no observable state change） |
 | `set_group_ban` | 已暴露 | `group.mute` |
-| `set_group_card` | 已暴露 | `member.card` |
+| `set_group_card` | 已暴露 | `member.card`（Unverified：write confirmed, rollback unverified；清空 OIDB 1007，有残留） |
 | `set_group_kick` | 已暴露 | `member.kick` |
 | `set_group_kick_members` | 已暴露 | `member.kick_many` |
 | `set_group_leave` | 已暴露 | `group.leave` |
@@ -180,7 +185,7 @@
 | `set_group_name` | 已暴露 | `group.name` |
 | `set_group_new_member_history_visibility` | 已暴露 | `group.history_visibility` |
 | `set_group_portrait` | 已暴露 | `group.avatar` |
-| `set_group_search` | 已暴露 | `group.search`（open/close 枚举） |
+| `set_group_search` | 已暴露 | `group.search`（Unverified：misnamed write，实为写开关；实测 OIDB 1288、读回无变化） |
 | `set_group_special_title` | 已暴露 | `member.title` |
 | `set_group_whole_ban` | 已暴露 | `group.mute_all` |
 
@@ -188,8 +193,8 @@
 
 | 动作 | 状态 | op / 原因 |
 |---|---|---|
-| `can_send_image` | 已暴露 | `account.can_send_image`（Unverified） |
-| `can_send_record` | 已暴露 | `account.can_send_record`（Unverified） |
+| `can_send_image` | 已暴露 | `account.can_send_image`（代码为 Verified（快照）；返回语义待实测） |
+| `can_send_record` | 已暴露 | `account.can_send_record`（代码为 Verified（快照）；返回语义待实测） |
 | `get_login_info` | 已暴露 | `account.login_info` |
 | `get_status` | 已暴露 | `account.status` |
 | `get_version_info` | 已暴露 | `account.version` |
@@ -307,10 +312,11 @@
   `nc_get_packet_status` / `set_group_anonymous` / `set_group_anonymous_ban`）
   协议上都有合法调用，按用户口径暴露成 `Unverified`；没有「技术上无法调用」的
   动作可留在白名单里。测试仍保留 `UNEXPOSED` 常量：非空时每条必须有理由。
-- 带 `Unverified` 的 14 个 op 分两类：6 个是真没出处/目录自述待核实/语义未确证/
-  写操作未执行，8 个是平台 mock/占位（协议可调用但无语义）。它们在 catalog 里
-  可申请、可审批、可执行，只是直调被拒且审批私信会显示 `[UNVERIFIED]`；
-  实验完成后把标记改成 `Verified`。
+- 带 `Unverified` 的 16 个 op 分四类：4 个分类标签/加群方式语义未全确证，
+  2 个真没出处/目录自述待核实，8 个平台 mock/占位/未实现（协议可调用但无语义），
+  2 个本次实测降级（`group.search` 误名写入、`member.card` 回滚失败）。它们在
+  catalog 里可申请、可审批、可执行，只是直调被拒且审批私信会显示 `[UNVERIFIED]`；
+  实验完成并满足「参数语义 + 返回语义 + 新鲜读回」后才改 `Verified`。
 - 审计结论逐条写在 `adapter-snowluma.md` 的「批次 9 审计表」，包括每条查的是
   SnowLuma 动作目录的哪个条目、参数是否对齐、为什么保留 `Unverified`。
 - QQ 空间写操作至少 `Destructive`：`account.qzone.send` / `comment` / `like` /

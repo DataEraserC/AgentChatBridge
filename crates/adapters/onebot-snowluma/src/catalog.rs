@@ -2602,22 +2602,27 @@ fn verification_of(method: &str) -> Verification {
     }
     match method {
         "group.add_option" => Verification::unverified(
-            "add_type=0 的真实语义（空设置 / 允许任何人 / 不允许任何人）与 1-3 只有 NapCat \
-             注释单一来源，尚未在 SnowLuma v2.4.0 实机确认",
-            "research §3.1：先 get_group_admin_settings 记录基线，对 v={0,1,2,3,4,5,55} 逐个 \
-             set_group_add_option 并回读 + QQ 客户端截图；再试 6/100 观察平台是否拒绝",
+            "2026-11-05 写入实验只确证 add_type=3（2→3→2 读回一致）；0/1/2/4/5/55 的 \
+             语义仍未逐个读回确证，且写 add_type 会重置 member_invite_policy、接口无法回滚",
+            "先人工在 QQ 客户端恢复 member_invite_policy=disabled；再对剩余取值逐个执行 \
+             「读基线 → 写 → 读回 → 写回」，每次记录 member_invite_policy 是否被重置",
         ),
+        // 群分类标签是分类级（group_class）不是群级：协议请求体里没有 group_id。
+        // 平台也没有「群号 → 分类」查询，无法把读回结果或写入限制到测试群。
         "group.tag_list" => Verification::unverified(
-            "2026-11-05 只读实验确认了参数 group_class 与返回 tags:[] 的形状，但 \
-             group_class=0/1/2/3/5/10 六次调用都返回空 tags，无法证明 tags 与 \
-             group_class 有对应关系；只算「契约已确认」，语义未确证",
-            "research §3.3：在已知带不同分类标签的测试群上，对至少两个非空 \
-             group_class 调用 get_group_tags，确认返回 tags 随 group_class 变化且与群号无关",
+            "operates on group classification tags, not group tags: get_group_tags 的底层是 \
+             OIDB 38524，请求体只有 groupClass（uint32），没有 group_id；\
+             group_class=0/1/2/3/5/10 六次调用都返回 tags:[]，只确认参数与返回形状，\
+             tags 与分类的对应关系未确证",
+            "需要平台先提供「群号 → 分类」映射或一个确定非空的 group_class；在此之前\
+             无法把读回结果与具体群关联。当前只算契约已确认，不标 Verified",
         ),
         "group.tag_add" | "group.tag_delete" => Verification::unverified(
-            "写标签的语义（影响群资料还是全局分类目录）尚未实机确认",
-            "research §3.3：选两个不同分类的测试群，加/删一个测试标签后检查两群资料与标签\
-             目录，最后清理",
+            "operates on group classification tags, not group tags: add_group_tag / \
+             delete_group_tag 的底层是 OIDB 38525/38526，请求体只有 groupClass + name，\
+             没有 group_id；写入会作用到整个分类，不是单个群",
+            "平台没有「群号 → 分类」查询，无法把写入限制在测试群；在授权边界内没有\
+             可执行的读回实验，保持 Unverified。不要用 group_id 冒充 group_class 重试",
         ),
         "msg.mark_read_group" | "msg.mark_read_private" => Verification::verified(
             "SnowLuma action catalog：mark_group_msg_as_read / mark_private_msg_as_read 是 \
@@ -2625,31 +2630,69 @@ fn verification_of(method: &str) -> Verification {
         ),
         // 目录自身标注未核实 / 运行目录里没有条目的，继续 Unverified。
         "account.qzone.unlike" => Verification::unverified(
-            "SnowLuma action catalog 在 unlike_qzone 条目上明确写「取消赞端点待真机核实」",
-            "research §3.8：用隔离测试号点赞再取消，确认端点、参数与失败码",
+            "endpoint self-declared unverified: SnowLuma action catalog 在 unlike_qzone 条目\
+             上明确写「取消赞端点待真机核实」；tid=0 返回 retcode 0 + data:null，\
+             成功返回不能证明点赞状态变化",
+            "用真实已点赞的 tid 执行后重新读点赞状态；状态没变即未生效。当前没有可用的\
+             真实点赞样本，保持 Unverified",
         ),
         "msg.tuwen_ark" => Verification::unverified(
-            "send_tuwen_ark 只出现在中文 API 索引，运行目录快照没有该动作；Ark 载荷形状\
-             无出处",
-            "research §3.7：用测试号发一张图文卡片，抓平台请求确认字段名",
+            "contract only: send_tuwen_ark 只出现在中文 API 索引，运行目录快照没有该动作；\
+             空参数返回 retcode 1400「title: is required」，Ark 载荷形状与成功返回无出处",
+            "research §3.7：用测试号发一张图文卡片，抓平台请求确认字段名与成功返回结构",
         ),
-        // 白名单清零：平台标注 mock / 占位 / 未实现的动作也暴露，但没有可观察语义。
-        "account.model_show"
-        | "account.model_show_set"
-        | "msg.word_slices"
-        | "file.collection_create"
-        | "friend.recent_contacts"
-        | "system.packet_status"
-        | "group.anonymous"
-        | "group.anonymous_ban" => Verification::unverified(
-            "SnowLuma action catalog 把这些动作标为 mock / 占位 / 未实现（或返回 ok 无效果）；\
-             协议上可调用，但没有可观察语义",
-            "research §3.10：对测试号逐个调用，记录是否返回占位成功、失败码与实际副作用；\
-             若平台补实现再改 Verified",
+        // 占位/空实现：成功返回不代表状态变化。reason 用固定类别开头，便于审计检索。
+        "group.anonymous" => Verification::unverified(
+            "placeholder handler, no observable state change: SnowLuma 2.2.1-node 的 \
+             set_group_anonymous run 是 () => okResponse()，不修改任何群状态；平台也没有\
+             可读回匿名开关的接口",
+            "无法用状态读回定性；只有平台补实现匿名开关并提供读接口后，才做\
+             开/关/再读的对照实验。当前不要把返回 ok 当成生效证据",
         ),
-        "group.search" => Verification::verified(
-            "SnowLuma packages/proto-defs/src/oidb.ts:139-142（0=open,1=close）与 \
-             packages/onebot/src/actions/group-admin.ts:323-330",
+        "group.anonymous_ban" => Verification::unverified(
+            "placeholder handler, no observable state change: SnowLuma 2.2.1-node 的 \
+             set_group_anonymous_ban run 是 () => okResponse()，不读取 user_id，\
+             也不会禁言任何人",
+            "无需制造匿名消息或提供真实 user_id；该 handler 不消费参数。只有平台补实现后，\
+             才用测试匿名成员做「禁言 → 读群禁言列表 → 解除」的读回实验",
+        ),
+        "account.model_show_set" => Verification::unverified(
+            "placeholder handler, no observable state change: SnowLuma 2.2.1-node 的 \
+             _set_model_show run 是 async () => okResponse()，不写任何状态；\
+             _get_model_show 也不返回真实机型",
+            "平台补实现前没有可核对的状态变化；补实现后用 _get_model_show 读回 \
+             variants.model_show 与基线对比",
+        ),
+        "account.model_show" => Verification::unverified(
+            "compatibility mock, no observable state change: _get_model_show 把入参 model \
+             原样回显成 variants.model_show 并固定 need_pay:false，不反映真实机型或付费状态",
+            "2026-11-05 只读实验已确认是 echo；只有平台返回可核对的真实机型字段后才改\
+             Verified",
+        ),
+        "friend.recent_contacts" | "system.packet_status" => Verification::unverified(
+            "placeholder handler, no observable state change: get_recent_contact 返回空数组，\
+             nc_get_packet_status 返回 null；两个动作都没有真实数据字段",
+            "2026-11-05 只读实验已确认空返回；只有平台补实现并返回非空数据后才改 Verified",
+        ),
+        "msg.word_slices" | "file.collection_create" => Verification::unverified(
+            "platform reports not implemented: .get_word_slices 与 create_collection 都返回 \
+             retcode 100「not yet implemented」，没有成功返回语义",
+            "2026-11-05 只读实验已确认是明确失败；平台补实现后重新跑参数/返回语义对照",
+        ),
+        "member.card" => Verification::unverified(
+            "write confirmed, rollback unverified: set_group_card 的写入方向已用\
+             no_cache:true 新鲜读回确证，但清空/回滚方向返回 OIDB error 1007 on 0x8fc_3，\
+             残留值留在群里；不能算双确证",
+            "用测试成员重复「读基线 → 写新名片 → no_cache:true 读回 → 写回空字符串 → \
+             no_cache:true 读回」；回滚失败前不要升级 Verified，必要时人工改回",
+        ),
+        "group.search" => Verification::unverified(
+            "misnamed write: op 名 group.search 暗示查询，实际 handler 是 set_group_search\
+             （写群被搜索方式），没有分页；实测返回 OIDB error 1288 on 0x89a_0，\
+             读回前后管理设置完全一致，成功写入语义未确证",
+            "用 get_group_admin_settings(no_cache:true) 记录 no_finger_open / \
+             no_code_finger_open 基线，分别写 open/close 后新鲜读回；当前实测失败，\
+             保持 Unverified",
         ),
         "group.file.folder_rename" => Verification::verified(
             "SnowLuma packages/onebot/src/actions/group-file.ts:526-563（new_folder_name 优先、\
