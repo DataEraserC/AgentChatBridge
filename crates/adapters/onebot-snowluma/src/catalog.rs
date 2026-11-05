@@ -2694,6 +2694,12 @@ fn verification_of(method: &str) -> Verification {
              no_code_finger_open 基线，分别写 open/close 后新鲜读回；当前实测失败，\
              保持 Unverified",
         ),
+        "system.restart" => Verification::unverified(
+            "platform self-declared unsupported: SnowLuma action catalog 把 set_restart \
+             标为「重启（不支持）」；没有成功返回语义，也没有可观察的重启结果",
+            "在隔离实例上调用一次 set_restart，记录 retcode、连接是否断开与平台是否\
+             真的重启；平台补实现前保持 Unverified",
+        ),
         "group.file.folder_rename" => Verification::verified(
             "SnowLuma packages/onebot/src/actions/group-file.ts:526-563（new_folder_name 优先、\
              name 回退，两者皆空 retcode 1400）",

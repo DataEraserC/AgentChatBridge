@@ -123,6 +123,22 @@ fn catalog() -> Arc<[MethodSpec]> {
         record: RecordMode::None,
         verification: Verification::unverified("只有单一来源", "跑一次实验"),
     });
+    methods.push(MethodSpec {
+        name: "system.restart".into(),
+        aliases: Cow::Borrowed(&[]),
+        summary: "假重启 op：Critical + Unverified".into(),
+        tags: Vec::new().into(),
+        risk: Risk::Critical,
+        scope: Scope::Connection,
+        params: Vec::new().into(),
+        targets: Vec::new().into(),
+        effect: Effect::Read,
+        record: RecordMode::None,
+        verification: Verification::unverified(
+            "platform self-declared unsupported: 平台自述不支持重启",
+            "隔离实例调用并记录 retcode",
+        ),
+    });
     methods.into()
 }
 
@@ -457,6 +473,29 @@ fn session_scope_summarizes_tools_rooms_and_tickets() {
     assert_eq!(described, kernel, "可申请票据 op 必须等于内核词表");
 }
 
+/// 重启是 Critical，但平台自述不支持：capabilities 必须按 unverified 处理，
+/// 不能因为 Critical 就把它显示成可直接执行或 verified。
+#[test]
+fn critical_unverified_restart_is_ticket_only() {
+    let mut bridge = bridge();
+    let ticket = open_turn(&mut bridge, "qq:group/123");
+    let value = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "tool", "name": "system.restart"}),
+        )
+        .expect("能查");
+    assert_eq!(value["kind"], "op");
+    assert_eq!(value["risk"], "critical");
+    assert_eq!(value["verification"]["state"], "unverified");
+    assert_eq!(value["direct_executable"], false);
+    assert_eq!(value["ticket_required"], true);
+    assert_eq!(value["reason"], "unverified_requires_ticket");
+    assert_eq!(value["requestable"], true);
+}
+
 #[test]
 fn room_scope_separates_subscription_read_and_write() {
     let mut bridge = bridge();
@@ -476,8 +515,8 @@ fn room_scope_separates_subscription_read_and_write() {
     assert_eq!(subscribed["reason"], "forbidden");
 
     let ops = subscribed["ops"].as_array().expect("ops 是数组");
-    assert_eq!(ops.len(), 119);
-    assert_eq!(subscribed["indexed"], true, "119 个 op 必须索引降级");
+    assert_eq!(ops.len(), 120);
+    assert_eq!(subscribed["indexed"], true, "120 个 op 必须索引降级");
     assert!(ops[0].get("example").is_none(), "索引形态不带 example");
     let kick = ops
         .iter()
