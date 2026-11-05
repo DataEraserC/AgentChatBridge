@@ -80,21 +80,68 @@
         program = "${self.packages.${system}.acb-bridge-test}/bin/acb-bridge-test";
       };
 
-      devShells.${system}.default = pkgs.mkShell {
-        nativeBuildInputs = with pkgs; [
-          cargo
-          rustc
-          pkg-config
-        ];
-        buildInputs = with pkgs; [
-          openssl
-          zlib
-          libgit2
-        ];
-        # 让 cargo 在这个 dev shell 里能正常解包（nix 提供干净的文件系统）。
-        shellHook = ''
-          export CARGO_HOME="''${CARGO_HOME:-$HOME/.cargo}"
-        '';
-      };
+      devShells.${system} =
+        let
+          # inputsFrom 只合并 buildInputs/nativeBuildInputs/propagated* 并拼接
+          # shellHook，不会合并任意 env；公共变量必须写进这个共享 hook，
+          # 并在每个需要它的 shell 里引用。
+          commonHook = ''
+            export CARGO_HOME="''${CARGO_HOME:-$HOME/.cargo}"
+          '';
+        in
+        rec {
+          # 公共工具层：脚本、调试和部署都会用到的基础命令。
+          base = pkgs.mkShell {
+            name = "acb-base";
+            nativeBuildInputs = with pkgs; [
+              bash
+              coreutils
+              curl
+              git
+              jq
+            ];
+            shellHook = commonHook;
+          };
+
+          # Rust 组件：与旧 default 一致。
+          acb = pkgs.mkShell {
+            name = "acb-rust";
+            nativeBuildInputs = with pkgs; [
+              cargo
+              rustc
+              pkg-config
+            ];
+            buildInputs = with pkgs; [
+              openssl
+              zlib
+              libgit2
+            ];
+            shellHook = commonHook;
+          };
+
+          # Node 组件：仓库实际用 Node 24 跑 `node --test`；Node 22 在受限
+          # 环境里 node:http 走 undici 会失败，所以固定到已验证的 24。
+          harness = pkgs.mkShell {
+            name = "acb-harness";
+            nativeBuildInputs = with pkgs; [
+              nodejs_24
+              pnpm
+            ];
+            shellHook = commonHook;
+          };
+
+          # `nix develop` 一次只接受一个 installable；多组件组合走这个聚合层。
+          all = pkgs.mkShell {
+            name = "acb-all";
+            inputsFrom = [
+              base
+              acb
+              harness
+            ];
+          };
+
+          # 旧入口保持只含 Rust 工具链，不额外引入 Node；需要全部组件用 .#all。
+          default = acb;
+        };
     };
 }
