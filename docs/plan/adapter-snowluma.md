@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 16 项、部分实现 3 项、未实现 4 项**。动作级：现有 catalog 暴露 127 个层级 op / 130 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。逐动作覆盖矩阵见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 19 项、部分实现 2 项、未实现 2 项**。动作级：现有 catalog 暴露 189 个层级 op / 192 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考），200 个中文动作里只剩 8 个平台占位/未实现的外部约束项。逐动作覆盖矩阵见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -116,8 +116,8 @@
 - **连接**：正向 WebSocket（`ws-client`）与反向 WebSocket（`ws-server`，桥监听，SnowLuma 连入）；HTTP API、HTTP 事件上报与 `wss://` 未实现。
 - **鉴权**：`ws-client` 用 `Authorization: Bearer`（地址里的 `?access_token=` 原样保留）；`ws-server` 接受 `?access_token=` 或 `Authorization: Bearer`，不匹配直接 401。
 - **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、自定义收藏表情（`msg.face`）、合并转发发送与读取。
-- **平台方法**：`catalog.rs` 的 `ROUTES` 共 91 个层级 op，映射 94 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
-- **目录体积**：不带 `op` 列目录时，91 个 op 的原始清单约 18–19 KB；索引化后约 13 KB，仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
+- **平台方法**：`catalog.rs` 的 `ROUTES` 共 189 个层级 op，映射 192 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**；现在只剩 8 个平台占位/未实现的动作没列。
+- **目录体积**：不带 `op` 列目录时，189 个 op 的原始清单约 25–27 KB；索引化后仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
 - **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略（`reportSelfMessage = true` 时不重复记账）；`meta_event/heartbeat` 只刷新平台依赖条目的 `lastOkAt`，生命周期忽略；`bot_status` / `bot_offline` 走账号状态，不再写进私聊房间；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot-snowluma/src/event.rs#L55-L200)）。
 - **账号**：连上后另起线程调 `get_login_info` 核对 `account`，并调 `get_version_info` / `get_status` 采集三层版本与在线状态（[link.rs](../../crates/adapters/onebot-snowluma/src/link.rs)）。
 - **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 写进 `accountOnline` / `accountGood`；`bot_status` 的上下线按失败阈值迁移依赖状态，心跳只刷新 `lastOkAt`。版本信息写进 `version`。
@@ -222,30 +222,28 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 14 | 群公告 | 3 | **已实现** | 获取/发送/删除 |
 | 15 | 群文件 | 12 | **已实现** | 根/子目录列表、下载链接、系统信息、群/私聊上传、群删除、文件夹创建/删除/改名、文件移动/重命名、私聊下载链接、分享链接、临时文件转永久 |
 | 16 | 流式传输 | 6 | **已实现** | WS 多帧下载 `file_info → file_chunk* → file_complete` 累计为元信息/分块统计；上传多请求 + `reset:true`；chunk 字节不整段进内存 |
-| 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **部分** | 回应/自定义表情/系统表情主体已实现；仍缺 `move_custom_face_to_front` 与 `get_emoji_likes`（与 `fetch_emoji_like` 重叠） |
+| 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **已实现** | 回应/自定义表情/系统表情全部暴露；`move_custom_face_to_front` 与 `get_emoji_likes` 已补（后者是 `fetch_emoji_like` 的别名） |
 | 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **已实现** | 原始流式上传下载、`download_file`（1 GiB / 60 s / http(s)）已补；音乐签名是配置项不是动作 |
-| 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 启动已调用 `get_login_info` / `get_status` / `get_version_info`；三层版本 + 兼容下限进依赖元数据。仍缺 `can_send_*`、资料设置、在线状态设置 |
+| 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 启动已调用 `get_login_info` / `get_status` / `get_version_info`；三层版本 + 兼容下限进依赖元数据。`can_send_*`、资料设置、在线状态设置已补，但 55 个批次 9 op 仍是 `Unverified`，要等实验完成才算「完全」 |
 | 20 | 事件类型 | message / message_sent / notice / request / meta | **已实现** | `group_upload` / `essence` / `notify.*`（poke/profile_like/title/group_name/input_status）按 research §2.1 字段解析；未知 notice 仍保留 Opaque |
 | 21 | 群相册 | 9 | **已实现** | 相册/媒体列表、上传、删除、评论、点赞全部暴露；删除/上传按风险分级 |
-| 22 | QQ 空间 | 10（中文）/ 26（英文） | **未实现** | 产品决定不暴露：账号级社交面，权限/审计成本高于聊天核心收益 |
-| 23 | 收藏/闪传/其他扩展 | 115 个 extended 里的大部分 | **未实现** | 仍按产品范围不暴露收藏/闪传的其余动作、SSO、数据库密钥等；`add_custom_face` / `get_share_link` / `trans_group_file` 已按出处落地 |
+| 22 | QQ 空间 | 10（中文）/ 26（英文） | **已实现（Unverified）** | 批次 9 按「任何平台功能均要有」全部暴露；写操作至少 `Destructive`，全部标 `Unverified`（门槛 critical），等实机实验后再改 `Verified` |
+| 23 | 收藏/闪传/其他扩展 | 115 个 extended 里的大部分 | **已实现（外部约束除外）** | 收藏/闪传/文件集、账号资料、群待办、Ark 卡片、单条转发都已暴露；SSO / 数据库密钥 / 进程运维按 critical 处理 |
 | 24 | WebUI 邮件/Webhook | 运维通道 | **不适用** | 不在适配器职责 |
 | 25 | MCP / TypeScript SDK | 独立包 | **不适用** | 不是 OneBot 运行时协议 |
 
-**计数（2026-11-05，动作补全 + verification 之后）**：25 项中 2 项不适用；
-适用 23 项 = 已实现 16 + 部分 3 + 未实现 4。批次 8 完成后计数为
-**9 完全 / 8 部分 / 6 未实现**；随后「动作补全 + verification」批次把 #4 HTTP 事件上报、
-#7 CQ 字符串、#10 群管理、#15 群文件、#16 流式、#20 事件字段补齐，计数变为
-**16 完全 / 3 部分 / 4 未实现**；#17 / #18 / #19 仍各有未排期动作，#2 HTTP API 与
-#5 `wss://` 仍未实现。
+**计数（2026-11-05，批次 9 之后）**：25 项中 2 项不适用；
+适用 23 项 = 已实现 19 + 部分 2 + 未实现 2（#2 HTTP API 与 #5 `wss://`）。
+#17 表情回应、#22 QQ 空间、#23 收藏/闪传已由批次 9 补齐；#19 的动作已全，
+但 59 个 `Unverified` op 要等实验完成才算完全实现。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 127 个层级 op / 130 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
-- 其中 4 个 op（`group.tag_list` / `group.tag_add` / `group.tag_delete` /
-  `group.add_option`）带 `Verification::Unverified`，按 critical 档管理。
+- 现有 `ROUTES` 189 个层级 op / 192 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 其中 59 个 op 带 `Verification::Unverified`（批次 8 的 4 个 + 批次 9 的 55 个），
+  按 critical 档管理；7 个批次 9 别名 op 有明确出处，标 `Verified`。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 逐动作「已暴露 / 未暴露 + 原因分类」见 [snowluma-action-coverage.md](snowluma-action-coverage.md)：
-  已暴露 130、未暴露 70（外部约束 8、未排期 62）。
+  已暴露 192、未暴露 8（全部是外部约束，白名单 + 理由由测试锁定）。
 - 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。
 
 **曾经最容易造成实际事故的三个缺口，已由批次 1 / 2 收口**：
@@ -253,7 +251,8 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 2. 账号上下线进入平台依赖健康，`/healthz` 能看到 `accountOnline` / `accountGood`（批次 1 / 2）。
 3. `get_version_info` 已采集三层版本并写进依赖元数据（批次 1）。
 
-现在的主要风险转为动作覆盖面：未列入 catalog 的 SnowLuma 动作 agent 调不到，见批次 3 / 4 / 7。
+动作覆盖面已收口：200 个中文动作里 192 个有 op，剩下 8 个是平台占位/未实现。
+现在的主要风险转为 `Unverified` 语义（59 个）与 QQ 空间等账号级写操作的实机行为。
 
 ---
 
@@ -862,7 +861,58 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - `hmac_sha1_matches_the_rfc2202_vector` / `event_dedup_drops_repeats_but_not_heartbeats`
 - 内核：`unverified_op_is_direct_denied_and_ticket_approval_shows_the_reason`、
   `capabilities` 里的 `fake.unverified` 条目。
-- 逐动作覆盖：[snowluma-action-coverage.md](snowluma-action-coverage.md)（130 已暴露 / 70 未暴露）。
+- 逐动作覆盖：[snowluma-action-coverage.md](snowluma-action-coverage.md)（批次 8 结束时为
+  130 已暴露 / 70 未暴露；批次 9 后为 192 / 8）。
+
+### 动作全暴露（批次 9，2026-11-05）
+
+**目标**：按「任何平台功能均要有，可以标高危，但必须要有」把 62 个未排期动作全部落地。
+
+**新增 62 个 op（127 → 189），映射 62 个 action（130 → 192）**
+- 账号资料/在线状态：`friend.dress`、`msg.mark_all_read`、`account.online_clients`、
+  `account.profile_likes`、`account.user_status`、`account.diy_status`、
+  `account.input_status`、`account.online_status`、`account.avatar`、
+  `account.profile`、`account.long_nick`、`account.can_send_image`、
+  `account.can_send_record`、`account.rkey`、`account.rkey_server`。
+- 群待办/键盘/机器人：`group.todo.list/set/complete/cancel`、`msg.inline_button`、
+  `group.robot_add_option`。
+- 收藏/闪传/文件集：`file.collection_list`、`file.flash_task_create`、
+  `file.flash_file_list/url/delete/rename`、`file.flash_msg_send`、
+  `file.fileset_list/id/info/download`、`file.private_upload`、
+  `face.custom_move_front`。
+- 单条转发/Ark/分享/翻译：`msg.forward_single_friend`、`msg.forward_single_group`、
+  `msg.mini_app_ark`、`msg.ark_share`、`msg.group_ark_share`、`msg.tuwen_ark`、
+  `msg.group_share_ex`、`msg.peer_share`、`msg.translate`、`face.super_id`。
+- 别名/已读/拍一拍/群信息：`msg.send_alias`、`group.file.folder_delete_alias`、
+  `group.ignored_requests_alias`、`msg.emoji_likes_alias`、`msg.mark_read_group`、
+  `msg.mark_read_private`、`msg.poke_alias`、`group.info_ex`。
+- QQ 空间：`account.qzone.feeds/list/detail/send/comment/delete/like/unlike/ban/right`。
+
+**风险分级（逐条按动作，不为清单好看放宽）**
+- `Critical`：`account.rkey`、`account.rkey_server`（密钥材料）、
+  `file.fileset_download`、`file.flash_file_url`（任意下载入口）。
+- `Destructive`：`group.todo.cancel`、`file.flash_file_delete`、
+  `group.file.folder_delete_alias`，以及 QQ 空间里代表账号对外发布或改变可见性的
+  `send` / `comment` / `like` / `unlike` / `delete` / `ban` / `right`。
+- `Write`：发消息、资料设置、在线状态、群待办设置、上传、重命名、标记已读。
+- `Read`：纯查询。
+
+**verification**
+- 7 个别名 op（`msg.send_alias`、`group.file.folder_delete_alias`、
+  `group.ignored_requests_alias`、`msg.emoji_likes_alias`、`msg.mark_read_group`、
+  `msg.mark_read_private`、`msg.poke_alias`）语义等于已核实动作，标 `Verified` 并写出处。
+- 其余 55 个只有 SnowLuma 动作目录来源，全部标 `Unverified { reason, experiment }`
+  （research §3.4–§3.8），门槛等同 critical：直调拒绝，只能走票据 + 审批。
+  全表 `Unverified` 59 个（含批次 8 的 4 个）。
+
+**证据**
+- `every_op_is_hierarchical_tagged_and_routed`：189 个 op 逐个检查层级名、risk tag、
+  scope tag、路由、TargetSpec 非空、verification 的 source/reason/experiment。
+- `action_coverage_matrix_is_complete_and_exceptions_have_reasons`：直接解析
+  `snowluma-action-coverage.md`，断言 200 行、192 已暴露、8 未暴露且逐条命中白名单
+  并有非空理由。
+- `catalog_lists_the_unverified_ops`：59 个 unverified op 的逐字清单。
+- **配置**：无新增配置项；风险仍由 `allow_destructive` + 票据审批控制。
 
 ### 批次之间的依赖
 
