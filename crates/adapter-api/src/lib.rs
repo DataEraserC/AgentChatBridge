@@ -389,6 +389,9 @@ pub enum WireVerification {
 #[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
 pub struct WireMethodSpec {
     pub name: String,
+    /// 别名 op。目录不展开别名；core 解析时归一化到主 op。
+    #[serde(default)]
+    pub aliases: Vec<String>,
     #[serde(default)]
     pub summary: String,
     #[serde(default)]
@@ -658,6 +661,7 @@ mod tests {
             name: "fixture".into(),
             catalog: vec![WireMethodSpec {
                 name: "fixture.echo".into(),
+                aliases: Vec::new(),
                 summary: "回显".into(),
                 tags: vec!["send".into()],
                 risk: "read".into(),

@@ -24,6 +24,7 @@ import {
   roomText,
 } from "./acb-wire.mjs"
 import {
+  ON_DEMAND_TOOL_NAMES,
   RESIDENT_TOOL_NAMES,
   residentSurface,
   toolsForSurface,
@@ -144,7 +145,9 @@ export default {
     })
     driver.visibleNames = new Set(residentSpecs.map((spec) => spec.name))
     driver.applySurface = async (surface) => {
-      const desired = toolSpecsForSurface(surface)
+      const desired = toolSpecsForSurface(surface, {
+        includeOnDemand: driver.onDemand,
+      })
       const desiredNames = new Set(desired.map((spec) => spec.name))
       await ctx.tool.transform((editor) => {
         for (const name of driver.visibleNames) {
@@ -229,6 +232,8 @@ class TurnDriver {
     this.surface = residentSurface()
     /** `ok` / `surface_fallback`：桥拉取失败时退回常驻层，不退回全量。 */
     this.surfaceStatus = "resident_only"
+    /** 本轮按需注入的工具：只在投递溢出/需要补上下文时非空。 */
+    this.onDemand = []
     /** setup 里注入：用新的 surface 调 ctx.tool.transform 增删工具。 */
     this.applySurface = null
     /** 当前已注册的工具名，避免重复 add / 漏 remove。 */
@@ -393,6 +398,8 @@ class TurnDriver {
     const started = Date.now()
     try {
       let sessionID = await this.#session(delivery.session)
+      // 投递溢出/补上下文是框架自己知道的事：这一轮临时把回看工具加进工具面。
+      this.onDemand = overflowTools(delivery)
       await this.#refreshSurface(link, delivery.session)
       // 映射（新建或接上的）报给桥，控制台才看得到 harness 侧映射。
       this.#reportMap(delivery.session, sessionID, link)
@@ -624,9 +631,15 @@ async function callBridge(link, name, args, options = {}) {
 }
 
 
+/** 这一轮是否需要临时注入回看工具。 */
+function overflowTools(delivery) {
+  const more = Number(delivery?.more ?? 0)
+  return delivery?.omitted || more > 0 ? ON_DEMAND_TOOL_NAMES : []
+}
+
 /** 按 surface 选 opencode 工具定义；dsh 与 opencode 共用 shared/tools.mjs 的选择逻辑。 */
-export function toolSpecsForSurface(surface = {}) {
-  return toolsForSurface(surface).map(({ name, description, schema }) => ({
+export function toolSpecsForSurface(surface = {}, options = {}) {
+  return toolsForSurface(surface, options).map(({ name, description, schema }) => ({
     name,
     description,
     input: schema,

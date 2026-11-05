@@ -12,6 +12,7 @@
 //!
 //! core 不认识这里任何一个名字，它只认 `MethodSpec` 这个形状（ADR-0020）。
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use acb_kernel::{
@@ -136,6 +137,7 @@ fn m(
 ) -> MethodSpec {
     MethodSpec {
         name: name.into(),
+        aliases: Cow::Borrowed(&[]),
         summary: summary.into(),
         tags: tags.to_vec().into(),
         risk,
@@ -163,6 +165,7 @@ fn cm(
 ) -> MethodSpec {
     MethodSpec {
         name: name.into(),
+        aliases: Cow::Borrowed(&[]),
         summary: summary.into(),
         tags: tags.to_vec().into(),
         risk,
@@ -1828,43 +1831,6 @@ fn methods() -> Vec<MethodSpec> {
             &[],
         ),
         m(
-            "msg.send_alias",
-            "按 message_type 发送消息（send_msg）。与 msg.send 等价，保留平台原动作名",
-            &[tags::MESSAGE, tags::SEND],
-            Risk::Write,
-            &[
-                any("message", "消息内容"),
-                opt("message_type", "group / private"),
-                opt("group_id", "群号；message_type=group 时填"),
-                opt("user_id", "QQ 号；message_type=private 时填"),
-            ],
-        ),
-        m(
-            "group.file.folder_delete_alias",
-            "删除群文件文件夹（delete_group_folder）。与 group.file.folder_delete 等价",
-            &[tags::GROUP, tags::FILE],
-            Risk::Destructive,
-            &[req("folder_id", "文件夹 id")],
-        ),
-        cm(
-            "group.ignored_requests_alias",
-            "查被忽略的加群请求（get_group_ignore_add_request）。与 group.ignored_requests 同义",
-            &[tags::GROUP, tags::APPROVE],
-            Risk::Read,
-            &[opt("count", "取多少条")],
-        ),
-        cm(
-            "msg.emoji_likes_alias",
-            "查消息的表情表态（get_emoji_likes）。与 msg.reaction_users 同义",
-            &[tags::MESSAGE],
-            Risk::Read,
-            &[
-                req("message_id", "消息 id"),
-                opt("emoji_id", "只看某个表情"),
-                num("count", "取多少条"),
-            ],
-        ),
-        m(
             "msg.mark_read_group",
             "把群消息标为已读（mark_group_msg_as_read）。只影响账号未读状态",
             &[tags::MESSAGE],
@@ -1877,16 +1843,6 @@ fn methods() -> Vec<MethodSpec> {
             &[tags::MESSAGE],
             Risk::Write,
             &[opt("message_id", "标到哪条消息；不填=全部")],
-        ),
-        m(
-            "msg.poke_alias",
-            "拍一拍（send_poke）。与 msg.poke 等价，群里 user_id 是拍谁",
-            &[tags::POKE, tags::SEND, tags::MEMBER],
-            Risk::Write,
-            &[
-                req("user_id", "拍谁 / 私聊对方 QQ 号"),
-                opt("group_id", "群号；群里拍人时填"),
-            ],
         ),
         // ── QQ 空间：代表账号对外发布，写操作至少 Destructive ──
         cm(
@@ -2261,16 +2217,8 @@ pub static ROUTES: &[Route] = &[
     route("msg.translate", "translate_en2zh"),
     route("face.super_id", "fetch_super_face_id"),
     group_route("group.info_ex", "get_group_info_ex"),
-    route("msg.send_alias", "send_msg"),
-    group_route("group.file.folder_delete_alias", "delete_group_folder"),
-    route(
-        "group.ignored_requests_alias",
-        "get_group_ignore_add_request",
-    ),
-    route("msg.emoji_likes_alias", "get_emoji_likes"),
     group_route("msg.mark_read_group", "mark_group_msg_as_read"),
     private_route("msg.mark_read_private", "mark_private_msg_as_read"),
-    route("msg.poke_alias", "send_poke"),
     route("account.qzone.feeds", "get_qzone_feeds"),
     route("account.qzone.list", "get_qzone_msg_list"),
     route("account.qzone.detail", "get_qzone_msg_detail"),
@@ -2282,6 +2230,30 @@ pub static ROUTES: &[Route] = &[
     route("account.qzone.ban", "set_qzone_ban"),
     route("account.qzone.right", "set_qzone_msg_right"),
     private_route("file.private_upload", "upload_private_file"),
+];
+
+/// 别名 op →（主 op、对应平台动作）。
+///
+/// 别名不出现在目录里，解析时归一化到主 op；risk / scope / targets / verification
+/// 全部继承主 op。第三个字段只给覆盖矩阵用：action 数不减，op 数要减。
+pub const ALIASES: &[(&str, &str, &str)] = &[
+    ("msg.send_alias", "msg.send", "send_msg"),
+    (
+        "group.file.folder_delete_alias",
+        "group.file.folder_delete",
+        "delete_group_folder",
+    ),
+    (
+        "group.ignored_requests_alias",
+        "group.ignored_requests",
+        "get_group_ignore_add_request",
+    ),
+    (
+        "msg.emoji_likes_alias",
+        "msg.reaction_users",
+        "get_emoji_likes",
+    ),
+    ("msg.poke_alias", "msg.poke", "send_poke"),
 ];
 
 /// 方法表 + 从路由推导出的目标参数声明。
@@ -2296,7 +2268,13 @@ pub fn catalog() -> std::sync::Arc<[MethodSpec]> {
                 .into_iter()
                 .map(|method| {
                     let effect = effect_of(&method);
+                    let aliases: Vec<Cow<'static, str>> = ALIASES
+                        .iter()
+                        .filter(|(_, main, _)| *main == method.name.as_ref())
+                        .map(|(alias, _, _)| Cow::Borrowed(*alias))
+                        .collect();
                     MethodSpec {
+                        aliases: aliases.into(),
                         tags: tags_for(&method).into(),
                         targets: targets_of(method.name.as_ref()).into(),
                         effect,
@@ -2393,7 +2371,6 @@ const DELETE_METHODS: &[&str] = &[
     "friend.delete",
     "group.file.delete",
     "group.file.folder_delete",
-    "group.file.folder_delete_alias",
     "group.essence.delete",
     "group.notice.delete",
     "face.custom_delete",
@@ -2410,7 +2387,6 @@ fn record_of(method: &str) -> RecordMode {
         "msg.send"
         | "msg.face"
         | "group.ai_voice_send"
-        | "msg.send_alias"
         | "msg.ark_share"
         | "msg.group_ark_share"
         | "msg.tuwen_ark"
@@ -2447,29 +2423,9 @@ fn verification_of(method: &str) -> Verification {
             "research §3.3：选两个不同分类的测试群，扫描 get_group_tags(0..30)，加/删一个 \
              测试标签后检查两群资料与标签目录，最后清理",
         ),
-        // 批次 9 的 7 个别名：语义就是已核实的同名/同参动作，给出处。
-        "group.file.folder_delete_alias" => Verification::verified(
-            "SnowLuma action catalog：delete_group_folder 与 delete_group_file_folder 同名同参，\
-             等价于已核实的 group.file.folder_delete",
-        ),
         "msg.mark_read_group" | "msg.mark_read_private" => Verification::verified(
             "SnowLuma action catalog：mark_group_msg_as_read / mark_private_msg_as_read 是 \
              mark_msg_as_read 的群/私聊专用别名",
-        ),
-        "msg.poke_alias" => Verification::verified(
-            "SnowLuma action catalog：send_poke 是 group_poke / friend_poke 的合体别名，\
-             群聊/私聊语义与已核实的 msg.poke 一致",
-        ),
-        "msg.emoji_likes_alias" => Verification::verified(
-            "SnowLuma action catalog：get_emoji_likes 与 fetch_emoji_like 返回同一组表情表态",
-        ),
-        "group.ignored_requests_alias" => Verification::verified(
-            "SnowLuma action catalog：get_group_ignore_add_request 与 get_group_ignored_notifies \
-             同名同义",
-        ),
-        "msg.send_alias" => Verification::verified(
-            "SnowLuma action catalog：send_msg 按 message_type 路由到 send_group_msg / \
-             send_private_msg，与已核实的 msg.send 等价",
         ),
         // 批次 9 的其余 op：只有动作目录来源，语义/参数/权限未实机确认。
         "friend.dress"

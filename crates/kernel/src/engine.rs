@@ -75,7 +75,7 @@ use crate::tools::{
     MemorySearchArgs, MemoryWriteArgs, NotesArgs, NotesToolArgs, PlatformCallArgs,
     PlatformListArgs, PlatformToolArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs,
     RECORD_COLUMNS, RESIDENT_TOOLS, SendArgs, SendToArgs, SetNoteArgs, TOOL_NAMES, TasksToolArgs,
-    WaitMessageArgs, catalog_entry, is_known, is_resident,
+    WaitMessageArgs, catalog_entry, is_known, is_on_demand, is_resident,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -5432,9 +5432,16 @@ impl<S: Store> Bridge<S> {
             .map(|tool| self.tool_surface_entry_json(ctx, config, session, tool))
             .collect();
         let resident: Vec<&str> = RESIDENT_TOOLS.to_vec();
+        // 按需工具（get_history / fetch_records）即使可执行也不进默认可见集：
+        // harness 在投递溢出时自己把它们加回本轮工具面。
         let executable = entries
             .iter()
             .filter(|entry| entry["direct_executable"] != false)
+            .filter(|entry| {
+                entry["tool"]
+                    .as_str()
+                    .is_some_and(|tool| !is_on_demand(tool))
+            })
             .count();
         let hidden = entries.len() - executable;
         let catalog: Vec<Value> = entries;
@@ -9549,6 +9556,7 @@ fn cap_op_json(
             Scope::Room => "room",
             Scope::Connection => "connection",
         },
+        "aliases": spec.aliases.iter().map(|alias| alias.as_ref()).collect::<Vec<_>>(),
         "direct_executable": direct_executable,
         "ticket_required": ticket_required,
         "requestable": requestable,
@@ -10057,7 +10065,9 @@ fn find_platform_op<'a>(methods: &'a [MethodSpec], op: &str) -> Result<&'a Metho
     }
     methods
         .iter()
-        .find(|method| method.name.as_ref() == op)
+        .find(|method| {
+            method.name.as_ref() == op || method.aliases.iter().any(|alias| alias.as_ref() == op)
+        })
         .ok_or_else(|| platform_op_error(methods, op))
 }
 
@@ -10103,6 +10113,14 @@ fn describe_brief(spec: &MethodSpec) -> Value {
     if spec.scope == Scope::Connection {
         item["scope"] = json!(spec.scope.as_str());
     }
+    if !spec.aliases.is_empty() {
+        item["aliases"] = json!(
+            spec.aliases
+                .iter()
+                .map(|alias| alias.as_ref())
+                .collect::<Vec<_>>()
+        );
+    }
     item
 }
 
@@ -10111,7 +10129,7 @@ fn describe_brief(spec: &MethodSpec) -> Value {
 /// 参数表说「该填什么」，样例说「填好长这样」。只给前者，模型还得把 Schema 翻译成
 /// 一次调用；翻译错就要多试一轮，而试错正是反馈里最多的摩擦。
 fn describe_method(spec: &MethodSpec) -> Value {
-    json!({
+    let mut item = json!({
         "op": spec.name,
         "path": spec.path(),
         "summary": spec.summary,
@@ -10122,7 +10140,16 @@ fn describe_method(spec: &MethodSpec) -> Value {
         "params": spec.params_schema(),
         "example": spec.example_call(),
         "verification": spec.verification.to_json(false),
-    })
+    });
+    if !spec.aliases.is_empty() {
+        item["aliases"] = json!(
+            spec.aliases
+                .iter()
+                .map(|alias| alias.as_ref())
+                .collect::<Vec<_>>()
+        );
+    }
+    item
 }
 
 /// 这台连接用到的标签，按首次出现的顺序。

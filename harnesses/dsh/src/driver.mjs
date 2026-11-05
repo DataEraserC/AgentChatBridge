@@ -39,6 +39,7 @@ import {
   renderTurn,
 } from "../../opencode/plugin/acb-wire.mjs"
 import {
+  ON_DEMAND_TOOL_NAMES,
   RESIDENT_TOOL_NAMES,
   residentSurface,
   toolsForSurface,
@@ -259,11 +260,13 @@ class TurnDriver {
     this.surface = residentSurface()
     // `ok` / `surface_fallback`：桥拉取失败时退回常驻层，不退回 29 个全量。
     this.surfaceStatus = "resident_only"
+    // 本轮按需注入的工具：只在投递溢出/需要补上下文时非空。
+    this.onDemand = []
   }
 
   /** 当前 MCP tools/list 要返回的工具定义。 */
   toolDefs() {
-    return toolDefsForSurface(this.surface)
+    return toolDefsForSurface(this.surface, { includeOnDemand: this.onDemand })
   }
 
   /** 用桥算出的 surface 替换本轮可见面；形状不对就保留上一次。 */
@@ -393,6 +396,8 @@ class TurnDriver {
     let failureInfo = null
     try {
       let sessionId = await this.#session(delivery.session, link)
+      // 投递溢出/补上下文是框架自己知道的事：这一轮临时把回看工具加进工具面。
+      this.onDemand = overflowTools(delivery)
       await this.#refreshSurface(link, delivery.session)
       const modelRef = this.#modelFor(delivery)
       await this.#pinModel(sessionId, modelRef)
@@ -838,9 +843,15 @@ function hiddenCatalogCount(catalog) {
   return catalog.length - visibleCatalogCount(catalog)
 }
 
+/** 这一轮是否需要临时注入回看工具。 */
+function overflowTools(delivery) {
+  const more = Number(delivery?.more ?? 0)
+  return delivery?.omitted || more > 0 ? ON_DEMAND_TOOL_NAMES : []
+}
+
 /** 按 surface 选 MCP 工具定义；dsh 与 opencode 共用 shared/tools.mjs 的选择逻辑。 */
-export function toolDefsForSurface(surface = {}) {
-  return toolsForSurface(surface).map(({ name, description, schema }) => ({
+export function toolDefsForSurface(surface = {}, options = {}) {
+  return toolsForSurface(surface, options).map(({ name, description, schema }) => ({
     name,
     description,
     inputSchema: schema,

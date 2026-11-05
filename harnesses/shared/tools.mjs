@@ -805,8 +805,15 @@ export const RESIDENT_TOOL_NAMES = [
   "access_request",
   "access_ticket_get",
   "ack_messages",
-  "fetch_records",
+]
+
+/**
+ * 按需工具：默认不注入，harness 检测到投递溢出（`delivery.omitted` / `delivery.more`）
+ * 时临时加进本轮工具面。它们仍有完整 schema，按需时直接给模型用。
+ */
+export const ON_DEMAND_TOOL_NAMES = [
   "get_history",
+  "fetch_records",
 ]
 
 /** 只含常驻白名单的 surface：启动时与桥拉取失败时的兜底，绝不退回全量工具。 */
@@ -851,9 +858,11 @@ function catalogSpec(spec, entry) {
  * - 其余（隐藏）不注入，但仍可从 `capabilities scope=catalog/session` 查到。
  *
  * surface 不再重复列 `visible`：可见集 = 常驻 ∪ 可执行的长尾。
+ * `get_history` / `fetch_records` 默认可执行但不注入；传 `includeOnDemand` 才给
+ * 完整 schema（投递溢出/补齐上下文时由 harness 显式触发）。
  * 没有 surface（例如还没开过轮）时只返回常驻层。
  */
-export function toolsForSurface(surface = {}) {
+export function toolsForSurface(surface = {}, { includeOnDemand = [] } = {}) {
   const resident = new Set(
     Array.isArray(surface.resident) && surface.resident.length
       ? surface.resident
@@ -862,13 +871,23 @@ export function toolsForSurface(surface = {}) {
   const catalog = new Map(
     (Array.isArray(surface.catalog) ? surface.catalog : []).map((entry) => [entry.tool, entry]),
   )
+  const forced = new Set(
+    includeOnDemand.filter((name) => ON_DEMAND_TOOL_NAMES.includes(name)),
+  )
   const visible = new Set(resident)
   for (const entry of catalog.values()) {
-    if (entry.direct_executable !== false) visible.add(entry.tool)
+    if (
+      entry.direct_executable !== false &&
+      !ON_DEMAND_TOOL_NAMES.includes(entry.tool)
+    ) {
+      visible.add(entry.tool)
+    }
   }
   const out = []
   for (const spec of TOOLS) {
     if (resident.has(spec.name)) {
+      out.push(spec)
+    } else if (forced.has(spec.name)) {
       out.push(spec)
     } else if (visible.has(spec.name)) {
       out.push(catalogSpec(spec, catalog.get(spec.name)))

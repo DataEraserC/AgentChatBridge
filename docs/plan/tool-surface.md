@@ -7,26 +7,31 @@
 ## 1. 三层
 
 ```text
-常驻层（RESIDENT_TOOLS，10 个，显式白名单）
+常驻层（RESIDENT_TOOLS，8 个，显式白名单）
   └─ 每条 harness 启动就注入；高频路径不搞两阶段
+按需层（ON_DEMAND_TOOLS，2 个）
+  └─ 投递溢出/补齐上下文时由 harness 临时注入，其余时候不在可见集
 目录层（capabilities scope=catalog）
   └─ 长尾工具的 name + 一句话用途 + 何时用 + 可见性/可申请性
 过滤层（capabilities scope=surface）
   └─ 按会话/场所/身份算出本轮 visible + hidden；harness 用它选工具
 ```
 
-### 常驻白名单（固定 10 个）
+### 常驻白名单（固定 8 个）
 
 `send_message` / `send_message_to` / `list_rooms` / `capabilities` /
-`platform_call` / `access_request` / `access_ticket_get` / `ack_messages` /
-`fetch_records` / `get_history`。
+`platform_call` / `access_request` / `access_ticket_get` / `ack_messages`。
 
 - `ack_messages` 是结束轮次前的确认工具；它和 `access_request` /
   `access_ticket_get` / `capabilities` 一样**永不被过滤**。
+- `get_history` / `fetch_records` 移到按需层（`ON_DEMAND_TOOLS`）：投递溢出
+  （`delivery.omitted` / `delivery.more`）或补上下文时，harness 把这两个工具
+  **临时**加进本轮可见集；普通轮次不注入。它们仍在 `TOOL_CATALOG` 里，可发现、
+  可调用，只是不预先占常驻位。
 - 白名单在 Rust 里是 `crates/kernel/src/tools.rs` 的 `RESIDENT_TOOLS`；在 JS 里是
   `harnesses/shared/tools.mjs` 的 `RESIDENT_TOOL_NAMES`。两边由
   `tool_schema_consistency.rs` 锁住，禁止反向定义（「除长尾外都常驻」会让新工具
-  自动膨胀）。
+  自动膨胀）。按需层同理由 `ON_DEMAND_TOOLS` / `ON_DEMAND_TOOL_NAMES` 对齐。
 
 ### 目录层入口
 
@@ -76,15 +81,15 @@ core 不复制第二份 schema，也不做第二份权限判定。
 只放选工具真正要用的字段）：
 
 - `resident`：常驻白名单（只有名字，永远全部可见）；
-- `catalog`：全部非驻留工具的索引。可执行条目只有 `tool` + `purpose`；
+- `catalog`：全部非驻留工具的索引（含按需层）。可执行条目只有 `tool` + `purpose`；
   不可执行条目只有 `tool` + `direct_executable=false` + `requestable` +
   `ticket_required` + `reason`（本轮不会注入，所以不带 `purpose`）；
 - `allow_destructive`：当前房间连接的破坏性放行状态；
 - `counts`：total / resident / catalog / visible / hidden。
 
 不再重复列 `visible` / `hidden` 数组：可见集 = `resident` ∪ `catalog` 里不带
-`direct_executable=false` 的条目。这样同一事实只有一个来源，也省掉每轮重复的
-29 个工具名。`when`、完整权限字段留给 `scope=catalog` / `scope=tool`。
+`direct_executable=false` 且**不是按需层**的条目。这样同一事实只有一个来源，
+也省掉每轮重复的 29 个工具名。`when`、完整权限字段留给 `scope=catalog` / `scope=tool`。
 
 harness 只把可见集里的工具注入本轮工具面：常驻工具用完整 schema，长尾工具用
 一个最小占位 schema（`additionalProperties: true`），描述里指向
@@ -111,20 +116,24 @@ harness 只把可见集里的工具注入本轮工具面：常驻工具用完整
 
 ## 3. 两阶段成本
 
-常驻层 10 个工具、长尾 19 个。启动时只注入常驻层，避免每条 harness 一开机就付
-19 份完整 schema。长尾工具在本轮被判定为可直接执行时，用最小占位 schema 注入；
-模型真的需要参数时再调 `capabilities scope=tool name=...` 拿完整 schema。
+常驻层 8 个工具、长尾 21 个（含按需层 2 个）。启动时只注入常驻层，避免每条 harness
+一开机就付全部完整 schema。长尾工具在本轮被判定为可直接执行时，用最小占位 schema
+注入；模型真的需要参数时再调 `capabilities scope=tool name=...` 拿完整 schema。
+按需层只有 harness 检测到投递溢出时才给完整 schema。
 
-实测（2026-11-05，29 个内置工具，JSON 紧凑序列化）：
+实测（2026-11-05，29 个内置工具，统一用 MCP `tools/list` 的紧凑 JSON 口径）：
 
 | 形态 | 字节数 | 粗估 token（按 4 B/token） |
 | --- | ---: | ---: |
-| 改动前：29 份完整 schema 常驻 | 32,785 | 8,196 |
-| 改动前：10 份常驻 schema + 旧 surface（6,303 B） | 22,154 | 5,538 |
-| 改动后：10 份常驻 schema + 新 surface（1,762 B） | 17,613 | 4,403 |
+| 全部 29 份完整 schema | 21,695 | 5,424 |
+| 旧：10 份常驻 schema + 旧 surface（1,762 B） | 11,832 | 2,958 |
+| 新：8 份常驻 schema + 新 surface（1,877 B） | 9,837 | 2,459 |
 
-surface 本身从 6,303 → 1,762 字节（-72%）；“空轮次”总成本比 29 份全量常驻
-少 46%。修改工具目录或 purpose 文案时，`surface_response_stays_within_budget`
+> 上一版记的 32,785 / 17,613 是另一种一次性口径，未留脚本、无法逐字节复现；
+> 本表统一重测。按同一口径，常驻 10→8 让“空轮次”从 11,832 → 9,837 B（-16.9%）。
+> surface 从 1,762 → 1,877 B：两个按需工具移进目录索引抵消了常驻层缩小的部分。
+
+修改工具目录或 purpose 文案时，`surface_response_stays_within_budget`
 会卡住 2 KiB 上限。
 
 对高频调用（发消息、列房间、票据、能力自检）不搞两阶段：它们本来每轮都可能用，
@@ -137,9 +146,11 @@ surface 本身从 6,303 → 1,762 字节（-72%）；“空轮次”总成本比
 
 - `src/driver.mjs` 的 `TurnDriver` 持有 `this.surface`；每轮 `#one` 在投话前调
   `callBridge(link, "capabilities", {scope:"surface"}, {internal:true})`。失败时
-  **退回常驻白名单**（`residentSurface()`，10 个），把 `surfaceStatus` 记成
+  **退回常驻白名单**（`residentSurface()`，8 个），把 `surfaceStatus` 记成
   `surface_fallback` 并记日志；不保留上一轮的长尾工具，也绝不退回 29 个全量。
   `internal` 不计入 `turnCalls`，避免把内部查询误报成「模型调了工具」。
+- `#one` 先看 `delivery.omitted` / `delivery.more`；非空就把 `ON_DEMAND_TOOL_NAMES`
+  记进 `this.onDemand`，`toolDefs()` 给这两个工具完整 schema。下一轮没有溢出时自动收回。
 - `src/mcp-core.mjs` / `src/mcp-server.mjs` 的 `tools` 参数支持**数组或函数**；
   `main()` 传 `() => driver.toolDefs()`，所以 `tools/list` 每次按当前 surface 算。
 - `toolDefsForSurface` 用 `shared/tools.mjs` 的 `toolsForSurface`，与 opencode 同源。
@@ -151,6 +162,8 @@ surface 本身从 6,303 → 1,762 字节（-72%）；“空轮次”总成本比
   `ctx.tool.transform`：删掉不在可见集的旧工具，补上新的长尾工具；surface 查询
   同样标 `internal`，不计入本轮的模型工具调用数。失败时先 `applySurface(residentSurface())`
   把工具面缩回常驻层，再记 `surfaceStatus = "surface_fallback"`。
+- `#one` 按 `delivery.omitted` / `delivery.more` 设置 `this.onDemand`；
+  `applySurface` 把按需工具用完整 schema 临时注入，下一轮自动收回。
 - `toolSpecsForSurface` 与 dsh 的 `toolDefsForSurface` 共用 `toolsForSurface`，
   一致性测试直接跨 harness 比对两边的工具名。
 
@@ -175,9 +188,12 @@ surface 本身从 6,303 → 1,762 字节（-72%）；“空轮次”总成本比
 - `harnesses/dsh/test/tool-surface.test.mjs`：
   同一 surface 下 dsh 与 opencode 选出的工具名完全一致；surface 收窄时两边一起收窄。
 - `harnesses/dsh/test/driver.test.mjs` 与
+  `harnesses/opencode/test/plugin.test.mjs`：投递溢出时临时注入
+  `get_history` / `fetch_records`，普通轮次不注入，下一轮自动收回。
+- `harnesses/dsh/test/driver.test.mjs` 与
   `harnesses/opencode/test/plugin.test.mjs`：
   `surface_failure_falls_back_to_resident_only`（先成功补上长尾，再让假桥拒绝
-  surface，断言工具面缩回 10 个常驻、不含长尾也不含全量）；
+  surface，断言工具面缩回 8 个常驻、不含长尾也不含全量）；
   启动只挂常驻白名单；开轮后补可见长尾、隐藏不注入；
   `capabilities scope=tool` 在 harness 侧补完整 schema。
 - `harnesses/dsh/test/mcp-server.test.mjs`：
@@ -189,6 +205,8 @@ surface 本身从 6,303 → 1,762 字节（-72%）；“空轮次”总成本比
   因此隐藏工具不会因为看不见而变成不可调用——只是不在模型上下文里出现。
 - `capabilities scope=surface` 是一次读操作，不消费票据、不改变状态；harness 拉取
   失败时退回常驻白名单（状态 `surface_fallback`），不影响本轮对话，也不扩大工具面。
+- 按需层只影响注入，不影响可调用性：`tools/call` 仍接受 `get_history` /
+  `fetch_records`；它们不在普通轮次的模型上下文里，只是不预先占位。
 - 目录层只覆盖内置工具。平台 op 的目录仍在 `capabilities scope=room` /
   `platform_call` 里，按同样的 `cap_op_json` 给出 `direct_executable` /
   `ticket_required` / `allow_destructive`。

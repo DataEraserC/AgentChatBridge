@@ -524,6 +524,47 @@ test("会话模型按 provider/model 拆，模型 id 里的斜杠保留", async 
   assert.equal(turnEnd.error, undefined)
 })
 
+test("投递溢出时临时注入 get_history/fetch_records，普通轮次不注入", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  link.ticket = TICKET
+
+  // 普通轮次：回看工具不在工具面里。
+  const first = driver.run(delivery(), link)
+  await waitFor(() => dsh.prompts.length === 1, "普通轮次要投话")
+  const normal = driver.toolDefs().map((tool) => tool.name)
+  assert.equal(normal.includes("get_history"), false, "普通轮次不注入 get_history")
+  assert.equal(normal.includes("fetch_records"), false, "普通轮次不注入 fetch_records")
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
+  await first
+
+  // 投递溢出：本轮临时注入；下一轮没有溢出时收回。
+  link.ticket = TICKET
+  const overflow = driver.run(delivery({ more: 3 }), link)
+  await waitFor(() => dsh.prompts.length === 2, "溢出轮次要投话")
+  const injected = driver.toolDefs().map((tool) => tool.name)
+  assert.ok(injected.includes("get_history"), "溢出时注入 get_history")
+  assert.ok(injected.includes("fetch_records"), "溢出时注入 fetch_records")
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t2" } })
+  await overflow
+
+  link.ticket = TICKET
+  const third = driver.run(delivery(), link)
+  await waitFor(() => dsh.prompts.length === 3, "收回轮次要投话")
+  const restored = driver.toolDefs().map((tool) => tool.name)
+  assert.equal(restored.includes("get_history"), false, "下一轮收回 get_history")
+  assert.equal(restored.includes("fetch_records"), false, "下一轮收回 fetch_records")
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t3" } })
+  await third
+})
+
 test("surface_failure_falls_back_to_resident_only：拉取失败时退回常驻层，不退回全量", async (t) => {
   const bridge = await new FakeBridge().start()
   const dsh = new ControllableDsh()

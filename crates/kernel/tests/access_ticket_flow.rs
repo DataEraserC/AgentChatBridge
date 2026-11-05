@@ -2,6 +2,7 @@
 //!
 //! 票据只放宽房间目标；`destructive` / `plugin` 不走票据，保持原有闸门。
 
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use acb_kernel::{
@@ -26,6 +27,7 @@ fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
     std::sync::Arc::from(vec![
         MethodSpec {
             name: "member.kick".into(),
+            aliases: Cow::Borrowed(&[]),
             summary: "踢人".into(),
             tags: Vec::new().into(),
             risk: Risk::Destructive,
@@ -38,6 +40,7 @@ fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
         },
         MethodSpec {
             name: "account.cookies".into(),
+            aliases: Cow::Borrowed(&[]),
             summary: "获取 Cookies".into(),
             tags: Vec::new().into(),
             risk: Risk::Critical,
@@ -55,6 +58,7 @@ fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
         },
         MethodSpec {
             name: "group.unverified".into(),
+            aliases: Cow::Borrowed(&[]),
             summary: "未验证的群设置".into(),
             tags: Vec::new().into(),
             risk: Risk::Write,

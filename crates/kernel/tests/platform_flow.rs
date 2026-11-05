@@ -50,6 +50,7 @@ fn spec(
 ) -> MethodSpec {
     MethodSpec {
         name: name.into(),
+        aliases: Cow::Borrowed(&[]),
         summary: summary.into(),
         tags: tags.to_vec().into(),
         risk,

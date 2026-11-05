@@ -178,6 +178,31 @@ test("开轮后按 surface 补长尾工具，隐藏工具不进来", async (t) =
   assert.equal(notes.input.additionalProperties, true, "长尾用占位 schema")
 })
 
+test("投递溢出时临时注入回看工具，普通轮次不注入", async (t) => {
+  const { bridge, host } = await boot(t)
+
+  // 普通轮次：回看工具不在工具面里。
+  await openTurn(bridge, host)
+  assert.equal(host.tools.has("get_history"), false, "普通轮次不注入 get_history")
+  assert.equal(host.tools.has("fetch_records"), false, "普通轮次不注入 fetch_records")
+  host.finishTurn()
+
+  // 投递溢出：本轮临时注入，下一轮再收回。
+  await openTurn(bridge, host, delivery({ more: 3 }))
+  await waitFor(
+    () => host.tools.has("get_history") && host.tools.has("fetch_records"),
+    "投递溢出时应注入回看工具",
+  )
+  assert.equal(host.tools.has("get_history"), true)
+  assert.equal(host.tools.has("fetch_records"), true)
+  host.finishTurn()
+
+  await openTurn(bridge, host)
+  await waitFor(() => !host.tools.has("get_history"), "下一轮应收回按需工具")
+  assert.equal(host.tools.has("fetch_records"), false)
+  host.finishTurn()
+})
+
 test("surface_failure_falls_back_to_resident_only：拉取失败时退回常驻层，不退回全量", async (t) => {
   const { bridge, host } = await boot(t)
 

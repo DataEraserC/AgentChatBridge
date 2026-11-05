@@ -1267,6 +1267,7 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::ALIASES;
     use acb_kernel::{Effect, OutgoingKind, RecordMode, Risk, Scope, TargetRole, Verification};
 
     #[test]
@@ -1660,8 +1661,6 @@ mod tests {
                     | "msg.mini_app_ark"
                     | "msg.translate"
                     | "face.super_id"
-                    | "group.ignored_requests_alias"
-                    | "msg.emoji_likes_alias"
                     | "account.qzone.feeds"
                     | "account.qzone.list"
                     | "account.qzone.detail"
@@ -1759,7 +1758,7 @@ mod tests {
     #[test]
     fn every_op_is_hierarchical_tagged_and_routed() {
         let methods = catalog();
-        assert_eq!(methods.len(), 189, "批次 9 后应有 189 个层级 op");
+        assert_eq!(methods.len(), 184, "别名收敛后应有 184 个层级 op");
         assert!(!methods.is_empty());
         for method in methods.iter() {
             let name = method.name.as_ref();
@@ -1803,6 +1802,32 @@ mod tests {
                     assert!(!experiment.is_empty(), "{name} 的 Unverified 没有实验");
                 }
             }
+        }
+    }
+
+    /// 别名挂在主 op 上，目录里没有别名条目；解析由 core 的 `find_platform_op`
+    /// 归一化（risk / verification 都是主 op 的）。
+    #[test]
+    fn aliases_attach_to_the_main_op_and_stay_out_of_the_catalog() {
+        let methods = catalog();
+        for (alias, main, _action) in ALIASES {
+            assert_ne!(alias, main, "别名不能等于主 op");
+            assert!(
+                !methods.iter().any(|method| method.name.as_ref() == *alias),
+                "目录里不能出现别名条目 {alias}"
+            );
+            let spec = methods
+                .iter()
+                .find(|method| method.name.as_ref() == *main)
+                .unwrap_or_else(|| panic!("主 op {main} 不在目录里"));
+            assert!(
+                spec.aliases.iter().any(|name| name.as_ref() == *alias),
+                "{alias} 没有挂到主 op {main} 上"
+            );
+            assert!(
+                spec.verification.is_verified(),
+                "别名继承主 op 的 verification：{main} 必须是 Verified"
+            );
         }
     }
 
@@ -1856,6 +1881,7 @@ mod tests {
                 Target::Fixed(action) => vec![action],
                 Target::ByRoom { group, private } => vec![group, private],
             })
+            .chain(ALIASES.iter().map(|(_, _, action)| *action))
             .collect();
 
         let mut exposed = 0usize;
