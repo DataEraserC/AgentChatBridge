@@ -1758,6 +1758,37 @@
 - 能力状态：计数仍是 **8 完全 / 8 部分 / 7 未实现**；#18 语音/媒体仍为「部分」，
   缺口缩为原始流式上传下载、`download_file`、音乐签名；#16 流式传输仍未实现。
 
+## 2026-11-05 — 批次 7：扩展域收尾（只读群相册）
+
+- 任务编号：adapter-snowluma 批次 7
+- 做了什么：
+  - `crates/adapters/onebot-snowluma/src/catalog.rs`：新增 2 个只读 op、2 条路由；
+    89 op / 92 action → 91 op / 94 action。
+  - `group.album.list` → `get_group_album_list`：群相册列表。
+  - `group.album.media` → `get_group_album_media_list`：相册媒体列表，`album_id` 必填，
+    `attach_info` 原样带回上一页 `nextAttachInfo`。
+  - 两个 op 均为 `Scope::Room`、`Risk::Read`、`Effect::Read`，没有状态变更。
+  - `crates/adapters/onebot-snowluma/src/outbound.rs`：`group.album.media` 的
+    `album_id` 空值校验。
+- 新增 op：**2 个**；新增工具位：**0 个**（工具数保持 28）。
+  没有新增 `PlatformTag`，没有第二张 risk 表。
+- 目录体积复核：op 数 91；默认 20 条/页仍是同样 20 条，约 **3 KB**；
+  全量清单约 18–19 KB、索引化后约 13 KB，自动分页继续生效，没有调页大小。
+- 产品范围判断不做（记缺口）：
+  - 群相册上传/删除/评论/点赞不暴露；文档也没有创建/删除相册动作。
+  - QQ 空间 26 个动作全部不暴露（账号级社交面）。
+  - 收藏/闪传 115 个 extended 不排期；`send_packet`、`request_decrypt_key`、
+    `get_credentials`、`get_cookies`、`get_clientkey`、`set_restart`、`bot_exit`、
+    `clean_cache` 永不暴露。
+- 证据：
+  - `batch_seven_album_ops_are_read_only_and_routed`（2 个 op 只读、路由正确，
+    catalog 不含 album upload/delete）
+  - `album_media_requires_an_album_id`
+  - `every_op_is_hierarchical_tagged_and_routed`（91 op）
+  - `cargo test --workspace`、clippy `-D warnings`、dsh/opencode 测试、`node --check` 全绿。
+- 能力状态：计数 **8 完全 / 8 部分 / 7 未实现 → 8 完全 / 9 部分 / 6 未实现**；
+  #21 群相册升为「部分」，#22 QQ 空间 / #23 收藏闪传仍为「未实现」（产品范围）。
+
 
 
 ## 部署注意事项（nix-config 打包）

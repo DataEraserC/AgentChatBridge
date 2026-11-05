@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 8 项、部分实现 8 项、未实现 7 项**。动作级：现有 catalog 暴露 89 个层级 op / 92 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 8 项、部分实现 9 项、未实现 6 项**。动作级：现有 catalog 暴露 91 个层级 op / 94 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -116,8 +116,8 @@
 - **连接**：正向 WebSocket（`ws-client`）与反向 WebSocket（`ws-server`，桥监听，SnowLuma 连入）；HTTP API、HTTP 事件上报与 `wss://` 未实现。
 - **鉴权**：`ws-client` 用 `Authorization: Bearer`（地址里的 `?access_token=` 原样保留）；`ws-server` 接受 `?access_token=` 或 `Authorization: Bearer`，不匹配直接 401。
 - **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、自定义收藏表情（`msg.face`）、合并转发发送与读取。
-- **平台方法**：`catalog.rs` 的 `ROUTES` 共 89 个层级 op，映射 92 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
-- **目录体积**：不带 `op` 列目录时，89 个 op 的原始清单约 18 KB；索引化后约 12–13 KB，仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
+- **平台方法**：`catalog.rs` 的 `ROUTES` 共 91 个层级 op，映射 94 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
+- **目录体积**：不带 `op` 列目录时，91 个 op 的原始清单约 18–19 KB；索引化后约 13 KB，仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
 - **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略（`reportSelfMessage = true` 时不重复记账）；`meta_event/heartbeat` 只刷新平台依赖条目的 `lastOkAt`，生命周期忽略；`bot_status` / `bot_offline` 走账号状态，不再写进私聊房间；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot-snowluma/src/event.rs#L55-L200)）。
 - **账号**：连上后另起线程调 `get_login_info` 核对 `account`，并调 `get_version_info` / `get_status` 采集三层版本与在线状态（[link.rs](../../crates/adapters/onebot-snowluma/src/link.rs)）。
 - **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 写进 `accountOnline` / `accountGood`；`bot_status` 的上下线按失败阈值迁移依赖状态，心跳只刷新 `lastOkAt`。版本信息写进 `version`。
@@ -226,13 +226,13 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **部分** | `get_record` / `get_image` / `get_file`、语音转写（`msg.voice_text`）、OCR（`msg.ocr`）、AI 语音角色/生成/发送有；缺原始流式上传下载、`download_file`（任意 URL/base64，无大小上限）、音乐签名（`musicSignUrl` 是配置项不是动作） |
 | 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 启动已调用 `get_login_info` / `get_status` / `get_version_info`；三层版本 + 兼容下限进依赖元数据。仍缺 `can_send_*`、资料设置、在线状态设置 |
 | 20 | 事件类型 | message / message_sent / notice / request / meta | **部分** | 有分流；notice 只解析 6 类 + poke；`bot_status` / `bot_offline` 已走账号状态并驱动依赖健康，心跳只刷新 `lastOkAt`，`message_sent` 已忽略。仍缺 `group_upload`、`essence`、`notify.*` 的字段解析（SnowLuma 未成文），未知 notice 保留 Opaque |
-| 21 | 群相册 | 9 | **未实现** | 无 |
-| 22 | QQ 空间 | 10（中文）/ 26（英文） | **未实现** | 无 |
-| 23 | 收藏/闪传/其他扩展 | 115 个 extended 里的大部分 | **未实现** | 无；部分上游本身是占位/未实现 |
+| 21 | 群相册 | 9 | **部分** | 相册列表/相册媒体列表（只读）有；创建/删除相册动作文档里不存在，上传/删除/评论/点赞按产品范围不暴露 |
+| 22 | QQ 空间 | 10（中文）/ 26（英文） | **未实现** | 产品决定不暴露：账号级社交面，权限/审计成本高于聊天核心收益 |
+| 23 | 收藏/闪传/其他扩展 | 115 个 extended 里的大部分 | **未实现** | 产品决定不暴露：收藏/闪传/SSO/数据库密钥等账号级或敏感面；`send_packet`、`request_decrypt_key`、`get_credentials` 永不暴露 |
 | 24 | WebUI 邮件/Webhook | 运维通道 | **不适用** | 不在适配器职责 |
 | 25 | MCP / TypeScript SDK | 独立包 | **不适用** | 不是 OneBot 运行时协议 |
 
-**计数**：25 项中 2 项不适用；适用 23 项 = 已实现 8 + 部分 8 + 未实现 7。
+**计数**：25 项中 2 项不适用；适用 23 项 = 已实现 8 + 部分 9 + 未实现 6。
 批次 1 完成后计数不变：第 19 项仍是「部分」，但缺口从「启动不调用版本/状态」缩小为
 「缺能力查询、资料设置、在线状态设置」。批次 2 完成后计数仍不变：第 20 项仍是「部分」，
 但缺口从「`bot_status` 污染私聊房间、心跳不更新健康」缩小为「`group_upload` / `essence` /
@@ -243,10 +243,12 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 收藏表情新增/置顶。批次 5 完成后：#3 反向 WS 从「未实现」升为「已实现」，
 计数变为 **8 完全 / 8 部分 / 7 未实现**；HTTP API、HTTP 事件上报、`wss://` 仍未实现。
 批次 6 完成后计数不变：#18 语音/媒体仍是「部分」，缺口缩为原始流式上传下载、
-`download_file` 与音乐签名；#16 流式传输仍未实现。
+`download_file` 与音乐签名；#16 流式传输仍未实现。批次 7 完成后：#21 群相册从
+「未实现」升为「部分」，计数变为 **8 完全 / 9 部分 / 6 未实现**；#22 QQ 空间与
+#23 收藏/闪传按产品范围保持「未实现」。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 89 个层级 op / 92 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 现有 `ROUTES` 91 个层级 op / 94 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。这是「完整实现 SnowLuma 能力」的主要工作量。
 
@@ -723,7 +725,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **前置**：**批次 5**。流式大概率只能走 HTTP；WS 不适合分段响应。
 
-### 批次 7：扩展域（群相册 / 空间 / 收藏 / 闪传 / 其他）
+### 批次 7：扩展域（已完成：只读群相册；其余按产品范围不暴露）
 
 **能力范围**
 - 群相册 9 个、QQ 空间 10/26 个、收藏与闪传、系统表情、其他 extended。
@@ -731,14 +733,33 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - 如果暴露，必须逐个给 risk / effect；账号级动作考虑 `Scope::Connection`，默认拒绝破坏性操作。
 
 **涉及文件**
-- `crates/adapters/onebot11/src/catalog.rs`
-- `crates/adapters/onebot11/src/outbound.rs`
+- `crates/adapters/onebot-snowluma/src/catalog.rs`
+- `crates/adapters/onebot-snowluma/src/outbound.rs`
 - `docs/05-adapters.md`
 
 **验证方式**
 - 目录快照 + 访问策略测试。
 - 真机 spot check（每个分类至少一个动作）。
 - 未实现/占位动作不标为可用。
+
+**实际落地**
+- **新增 2 个 op（89 → 91），映射 2 个 action（92 → 94）**：
+  - `group.album.list` → `get_group_album_list`（Read）：群相册列表。
+  - `group.album.media` → `get_group_album_media_list`（Read）：相册里的照片/视频，
+    `album_id` 必填，`attach_info` 原样带回上一页的 `nextAttachInfo`。
+  - 两者都是 `Scope::Room`、`Risk::Read`、`Effect::Read`，没有状态变更。
+- **参数校验**：`group.album.media` 的 `album_id` 不能为空。
+- **工具位不变**：仍为 28 个工具；新能力全部走 `platform_call` 的层级 op。
+- **产品范围判断不做（记缺口）**：
+  - 群相册写操作：`upload_image_to_qun_album`、`upload_video_to_qun_album`、
+    `del_group_album_media`、`do_group_album_comment`、点赞/取消点赞。上传/删除属于
+    相册媒体写面，评论/点赞属于社交互动，不纳入本轮聊天核心。
+  - 文档里没有创建/删除相册的动作，只有媒体级操作；不能凭空补一个 op。
+  - QQ 空间 26 个动作全部不暴露：账号级社交发布/删除/点赞/关注，权限和审计成本高。
+  - 收藏/闪传 115 个 extended：只读的 `get_collection_list` / 闪传读取也没有排期；
+    `send_packet`、`request_decrypt_key`、`get_credentials`、`get_cookies`、
+    `get_clientkey`、`set_restart`、`bot_exit`、`clean_cache` 永不暴露。
+- **没有新增 `PlatformTag`，没有第二张 op→risk 表**；全部走 `catalog()` + `ROUTES`。
 
 **前置**：无强依赖；但媒体相关动作可能依赖批次 5/6。
 
