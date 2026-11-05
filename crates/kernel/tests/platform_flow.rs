@@ -352,6 +352,7 @@ impl AdapterFactory for FakeAdapterFactory {
             supports_reply: true,
             text_limit: None,
             metadata: PluginMetadata::EMPTY,
+            direct_room: None,
         }
     }
 

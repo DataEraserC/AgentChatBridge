@@ -85,6 +85,8 @@ pub struct AdapterManifest {
     pub text_limit: Option<usize>,
     /// 给 agent / 控制台看的说明。
     pub metadata: PluginMetadata,
+    /// 这条连接的默认一对一房间（完整 room id）。审批路由的全局默认只从这里取。
+    pub direct_room: Option<Cow<'static, str>>,
 }
 
 /// 适配器启动时能拿到的东西。
@@ -375,6 +377,7 @@ mod tests {
         supports_reply: true,
         text_limit: None,
         metadata: PluginMetadata::EMPTY,
+        direct_room: None,
     };
 
     struct FakeFactory;
@@ -468,6 +471,7 @@ mod tests {
                 supports_reply: true,
                 text_limit: None,
                 metadata: PluginMetadata::EMPTY,
+                direct_room: None,
             }
         }
 

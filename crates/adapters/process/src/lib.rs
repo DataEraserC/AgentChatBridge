@@ -95,6 +95,8 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
         docs_url: None,
         options_schema: None,
     },
+    // 外置进程由子进程/连接配置决定，不在载体静态声明里编造。
+    direct_room: None,
 };
 
 /// 外置进程适配器工厂。

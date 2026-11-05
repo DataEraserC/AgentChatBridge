@@ -114,7 +114,7 @@ fn decision_providers_use_the_shared_wire() {
             connection: "qq",
             room: Some(&room),
             subject: acb_kernel::GrantSubject::User,
-            place: acb_kernel::GrantPlace::Group,
+            place: acb_kernel::Place::Room(acb_kernel::RoomScope::MultiParty),
             origin_room: Some(&room),
             action: AccessAction::Read,
             subscriptions: std::slice::from_ref(&room),

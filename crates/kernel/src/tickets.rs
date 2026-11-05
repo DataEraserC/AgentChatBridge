@@ -16,7 +16,7 @@ use acb_proto::RoomId;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::grants::{AccessTarget, GrantCapability, GrantPlace, GrantSubject, truncate_target};
+use crate::grants::{AccessTarget, GrantCapability, GrantSubject, Place, truncate_target};
 
 /// `[tickets]`：审批冷却与聚合的节奏。0 = 关闭对应冷却。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -99,7 +99,7 @@ pub struct AccessTicket {
     pub id: String,
     pub nonce: String,
     pub principal: GrantSubject,
-    pub place: GrantPlace,
+    pub place: Place,
     pub session: String,
     /// 申请时所在的房间（原会话流水写结果指针的位置）。
     pub request_room: RoomId,
@@ -121,11 +121,22 @@ pub struct AccessTicket {
     pub state: TicketState,
     pub request_turn: String,
     pub batch_id: Option<String>,
+    /// 申请时解析出的审批目标（房间 id 列表）。空 = 路由不可达。
+    pub approval_route: Vec<String>,
+    /// 实际批准/拒绝所在的房间。
+    pub approval_room: Option<String>,
+    /// 实际批准/拒绝的场所（private / group / console）。
+    pub approval_place: Option<String>,
     pub approval_ref: Option<String>,
     pub approver: Option<String>,
+    /// 是否在可信群内批准（审计用）。
+    pub trusted_group: bool,
     pub used_at: Option<i64>,
     /// 审批私信是否已经把这张票据列给管理员。同轮多张票据在收工时聚合发送。
     pub announced: bool,
+    /// 最近一次路由不可达的原因；发送成功后清空。
+    pub route_unavailable: Option<String>,
+    pub route_unavailable_at: Option<i64>,
     /// core 执行状态：succeeded / failed / skipped。
     pub execution_status: Option<String>,
     pub executed_at: Option<i64>,
@@ -138,7 +149,7 @@ pub struct AccessTicket {
 #[derive(Debug, Clone)]
 pub struct TicketRequest {
     pub principal: GrantSubject,
-    pub place: GrantPlace,
+    pub place: Place,
     pub session: String,
     pub request_room: RoomId,
     pub target: AccessTarget,
@@ -150,7 +161,19 @@ pub struct TicketRequest {
     pub unverified: Vec<UnverifiedOp>,
     pub request_turn: String,
     pub batch_id: Option<String>,
+    /// 申请时解析出的审批目标；空 = 路由不可达，不允许退回申请房间。
+    pub approval_route: Vec<String>,
     pub now: i64,
+}
+
+/// 一次批准/拒绝/撤销的场所与身份，用于审计与路由去重。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalMeta {
+    pub approval_room: String,
+    pub approval_place: String,
+    pub approver: String,
+    pub approval_ref: String,
+    pub trusted_group: bool,
 }
 
 /// 申请结果。`duplicate=true` 表示命中了同一会话/目标/op 的现有票据，
@@ -353,10 +376,16 @@ impl AccessTickets {
             state: TicketState::PendingApproval,
             request_turn: request.request_turn,
             batch_id: request.batch_id,
+            approval_route: request.approval_route,
+            approval_room: None,
+            approval_place: None,
             approval_ref: None,
             approver: None,
+            trusted_group: false,
             used_at: None,
             announced: false,
+            route_unavailable: None,
+            route_unavailable_at: None,
             execution_status: None,
             executed_at: None,
             result: None,
@@ -423,6 +452,8 @@ impl AccessTickets {
             if let Some(ticket) = self.tickets.get_mut(id) {
                 if ticket.state == TicketState::PendingApproval {
                     ticket.announced = true;
+                    ticket.route_unavailable = None;
+                    ticket.route_unavailable_at = None;
                     sessions.insert(ticket.session.clone());
                 }
             }
@@ -432,6 +463,18 @@ impl AccessTickets {
         }
         if !ids.is_empty() {
             self.admin_notified_at = Some(now);
+        }
+    }
+
+    /// 记录一次审批路由不可达；不改变票据状态，下一次收工继续重试。
+    pub fn mark_route_unavailable(&mut self, ids: &[String], reason: &str, now: i64) {
+        for id in ids {
+            if let Some(ticket) = self.tickets.get_mut(id) {
+                if ticket.state == TicketState::PendingApproval {
+                    ticket.route_unavailable = Some(reason.to_owned());
+                    ticket.route_unavailable_at = Some(now);
+                }
+            }
         }
     }
 
@@ -477,6 +520,53 @@ impl AccessTickets {
             .collect();
         tickets.sort_by_key(|ticket| (ticket.created_at, ticket.seq));
         tickets
+    }
+
+    /// 整批批准（带审批场所元数据）。
+    pub fn approve_batch_with_meta(
+        &mut self,
+        batch_id: &str,
+        meta: &ApprovalMeta,
+        now: i64,
+    ) -> Result<Vec<TicketReply>, String> {
+        self.sweep(now);
+        let ids: Vec<String> = self
+            .for_batch(batch_id)
+            .into_iter()
+            .map(|ticket| ticket.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Err(format!("unknown batch {batch_id}"));
+        }
+        if ids.iter().any(|id| {
+            self.tickets
+                .get(id)
+                .is_none_or(|ticket| ticket.state != TicketState::PendingApproval)
+        }) {
+            return Err(format!(
+                "batch {batch_id} contains a ticket that is not pending_approval; whole batch rejected"
+            ));
+        }
+        let mut replies = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let ticket = self.tickets.get_mut(id).expect("ids came from the map");
+            ticket.state = TicketState::Active;
+            ticket.expires_at = now.saturating_add(ACTIVE_TTL_MS);
+            apply_approval(ticket, meta);
+            ticket.nonce.clear();
+            let snapshot = ticket.snapshot();
+            self.audit("approve", &snapshot, "approved");
+            replies.push(reply(&snapshot, false));
+        }
+        self.audit_batch(
+            "approve",
+            batch_id,
+            "active",
+            ids.len(),
+            &meta.approval_ref,
+            "batch approved",
+        );
+        Ok(replies)
     }
 
     /// 整批批准：逐张 pending → active；任何一张不是 pending 都拒绝整批。
@@ -528,6 +618,53 @@ impl AccessTickets {
         Ok(replies)
     }
 
+    /// 整批拒绝（带审批场所元数据）。
+    pub fn deny_batch_with_meta(
+        &mut self,
+        batch_id: &str,
+        meta: &ApprovalMeta,
+        now: i64,
+    ) -> Result<Vec<TicketReply>, String> {
+        self.sweep(now);
+        let ids: Vec<String> = self
+            .for_batch(batch_id)
+            .into_iter()
+            .map(|ticket| ticket.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Err(format!("unknown batch {batch_id}"));
+        }
+        if ids.iter().any(|id| {
+            self.tickets
+                .get(id)
+                .is_none_or(|ticket| ticket.state != TicketState::PendingApproval)
+        }) {
+            return Err(format!(
+                "batch {batch_id} contains a ticket that is not pending_approval; whole batch rejected"
+            ));
+        }
+        let mut replies = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let ticket = self.tickets.get_mut(id).expect("ids came from the map");
+            ticket.state = TicketState::Denied;
+            apply_approval(ticket, meta);
+            ticket.nonce.clear();
+            ticket.params = None;
+            let snapshot = ticket.snapshot();
+            self.audit("deny", &snapshot, "denied");
+            replies.push(reply(&snapshot, false));
+        }
+        self.audit_batch(
+            "deny",
+            batch_id,
+            "denied",
+            ids.len(),
+            &meta.approval_ref,
+            "batch denied",
+        );
+        Ok(replies)
+    }
+
     /// 整批拒绝：逐张 pending → denied；任何一张不是 pending 都拒绝整批。
     pub fn deny_batch(
         &mut self,
@@ -575,6 +712,101 @@ impl AccessTickets {
             "batch denied",
         );
         Ok(replies)
+    }
+
+    /// 单张批准（带审批场所元数据）。`nonce` 必须与 pending 票据完全一致。
+    pub fn approve_with_meta(
+        &mut self,
+        id: &str,
+        nonce: &str,
+        meta: &ApprovalMeta,
+        now: i64,
+    ) -> Result<TicketReply, String> {
+        self.sweep(now);
+        let snapshot = {
+            let ticket = self
+                .tickets
+                .get_mut(id)
+                .ok_or_else(|| format!("unknown ticket {id}"))?;
+            if ticket.state != TicketState::PendingApproval {
+                return Err(format!(
+                    "ticket {id} is {}; only pending_approval can be approved",
+                    ticket.state.as_str()
+                ));
+            }
+            if ticket.nonce != nonce {
+                return Err("nonce mismatch".to_owned());
+            }
+            ticket.state = TicketState::Active;
+            ticket.expires_at = now.saturating_add(ACTIVE_TTL_MS);
+            apply_approval(ticket, meta);
+            ticket.nonce.clear();
+            ticket.snapshot()
+        };
+        self.audit("approve", &snapshot, "approved");
+        Ok(reply(&snapshot, false))
+    }
+
+    /// 单张拒绝（带审批场所元数据）。
+    pub fn deny_with_meta(
+        &mut self,
+        id: &str,
+        nonce: &str,
+        meta: &ApprovalMeta,
+        now: i64,
+    ) -> Result<TicketReply, String> {
+        self.sweep(now);
+        let snapshot = {
+            let ticket = self
+                .tickets
+                .get_mut(id)
+                .ok_or_else(|| format!("unknown ticket {id}"))?;
+            if ticket.state != TicketState::PendingApproval {
+                return Err(format!(
+                    "ticket {id} is {}; only pending_approval can be denied",
+                    ticket.state.as_str()
+                ));
+            }
+            if ticket.nonce != nonce {
+                return Err("nonce mismatch".to_owned());
+            }
+            ticket.state = TicketState::Denied;
+            apply_approval(ticket, meta);
+            ticket.nonce.clear();
+            ticket.params = None;
+            ticket.snapshot()
+        };
+        self.audit("deny", &snapshot, "denied");
+        Ok(reply(&snapshot, false))
+    }
+
+    /// 撤销（带审批场所元数据）。
+    pub fn revoke_with_meta(
+        &mut self,
+        id: &str,
+        meta: &ApprovalMeta,
+        now: i64,
+    ) -> Result<TicketReply, String> {
+        self.sweep(now);
+        let snapshot = {
+            let ticket = self
+                .tickets
+                .get_mut(id)
+                .ok_or_else(|| format!("unknown ticket {id}"))?;
+            if !ticket.state.live() {
+                return Err(format!(
+                    "ticket {id} is {}; cannot revoke",
+                    ticket.state.as_str()
+                ));
+            }
+            ticket.state = TicketState::Revoked;
+            apply_approval(ticket, meta);
+            ticket.nonce.clear();
+            ticket.params = None;
+            ticket.snapshot()
+        };
+        self.audit("revoke", &snapshot, "revoked");
+        Ok(reply(&snapshot, false))
     }
 
     /// 私信管理员批准。`nonce` 必须与 pending 票据完全一致。
@@ -788,7 +1020,7 @@ impl AccessTickets {
             .join("|");
         let ops = ticket.ops.join("|");
         let line = format!(
-            "[access-ticket] event={} ticket={} batch={} state={} principal={} place={} capability={} target={} ops={} session={} turn={} sender={} sender_name={} approval_ref={} unverified={} reason=\"{}\"",
+            "[access-ticket] event={} ticket={} batch={} state={} principal={} place={} capability={} target={} ops={} session={} turn={} sender={} sender_name={} approval_ref={} approval_route={} approval_room={} approval_place={} trusted_group={} unverified={} reason=\"{}\"",
             event,
             ticket.id,
             ticket.batch_id.as_deref().unwrap_or("-"),
@@ -803,6 +1035,10 @@ impl AccessTickets {
             ticket.origin_sender.as_deref().unwrap_or("-"),
             ticket.origin_sender_name.as_deref().unwrap_or("-"),
             ticket.approval_ref.as_deref().unwrap_or("-"),
+            ticket.approval_route.join("|"),
+            ticket.approval_room.as_deref().unwrap_or("-"),
+            ticket.approval_place.as_deref().unwrap_or("-"),
+            ticket.trusted_group,
             !ticket.unverified.is_empty(),
             reason.replace('"', "'"),
         );
@@ -839,6 +1075,14 @@ impl AccessTicket {
     fn snapshot(&self) -> Self {
         self.clone()
     }
+}
+
+fn apply_approval(ticket: &mut AccessTicket, meta: &ApprovalMeta) {
+    ticket.approval_room = Some(meta.approval_room.clone());
+    ticket.approval_place = Some(meta.approval_place.clone());
+    ticket.approval_ref = Some(meta.approval_ref.clone());
+    ticket.approver = Some(meta.approver.clone());
+    ticket.trusted_group = meta.trusted_group;
 }
 
 fn reply(ticket: &AccessTicket, duplicate: bool) -> TicketReply {
@@ -902,7 +1146,7 @@ mod tests {
     fn request(now: i64, ops: &[&str]) -> TicketRequest {
         TicketRequest {
             principal: GrantSubject::User,
-            place: GrantPlace::Group,
+            place: Place::Room(crate::grants::RoomScope::MultiParty),
             session: "main".to_owned(),
             request_room: RoomId::parse("qq:group/123").expect("房间"),
             target: target(),
@@ -914,6 +1158,7 @@ mod tests {
             unverified: Vec::new(),
             request_turn: "turn-1".to_owned(),
             batch_id: None,
+            approval_route: vec!["qq:private/10002".to_owned()],
             now,
         }
     }
@@ -961,6 +1206,36 @@ mod tests {
                 )
                 .is_none(),
             "用后即废"
+        );
+    }
+
+    #[test]
+    fn pending_ticket_expires_after_ttl_without_approval() {
+        let mut tickets = AccessTickets::new();
+        let pending = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        assert_eq!(
+            tickets.get(&pending.id).expect("在簿上").state,
+            TicketState::PendingApproval
+        );
+        tickets.sweep(1000 + PENDING_TTL_MS);
+        assert_eq!(
+            tickets.get(&pending.id).expect("还在簿上").state,
+            TicketState::Expired,
+            "PENDING_TTL 到点必须自然过期"
+        );
+        assert!(
+            tickets
+                .approve(
+                    &pending.id,
+                    &pending.nonce,
+                    "ref",
+                    "system_admin",
+                    1000 + PENDING_TTL_MS
+                )
+                .is_err(),
+            "过期票据不能再批准"
         );
     }
 

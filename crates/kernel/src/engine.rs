@@ -34,8 +34,8 @@ use crate::config::{
 };
 use crate::deps::{DependencyKind, DependencyRegistry};
 use crate::grants::{
-    self, AccessTarget, AccessTargetKind, GrantCapability, GrantDecision, GrantPlace, GrantSubject,
-    GrantsConfig,
+    self, AccessTarget, AccessTargetKind, GrantCapability, GrantDecision, GrantSubject,
+    GrantsConfig, Place, RoomScope, Trust,
 };
 use crate::lkg::PluginLkg;
 use crate::memory::{
@@ -62,7 +62,7 @@ use crate::storage::{
     RecordDraft, StorageError, Store, TopicStatus, unread,
 };
 use crate::tickets::{
-    ACTIVE_TTL_MS, AccessTicket, AccessTickets, BatchReply, MAX_LIVE_PER_SESSION,
+    ACTIVE_TTL_MS, AccessTicket, AccessTickets, ApprovalMeta, BatchReply, MAX_LIVE_PER_SESSION,
     MAX_REQUESTS_PER_TURN, PENDING_TTL_MS, TicketReply, TicketRequest, TicketState, UnverifiedOp,
 };
 use crate::tools::{
@@ -583,6 +583,15 @@ pub struct Bridge<S: Store> {
     draining: bool,
     /// 配置版本号：每换一次配置 +1，控制台靠它展示「配置换过没有」。
     config_version: u64,
+    /// 适配器声明的房间结构事实。键是房间；没有条目 = 未知（MultiParty）。
+    room_profiles: HashMap<RoomId, RoomProfile>,
+}
+
+/// 适配器对房间的结构声明；core 只消费，不再从房间路径猜。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoomProfile {
+    scope: RoomScope,
+    labels: Vec<String>,
 }
 
 /// 一条已发出的 in-band 失败通知，用于去重与按房间限流。
@@ -708,7 +717,40 @@ impl<S: Store> Bridge<S> {
         Self::with_plugins_inner(config, store, outbound, plugins, PluginLkg::disabled())
     }
 
-    /// 带 LKG 状态文件的桥。生产 main 用这个；状态文件放在存储目录旁。
+    /// 生产入口：直接接收已经按连接注册好 manifest 的 [`Outbounds`]。
+    ///
+    /// 不能走 `Box<dyn Outbound>` 再包一层 fallback，否则 `with_manifest` 记录的
+    /// `direct_room` / 适配器声明会留在内层对象里，core 的审批路由读不到。
+    pub fn with_outbounds(
+        config: Config,
+        store: S,
+        outbounds: Outbounds,
+        plugins: PluginManager,
+    ) -> Self {
+        Self::with_outbounds_inner(config, store, outbounds, plugins, PluginLkg::disabled())
+    }
+
+    /// 带 LKG 状态文件的生产入口；语义同 [`Self::with_plugins_lkg`]。
+    pub fn with_outbounds_lkg(
+        config: Config,
+        store: S,
+        outbounds: Outbounds,
+        plugins: PluginManager,
+        lkg_path: PathBuf,
+    ) -> Self {
+        let lkg_config = config.lkg;
+        let mut bridge = Self::with_outbounds_inner(
+            config,
+            store,
+            outbounds,
+            plugins,
+            PluginLkg::new_with_config(lkg_path, lkg_config),
+        );
+        bridge.register_startup_lkg_candidates();
+        bridge
+    }
+
+    /// 带 LKG 状态文件的桥。测试/单 adapter 入口；生产用 with_outbounds_lkg。
     pub fn with_plugins_lkg(
         config: Config,
         store: S,
@@ -735,15 +777,25 @@ impl<S: Store> Bridge<S> {
         plugins: PluginManager,
         lkg: PluginLkg,
     ) -> Self {
-        // 单实现调用点（测试/单 adapter）走兜底；生产 main 传进来的本身就是 Outbounds，
-        // 再包一层兜底只是多一次转发，不改变按连接分发。
-        let outbound = Outbounds::fallback(outbound);
+        // 单实现调用点（测试/单 adapter）走兜底；生产 main 用 with_outbounds_lkg。
+        Self::with_outbounds_inner(config, store, Outbounds::fallback(outbound), plugins, lkg)
+    }
+
+    fn with_outbounds_inner(
+        config: Config,
+        store: S,
+        outbound: Outbounds,
+        plugins: PluginManager,
+        lkg: PluginLkg,
+    ) -> Self {
         let memory = MemoryRepo::new(config.worktrees_root.clone());
         plugins.set_provider_timeout_ms(config.provider_calls.timeout_ms);
         let relay = config
             .file_relay
             .as_ref()
             .map(|cfg| crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base));
+        // 启动时把房间政策落一条审计：某群何时被放开必须可查。
+        audit_grants_config(None, &config.grants);
         Self {
             config,
             store,
@@ -778,6 +830,7 @@ impl<S: Store> Bridge<S> {
             wake_rates: HashMap::new(),
             draining: false,
             config_version: 0,
+            room_profiles: HashMap::new(),
         }
     }
 
@@ -1873,7 +1926,9 @@ impl<S: Store> Bridge<S> {
         self.deps.retain_config(&config);
         self.plugins
             .set_provider_timeout_ms(config.provider_calls.timeout_ms);
+        let previous = self.config.grants.clone();
         self.config = config;
+        audit_grants_config(Some(&previous), &self.config.grants);
         self.config_version += 1;
     }
 
@@ -2007,6 +2062,23 @@ impl<S: Store> Bridge<S> {
         // 保证投递批次组装时用的配置和开轮后工具查询看到的一致。
         self.apply_staged_config();
         let room = draft.room.clone();
+        // 适配器声明的房间结构事实：只在声明了/带了标签时更新，合成事件不覆盖已有声明。
+        if draft.room_scope.is_some() || !draft.room_labels.is_empty() {
+            let profile = self
+                .room_profiles
+                .entry(room.clone())
+                .or_insert_with(|| RoomProfile {
+                    // 未声明 = MultiParty（fail-safe），不能因为缺字段被放宽。
+                    scope: RoomScope::MultiParty,
+                    labels: Vec::new(),
+                });
+            if let Some(scope) = draft.room_scope {
+                profile.scope = scope;
+            }
+            if !draft.room_labels.is_empty() {
+                profile.labels = draft.room_labels.clone();
+            }
+        }
         // 私信管理员的票据命令是 core 自带入口：不依赖订阅、不进 route、不叫醒 agent。
         let command = command_text(&draft.elements);
         let account = self.config.account_of_room(&room);
@@ -2463,47 +2535,146 @@ impl<S: Store> Bridge<S> {
         if !matches!(verb.as_str(), "/approve" | "/deny" | "/revoke") {
             return Ok(None);
         }
-        // 只认私信里的管理员：system_admin 与配置的 bot_admin。身份走 grants 判定，
-        // 不再硬编码某一个账号；拒绝也留审计行。
-        if room.path.first().map(String::as_str) != Some("private") {
+
+        // 场所来自适配器声明，信任来自 `[grants.rooms]`；两者分开判定。
+        let place = self.room_place(room, true);
+        let subject = self
+            .config
+            .grants
+            .subject_for(&room.connection, Some(draft.sender.id.as_str()));
+        let (allowed, trusted_group, deny_reason) =
+            self.approval_allowed(room, place, subject, &draft.sender.id);
+        let first = parts.next();
+        let second = parts.next();
+
+        // 群内批准必须绑定 ticket id；无 nonce / 只有宽松指令一律拒绝。
+        if matches!(place, Place::Room(RoomScope::MultiParty)) {
+            let bound = match verb.as_str() {
+                "/approve" | "/deny" => first.is_some() && second.is_some(),
+                "/revoke" => first.is_some(),
+                _ => false,
+            };
+            if !bound {
+                eprintln!(
+                    "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place=group result=deny reason=group_requires_ticket_id",
+                    verb,
+                    room,
+                    draft.sender.id,
+                    subject.as_str(),
+                    place.as_str(),
+                    trusted_group,
+                );
+                return Ok(None);
+            }
+        }
+
+        if !allowed {
             eprintln!(
-                "[access-approval] verb={} room={} sender={} result=deny reason=not_private",
-                verb, room, draft.sender.id
+                "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} result=deny reason={}",
+                verb,
+                room,
+                draft.sender.id,
+                subject.as_str(),
+                place.as_str(),
+                trusted_group,
+                place.as_str(),
+                deny_reason,
             );
             return Ok(None);
         }
-        let place = GrantsConfig::place_of(room, true);
-        let subject =
-            self.config
-                .grants
-                .subject_for(&room.connection, Some(draft.sender.id.as_str()), place);
-        let allowed = matches!(subject, GrantSubject::SystemAdmin | GrantSubject::BotAdmin);
-        eprintln!(
-            "[access-approval] verb={} room={} sender={} subject={} result={}",
-            verb,
-            room,
-            draft.sender.id,
-            subject.as_str(),
-            if allowed { "allow" } else { "deny" }
-        );
-        if !allowed {
-            return Ok(None);
+
+        // 只能批准路由到本房间的票据；B 房间批准校验的是 B 房间的授权与路由。
+        if let Some(id) = first {
+            if !id.starts_with("bt-") {
+                let routed = match self.access_tickets.get(id) {
+                    Some(ticket) => ticket
+                        .approval_route
+                        .iter()
+                        .any(|target| target == &room.to_string()),
+                    // 未知 ticket 交给后续命令回复具体错误，不在这里静默吞掉。
+                    None => true,
+                };
+                if !routed {
+                    eprintln!(
+                        "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} result=deny reason=not_routed_here ticket={}",
+                        verb,
+                        room,
+                        draft.sender.id,
+                        subject.as_str(),
+                        place.as_str(),
+                        trusted_group,
+                        place.as_str(),
+                        id,
+                    );
+                    return Ok(None);
+                }
+            }
+        }
+        if let Some(batch_id) = first.filter(|id| id.starts_with("bt-")) {
+            let routed = self
+                .access_tickets
+                .for_batch(batch_id)
+                .iter()
+                .all(|ticket| {
+                    ticket
+                        .approval_route
+                        .iter()
+                        .any(|target| target == &room.to_string())
+                });
+            if !routed {
+                eprintln!(
+                    "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} result=deny reason=not_routed_here batch={}",
+                    verb,
+                    room,
+                    draft.sender.id,
+                    subject.as_str(),
+                    place.as_str(),
+                    trusted_group,
+                    place.as_str(),
+                    batch_id,
+                );
+                return Ok(None);
+            }
         }
 
         let record = self.store.append(draft.clone())?;
         let approval_ref = format!("{}#{}", room, record.id);
-        let approver = format!("{}:{}", room.connection, draft.sender.id);
+        let meta = ApprovalMeta {
+            approval_room: room.to_string(),
+            approval_place: place.as_str().to_owned(),
+            approver: format!("{}:{}", room.connection, draft.sender.id),
+            approval_ref,
+            trusted_group,
+        };
+        eprintln!(
+            "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} approval_route={} result=allow",
+            verb,
+            room,
+            draft.sender.id,
+            subject.as_str(),
+            place.as_str(),
+            trusted_group,
+            place.as_str(),
+            first
+                .map(|id| self
+                    .access_tickets
+                    .get(id)
+                    .map(|ticket| ticket.approval_route.join("|"))
+                    .unwrap_or_else(|| "-".to_owned()))
+                .unwrap_or_else(|| "-".to_owned()),
+        );
         let now = now_millis();
         let mut approved = Vec::new();
+        let mut superseded = Vec::new();
         let mut confirmation = match verb.as_str() {
-            "/approve" => match (parts.next(), parts.next()) {
+            "/approve" => match (first, second) {
                 (Some(id), Some(nonce)) => {
-                    match self
-                        .access_tickets
-                        .approve(id, nonce, &approval_ref, &approver, now)
-                    {
+                    match self.access_tickets.approve_with_meta(id, nonce, &meta, now) {
                         Ok(reply) => {
                             approved.push(reply.id.clone());
+                            if let Some(ticket) = self.access_tickets.get(&reply.id).cloned() {
+                                superseded.push((ticket, "approved"));
+                            }
                             format!(
                                 "票据 {} 已批准：{} 分钟内可用一次。",
                                 reply.id,
@@ -2516,10 +2687,15 @@ impl<S: Store> Bridge<S> {
                 (Some(batch_id), None) if batch_id.starts_with("bt-") => {
                     match self
                         .access_tickets
-                        .approve_batch(batch_id, &approval_ref, &approver, now)
+                        .approve_batch_with_meta(batch_id, &meta, now)
                     {
                         Ok(replies) => {
                             approved.extend(replies.iter().map(|reply| reply.id.clone()));
+                            for reply in &replies {
+                                if let Some(ticket) = self.access_tickets.get(&reply.id).cloned() {
+                                    superseded.push((ticket, "approved"));
+                                }
+                            }
                             format!(
                                 "批次 {} 已整批批准，共 {} 项；每项 {} 分钟内单次可用。",
                                 batch_id,
@@ -2532,22 +2708,29 @@ impl<S: Store> Bridge<S> {
                 }
                 _ => "用法：/approve <ticket-id> <nonce> 或 /approve <batch_id>".to_owned(),
             },
-            "/deny" => match (parts.next(), parts.next()) {
+            "/deny" => match (first, second) {
                 (Some(id), Some(nonce)) => {
-                    match self
-                        .access_tickets
-                        .deny(id, nonce, &approval_ref, &approver, now)
-                    {
-                        Ok(reply) => format!("票据 {} 已拒绝。", reply.id),
+                    match self.access_tickets.deny_with_meta(id, nonce, &meta, now) {
+                        Ok(reply) => {
+                            if let Some(ticket) = self.access_tickets.get(&reply.id).cloned() {
+                                superseded.push((ticket, "denied"));
+                            }
+                            format!("票据 {} 已拒绝。", reply.id)
+                        }
                         Err(reason) => format!("授权命令失败：{reason}"),
                     }
                 }
                 (Some(batch_id), None) if batch_id.starts_with("bt-") => {
                     match self
                         .access_tickets
-                        .deny_batch(batch_id, &approval_ref, &approver, now)
+                        .deny_batch_with_meta(batch_id, &meta, now)
                     {
                         Ok(replies) => {
+                            for reply in &replies {
+                                if let Some(ticket) = self.access_tickets.get(&reply.id).cloned() {
+                                    superseded.push((ticket, "denied"));
+                                }
+                            }
                             format!("批次 {} 已整批拒绝，共 {} 项。", batch_id, replies.len())
                         }
                         Err(reason) => format!("授权命令失败：{reason}"),
@@ -2555,8 +2738,8 @@ impl<S: Store> Bridge<S> {
                 }
                 _ => "用法：/deny <ticket-id> <nonce> 或 /deny <batch_id>".to_owned(),
             },
-            "/revoke" => match parts.next() {
-                Some(id) => match self.access_tickets.revoke(id, &approver, now) {
+            "/revoke" => match first {
+                Some(id) => match self.access_tickets.revoke_with_meta(id, &meta, now) {
                     Ok(reply) => format!("票据 {} 已撤销。", reply.id),
                     Err(reason) => format!("撤销失败：{reason}"),
                 },
@@ -2569,6 +2752,9 @@ impl<S: Store> Bridge<S> {
             confirmation.push_str("\n执行：");
             confirmation.push_str(&executed.join("；"));
         }
+        for (ticket, outcome) in superseded {
+            self.notify_superseded(&ticket, room, outcome);
+        }
         if let Err(error) = self.send_admin_text(room, &confirmation) {
             eprintln!("[access-ticket] confirmation failed: {error}");
         }
@@ -2576,6 +2762,66 @@ impl<S: Store> Bridge<S> {
             stored: Some(record.id),
             woke: Vec::new(),
         }))
+    }
+
+    /// 审批身份与场所判定。返回 `(允许?, 是否可信群, 拒绝原因)`。
+    fn approval_allowed(
+        &self,
+        room: &RoomId,
+        place: Place,
+        subject: GrantSubject,
+        sender: &str,
+    ) -> (bool, bool, &'static str) {
+        match place {
+            Place::Room(RoomScope::Direct) | Place::Console => (
+                matches!(subject, GrantSubject::SystemAdmin | GrantSubject::BotAdmin),
+                false,
+                "not_admin",
+            ),
+            Place::Room(RoomScope::MultiParty) => {
+                if self.config.grants.room_trust(room) != Trust::Trusted {
+                    return (false, false, "group_not_trusted");
+                }
+                if let Some(members) = self.config.grants.room_members(room) {
+                    if !members.iter().any(|member| member == sender) {
+                        return (false, false, "not_group_member");
+                    }
+                }
+                (true, true, "")
+            }
+            Place::None => (false, false, "no_human"),
+        }
+    }
+
+    /// 批准/拒绝后通知其余路由目标，避免第二个目标再做一次动作。
+    fn notify_superseded(&self, ticket: &AccessTicket, approved_room: &RoomId, outcome: &str) {
+        let text = format!(
+            "[ACB 授权] ticket {} 已在 {} {}（approval_place={}），本目标无需再处理。",
+            ticket.id,
+            approved_room,
+            outcome,
+            ticket.approval_place.as_deref().unwrap_or("-"),
+        );
+        for target in &ticket.approval_route {
+            if target == &approved_room.to_string() {
+                continue;
+            }
+            let Ok(target_room) = RoomId::parse(target) else {
+                continue;
+            };
+            match self.send_admin_text(&target_room, &text) {
+                Ok(()) => eprintln!(
+                    "[access-approval] ticket={} result=superseded target={}",
+                    ticket.id, target_room
+                ),
+                Err(error) => eprintln!(
+                    "[access-approval] ticket={} result=superseded_failed target={} reason=\"{}\"",
+                    ticket.id,
+                    target_room,
+                    error.replace('"', "'")
+                ),
+            }
+        }
     }
 
     /// 执行一个路由动作。打断和状态清理在这里立即做；发送/任务只做准备，
@@ -4238,12 +4484,11 @@ impl<S: Store> Bridge<S> {
         if let Some(session) = ctx.config.session(&ctx.session) {
             let provider_id = session.access.provider.to_string();
             if Self::is_builtin_access_provider(&provider_id) {
-                let place = GrantsConfig::place_of(&ctx.room, ctx.origin_sender.is_some());
-                let subject = ctx.config.grants.subject_for(
-                    &ctx.room.connection,
-                    ctx.origin_sender.as_deref(),
-                    place,
-                );
+                let place = self.room_place(&ctx.room, ctx.origin_sender.is_some());
+                let subject = ctx
+                    .config
+                    .grants
+                    .subject_for(&ctx.room.connection, ctx.origin_sender.as_deref());
                 let capability = if spec.risk == Risk::Destructive {
                     GrantCapability::Destructive
                 } else if spec.access_kind() == AccessTargetKind::Account {
@@ -4595,12 +4840,11 @@ impl<S: Store> Bridge<S> {
             .origin_sender
             .as_deref()
             .is_some_and(|sender| ctx.config.is_admin(&ctx.room, sender));
-        let place = GrantsConfig::place_of(&ctx.room, ctx.origin_sender.is_some());
-        let subject = ctx.config.grants.subject_for(
-            &ctx.room.connection,
-            ctx.origin_sender.as_deref(),
-            place,
-        );
+        let place = self.room_place(&ctx.room, ctx.origin_sender.is_some());
+        let subject = ctx
+            .config
+            .grants
+            .subject_for(&ctx.room.connection, ctx.origin_sender.as_deref());
         let context = crate::plugin::ToolAccessContext {
             tool,
             args,
@@ -4802,12 +5046,11 @@ impl<S: Store> Bridge<S> {
                 ),
             ));
         }
-        let place = GrantsConfig::place_of(&ctx.room, ctx.origin_sender.is_some());
-        let principal = ctx.config.grants.subject_for(
-            &ctx.room.connection,
-            ctx.origin_sender.as_deref(),
-            place,
-        );
+        let place = self.room_place(&ctx.room, ctx.origin_sender.is_some());
+        let principal = ctx
+            .config
+            .grants
+            .subject_for(&ctx.room.connection, ctx.origin_sender.as_deref());
         let origin_sender_name = ctx
             .origin_sender
             .as_deref()
@@ -4818,12 +5061,13 @@ impl<S: Store> Bridge<S> {
                 "[access_request] a turn without a human sender cannot request a ticket",
             ));
         }
-        let Some(_admin) = ctx.config.grants.system_admin.as_ref() else {
-            return Err(ToolError::new(
-                ErrorCode::ToolNotAllowed,
-                "[access_request] no [grants.system_admin] configured; nobody can approve",
-            ));
-        };
+        // 审批目标由配置/适配器决定；没有可达目标时票据仍可创建，
+        // 由 flush 记录 route_unavailable 并走 PENDING_TTL 自然过期。
+        let approval_route: Vec<String> = self
+            .approval_route(&ctx.config, &ctx.room)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         let now = now_millis();
         let cooldown_ms = i64::try_from(ctx.config.tickets.request_cooldown_secs)
             .unwrap_or(i64::MAX)
@@ -4972,6 +5216,7 @@ impl<S: Store> Bridge<S> {
                 unverified,
                 request_turn: ticket.as_str().to_owned(),
                 batch_id: None,
+                approval_route: approval_route.clone(),
                 now,
             });
         }
@@ -5893,19 +6138,6 @@ impl<S: Store> Bridge<S> {
         if pending.is_empty() {
             return;
         }
-        let Some(admin) = config.grants.system_admin.as_ref() else {
-            return;
-        };
-        let admin_room = match RoomId::new(
-            admin.connection.clone(),
-            format!("private/{}", admin.account),
-        ) {
-            Ok(room) => room,
-            Err(error) => {
-                eprintln!("[access-ticket] bad system admin room: {error}");
-                return;
-            }
-        };
         let admin_cooldown_ms = i64::try_from(config.tickets.admin_cooldown_secs)
             .unwrap_or(i64::MAX)
             .saturating_mul(1000);
@@ -5919,14 +6151,128 @@ impl<S: Store> Bridge<S> {
             );
             return;
         }
-        let text = approval_batch_text(&pending);
-        match self.send_admin_text(&admin_room, &text) {
-            Ok(()) => {
-                let ids: Vec<String> = pending.iter().map(|ticket| ticket.id.clone()).collect();
-                self.access_tickets.mark_announced(&ids, now);
-            }
-            Err(error) => eprintln!("[access-ticket] approval message failed: {error}"),
+        // 按路由分组：同一组目标只发一次聚合消息，不同路由不会互相看到票据。
+        let mut groups: std::collections::BTreeMap<Vec<String>, Vec<AccessTicket>> =
+            std::collections::BTreeMap::new();
+        for ticket in pending {
+            groups
+                .entry(ticket.approval_route.clone())
+                .or_default()
+                .push(ticket);
         }
+        for (route, tickets) in groups {
+            let ids: Vec<String> = tickets.iter().map(|ticket| ticket.id.clone()).collect();
+            if route.is_empty() {
+                let reason = "no approval route (room/account/default)";
+                self.access_tickets
+                    .mark_route_unavailable(&ids, reason, now);
+                for ticket in &tickets {
+                    eprintln!(
+                        "[access-ticket] event=route_unavailable ticket={} target=- reason=\"{}\"",
+                        ticket.id, reason
+                    );
+                }
+                continue;
+            }
+            let text = approval_batch_text(&tickets);
+            let mut delivered = false;
+            let mut last_failure = None;
+            for target in &route {
+                let room = match RoomId::parse(target) {
+                    Ok(room) => room,
+                    Err(error) => {
+                        let reason = format!("bad room: {}", error.to_string().replace('"', "'"));
+                        last_failure = Some(reason.clone());
+                        eprintln!(
+                            "[access-ticket] event=route_unavailable target={} reason=\"{}\"",
+                            target, reason
+                        );
+                        continue;
+                    }
+                };
+                if let Err(reason) = self.approval_target_available(config, &room) {
+                    last_failure = Some(reason.clone());
+                    eprintln!(
+                        "[access-ticket] event=route_unavailable ticket={} target={} reason=\"{}\"",
+                        ids.first().map(String::as_str).unwrap_or("-"),
+                        room,
+                        reason.replace('"', "'")
+                    );
+                    continue;
+                }
+                match self.send_admin_text(&room, &text) {
+                    Ok(()) => delivered = true,
+                    Err(error) => {
+                        let reason = error.replace('"', "'");
+                        last_failure = Some(reason.clone());
+                        eprintln!(
+                            "[access-ticket] event=route_unavailable ticket={} target={} reason=\"{}\"",
+                            ids.first().map(String::as_str).unwrap_or("-"),
+                            room,
+                            reason
+                        );
+                    }
+                }
+            }
+            if delivered {
+                self.access_tickets.mark_announced(&ids, now);
+            } else if let Some(reason) = last_failure {
+                self.access_tickets
+                    .mark_route_unavailable(&ids, &reason, now);
+            }
+        }
+    }
+
+    /// 解析审批路由：房间级 > 账号级 > 适配器提供的全局默认。
+    /// 永远不回退到申请房间。
+    fn approval_route(&self, config: &Config, room: &RoomId) -> Vec<RoomId> {
+        let room_route = config.grants.room_approval_route(room);
+        let account = config.account_of_room(room);
+        let route: &[String] = if !room_route.is_empty() {
+            room_route
+        } else if !account.is_empty() {
+            config
+                .grants
+                .account_approval_route(&room.connection, &account)
+        } else {
+            &[]
+        };
+        let mut targets = Vec::new();
+        for target in route {
+            if let Ok(room) = RoomId::parse(target) {
+                if !targets.contains(&room) {
+                    targets.push(room);
+                }
+            }
+        }
+        if targets.is_empty() {
+            if let Some(direct) = self.outbound.direct_room(&room.connection) {
+                if let Ok(room) = RoomId::parse(&direct) {
+                    targets.push(room);
+                }
+            }
+        }
+        targets
+    }
+
+    /// 审批目标必须真的可达：连接在配置里、房间被某个会话订阅、载体在位。
+    fn approval_target_available(&self, config: &Config, room: &RoomId) -> Result<(), String> {
+        if config.connection(&room.connection).is_none() {
+            return Err(format!("unknown connection {}", room.connection));
+        }
+        let subscribed = config.sessions.iter().any(|session| {
+            session
+                .subscriptions
+                .iter()
+                .any(|subscription| subscription.room == *room)
+        });
+        if !subscribed {
+            return Err("target room is not subscribed by any session".to_owned());
+        }
+        if self.outbound.handle_for(&room.connection).is_none() {
+            return Err("carrier is down".to_owned());
+        }
+        Ok(())
     }
 
     /// 批准后由 core 执行挂起动作；批量逐条执行，每条独立结果。
@@ -6387,16 +6733,30 @@ impl<S: Store> Bridge<S> {
         config: &Config,
         session: &str,
         origin: Option<&RoomId>,
-    ) -> (GrantSubject, GrantPlace) {
+    ) -> (GrantSubject, Place) {
         let Some(origin) = origin else {
-            return (GrantSubject::System, GrantPlace::None);
+            return (GrantSubject::System, Place::None);
         };
         let sender = self.origin_sender_for(session, origin);
-        let place = GrantsConfig::place_of(origin, sender.is_some());
+        let place = self.room_place(origin, sender.is_some());
         let subject = config
             .grants
-            .subject_for(&origin.connection, sender.as_deref(), place);
+            .subject_for(&origin.connection, sender.as_deref());
         (subject, place)
+    }
+
+    /// 房间场所只来自适配器声明；未知/缺失 → MultiParty。`Console` 由适配器标签声明。
+    fn room_place(&self, room: &RoomId, has_human: bool) -> Place {
+        if !has_human {
+            return Place::None;
+        }
+        let Some(profile) = self.room_profiles.get(room) else {
+            return Place::Room(RoomScope::MultiParty);
+        };
+        if profile.labels.iter().any(|label| label.trim() == "console") {
+            return Place::Console;
+        }
+        Place::Room(profile.scope)
     }
 
     fn origin_sender_for(&self, session: &str, origin: &RoomId) -> Option<String> {
@@ -6444,7 +6804,7 @@ impl<S: Store> Bridge<S> {
         &self,
         session: &str,
         subject: GrantSubject,
-        place: GrantPlace,
+        place: Place,
         capability: GrantCapability,
         target: &AccessTarget,
         decision: &GrantDecision,
@@ -9022,13 +9382,65 @@ fn is_core_executable_op(op: &str) -> bool {
 
 fn ticket_result_text(ticket: &AccessTicket, status: &str, _failure: Option<&str>) -> String {
     format!(
-        "ticket {} {}：目标 {}，op {}。用 access_ticket_get {{\"id\":\"{}\"}} 查详情。",
+        "ticket {} {}：目标 {}，op {}；approval_route={}，批准房间={}，批准场所={}，批准人={}。用 access_ticket_get {{\"id\":\"{}\"}} 查详情。",
         ticket.id,
         status,
         ticket.target.display(),
         ticket.ops.join(", "),
+        ticket.approval_route.join("|"),
+        ticket.approval_room.as_deref().unwrap_or("-"),
+        ticket.approval_place.as_deref().unwrap_or("-"),
+        ticket.approver.as_deref().unwrap_or("-"),
         ticket.id,
     )
+}
+
+/// `trust` / `members` / `approval_route` 的配置变更审计。
+/// 启动时（previous=None）记录全部房间政策；热更新时只记新增/变化/删除。
+fn audit_grants_config(previous: Option<&GrantsConfig>, current: &GrantsConfig) {
+    let members = |values: &[String]| {
+        if values.is_empty() {
+            "-".to_owned()
+        } else {
+            values.join(",")
+        }
+    };
+    let route = |values: &[String]| {
+        if values.is_empty() {
+            "-".to_owned()
+        } else {
+            values.join("|")
+        }
+    };
+    for (room, grant) in &current.rooms {
+        match previous.and_then(|previous| previous.rooms.get(room)) {
+            Some(old) if old == grant => {}
+            Some(old) => eprintln!(
+                "[access-config] event=changed room={} old_trust={} new_trust={} old_members=[{}] new_members=[{}] old_approval_route=[{}] new_approval_route=[{}]",
+                room,
+                old.trust.as_str(),
+                grant.trust.as_str(),
+                members(&old.members),
+                members(&grant.members),
+                route(&old.approval_route),
+                route(&grant.approval_route),
+            ),
+            None => eprintln!(
+                "[access-config] event=loaded room={} trust={} members=[{}] approval_route=[{}]",
+                room,
+                grant.trust.as_str(),
+                members(&grant.members),
+                route(&grant.approval_route),
+            ),
+        }
+    }
+    if let Some(previous) = previous {
+        for room in previous.rooms.keys() {
+            if !current.rooms.contains_key(room) {
+                eprintln!("[access-config] event=removed room={room}");
+            }
+        }
+    }
 }
 
 fn cooldown_seconds(millis: i64) -> i64 {
@@ -9070,7 +9482,14 @@ fn ticket_json(ticket: &crate::tickets::AccessTicket) -> Value {
         "request_turn": ticket.request_turn,
         "origin_sender": ticket.origin_sender,
         "origin_sender_name": ticket.origin_sender_name,
+        "approval_route": ticket.approval_route,
+        "approval_room": ticket.approval_room,
+        "approval_place": ticket.approval_place,
         "approval_ref": ticket.approval_ref,
+        "approver": ticket.approver,
+        "trusted_group": ticket.trusted_group,
+        "route_unavailable": ticket.route_unavailable,
+        "route_unavailable_at": ticket.route_unavailable_at,
         "execution_status": ticket.execution_status,
         "executed_at": ticket.executed_at,
         "result": ticket.result,
@@ -10370,7 +10789,12 @@ fn check_target_params(spec: &MethodSpec, room: &RoomId, params: &Value) -> Resu
     }
 
     let room_kind = room.path.first().map(String::as_str).unwrap_or("");
-    let room_id = room.path.get(1).map(String::as_str).unwrap_or("");
+    // 不能假设路径恰好两段：`stream/abc/def` 这类子路径要让整个剩余段参与比较。
+    let room_id = room
+        .path
+        .get(1..)
+        .map(|rest| rest.join("/"))
+        .unwrap_or_default();
 
     for target in spec.targets.iter() {
         if target.role != TargetRole::Room {
@@ -10476,5 +10900,41 @@ mod limit_tests {
         assert_eq!(memory_git_log_limit(None), 10, "默认 10 不变");
         assert_eq!(memory_git_log_limit(Some(0)), 1, "下限 1");
         assert_eq!(memory_git_log_limit(Some(999)), 100, "上限 100");
+    }
+}
+
+#[cfg(test)]
+mod target_param_tests {
+    use super::*;
+    use crate::outbound::{TargetSpec, Verification};
+
+    fn stream_spec() -> MethodSpec {
+        MethodSpec {
+            name: "stream.test".into(),
+            aliases: Vec::new().into(),
+            summary: "stream 子路径".into(),
+            tags: Vec::new().into(),
+            risk: Risk::Read,
+            scope: Scope::Room,
+            params: Vec::new().into(),
+            targets: vec![TargetSpec::room("stream_id", "stream")].into(),
+            effect: Effect::Read,
+            record: RecordMode::None,
+            verification: Verification::verified("target param test"),
+        }
+    }
+
+    #[test]
+    fn room_target_with_subpath_compares_the_full_tail() {
+        let spec = stream_spec();
+        let room = RoomId::new("qq", "stream/abc/def").expect("合法");
+        assert!(
+            check_target_params(&spec, &room, &json!({"stream_id": "abc/def"})).is_ok(),
+            "带子路径的房间目标要按完整剩余段比较"
+        );
+        assert!(
+            check_target_params(&spec, &room, &json!({"stream_id": "abc"})).is_err(),
+            "只给第一段应判为换目标"
+        );
     }
 }

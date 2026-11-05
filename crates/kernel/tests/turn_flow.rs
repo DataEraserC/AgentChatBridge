@@ -428,8 +428,14 @@ fn room(text: &str) -> RoomId {
 }
 
 fn message(room: &str, sender: &str, text: &str, at_self: bool) -> RecordDraft {
+    let room = room_of(room);
+    let scope = if room.path.first().map(String::as_str) == Some("private") {
+        acb_kernel::RoomScope::Direct
+    } else {
+        acb_kernel::RoomScope::MultiParty
+    };
     RecordDraft::message(
-        room_of(room),
+        room,
         Sender {
             id: sender.to_owned(),
             name: "老王".to_owned(),
@@ -439,6 +445,7 @@ fn message(room: &str, sender: &str, text: &str, at_self: bool) -> RecordDraft {
         vec![Element::text(text)],
         at_self,
     )
+    .with_room_scope(scope)
 }
 
 fn room_of(text: &str) -> RoomId {

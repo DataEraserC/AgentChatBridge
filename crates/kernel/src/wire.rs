@@ -76,6 +76,7 @@ impl TryFrom<WireManifest> for AdapterManifest {
             supports_reply: manifest.supports_reply,
             text_limit: manifest.text_limit,
             metadata,
+            direct_room: manifest.direct_room.map(Cow::Owned),
         })
     }
 }
@@ -137,6 +138,12 @@ impl From<WireRecord> for RecordDraft {
             target_platform_id: record.target_platform_id,
             target_labels: record.target_labels,
             suppressed: record.suppressed,
+            // 未知/缺失声明一律按 MultiParty：旧适配器不能因为缺字段被放宽。
+            room_scope: record
+                .room_scope
+                .as_deref()
+                .and_then(crate::grants::RoomScope::parse),
+            room_labels: record.room_labels,
         }
     }
 }
@@ -515,8 +522,11 @@ mod tests {
             target_platform_id: None,
             target_labels: Vec::new(),
             suppressed: false,
+            room_scope: Some("direct".into()),
+            room_labels: Vec::new(),
         };
         let draft = RecordDraft::from(record);
+        assert_eq!(draft.room_scope, Some(crate::grants::RoomScope::Direct));
         assert!(draft.at_self);
         assert!(matches!(draft.kind, RecordKind::Event { .. }));
     }
@@ -567,6 +577,7 @@ mod tests {
             text_limit: None,
             extension: "platform_adapter".into(),
             metadata: WirePluginMetadata::default(),
+            direct_room: None,
         };
         let manifest = AdapterManifest::try_from(wire).expect("capabilities 可转换");
         for capability in [
@@ -594,6 +605,7 @@ mod tests {
             text_limit: Some(4000),
             extension: "platform_adapter".into(),
             metadata: WirePluginMetadata::default(),
+            direct_room: Some("demo:private/10001".into()),
         })
         .expect("能转换");
         assert!(
@@ -610,6 +622,7 @@ mod tests {
         );
         assert!(manifest.supports_at && manifest.supports_reply);
         assert_eq!(manifest.text_limit, Some(4000));
+        assert_eq!(manifest.direct_room.as_deref(), Some("demo:private/10001"));
         assert_eq!(manifest.kind, "demo");
         assert!(manifest.capabilities.contains(&AdapterCapability::Send));
     }

@@ -72,6 +72,8 @@ unsafe extern "C" fn fixture_manifest() -> *mut c_char {
             docs_url: None,
             options_schema: None,
         },
+        // 动态夹具默认一对一路由；这是夹具声明，不是 core 拼接。
+        direct_room: Some("demo:private/10001".into()),
     };
     let json = serde_json::to_string(&manifest).expect("manifest 可序列化");
     CString::new(json).expect("manifest 没有 NUL").into_raw()
@@ -122,6 +124,8 @@ unsafe extern "C" fn fixture_create(
                 target_platform_id: None,
                 target_labels: Vec::new(),
                 suppressed: false,
+                room_scope: Some("multi_party".into()),
+                room_labels: Vec::new(),
             },
         };
         let json = encode_line(&event).expect("事件可序列化");

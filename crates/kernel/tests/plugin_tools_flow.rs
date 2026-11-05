@@ -275,17 +275,21 @@ fn plugin_tool_call_requires_an_explicit_scope() {
 fn bot_admin_plugin_capability_is_fail_closed_without_a_grant() {
     fn turn(bridge: &Arc<Mutex<Bridge<MemoryStore>>>) -> acb_kernel::Ticket {
         lock(bridge)
-            .ingest(RecordDraft::message(
-                RoomId::parse("qq:private/10001").expect("房间"),
-                Sender {
-                    id: "10001".into(),
-                    name: "admin".into(),
-                    role: None,
-                },
-                1,
-                vec![Element::text("批一下")],
-                true,
-            ))
+            .ingest(
+                RecordDraft::message(
+                    RoomId::parse("qq:private/10001").expect("房间"),
+                    Sender {
+                        id: "10001".into(),
+                        name: "admin".into(),
+                        role: None,
+                    },
+                    1,
+                    vec![Element::text("批一下")],
+                    true,
+                )
+                // 适配器声明这是私信；缺省会被 fail-safe 当成 MultiParty。
+                .with_room_scope(acb_kernel::RoomScope::Direct),
+            )
             .expect("入库");
         lock(bridge)
             .poll_turn()
