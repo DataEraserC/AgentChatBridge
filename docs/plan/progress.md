@@ -2242,6 +2242,33 @@
   - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode
     `npm test` 全绿。
 
+## 2026-11-05 — 纠正 `group.tag_list` 判定与「静默成功」清单
+
+- 做了什么：
+  - 对 `get_group_tags` 用 `group_class=0/1/2/3/5/10` 六次只读调用做语义对照，
+    全部返回 `tags:[]`；无法证明 tags 与 group_class 有对应关系。`group.tag_list`
+    从 `Verified` 退回 `Unverified`，reason 写明「契约已确认，语义未确证」。
+    `account.qzone.detail` 仍保留 `Verified`（有效 tid 返回 tid/content/
+    comment_num/comments）。
+  - 文档新增 `Verified` 判定标准：参数语义 + 返回语义都确证才算 `Verified`；
+    「能调用、返回形状对」= `Unverified + 契约已确认`。
+  - 新增「静默成功」清单 7 条：`account.model_show`、`account.model_show_set`、
+    `friend.recent_contacts`、`system.packet_status`、`group.anonymous`、
+    `group.anonymous_ban`、`account.qzone.unlike`（tid=0）。明确
+    **`retcode=0` 不代表生效**；`msg.word_slices` / `file.collection_create`
+    返回 retcode=100，属于明确失败，不在静默成功清单。
+  - `Unverified` 13 → 14；覆盖矩阵、adapter-snowluma.md 计数与测试同步。
+- 取舍：
+  - 不拿「返回形状对」冒充语义确证；宁可回到 `Unverified`，也不让 `Verified`
+    失去含义。
+  - 静默成功单独建表，不再散落在实验结论里；以后看到 retcode=0 先查这张表。
+- 证据：
+  - `catalog_lists_the_unverified_ops`：14 个
+  - `verified_sources_resolve_to_snapshot_or_experiment`
+  - 只读实验记录新增 6 条 group.tag_list 探针（均 `contract_only`）
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode
+    `npm test` 全绿。
+
 ## 部署注意事项（nix-config 打包）
 
 - `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置

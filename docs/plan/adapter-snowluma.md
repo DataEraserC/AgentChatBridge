@@ -235,12 +235,12 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 **计数（2026-11-05，批次 9 之后）**：25 项中 2 项不适用；
 适用 23 项 = 已实现 19 + 部分 2 + 未实现 2（#2 HTTP API 与 #5 `wss://`）。
 #17 表情回应、#22 QQ 空间、#23 收藏/闪传已由批次 9 补齐；#19 的动作已全，
-但 13 个 `Unverified` op 要等实验完成才算完全实现。
+但 14 个 `Unverified` op 要等实验完成才算完全实现。
 
 **动作级覆盖**：
 - 现有 `ROUTES` 192 个层级 op / 200 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
-- 其中 **13 个 op** 带 `Verification::Unverified`（批次 8 的 3 个、审计后仍无出处的
-  2 个、白名单清零的 8 个），按 critical 档管理；5 个平台别名挂在主 op 的
+- 其中 **14 个 op** 带 `Verification::Unverified`（批次 8 的 3 个、审计后仍无出处的
+  3 个、白名单清零的 8 个），按 critical 档管理；5 个平台别名挂在主 op 的
   `aliases` 上，继承主 op 的 `Verified`。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 逐动作「已暴露 / 未暴露 + 原因分类」见 [snowluma-action-coverage.md](snowluma-action-coverage.md)：
@@ -253,7 +253,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 3. `get_version_info` 已采集三层版本并写进依赖元数据（批次 1）。
 
 动作覆盖面已收口：200 个中文动作全部有 op / 别名归属，白名单为空。
-现在的主要风险转为 13 个 `Unverified` 语义与 QQ 空间等账号级写操作的实机行为。
+现在的主要风险转为 14 个 `Unverified` 语义与 QQ 空间等账号级写操作的实机行为。
 
 ---
 
@@ -909,8 +909,10 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - 批次 9 审计后，55 个中 52 个按 SnowLuma 动作目录的摘要+参数改 `Verified`；
   2 个保留 `Unverified`（`account.qzone.unlike` / `msg.tuwen_ark`）。
   `account.qzone.detail` 由 2026-11-05 只读实验改 `Verified`（有效 tid 返回
-  tid/content/comment_num/comments）；白名单清零的 8 个平台占位/mock 仍标
-  `Unverified`。全表 `Unverified` 13 个（批次 8 的 3 + 2 + 8）。
+  tid/content/comment_num/comments）；`group.tag_list` 只到「契约已确认」，仍标
+  `Unverified`（六个 group_class 都返回空 tags，语义未确证）；白名单清零的 8 个
+  平台占位/mock 仍标 `Unverified`。全表 `Unverified` 14 个（批次 8 的 3 +
+  审计后仍无出处/未确证的 3 + 8）。
 
 **证据**
 - `every_op_is_hierarchical_tagged_and_routed`：192 个 op 逐个检查层级名、risk tag、
@@ -920,8 +922,45 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - `action_coverage_matrix_is_complete_and_exceptions_have_reasons`：直接解析
   `snowluma-action-coverage.md`，断言 200 已暴露 / 0 未暴露；`UNEXPOSED` 为空时
   仍保留「非空则每条必须有理由」。
-- `catalog_lists_the_unverified_ops`：13 个 unverified op 的逐字清单。
+- `catalog_lists_the_unverified_ops`：14 个 unverified op 的逐字清单。
 - **配置**：无新增配置项；风险仍由 `allow_destructive` + 票据审批控制。
+
+### `Verified` 判定标准（2026-11-05 修订）
+
+只有**参数语义 + 返回语义都确证**才允许标 `Verified`：
+
+- 参数语义：知道每个参数是什么意思、取值域、哪些必填；
+- 返回语义：知道成功返回哪些字段、字段含义，以及失败时的稳定错误码；
+- 有官方源码/文档条目或真机语义对照实验作为出处。
+
+只做到「能调用、返回形状对」的，标 `Unverified`，并在 reason 或结论里写
+**「契约已确认」**；不要混用 `Verified`。典型例子：
+
+- `group.tag_list`：参数 `group_class` 与返回 `tags:[]` 形状确认，但
+  `group_class=0/1/2/3/5/10` 都返回空 tags，无法证明 tags 与 group_class 的
+  对应关系 → `Unverified + 契约已确认`。
+- `account.qzone.detail`：用有效 tid 返回 `tid/content/comment_num/comments`，
+  参数语义与返回语义都确证 → `Verified`。
+- 快照条目只证明「动作存在 + 参数表」，不证明运行时语义；快照型 `Verified`
+  依赖的是目录摘要与参数，不等同于真机语义实验。
+
+### 「静默成功」清单（2026-11-05）
+
+**`retcode=0` 不代表生效。** 以下动作返回成功但实际没有可观察效果，或返回值
+只是占位：
+
+| op | 动作 | 为什么返回成功 | 怎么判断它没生效 |
+|---|---|---|---|
+| `account.model_show` | `_get_model_show` | 平台是兼容 mock，把入参 `model` 原样放进 `variants.model_show` | 返回值只是回显；没有真实机型/付费状态 |
+| `account.model_show_set` | `_set_model_show` | 平台标注占位，返回 ok | 再读 `_get_model_show` 对比；若 `model_show` 未变，说明未生效 |
+| `friend.recent_contacts` | `get_recent_contact` | 占位动作，返回空数组 | 返回 `data=[]`，没有任何会话 id；真实数据应为非空 |
+| `system.packet_status` | `nc_get_packet_status` | 占位动作，返回 `data=null` | 没有 packet 字段；null 就是没实现 |
+| `group.anonymous` | `set_group_anonymous` | 平台标注未实现，固定返回 ok | 用测试群在 QQ 客户端看匿名开关；没变说明未生效 |
+| `group.anonymous_ban` | `set_group_anonymous_ban` | 平台标注未实现，固定返回 ok | 让测试匿名成员再发一条；还能发说明未禁言 |
+| `account.qzone.unlike` | `unlike_qzone` | `tid=0` 不存在/未点赞时也返回 ok | 用真实已点赞的 tid 执行后重新读点赞状态；状态没变说明未生效 |
+
+`msg.word_slices` / `file.collection_create` **不在这张表**：它们返回
+`retcode=100` + `not yet implemented`，属于明确失败，不是静默成功。
 
 ### `Verified` 依据与快照版本（2026-11-05）
 
@@ -952,7 +991,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | op | 动作 | 请求参数 | retcode / 关键返回 | 结论 |
 |---|---|---|---|---|
 | `account.qzone.detail` | `get_qzone_msg_detail` | `tid=553894db3dbf75689abb0000` | `0`；`data.tid/content/comment_num/comments` | **Verified**：参数与成功结构确认 |
-| `group.tag_list` | `get_group_tags` | `group_class=0` | `0`；`data.tags=[]` | **Verified**：读取契约确认；分类语义仍只有目录出处 |
+| `group.tag_list` | `get_group_tags` | `group_class=0/1/2/3/5/10` | 全部 `0`；`data.tags=[]` | **Unverified + 契约已确认**：参数与返回形状确认，但六个值都空，无法证明 tags 与 group_class 有对应关系 |
 | `account.qzone.unlike` | `unlike_qzone` | `tid=0` | `0`；`data=null` | 保留 `Unverified`：端点存在，但没有真实点赞可取消，无法确认状态变化 |
 | `msg.tuwen_ark` | `send_tuwen_ark` | `{}` | `1400`；`title: is required` | 保留 `Unverified`：动作存在、`title` 必填；发送类未执行有效调用 |
 | `account.model_show` | `_get_model_show` | `model=test` | `0`；`variants.model_show=test` | 保留 `Unverified`：mock echo，无语义 |

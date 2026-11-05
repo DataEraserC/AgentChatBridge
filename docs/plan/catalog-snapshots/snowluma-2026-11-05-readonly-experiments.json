@@ -8,7 +8,7 @@
       "account": "3683924053"
     },
     "endpoint": "http://127.0.0.1:53000",
-    "note": "运行中的 acb-bridge 对 Unverified op 的 platform_call 一律拒绝（安全设计），console 没有 tool_call 入口；只读探针直接打同一 SnowLuma 实例的 OneBot HTTP API（桥配置里的同一 token）。写入/破坏性动作未执行。"
+    "note": "运行中的 acb-bridge 对 Unverified op 的 platform_call 一律拒绝（安全设计），console 没有 tool_call 入口；只读探针直接打同一 SnowLuma 实例的 OneBot HTTP API（桥配置里的同一 token）。写入/破坏性动作未执行。 group.tag_list 用 0/1/2/3/5/10 六次只读调用做语义对照，全部空 tags，结论为「契约已确认、语义未确证」。"
   },
   "supporting_probes": [
     {
@@ -87,8 +87,83 @@
       "data": {
         "tags": []
       },
-      "conclusion": "verified",
-      "conclusion_note": "参数 group_class 有效；group_class=0 返回 tags:[]。读取契约确认，但分类语义仍只有目录出处。"
+      "conclusion": "contract_only",
+      "conclusion_note": "group_class=0 返回 tags:[]；只证明参数与返回形状，未证明 tags 与 group_class 的对应关系。"
+    },
+    {
+      "op": "group.tag_list",
+      "action": "get_group_tags",
+      "params": {
+        "group_class": 1
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "data": {
+        "tags": []
+      },
+      "conclusion": "contract_only",
+      "conclusion_note": "group_class=1 也返回 tags:[]；与 0 无差异，不能证明 tags 与 group_class 有对应关系。"
+    },
+    {
+      "op": "group.tag_list",
+      "action": "get_group_tags",
+      "params": {
+        "group_class": 2
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "data": {
+        "tags": []
+      },
+      "conclusion": "contract_only",
+      "conclusion_note": "group_class=2 也返回 tags:[]；与 0 无差异，不能证明 tags 与 group_class 有对应关系。"
+    },
+    {
+      "op": "group.tag_list",
+      "action": "get_group_tags",
+      "params": {
+        "group_class": 3
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "data": {
+        "tags": []
+      },
+      "conclusion": "contract_only",
+      "conclusion_note": "group_class=3 也返回 tags:[]；与 0 无差异，不能证明 tags 与 group_class 有对应关系。"
+    },
+    {
+      "op": "group.tag_list",
+      "action": "get_group_tags",
+      "params": {
+        "group_class": 5
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "data": {
+        "tags": []
+      },
+      "conclusion": "contract_only",
+      "conclusion_note": "group_class=5 也返回 tags:[]；与 0 无差异，不能证明 tags 与 group_class 有对应关系。"
+    },
+    {
+      "op": "group.tag_list",
+      "action": "get_group_tags",
+      "params": {
+        "group_class": 10
+      },
+      "http_status": 200,
+      "retcode": 0,
+      "status": "ok",
+      "data": {
+        "tags": []
+      },
+      "conclusion": "contract_only",
+      "conclusion_note": "group_class=10 也返回 tags:[]；与 0 无差异，不能证明 tags 与 group_class 有对应关系。"
     },
     {
       "op": "account.model_show",
