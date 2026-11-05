@@ -2073,6 +2073,51 @@
     `node --check harnesses/shared/tools.mjs` 全绿。
 
 
+## 2026-11-05 — 批次 9：剩余 62 个 SnowLuma 动作全部暴露
+
+- 做了什么：
+  - `crates/adapters/onebot-snowluma/src/catalog.rs` 新增 62 个层级 op
+    （127 → 189），映射 62 个动作（130 → 192）；`ROUTES` 同步补 62 条路由。
+    覆盖账号资料/在线状态、群待办/内联键盘/机器人加群选项、收藏/闪传/文件集、
+    单条转发/Ark 卡片/分享/翻译、群信息扩展、已读/拍一拍/发消息别名，以及
+    QQ 空间 10 个动作。
+  - 风险逐条按动作：`account.rkey` / `account.rkey_server` /
+    `file.fileset_download` / `file.flash_file_url` 为 `Critical`；
+    `group.todo.cancel` / `file.flash_file_delete` /
+    `group.file.folder_delete_alias` 与 QQ 空间写操作（send/comment/like/
+    unlike/delete/ban/right）为 `Destructive`；资料、在线状态、待办设置、
+    上传、重命名、标记已读为 `Write`；纯查询为 `Read`。
+  - verification：7 个别名 op（send_msg / delete_group_folder /
+    get_group_ignore_add_request / get_emoji_likes / mark_group_msg_as_read /
+    mark_private_msg_as_read / send_poke）语义等于已核实动作，标 `Verified`；
+    其余 55 个只有 SnowLuma 动作目录来源，全部标 `Unverified { reason,
+    experiment }`（research §3.4–§3.8），门槛等同 critical。
+  - `DELETE_METHODS` / `record_of` 补上新的删除与发消息 op；
+    `docs/plan/snowluma-action-coverage.md` 更新到 192 已暴露 / 8 外部约束 /
+    0 未排期；`docs/plan/adapter-snowluma.md` 更新功能域计数。
+- 取舍：
+  - **全部暴露而不是继续按产品范围裁剪**：按用户口径「任何平台功能均要有，
+    可以标高危」。宁可给 `Unverified` + critical 门槛，也不把动作留在目录外。
+  - **别名也给独立 op**，不复用旧 op 的名字：覆盖矩阵按 action 计数，独立 op
+    才能让「每个 action 都有 op」可被测试逐条验证；平台侧仍只发一个动作。
+  - **QQ 空间写操作至少 `Destructive`**：点赞/取消赞也算代表账号对外表态，
+    没有降成 `Write`。
+  - **`get_flash_file_url` 按 `Critical` 处理**：它返回可直接下载的地址，
+    与任意下载入口同档，不因为「只是取 URL」放宽。
+  - **未验证语义不硬标 `Verified`**：55 个新 op 保留 reason + experiment，
+    清单看起来不干净，但门槛正确。
+  - **无新增配置项**：风险仍由 `allow_destructive` + 票据审批控制；
+    `config.example.toml` 不需要改。
+- 证据：
+  - `every_op_is_hierarchical_tagged_and_routed`：189 个 op 逐个检查层级名、
+    risk/scope tag、路由、TargetSpec 非空、verification 的 source/reason/experiment。
+  - `action_coverage_matrix_is_complete_and_exceptions_have_reasons`：直接解析
+    `snowluma-action-coverage.md`，断言 200 个 action、192 已暴露、8 未暴露且逐条
+    命中白名单并有非空理由。
+  - `catalog_lists_the_unverified_ops`：59 个 unverified op 的逐字清单。
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode
+    `npm test`、`node --check` 全绿。
+
 ## 部署注意事项（nix-config 打包）
 
 - `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置

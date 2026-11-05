@@ -1267,7 +1267,7 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acb_kernel::{Effect, OutgoingKind, RecordMode, Risk, Scope, TargetRole};
+    use acb_kernel::{Effect, OutgoingKind, RecordMode, Risk, Scope, TargetRole, Verification};
 
     #[test]
     fn group_room_maps_to_send_group_msg() {
@@ -1629,6 +1629,49 @@ mod tests {
                     | "stream.download_file"
                     | "stream.test_download"
                     | "stream.clean"
+                    // 批次 9：账号/文件/空间级动作不走房间目标。
+                    | "friend.dress"
+                    | "msg.mark_all_read"
+                    | "account.online_clients"
+                    | "account.profile_likes"
+                    | "account.user_status"
+                    | "account.diy_status"
+                    | "account.input_status"
+                    | "account.online_status"
+                    | "account.avatar"
+                    | "account.profile"
+                    | "account.long_nick"
+                    | "account.can_send_image"
+                    | "account.can_send_record"
+                    | "account.rkey"
+                    | "account.rkey_server"
+                    | "file.collection_list"
+                    | "file.flash_task_create"
+                    | "file.flash_file_list"
+                    | "file.flash_file_url"
+                    | "file.flash_file_delete"
+                    | "file.flash_file_rename"
+                    | "file.flash_msg_send"
+                    | "file.fileset_list"
+                    | "file.fileset_id"
+                    | "file.fileset_info"
+                    | "file.fileset_download"
+                    | "face.custom_move_front"
+                    | "msg.mini_app_ark"
+                    | "msg.translate"
+                    | "face.super_id"
+                    | "group.ignored_requests_alias"
+                    | "msg.emoji_likes_alias"
+                    | "account.qzone.feeds"
+                    | "account.qzone.list"
+                    | "account.qzone.detail"
+                    | "account.qzone.send"
+                    | "account.qzone.comment"
+                    | "account.qzone.delete"
+                    | "account.qzone.like"
+                    | "account.qzone.unlike"
+                    | "account.qzone.ban"
+                    | "account.qzone.right"
             );
             let expected = if account_level {
                 Scope::Connection
@@ -1716,7 +1759,7 @@ mod tests {
     #[test]
     fn every_op_is_hierarchical_tagged_and_routed() {
         let methods = catalog();
-        assert_eq!(methods.len(), 127, "批次 8 后应有 127 个层级 op");
+        assert_eq!(methods.len(), 189, "批次 9 后应有 189 个层级 op");
         assert!(!methods.is_empty());
         for method in methods.iter() {
             let name = method.name.as_ref();
@@ -1743,7 +1786,105 @@ mod tests {
                 ROUTES.iter().any(|route| route.method == name),
                 "{name} 没有路由"
             );
+            // 目标声明要么为空（连接级/无房间目标），要么每个参数名都写清楚。
+            for target in method.targets.iter() {
+                assert!(!target.param.is_empty(), "{name} 的 TargetSpec 参数名为空");
+                assert!(
+                    !target.room_kind.is_empty(),
+                    "{name} 的 TargetSpec 房间类型为空"
+                );
+            }
+            match &method.verification {
+                Verification::Verified { source } => {
+                    assert!(!source.is_empty(), "{name} 的 Verified 没有出处");
+                }
+                Verification::Unverified { reason, experiment } => {
+                    assert!(!reason.is_empty(), "{name} 的 Unverified 没有原因");
+                    assert!(!experiment.is_empty(), "{name} 的 Unverified 没有实验");
+                }
+            }
         }
+    }
+
+    /// 覆盖矩阵是唯一一份 200 个动作的清单。测试直接读文档：
+    /// - 已暴露的动作必须真的在 ROUTES 里；
+    /// - 未暴露的动作必须命中白名单，且每条都写了理由；
+    /// - 白名单非空时不允许出现空理由。
+    #[test]
+    fn action_coverage_matrix_is_complete_and_exceptions_have_reasons() {
+        const COVERAGE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/plan/snowluma-action-coverage.md"
+        ));
+        const UNEXPOSED: &[(&str, &str)] = &[
+            (
+                "_get_model_show",
+                "外部约束：平台标注为兼容 mock，没有真实语义",
+            ),
+            ("_set_model_show", "外部约束：平台标注为占位，未实现"),
+            (".get_word_slices", "外部约束：平台标注未实现"),
+            ("create_collection", "外部约束：平台标注未实现"),
+            ("get_recent_contact", "外部约束：平台标注为占位"),
+            ("nc_get_packet_status", "外部约束：平台标注为占位"),
+            ("set_group_anonymous", "外部约束：平台标注未实现（返回 ok）"),
+            (
+                "set_group_anonymous_ban",
+                "外部约束：平台标注未实现（返回 ok）",
+            ),
+        ];
+
+        let rows: Vec<(String, String)> = COVERAGE
+            .lines()
+            .filter(|line| line.trim_start().starts_with("| `"))
+            .filter_map(|line| {
+                let cells: Vec<&str> = line
+                    .trim()
+                    .trim_matches('|')
+                    .split('|')
+                    .map(str::trim)
+                    .collect();
+                let action = cells.first()?.trim_matches('`').to_owned();
+                let status = (*cells.get(1)?).to_owned();
+                Some((action, status))
+            })
+            .collect();
+        assert_eq!(rows.len(), 200, "覆盖矩阵必须覆盖 200 个唯一动作");
+
+        let routed: std::collections::BTreeSet<&str> = ROUTES
+            .iter()
+            .flat_map(|route| match route.target {
+                Target::Fixed(action) => vec![action],
+                Target::ByRoom { group, private } => vec![group, private],
+            })
+            .collect();
+
+        let mut exposed = 0usize;
+        let mut unexposed: Vec<&str> = Vec::new();
+        for (action, status) in &rows {
+            if status.contains("已暴露") {
+                exposed += 1;
+                assert!(
+                    routed.contains(action.as_str()),
+                    "矩阵标已暴露但 ROUTES 里没有动作 {action}"
+                );
+            } else if status.contains("未暴露") {
+                unexposed.push(action);
+            }
+        }
+        assert_eq!(exposed, 192, "192 个动作必须有路由");
+        assert_eq!(unexposed.len(), 8, "只剩 8 个外部约束动作未暴露");
+        for (action, reason) in UNEXPOSED {
+            assert!(
+                unexposed.contains(action),
+                "白名单里的 {action} 在矩阵里不是未暴露"
+            );
+            assert!(!reason.trim().is_empty(), "例外 {action} 必须有理由");
+        }
+        assert_eq!(
+            unexposed.len(),
+            UNEXPOSED.len(),
+            "未暴露清单必须逐字等于白名单：{unexposed:?}"
+        );
     }
 
     #[test]
@@ -2769,10 +2910,65 @@ mod tests {
         assert_eq!(
             unverified,
             [
+                "account.avatar",
+                "account.can_send_image",
+                "account.can_send_record",
+                "account.diy_status",
+                "account.input_status",
+                "account.long_nick",
+                "account.online_clients",
+                "account.online_status",
+                "account.profile",
+                "account.profile_likes",
+                "account.qzone.ban",
+                "account.qzone.comment",
+                "account.qzone.delete",
+                "account.qzone.detail",
+                "account.qzone.feeds",
+                "account.qzone.like",
+                "account.qzone.list",
+                "account.qzone.right",
+                "account.qzone.send",
+                "account.qzone.unlike",
+                "account.rkey",
+                "account.rkey_server",
+                "account.user_status",
+                "face.custom_move_front",
+                "face.super_id",
+                "file.collection_list",
+                "file.fileset_download",
+                "file.fileset_id",
+                "file.fileset_info",
+                "file.fileset_list",
+                "file.flash_file_delete",
+                "file.flash_file_list",
+                "file.flash_file_rename",
+                "file.flash_file_url",
+                "file.flash_msg_send",
+                "file.flash_task_create",
+                "file.private_upload",
+                "friend.dress",
                 "group.add_option",
+                "group.info_ex",
+                "group.robot_add_option",
                 "group.tag_add",
                 "group.tag_delete",
                 "group.tag_list",
+                "group.todo.cancel",
+                "group.todo.complete",
+                "group.todo.list",
+                "group.todo.set",
+                "msg.ark_share",
+                "msg.forward_single_friend",
+                "msg.forward_single_group",
+                "msg.group_ark_share",
+                "msg.group_share_ex",
+                "msg.inline_button",
+                "msg.mark_all_read",
+                "msg.mini_app_ark",
+                "msg.peer_share",
+                "msg.translate",
+                "msg.tuwen_ark",
             ],
             "只有 research §3 里需要实验的 op 才能标 unverified"
         );

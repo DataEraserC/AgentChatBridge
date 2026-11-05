@@ -1,32 +1,35 @@
 # SnowLuma 动作覆盖矩阵
 
-状态：**对照完成（2026-11-05）**。输入为 SnowLuma 中文 API 索引的 200 个唯一动作
-（页面分类合计 200，英文页 219；以中文索引的实际条目为基准）。
+状态：**全部排期动作已落地（2026-11-05，批次 9）**。输入为 SnowLuma 中文 API 索引的
+200 个唯一动作（页面分类合计 200，英文页 219；以中文索引的实际条目为基准）。
 
-- 已暴露：**130 个**（`ROUTES` 127 个 op / 130 个 action，按群/私聊分动作的 op 会映射到两条）。
-- 未暴露：**70 个**，其中外部约束 **8 个**、未排期 **62 个**。
-- 其中 4 个新 op 带 `Unverified` 标记（`group.tag_*` / `group.add_option`），
-  只能走票据 + 审批；其余新 op 均为 `Verified` 并写出处。
-- 未排期的原因分四类：下一批（QQ 空间 / 收藏闪传）、别名/等价 op 已存在、账号资料/在线状态类、其它普通能力。
-- 目标：后续批次把这 62 个未排期项清零后，只剩 8 个外部约束项。
+- 已暴露：**192 个**（`ROUTES` 189 个 op / 192 个 action，按群/私聊分动作的 op 会映射到两条）。
+- 未暴露：**8 个**，全部是外部约束（平台标注占位 / 未实现 / mock），不是没排期。
+  例外白名单写在 `outbound.rs` 的 `UNEXPOSED` 常量里，测试逐条要求非空理由。
+- 批次 9 新增 62 个 op：7 个别名 op 为 `Verified` 并写出处，其余 55 个为
+  `Unverified`（门槛等同 critical，只能走票据 + 审批）。全表 `Unverified` 共 59 个
+  （含批次 8 的 `group.tag_*` / `group.add_option`）。
+- 风险分级逐条按动作：rkey / 文件集下载 / 闪传下载地址为 `Critical`；删除、取消、
+  QQ 空间代表账号对外发布为 `Destructive`；资料/在线状态/群待办为 `Write`；纯查询为
+  `Read`。
 
 ## 分类汇总
 
 | 分类 | 动作数 | 已暴露 | 未暴露（外部约束） | 未暴露（未排期） |
 |---|---|---|---|---|
-| 扩展 | 115 | 62 | 6 | 47 |
+| 扩展 | 115 | 109 | 6 | 0 |
 | 群管理 | 21 | 19 | 2 | 0 |
-| 信息 | 5 | 3 | 0 | 2 |
+| 信息 | 5 | 5 | 0 | 0 |
 | 群相册 | 9 | 9 | 0 | 0 |
 | 流式接口 | 6 | 6 | 0 | 0 |
-| 空间 | 10 | 0 | 0 | 10 |
-| 群文件 | 12 | 11 | 0 | 1 |
+| 空间 | 10 | 10 | 0 | 0 |
+| 群文件 | 12 | 12 | 0 | 0 |
 | 好友 | 3 | 3 | 0 | 0 |
-| 消息 | 6 | 5 | 0 | 1 |
-| 系统表情 | 4 | 3 | 0 | 1 |
+| 消息 | 6 | 6 | 0 | 0 |
+| 系统表情 | 4 | 4 | 0 | 0 |
 | 群信息 | 7 | 7 | 0 | 0 |
 | 请求 | 2 | 2 | 0 | 0 |
-| **合计** | **200** | **130** | **8** | **62** |
+| **合计** | **200** | **192** | **8** | **0** |
 
 ## 逐动作
 
@@ -35,118 +38,118 @@
 | 动作 | 状态 | op / 原因 |
 |---|---|---|
 | `_del_group_notice` | 已暴露 | `group.notice.delete` |
-| `_get_friend_dress` | 未暴露 | 未排期（账号资料/装扮） |
+| `_get_friend_dress` | 已暴露 | `friend.dress`（Unverified） |
 | `_get_group_notice` | 已暴露 | `group.notice.get` |
 | `_get_model_show` | 未暴露 | 外部约束：平台标注为兼容 mock，无真实语义 |
-| `_mark_all_as_read` | 未暴露 | 未排期（全部已读） |
+| `_mark_all_as_read` | 已暴露 | `msg.mark_all_read`（Unverified） |
 | `_send_group_notice` | 已暴露 | `group.notice.send` |
 | `_set_model_show` | 未暴露 | 外部约束：平台标注为占位 |
 | `.get_word_slices` | 未暴露 | 外部约束：平台标注未实现 |
 | `add_custom_face` | 已暴露 | `face.custom_add`（两段式：先加收藏，再用 emoji_id 调 `msg.face`） |
 | `bot_exit` | 已暴露 | `system.bot_exit` |
-| `cancel_group_todo` | 未暴露 | 未排期（群待办） |
+| `cancel_group_todo` | 已暴露 | `group.todo.cancel`（Unverified） |
 | `check_url_safely` | 已暴露 | `system.check_url` |
 | `clean_cache` | 已暴露 | `system.clean_cache` |
-| `click_inline_keyboard_button` | 未暴露 | 未排期（内联键盘） |
-| `complete_group_todo` | 未暴露 | 未排期（群待办） |
+| `click_inline_keyboard_button` | 已暴露 | `msg.inline_button`（Unverified） |
+| `complete_group_todo` | 已暴露 | `group.todo.complete`（Unverified） |
 | `create_collection` | 未暴露 | 外部约束：平台标注未实现 |
-| `create_flash_task` | 未暴露 | 未排期：收藏/闪传下一批 |
+| `create_flash_task` | 已暴露 | `file.flash_task_create`（Unverified） |
 | `delete_custom_face` | 已暴露 | `face.custom_delete` |
 | `delete_essence_msg` | 已暴露 | `group.essence.delete` |
-| `delete_flash_file` | 未暴露 | 未排期：收藏/闪传下一批 |
-| `delete_group_folder` | 未暴露 | 未排期：别名：group.file.folder_delete 已覆盖 |
+| `delete_flash_file` | 已暴露 | `file.flash_file_delete`（Unverified） |
+| `delete_group_folder` | 已暴露 | `group.file.folder_delete_alias`（别名） |
 | `download_file` | 已暴露 | `file.download` |
-| `download_fileset` | 未暴露 | 未排期：收藏/闪传下一批 |
+| `download_fileset` | 已暴露 | `file.fileset_download`（Unverified，Critical） |
 | `fetch_custom_face` | 已暴露 | `face.custom_list` |
 | `fetch_custom_face_detail` | 已暴露 | `face.custom_detail` |
 | `fetch_emoji_like` | 已暴露 | `msg.reaction_users` |
 | `fetch_ptt_text` | 已暴露 | `msg.voice_text` |
-| `forward_friend_single_msg` | 未暴露 | 未排期（单条转发） |
-| `forward_group_single_msg` | 未暴露 | 未排期（单条转发） |
+| `forward_friend_single_msg` | 已暴露 | `msg.forward_single_friend`（Unverified） |
+| `forward_group_single_msg` | 已暴露 | `msg.forward_single_group`（Unverified） |
 | `friend_poke` | 已暴露 | `msg.poke` |
 | `get_ai_characters` | 已暴露 | `group.ai_characters` |
 | `get_ai_record` | 已暴露 | `group.ai_voice` |
 | `get_clientkey` | 已暴露 | `account.clientkey` |
-| `get_collection_list` | 未暴露 | 未排期：收藏/闪传下一批 |
+| `get_collection_list` | 已暴露 | `file.collection_list`（Unverified） |
 | `get_cookies` | 已暴露 | `account.cookies` |
 | `get_credentials` | 已暴露 | `account.credentials` |
 | `get_csrf_token` | 已暴露 | `account.csrf_token` |
 | `get_doubt_friends_add_request` | 已暴露 | `friend.doubt_list` |
-| `get_emoji_likes` | 未暴露 | 未排期：与 msg.reaction_users（fetch_emoji_like）重叠 |
+| `get_emoji_likes` | 已暴露 | `msg.emoji_likes_alias`（别名） |
 | `get_essence_msg_list` | 已暴露 | `group.essence.list` |
 | `get_file` | 已暴露 | `file.info` |
-| `get_fileset_id` | 未暴露 | 未排期：收藏/闪传下一批 |
-| `get_fileset_info` | 未暴露 | 未排期：收藏/闪传下一批 |
-| `get_flash_file_list` | 未暴露 | 未排期：收藏/闪传下一批 |
-| `get_flash_file_url` | 未暴露 | 未排期：收藏/闪传下一批 |
+| `get_fileset_id` | 已暴露 | `file.fileset_id`（Unverified） |
+| `get_fileset_info` | 已暴露 | `file.fileset_info`（Unverified） |
+| `get_flash_file_list` | 已暴露 | `file.flash_file_list`（Unverified） |
+| `get_flash_file_url` | 已暴露 | `file.flash_file_url`（Unverified，Critical） |
 | `get_forward_msg` | 已暴露 | `msg.forward` |
 | `get_friend_msg_history` | 已暴露 | `msg.history` |
 | `get_friends_with_category` | 已暴露 | `friend.categories` |
 | `get_group_at_all_remain` | 已暴露 | `group.at_all_remain` |
 | `get_group_detail_info` | 已暴露 | `group.detail` |
 | `get_group_file_system_info` | 已暴露 | `group.file.info` |
-| `get_group_ignore_add_request` | 未暴露 | 未排期：与 group.ignored_requests 重叠 |
+| `get_group_ignore_add_request` | 已暴露 | `group.ignored_requests_alias`（别名） |
 | `get_group_ignored_notifies` | 已暴露 | `group.ignored_requests` |
-| `get_group_info_ex` | 未暴露 | 未排期（群信息扩展） |
+| `get_group_info_ex` | 已暴露 | `group.info_ex`（Unverified） |
 | `get_group_msg_history` | 已暴露 | `msg.history` |
 | `get_group_shut_list` | 已暴露 | `group.shut_list` |
 | `get_group_signed_list` | 已暴露 | `group.signed_list` |
-| `get_group_todo_list` | 未暴露 | 未排期（群待办） |
+| `get_group_todo_list` | 已暴露 | `group.todo.list`（Unverified） |
 | `get_image` | 已暴露 | `msg.image` |
-| `get_mini_app_ark` | 未暴露 | 未排期（Ark/卡片载荷） |
+| `get_mini_app_ark` | 已暴露 | `msg.mini_app_ark`（Unverified） |
 | `get_msg_emoji_likes` | 已暴露 | `msg.reactions` |
-| `get_online_clients` | 未暴露 | 未排期（在线状态） |
-| `get_profile_like` | 未暴露 | 未排期（账号资料） |
+| `get_online_clients` | 已暴露 | `account.online_clients`（Unverified） |
+| `get_profile_like` | 已暴露 | `account.profile_likes`（Unverified） |
 | `get_recent_contact` | 未暴露 | 外部约束：平台标注为占位 |
 | `get_record` | 已暴露 | `msg.voice` |
-| `get_rkey` | 未暴露 | 未排期（下载 rkey，后续按 critical 评估） |
-| `get_rkey_server` | 未暴露 | 未排期（下载 rkey，后续按 critical 评估） |
+| `get_rkey` | 已暴露 | `account.rkey`（Unverified，Critical） |
+| `get_rkey_server` | 已暴露 | `account.rkey_server`（Unverified，Critical） |
 | `get_share_link` | 已暴露 | `file.share_link`（只收 fileset_id） |
 | `get_unidirectional_friend_list` | 已暴露 | `friend.one_way` |
 | `group_poke` | 已暴露 | `msg.poke` |
-| `list_filesets` | 未暴露 | 未排期：收藏/闪传下一批 |
-| `mark_group_msg_as_read` | 未暴露 | 未排期：别名：msg.mark_read 已覆盖 |
+| `list_filesets` | 已暴露 | `file.fileset_list`（Unverified） |
+| `mark_group_msg_as_read` | 已暴露 | `msg.mark_read_group`（别名） |
 | `mark_msg_as_read` | 已暴露 | `msg.mark_read` |
-| `mark_private_msg_as_read` | 未暴露 | 未排期：别名：msg.mark_read 已覆盖 |
+| `mark_private_msg_as_read` | 已暴露 | `msg.mark_read_private`（别名） |
 | `modify_custom_face` | 已暴露 | `face.custom_modify` |
-| `move_custom_face_to_front` | 未暴露 | 未排期（收藏表情） |
+| `move_custom_face_to_front` | 已暴露 | `face.custom_move_front`（Unverified） |
 | `nc_get_packet_status` | 未暴露 | 外部约束：平台标注为占位 |
-| `nc_get_user_status` | 未暴露 | 未排期（在线状态） |
+| `nc_get_user_status` | 已暴露 | `account.user_status`（Unverified） |
 | `ocr_image` | 已暴露 | `msg.ocr` |
-| `rename_flash_file` | 未暴露 | 未排期：收藏/闪传下一批 |
+| `rename_flash_file` | 已暴露 | `file.flash_file_rename`（Unverified） |
 | `request_decrypt_key` | 已暴露 | `account.decrypt_key` |
-| `send_ark_share` | 未暴露 | 未排期（Ark/卡片载荷） |
-| `send_flash_msg` | 未暴露 | 未排期：收藏/闪传下一批 |
+| `send_ark_share` | 已暴露 | `msg.ark_share`（Unverified） |
+| `send_flash_msg` | 已暴露 | `file.flash_msg_send`（Unverified） |
 | `send_forward_msg` | 已暴露 | `msg.send_forward` |
 | `send_group_ai_record` | 已暴露 | `group.ai_voice_send` |
-| `send_group_ark_share` | 未暴露 | 未排期（Ark/卡片载荷） |
+| `send_group_ark_share` | 已暴露 | `msg.group_ark_share`（Unverified） |
 | `send_group_forward_msg` | 已暴露 | `msg.send_group_forward` |
 | `send_like` | 已暴露 | `like.send` |
 | `send_packet` | 已暴露 | `system.send_packet` |
-| `send_poke` | 未暴露 | 未排期：别名：msg.poke 已覆盖（group_poke / friend_poke） |
+| `send_poke` | 已暴露 | `msg.poke_alias`（别名） |
 | `send_private_forward_msg` | 已暴露 | `msg.send_private_forward` |
-| `send_tuwen_ark` | 未暴露 | 未排期（Ark/卡片载荷） |
-| `set_diy_online_status` | 未暴露 | 未排期（在线状态） |
+| `send_tuwen_ark` | 已暴露 | `msg.tuwen_ark`（Unverified） |
+| `set_diy_online_status` | 已暴露 | `account.diy_status`（Unverified） |
 | `set_doubt_friends_add_request` | 已暴露 | `friend.doubt_approve` |
 | `set_essence_msg` | 已暴露 | `group.essence.set` |
 | `set_friend_remark` | 已暴露 | `friend.remark` |
 | `set_friends_category` | 已暴露 | `friend.set_category` |
 | `set_group_reaction` | 已暴露 | `group.reaction` |
 | `set_group_remark` | 已暴露 | `group.remark` |
-| `set_group_robot_add_option` | 未暴露 | 未排期（群机器人加群选项） |
+| `set_group_robot_add_option` | 已暴露 | `group.robot_add_option`（Unverified） |
 | `set_group_sign` | 已暴露 | `group.sign` |
-| `set_group_todo` | 未暴露 | 未排期（群待办） |
-| `set_input_status` | 未暴露 | 未排期（在线状态） |
+| `set_group_todo` | 已暴露 | `group.todo.set`（Unverified） |
+| `set_input_status` | 已暴露 | `account.input_status`（Unverified） |
 | `set_msg_emoji_like` | 已暴露 | `msg.react` |
-| `set_online_status` | 未暴露 | 未排期（在线状态） |
-| `set_qq_avatar` | 未暴露 | 未排期（账号资料） |
-| `set_qq_profile` | 未暴露 | 未排期（账号资料） |
+| `set_online_status` | 已暴露 | `account.online_status`（Unverified） |
+| `set_qq_avatar` | 已暴露 | `account.avatar`（Unverified） |
+| `set_qq_profile` | 已暴露 | `account.profile`（Unverified） |
 | `set_restart` | 已暴露 | `system.restart` |
-| `set_self_longnick` | 未暴露 | 未排期（账号资料） |
-| `share_group_ex` | 未暴露 | 未排期（Ark/卡片载荷） |
-| `share_peer` | 未暴露 | 未排期（Ark/卡片载荷） |
+| `set_self_longnick` | 已暴露 | `account.long_nick`（Unverified） |
+| `share_group_ex` | 已暴露 | `msg.group_share_ex`（Unverified） |
+| `share_peer` | 已暴露 | `msg.peer_share`（Unverified） |
 | `trans_group_file` | 已暴露 | `group.file.trans`（临时群文件转同群永久存储，无目标群参数） |
-| `translate_en2zh` | 未暴露 | 未排期（翻译） |
+| `translate_en2zh` | 已暴露 | `msg.translate`（Unverified） |
 | `upload_forward_msg` | 已暴露 | `msg.forward_upload` |
 | `upload_foward_msg` | 已暴露 | `msg.forward_upload_alias` |
 
@@ -180,8 +183,8 @@
 
 | 动作 | 状态 | op / 原因 |
 |---|---|---|
-| `can_send_image` | 未暴露 | 未排期（账号能力探针） |
-| `can_send_record` | 未暴露 | 未排期（账号能力探针） |
+| `can_send_image` | 已暴露 | `account.can_send_image`（Unverified） |
+| `can_send_record` | 已暴露 | `account.can_send_record`（Unverified） |
 | `get_login_info` | 已暴露 | `account.login_info` |
 | `get_status` | 已暴露 | `account.status` |
 | `get_version_info` | 已暴露 | `account.version` |
@@ -215,16 +218,16 @@
 
 | 动作 | 状态 | op / 原因 |
 |---|---|---|
-| `comment_qzone` | 未暴露 | 未排期：QQ 空间下一批 |
-| `delete_qzone_msg` | 未暴露 | 未排期：QQ 空间下一批 |
-| `get_qzone_feeds` | 未暴露 | 未排期：QQ 空间下一批 |
-| `get_qzone_msg_detail` | 未暴露 | 未排期：QQ 空间下一批 |
-| `get_qzone_msg_list` | 未暴露 | 未排期：QQ 空间下一批 |
-| `like_qzone` | 未暴露 | 未排期：QQ 空间下一批 |
-| `send_qzone_msg` | 未暴露 | 未排期：QQ 空间下一批 |
-| `set_qzone_ban` | 未暴露 | 未排期：QQ 空间下一批 |
-| `set_qzone_msg_right` | 未暴露 | 未排期：QQ 空间下一批 |
-| `unlike_qzone` | 未暴露 | 未排期：QQ 空间下一批 |
+| `comment_qzone` | 已暴露 | `account.qzone.comment`（Unverified） |
+| `delete_qzone_msg` | 已暴露 | `account.qzone.delete`（Unverified） |
+| `get_qzone_feeds` | 已暴露 | `account.qzone.feeds`（Unverified） |
+| `get_qzone_msg_detail` | 已暴露 | `account.qzone.detail`（Unverified） |
+| `get_qzone_msg_list` | 已暴露 | `account.qzone.list`（Unverified） |
+| `like_qzone` | 已暴露 | `account.qzone.like`（Unverified） |
+| `send_qzone_msg` | 已暴露 | `account.qzone.send`（Unverified） |
+| `set_qzone_ban` | 已暴露 | `account.qzone.ban`（Unverified） |
+| `set_qzone_msg_right` | 已暴露 | `account.qzone.right`（Unverified） |
+| `unlike_qzone` | 已暴露 | `account.qzone.unlike`（Unverified） |
 
 ### 群文件
 
@@ -241,7 +244,7 @@
 | `rename_group_file` | 已暴露 | `group.file.rename` |
 | `rename_group_file_folder` | 已暴露 | `group.file.folder_rename`（new_folder_name 优先，name 回退） |
 | `upload_group_file` | 已暴露 | `group.file.upload` |
-| `upload_private_file` | 未暴露 | 未排期（私聊文件上传） |
+| `upload_private_file` | 已暴露 | `file.private_upload`（Unverified） |
 
 ### 好友
 
@@ -259,7 +262,7 @@
 | `get_msg` | 已暴露 | `msg.get` |
 | `send_custom_face` | 已暴露 | `msg.face` |
 | `send_group_msg` | 已暴露 | `msg.send` |
-| `send_msg` | 未暴露 | 未排期：别名：msg.send 已覆盖（按 message_type 路由） |
+| `send_msg` | 已暴露 | `msg.send_alias`（别名） |
 | `send_private_msg` | 已暴露 | `msg.send` |
 
 ### 系统表情
@@ -267,7 +270,7 @@
 | 动作 | 状态 | op / 原因 |
 |---|---|---|
 | `fetch_face_entity` | 已暴露 | `face.entity` |
-| `fetch_super_face_id` | 未暴露 | 未排期（系统表情格式判断） |
+| `fetch_super_face_id` | 已暴露 | `face.super_id`（Unverified） |
 | `fetch_sys_faces` | 已暴露 | `face.system_list` |
 | `search_sys_faces` | 已暴露 | `face.system_search` |
 
@@ -292,12 +295,15 @@
 
 ## 清零口径
 
-- 未排期的别名项可以由现有 op 的路由别名补齐，成本低，但仍算独立 action。
-- 账号资料/在线状态、群待办、单条转发、Ark 卡片：只是未排期，不是文档缺失。
-- 收藏表情的 `move_custom_face_to_front` 与闪传文件集的其余动作仍是未排期；
-  `add_custom_face` / `get_share_link` / `trans_group_file` 已按调研出处落地。
+- 未排期项已清零。62 个动作全部有独立 op；7 个别名 op 路由到平台别名动作，
+  其余 55 个直接路由到 SnowLuma 动作名。
 - 外部约束项要等 SnowLuma 补文档或实现；不能靠猜参数把 op 写进 catalog。
-  本批已把 8 个外部约束项（群分类 3、加群选项、群搜索、文件夹改名、分享链接、转存）
-  按出处落地，剩下的 8 个仍是平台占位/未实现。
+  剩下的 8 个（`_get_model_show` / `_set_model_show` / `.get_word_slices` /
+  `create_collection` / `get_recent_contact` / `nc_get_packet_status` /
+  `set_group_anonymous` / `set_group_anonymous_ban`）仍是平台占位/未实现。
+  它们是**白名单例外**：表里写明理由，测试断言未暴露清单逐条命中白名单且理由非空。
 - 带 `Unverified` 的 op 不是「没实现」：它们在 catalog 里可申请、可审批、可执行，
-  只是直调被拒且审批私信会显示 `[UNVERIFIED]`；实验完成后把标记改成 `Verified`。
+  只是直调被拒且审批私信会显示 `[UNVERIFIED]`；实验完成后把标记改成 `Verified`，
+  测试不要求清单「看起来干净」，只要求每条都有原因和实验。
+- QQ 空间写操作至少 `Destructive`：`account.qzone.send` / `comment` / `like` /
+  `unlike` / `delete` / `ban` / `right` 都代表账号对外发布或改变可见性，不给 `Write`。

@@ -1471,6 +1471,519 @@ fn methods() -> Vec<MethodSpec> {
                 opt("lloc", "图片长定位标识或视频 id"),
             ],
         ),
+        // ── 批次 9：把剩余未排期动作全部暴露 ──
+        //
+        // 这批 op 覆盖覆盖矩阵里的 62 个未排期动作。除 7 个别名 op 有明确出处外，
+        // 其余语义只有 SnowLuma 动作目录这一层来源，一律标 `Unverified`（门槛等同
+        // critical）：直调被拒，只能走票据 + 审批，实验完成后再改 `Verified`。
+        //
+        // 风险分级按动作本身，不为了「看起来干净」放宽：账号资料/在线状态/群待办
+        // 是 Write，删除/取消是 Destructive，rkey 与文件集下载是 Critical，
+        // QQ 空间里代表账号对外发布的写操作至少 Destructive。
+
+        // ── 账号资料 / 在线状态 / 账号能力探针 ──
+        cm(
+            "friend.dress",
+            "查好友的装扮/头像挂件（_get_friend_dress）。只读",
+            &[tags::FRIEND, tags::ACCOUNT],
+            Risk::Read,
+            &[req("user_id", "好友 QQ 号")],
+        ),
+        cm(
+            "msg.mark_all_read",
+            "把全部会话标为已读（_mark_all_as_read）。会改变账号未读状态，不是查询",
+            &[tags::MESSAGE, tags::ACCOUNT],
+            Risk::Write,
+            &[],
+        ),
+        cm(
+            "account.online_clients",
+            "列出当前在线的设备/客户端（get_online_clients）。只读",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Read,
+            &[],
+        ),
+        cm(
+            "account.profile_likes",
+            "查账号收到的资料点赞（get_profile_like）。只读",
+            &[tags::ACCOUNT],
+            Risk::Read,
+            &[
+                opt("user_id", "只看某个 QQ 号；不填=自己"),
+                num("count", "取多少条"),
+            ],
+        ),
+        cm(
+            "account.user_status",
+            "查某个用户的在线/输入状态（nc_get_user_status）。只读",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Read,
+            &[req("user_id", "QQ 号")],
+        ),
+        cm(
+            "account.diy_status",
+            "设置自定义在线状态（set_diy_online_status）。会改变别人看到的账号状态",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Write,
+            &[
+                opt("status", "状态值，平台定义"),
+                opt("text", "自定义状态文案"),
+            ],
+        ),
+        cm(
+            "account.input_status",
+            "设置输入状态（set_input_status，如正在输入）。会向对方广播",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Write,
+            &[req("status", "输入状态值，平台定义")],
+        ),
+        cm(
+            "account.online_status",
+            "设置账号在线状态（set_online_status）。会改变别人看到的在线状态",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Write,
+            &[req("status", "在线状态值，平台定义")],
+        ),
+        cm(
+            "account.avatar",
+            "设置账号头像（set_qq_avatar）。file 支持路径 / http(s) URL / base64://",
+            &[tags::ACCOUNT, tags::IMAGE],
+            Risk::Write,
+            &[req("file", "图片路径或 http(s) URL")],
+        ),
+        cm(
+            "account.profile",
+            "设置账号资料（set_qq_profile）：昵称、邮箱、公司、签名。缺省字段不动",
+            &[tags::ACCOUNT],
+            Risk::Write,
+            &[
+                opt("nickname", "昵称"),
+                opt("email", "邮箱"),
+                opt("company", "公司"),
+                opt("personal_note", "个性签名"),
+            ],
+        ),
+        cm(
+            "account.long_nick",
+            "设置账号长昵称（set_self_longnick）。会改变群名片之外的账号展示名",
+            &[tags::ACCOUNT],
+            Risk::Write,
+            &[req("long_nick", "长昵称")],
+        ),
+        cm(
+            "account.can_send_image",
+            "探针：这台号此刻能不能发图片（can_send_image）。只读",
+            &[tags::ACCOUNT, tags::IMAGE],
+            Risk::Read,
+            &[],
+        ),
+        cm(
+            "account.can_send_record",
+            "探针：这台号此刻能不能发语音（can_send_record）。只读",
+            &[tags::ACCOUNT, tags::VOICE],
+            Risk::Read,
+            &[],
+        ),
+        cm(
+            "account.rkey",
+            "下载账号 rkey（get_rkey）。这是解密媒体所需的密钥材料，按账号凭据管理",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Critical,
+            &[opt("user_id", "目标 QQ 号；不填=自己")],
+        ),
+        cm(
+            "account.rkey_server",
+            "从服务端拉取 rkey（get_rkey_server）。这是解密媒体所需的密钥材料",
+            &[tags::ACCOUNT, tags::SYSTEM],
+            Risk::Critical,
+            &[opt("user_id", "目标 QQ 号；不填=自己")],
+        ),
+        // ── 群待办 / 内联键盘 / 机器人加群选项 ──
+        m(
+            "group.todo.list",
+            "列群待办（get_group_todo_list）。只读",
+            &[tags::GROUP],
+            Risk::Read,
+            &[],
+        ),
+        m(
+            "group.todo.set",
+            "把一条群消息设成群待办（set_group_todo）。会出现在群成员的待办列表里",
+            &[tags::GROUP],
+            Risk::Write,
+            &[req("message_id", "要做成待办的消息 id")],
+        ),
+        m(
+            "group.todo.complete",
+            "完成一条群待办（complete_group_todo）。完成状态对所有成员可见",
+            &[tags::GROUP],
+            Risk::Write,
+            &[req("todo_id", "群待办 id")],
+        ),
+        m(
+            "group.todo.cancel",
+            "取消一条群待办（cancel_group_todo）。待办会被移除，不可恢复",
+            &[tags::GROUP],
+            Risk::Destructive,
+            &[req("todo_id", "群待办 id")],
+        ),
+        m(
+            "msg.inline_button",
+            "点击消息里的内联键盘按钮（click_inline_keyboard_button）。可能触发平台侧动作",
+            &[tags::MESSAGE],
+            Risk::Write,
+            &[
+                req("message_id", "带键盘的消息 id"),
+                req("button_id", "按钮 id"),
+                opt("callback_data", "按钮回调数据"),
+            ],
+        ),
+        m(
+            "group.robot_add_option",
+            "设置群机器人的加群选项（set_group_robot_add_option）。会改变谁能拉机器人进群",
+            &[tags::GROUP, tags::SYSTEM],
+            Risk::Write,
+            &[req("option", "加群选项值，平台定义")],
+        ),
+        // ── 收藏 / 闪传 / 文件集 ──
+        cm(
+            "file.collection_list",
+            "列收藏列表（get_collection_list）。只读",
+            &[tags::FILE, tags::MEDIA],
+            Risk::Read,
+            &[],
+        ),
+        cm(
+            "file.flash_task_create",
+            "创建闪传任务（create_flash_task）。任务会出现在账号的闪传列表里",
+            &[tags::FILE, tags::UPLOAD],
+            Risk::Write,
+            &[opt("file_name", "文件名"), opt("file_url", "文件地址")],
+        ),
+        cm(
+            "file.flash_file_list",
+            "列闪传文件（get_flash_file_list）。只读",
+            &[tags::FILE],
+            Risk::Read,
+            &[],
+        ),
+        cm(
+            "file.flash_file_url",
+            "取闪传文件的下载地址（get_flash_file_url）。地址可直接下载，按下载入口管理",
+            &[tags::FILE, tags::DOWNLOAD],
+            Risk::Critical,
+            &[req("file_id", "闪传文件 id")],
+        ),
+        cm(
+            "file.flash_file_delete",
+            "删除闪传文件（delete_flash_file）。不可恢复",
+            &[tags::FILE],
+            Risk::Destructive,
+            &[req("file_id", "闪传文件 id")],
+        ),
+        cm(
+            "file.flash_file_rename",
+            "重命名闪传文件（rename_flash_file）。会改变账号里的文件名",
+            &[tags::FILE],
+            Risk::Write,
+            &[req("file_id", "闪传文件 id"), req("new_name", "新文件名")],
+        ),
+        cm(
+            "file.flash_msg_send",
+            "把闪传文件作为消息发出去（send_flash_msg）",
+            &[tags::FILE, tags::SEND, tags::MESSAGE],
+            Risk::Write,
+            &[
+                req("file_id", "闪传文件 id"),
+                opt("user_id", "收件人 QQ 号"),
+                opt("group_id", "目标群号"),
+            ],
+        ),
+        cm(
+            "file.fileset_list",
+            "列文件集（list_filesets）。只读",
+            &[tags::FILE],
+            Risk::Read,
+            &[],
+        ),
+        cm(
+            "file.fileset_id",
+            "按文件查它所属的文件集 id（get_fileset_id）。只读",
+            &[tags::FILE],
+            Risk::Read,
+            &[opt("file_id", "文件 id")],
+        ),
+        cm(
+            "file.fileset_info",
+            "查文件集详情（get_fileset_info）。只读",
+            &[tags::FILE],
+            Risk::Read,
+            &[req("fileset_id", "文件集 id")],
+        ),
+        cm(
+            "file.fileset_download",
+            "下载文件集（download_fileset）。会按平台返回的地址取回文件，按任意下载入口管理",
+            &[tags::FILE, tags::DOWNLOAD],
+            Risk::Critical,
+            &[req("fileset_id", "文件集 id")],
+        ),
+        cm(
+            "face.custom_move_front",
+            "把收藏表情移到列表最前（move_custom_face_to_front）。会改变账号表情顺序",
+            &[tags::IMAGE, tags::ACCOUNT],
+            Risk::Write,
+            &[req("emoji_id", "收藏表情 id")],
+        ),
+        // ── 单条转发 / Ark 卡片 / 分享 / 翻译 ──
+        m(
+            "msg.forward_single_friend",
+            "把单条消息转发给好友（forward_friend_single_msg）",
+            &[tags::FORWARD, tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[req("message_id", "要转发的消息 id")],
+        ),
+        m(
+            "msg.forward_single_group",
+            "把单条消息转发到群（forward_group_single_msg）",
+            &[tags::FORWARD, tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[req("message_id", "要转发的消息 id")],
+        ),
+        cm(
+            "msg.mini_app_ark",
+            "取小程序 Ark 卡片载荷（get_mini_app_ark）。只读",
+            &[tags::MESSAGE],
+            Risk::Read,
+            &[opt("app_id", "小程序 id"), opt("app_name", "小程序名称")],
+        ),
+        m(
+            "msg.ark_share",
+            "给好友发 Ark 分享卡片（send_ark_share）",
+            &[tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[any("ark", "Ark 卡片载荷"), opt("user_id", "收件人 QQ 号")],
+        ),
+        m(
+            "msg.group_ark_share",
+            "在群里发 Ark 分享卡片（send_group_ark_share）",
+            &[tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[any("ark", "Ark 卡片载荷")],
+        ),
+        m(
+            "msg.tuwen_ark",
+            "给好友发图文 Ark 卡片（send_tuwen_ark）",
+            &[tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[
+                req("image", "图片地址"),
+                opt("text", "卡片文案"),
+                opt("user_id", "收件人 QQ 号"),
+            ],
+        ),
+        m(
+            "msg.group_share_ex",
+            "把群名片分享给好友（share_group_ex）",
+            &[tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[
+                req("group_id", "被分享的群号"),
+                opt("user_id", "收件人 QQ 号"),
+            ],
+        ),
+        m(
+            "msg.peer_share",
+            "分享联系人名片（share_peer）",
+            &[tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[
+                req("user_id", "被分享的 QQ 号"),
+                opt("group_id", "目标群号；不填=私聊"),
+            ],
+        ),
+        cm(
+            "msg.translate",
+            "英译中（translate_en2zh）。只读",
+            &[tags::TEXT],
+            Risk::Read,
+            &[
+                req("text", "要翻译的英文"),
+                opt("source", "源语言"),
+                opt("target", "目标语言"),
+            ],
+        ),
+        cm(
+            "face.super_id",
+            "判断一个表情能否用超级表情格式（fetch_super_face_id）。只读",
+            &[tags::IMAGE, tags::SYSTEM],
+            Risk::Read,
+            &[req("face_id", "表情 id")],
+        ),
+        // ── 群信息扩展 / 别名 / 已读 / 拍一拍 ──
+        m(
+            "group.info_ex",
+            "群信息扩展（get_group_info_ex）。只读",
+            &[tags::GROUP],
+            Risk::Read,
+            &[],
+        ),
+        m(
+            "msg.send_alias",
+            "按 message_type 发送消息（send_msg）。与 msg.send 等价，保留平台原动作名",
+            &[tags::MESSAGE, tags::SEND],
+            Risk::Write,
+            &[
+                any("message", "消息内容"),
+                opt("message_type", "group / private"),
+                opt("group_id", "群号；message_type=group 时填"),
+                opt("user_id", "QQ 号；message_type=private 时填"),
+            ],
+        ),
+        m(
+            "group.file.folder_delete_alias",
+            "删除群文件文件夹（delete_group_folder）。与 group.file.folder_delete 等价",
+            &[tags::GROUP, tags::FILE],
+            Risk::Destructive,
+            &[req("folder_id", "文件夹 id")],
+        ),
+        cm(
+            "group.ignored_requests_alias",
+            "查被忽略的加群请求（get_group_ignore_add_request）。与 group.ignored_requests 同义",
+            &[tags::GROUP, tags::APPROVE],
+            Risk::Read,
+            &[opt("count", "取多少条")],
+        ),
+        cm(
+            "msg.emoji_likes_alias",
+            "查消息的表情表态（get_emoji_likes）。与 msg.reaction_users 同义",
+            &[tags::MESSAGE],
+            Risk::Read,
+            &[
+                req("message_id", "消息 id"),
+                opt("emoji_id", "只看某个表情"),
+                num("count", "取多少条"),
+            ],
+        ),
+        m(
+            "msg.mark_read_group",
+            "把群消息标为已读（mark_group_msg_as_read）。只影响账号未读状态",
+            &[tags::MESSAGE],
+            Risk::Write,
+            &[opt("message_id", "标到哪条消息；不填=全部")],
+        ),
+        m(
+            "msg.mark_read_private",
+            "把私聊消息标为已读（mark_private_msg_as_read）。只影响账号未读状态",
+            &[tags::MESSAGE],
+            Risk::Write,
+            &[opt("message_id", "标到哪条消息；不填=全部")],
+        ),
+        m(
+            "msg.poke_alias",
+            "拍一拍（send_poke）。与 msg.poke 等价，群里 user_id 是拍谁",
+            &[tags::POKE, tags::SEND, tags::MEMBER],
+            Risk::Write,
+            &[
+                req("user_id", "拍谁 / 私聊对方 QQ 号"),
+                opt("group_id", "群号；群里拍人时填"),
+            ],
+        ),
+        // ── QQ 空间：代表账号对外发布，写操作至少 Destructive ──
+        cm(
+            "account.qzone.feeds",
+            "列 QQ 空间动态（get_qzone_feeds）。只读",
+            &[tags::ACCOUNT],
+            Risk::Read,
+            &[
+                opt("user_id", "看谁的动态；不填=好友流"),
+                num("count", "取多少条"),
+                num("pos", "从第几条开始"),
+            ],
+        ),
+        cm(
+            "account.qzone.list",
+            "列 QQ 空间说说（get_qzone_msg_list）。只读",
+            &[tags::ACCOUNT],
+            Risk::Read,
+            &[
+                opt("user_id", "看谁的说说；不填=自己"),
+                num("count", "取多少条"),
+                num("pos", "从第几条开始"),
+            ],
+        ),
+        cm(
+            "account.qzone.detail",
+            "查一条 QQ 空间说说详情（get_qzone_msg_detail）。只读",
+            &[tags::ACCOUNT],
+            Risk::Read,
+            &[req("msg_id", "说说 id")],
+        ),
+        cm(
+            "account.qzone.send",
+            "发一条 QQ 空间说说（send_qzone_msg）。代表账号对外发布",
+            &[tags::ACCOUNT, tags::MESSAGE],
+            Risk::Destructive,
+            &[
+                any("content", "说说正文"),
+                opt("images", "图片地址，逗号分隔"),
+            ],
+        ),
+        cm(
+            "account.qzone.comment",
+            "评论一条 QQ 空间说说（comment_qzone）。代表账号对外发布",
+            &[tags::ACCOUNT, tags::MESSAGE],
+            Risk::Destructive,
+            &[req("msg_id", "说说 id"), req("content", "评论正文")],
+        ),
+        cm(
+            "account.qzone.delete",
+            "删除一条 QQ 空间说说（delete_qzone_msg）。不可恢复",
+            &[tags::ACCOUNT],
+            Risk::Destructive,
+            &[req("msg_id", "说说 id")],
+        ),
+        cm(
+            "account.qzone.like",
+            "点赞一条 QQ 空间说说（like_qzone）。代表账号对外表态",
+            &[tags::ACCOUNT],
+            Risk::Destructive,
+            &[req("msg_id", "说说 id")],
+        ),
+        cm(
+            "account.qzone.unlike",
+            "取消点赞一条 QQ 空间说说（unlike_qzone）。代表账号对外表态",
+            &[tags::ACCOUNT],
+            Risk::Destructive,
+            &[req("msg_id", "说说 id")],
+        ),
+        cm(
+            "account.qzone.ban",
+            "设置 QQ 空间封禁（set_qzone_ban）。会限制账号的发布能力",
+            &[tags::ACCOUNT],
+            Risk::Destructive,
+            &[num("seconds", "封禁时长；平台若按天解释则以此为准")],
+        ),
+        cm(
+            "account.qzone.right",
+            "设置 QQ 空间说说可见范围（set_qzone_msg_right）。会改变谁能看到",
+            &[tags::ACCOUNT],
+            Risk::Destructive,
+            &[
+                req("msg_id", "说说 id"),
+                req("right", "可见范围值，平台定义"),
+            ],
+        ),
+        // ── 私聊文件上传 ──
+        m(
+            "file.private_upload",
+            "上传文件到私聊（upload_private_file）。只能在私聊房间里用",
+            &[tags::FILE, tags::UPLOAD],
+            Risk::Write,
+            &[
+                req("file", "平台侧路径或 http(s) URL"),
+                opt("name", "显示的文件名"),
+            ],
+        ),
     ]
 }
 
@@ -1703,6 +2216,72 @@ pub static ROUTES: &[Route] = &[
     group_route("group.album.comment", "do_group_album_comment"),
     group_route("group.album.like", "set_group_album_media_like"),
     group_route("group.album.unlike", "cancel_group_album_media_like"),
+    // 批次 9：账号资料 / 在线状态 / 群待办 / 收藏闪传 / Ark / QQ 空间 / 别名。
+    route("friend.dress", "_get_friend_dress"),
+    route("msg.mark_all_read", "_mark_all_as_read"),
+    route("account.online_clients", "get_online_clients"),
+    route("account.profile_likes", "get_profile_like"),
+    route("account.user_status", "nc_get_user_status"),
+    route("account.diy_status", "set_diy_online_status"),
+    route("account.input_status", "set_input_status"),
+    route("account.online_status", "set_online_status"),
+    route("account.avatar", "set_qq_avatar"),
+    route("account.profile", "set_qq_profile"),
+    route("account.long_nick", "set_self_longnick"),
+    route("account.can_send_image", "can_send_image"),
+    route("account.can_send_record", "can_send_record"),
+    route("account.rkey", "get_rkey"),
+    route("account.rkey_server", "get_rkey_server"),
+    group_route("group.todo.list", "get_group_todo_list"),
+    group_route("group.todo.set", "set_group_todo"),
+    group_route("group.todo.complete", "complete_group_todo"),
+    group_route("group.todo.cancel", "cancel_group_todo"),
+    route("msg.inline_button", "click_inline_keyboard_button"),
+    group_route("group.robot_add_option", "set_group_robot_add_option"),
+    route("file.collection_list", "get_collection_list"),
+    route("file.flash_task_create", "create_flash_task"),
+    route("file.flash_file_list", "get_flash_file_list"),
+    route("file.flash_file_url", "get_flash_file_url"),
+    route("file.flash_file_delete", "delete_flash_file"),
+    route("file.flash_file_rename", "rename_flash_file"),
+    route("file.flash_msg_send", "send_flash_msg"),
+    route("file.fileset_list", "list_filesets"),
+    route("file.fileset_id", "get_fileset_id"),
+    route("file.fileset_info", "get_fileset_info"),
+    route("file.fileset_download", "download_fileset"),
+    route("face.custom_move_front", "move_custom_face_to_front"),
+    private_route("msg.forward_single_friend", "forward_friend_single_msg"),
+    group_route("msg.forward_single_group", "forward_group_single_msg"),
+    route("msg.mini_app_ark", "get_mini_app_ark"),
+    private_route("msg.ark_share", "send_ark_share"),
+    group_route("msg.group_ark_share", "send_group_ark_share"),
+    private_route("msg.tuwen_ark", "send_tuwen_ark"),
+    private_route("msg.group_share_ex", "share_group_ex"),
+    route("msg.peer_share", "share_peer"),
+    route("msg.translate", "translate_en2zh"),
+    route("face.super_id", "fetch_super_face_id"),
+    group_route("group.info_ex", "get_group_info_ex"),
+    route("msg.send_alias", "send_msg"),
+    group_route("group.file.folder_delete_alias", "delete_group_folder"),
+    route(
+        "group.ignored_requests_alias",
+        "get_group_ignore_add_request",
+    ),
+    route("msg.emoji_likes_alias", "get_emoji_likes"),
+    group_route("msg.mark_read_group", "mark_group_msg_as_read"),
+    private_route("msg.mark_read_private", "mark_private_msg_as_read"),
+    route("msg.poke_alias", "send_poke"),
+    route("account.qzone.feeds", "get_qzone_feeds"),
+    route("account.qzone.list", "get_qzone_msg_list"),
+    route("account.qzone.detail", "get_qzone_msg_detail"),
+    route("account.qzone.send", "send_qzone_msg"),
+    route("account.qzone.comment", "comment_qzone"),
+    route("account.qzone.delete", "delete_qzone_msg"),
+    route("account.qzone.like", "like_qzone"),
+    route("account.qzone.unlike", "unlike_qzone"),
+    route("account.qzone.ban", "set_qzone_ban"),
+    route("account.qzone.right", "set_qzone_msg_right"),
+    private_route("file.private_upload", "upload_private_file"),
 ];
 
 /// 方法表 + 从路由推导出的目标参数声明。
@@ -1814,20 +2393,35 @@ const DELETE_METHODS: &[&str] = &[
     "friend.delete",
     "group.file.delete",
     "group.file.folder_delete",
+    "group.file.folder_delete_alias",
     "group.essence.delete",
     "group.notice.delete",
     "face.custom_delete",
     "group.album.delete_media",
+    "group.todo.cancel",
+    "file.flash_file_delete",
+    "account.qzone.delete",
     "stream.clean",
 ];
 
 /// 调用成功后要写进流水的那几个。core 靠它判断“这次调用会不会改变房间”。
 fn record_of(method: &str) -> RecordMode {
     match method {
-        "msg.send" | "msg.face" | "group.ai_voice_send" => RecordMode::Message,
+        "msg.send"
+        | "msg.face"
+        | "group.ai_voice_send"
+        | "msg.send_alias"
+        | "msg.ark_share"
+        | "msg.group_ark_share"
+        | "msg.tuwen_ark"
+        | "msg.group_share_ex"
+        | "msg.peer_share"
+        | "file.flash_msg_send" => RecordMode::Message,
         "msg.send_forward"
         | "msg.send_group_forward"
         | "msg.send_private_forward"
+        | "msg.forward_single_friend"
+        | "msg.forward_single_group"
         | "group.notice.send" => RecordMode::Event,
         _ => RecordMode::None,
     }
@@ -1852,6 +2446,111 @@ fn verification_of(method: &str) -> Verification {
              加/删标签是否影响群资料而不是全局分类目录，尚未实机确认",
             "research §3.3：选两个不同分类的测试群，扫描 get_group_tags(0..30)，加/删一个 \
              测试标签后检查两群资料与标签目录，最后清理",
+        ),
+        // 批次 9 的 7 个别名：语义就是已核实的同名/同参动作，给出处。
+        "group.file.folder_delete_alias" => Verification::verified(
+            "SnowLuma action catalog：delete_group_folder 与 delete_group_file_folder 同名同参，\
+             等价于已核实的 group.file.folder_delete",
+        ),
+        "msg.mark_read_group" | "msg.mark_read_private" => Verification::verified(
+            "SnowLuma action catalog：mark_group_msg_as_read / mark_private_msg_as_read 是 \
+             mark_msg_as_read 的群/私聊专用别名",
+        ),
+        "msg.poke_alias" => Verification::verified(
+            "SnowLuma action catalog：send_poke 是 group_poke / friend_poke 的合体别名，\
+             群聊/私聊语义与已核实的 msg.poke 一致",
+        ),
+        "msg.emoji_likes_alias" => Verification::verified(
+            "SnowLuma action catalog：get_emoji_likes 与 fetch_emoji_like 返回同一组表情表态",
+        ),
+        "group.ignored_requests_alias" => Verification::verified(
+            "SnowLuma action catalog：get_group_ignore_add_request 与 get_group_ignored_notifies \
+             同名同义",
+        ),
+        "msg.send_alias" => Verification::verified(
+            "SnowLuma action catalog：send_msg 按 message_type 路由到 send_group_msg / \
+             send_private_msg，与已核实的 msg.send 等价",
+        ),
+        // 批次 9 的其余 op：只有动作目录来源，语义/参数/权限未实机确认。
+        "friend.dress"
+        | "account.online_clients"
+        | "account.profile_likes"
+        | "account.user_status"
+        | "account.diy_status"
+        | "account.input_status"
+        | "account.online_status"
+        | "account.avatar"
+        | "account.profile"
+        | "account.long_nick"
+        | "account.can_send_image"
+        | "account.can_send_record"
+        | "account.rkey"
+        | "account.rkey_server"
+        | "msg.mark_all_read" => Verification::unverified(
+            "SnowLuma 动作目录只给出动作名与参数表；账号资料、在线状态、能力探针与 rkey 的\
+             真实返回字段、生效条件与频率限制没有官方源码或实机出处",
+            "research §3.4：用测试号逐项调用并记录返回字段与失败码；rkey 只在隔离号上验证，\
+             不落盘、不外传，验证后立即丢弃",
+        ),
+        "group.todo.list"
+        | "group.todo.set"
+        | "group.todo.complete"
+        | "group.todo.cancel"
+        | "msg.inline_button"
+        | "group.robot_add_option" => Verification::unverified(
+            "群待办 / 内联键盘 / 机器人加群选项的 id 生命周期、权限位与幂等性只有 SnowLuma\
+             动作目录来源",
+            "research §3.5：建测试群，用群主/管理员/成员三种身份逐项执行并回读；记录失败码\
+             与待办列表变化",
+        ),
+        "file.collection_list"
+        | "file.flash_task_create"
+        | "file.flash_file_list"
+        | "file.flash_file_url"
+        | "file.flash_file_delete"
+        | "file.flash_file_rename"
+        | "file.flash_msg_send"
+        | "file.fileset_list"
+        | "file.fileset_id"
+        | "file.fileset_info"
+        | "file.fileset_download"
+        | "file.private_upload"
+        | "face.custom_move_front" => Verification::unverified(
+            "收藏 / 闪传的文件集与 flash task 生命周期、fileset_id 来源及下载 URL 权限只有\
+             SnowLuma 动作目录来源",
+            "research §3.6：用测试号创建任务、列文件集、下载后校验哈希；确认 \
+             get_flash_file_url 是否对任意 fileset 都返回可下载地址",
+        ),
+        "msg.forward_single_friend"
+        | "msg.forward_single_group"
+        | "msg.mini_app_ark"
+        | "msg.ark_share"
+        | "msg.group_ark_share"
+        | "msg.tuwen_ark"
+        | "msg.group_share_ex"
+        | "msg.peer_share"
+        | "msg.translate"
+        | "face.super_id"
+        | "group.info_ex" => Verification::unverified(
+            "单条转发、Ark 卡片、分享卡片与翻译的载荷形状只有 SnowLuma 动作目录来源，\
+             字段名可能随客户端版本漂移",
+            "research §3.7：用测试号逐项发送到测试群/测试好友，记录平台返回与客户端展示；\
+             失败时保留原始 retcode",
+        ),
+        "account.qzone.feeds"
+        | "account.qzone.list"
+        | "account.qzone.detail"
+        | "account.qzone.send"
+        | "account.qzone.comment"
+        | "account.qzone.delete"
+        | "account.qzone.like"
+        | "account.qzone.unlike"
+        | "account.qzone.ban"
+        | "account.qzone.right" => Verification::unverified(
+            "QQ 空间动作只出现在 SnowLuma 目录；参数、权限、风控与「代表账号对外发布」的\
+             可见范围未实机确认",
+            "research §3.8：用隔离测试号发布/点赞/删除一条仅自己可见的说说，逐步放开可见\
+             范围，确认失败码与频率限制",
         ),
         "group.search" => Verification::verified(
             "SnowLuma packages/proto-defs/src/oidb.ts:139-142（0=open,1=close）与 \
