@@ -326,8 +326,16 @@ ignore_speakers = ["987654321"]
 # scope = "any"
 # capability = ["room_read", "room_write", "connection_read"]
 #
-# 能力：room_read / room_write / connection_read / platform / destructive / plugin。
+# 能力：room_read / room_write / connection_read / platform / destructive /
+#       access_request / account_read / plugin。
+# critical / account_secret 不能常驻授予，只能走 access_request 票据。
 # 场所：private / group / console / none；范围：any / subscribed / room / connection。
 #
-# scope = "room" / "connection" 时必须给 target = "qq:group/123" / "qq"。
+# scope = "room" / "connection" 时必须给 typed target：
+#   target = { kind = "room", id = "qq:group/123" }
+#   target = { kind = "connection", id = "qq" }
+# 旧写法 target = "qq:group/123" 会在启动解析期直接报错，不留兼容层。
+# scope = "any" 只覆盖本会话可达的 kind/目标，不是无条件全开。
+# access_request 默认：群友只能申请本会话已订阅目标；system_admin / bot_admin 在私信
+# 或控制台可申请任意目标；跨目标要显式规则（scope = "room" / "connection" + typed target）。
 # 未知字段或未知枚举会在启动解析期报错，不会静默忽略。

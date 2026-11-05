@@ -1503,8 +1503,9 @@ fn send_message_rechecks_current_room_access() {
 }
 
 /// system admin 只在私信里有常态授予；群里即使同账号也不自动提权。
+/// 跨订阅目标的放宽必须写显式 typed target，`scope = "any"` 只覆盖可达目标。
 #[test]
-fn system_admin_private_only_and_any_target() {
+fn system_admin_private_grants_stay_out_of_groups() {
     let rule = r#"
 [grants.system_admin]
 connection = "qq"
@@ -1513,7 +1514,8 @@ account = "10002"
 [[grants.rules]]
 subject = "system_admin"
 place = "private"
-scope = "any"
+scope = "room"
+target = { kind = "room", id = "qq:group/999" }
 capability = ["room_read", "room_write", "platform", "destructive", "plugin"]
 "#;
 

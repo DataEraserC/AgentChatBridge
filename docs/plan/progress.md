@@ -1979,9 +1979,8 @@
   - 审批私信新增 `申请者：<id>（<显示名>）`；票据审计行补 `sender` /
     `sender_name` / `reason`；申请被拒写 `[access-request] denied ... code=...`。
   - 冷却与额度数值不变。
-- 未落地（第二笔）：`AccessTarget` 类型化、`account_read` / `account_secret`、
-  按 kind 匹配规则、typed target 审批展示、`any` 的可达范围。当前 target 仍是
-  `RoomId`。
+- 第二笔（同日完成）：`AccessTarget` 类型化、`account_read` / `account_secret`、
+  按 kind 匹配规则、typed target 审批展示、`any` 的可达范围，见下一条。
 - 已知接受：管理员冷却是全局单时间戳，存在轻量 DoS；已写进 access-grants.md。
 - 证据：
   - `group_user_defaults_to_subscribed_targets_only`
@@ -1989,6 +1988,32 @@
   - `destructive_platform_call_is_refused_at_request_time`
   - `access_request_defaults_to_subscriptions_except_admin_private`
   - `batch_approve_sets_each_ticket_active_and_audits`（sender/name 审计）
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings` 全绿。
+
+## 2026-11-05 — typed target（access grants 第二笔）
+
+- 做了什么：
+  - 新增 `AccessTarget { kind, id, sub }` 与封闭枚举 `AccessTargetKind`
+    （`room` / `message` / `member` / `file` / `account` / `connection` /
+    `plugin_tool`）；规则、票据、审批展示、审计统一用同一形状。
+  - `GrantRule.target` 改为 typed 表；`scope = room` / `connection` 必须给
+    typed target，并校验 `kind` 与 `id`。旧字符串 target 在配置解析期报错。
+  - 能力表补 `account_read` / `account_secret`：`account_secret` 与 `critical`
+    同级，写进 rules 启动失败；账号级 critical 票据能力集自动带
+    `account_secret`，审批私信可见。
+  - `scope = any` 改为「本会话可达目标」：房间/连接来自订阅，账号来自订阅连接，
+    成员/消息/文件挂可达房间；跨目标必须显式写 `scope` + typed target。
+  - `MethodSpec::access_kind()` 由 catalog 的 scope/名字命名空间决定 grants
+    目标种类；票据申请与执行都校验 `[target_kind_mismatch]`。
+  - 审批私信与票据审计显示 `房间 ...` / `账号 ...（连接 ...）` 等 typed 文本。
+- 证据：
+  - `any_does_not_escape_the_sessions_reachable_targets`
+  - `config_cannot_grant_critical_capability`（critical / account_secret）
+  - `critical_is_refused_by_allow_destructive_and_runs_only_via_ticket`
+    （审批展示 `账号 bot（连接 qq）`）
+  - `mixed_target_kinds_are_refused_before_a_ticket_exists`
+  - `catalog_target_kinds_match_grant_kinds`
+  - `system_admin_private_grants_stay_out_of_groups`
   - 全量验证：`cargo test --workspace`、clippy `-D warnings` 全绿。
 
 

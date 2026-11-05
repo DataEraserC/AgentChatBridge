@@ -152,7 +152,8 @@ fn config() -> &'static str {
         [[grants.rules]]
         subject = "user"
         place = "group"
-        scope = "any"
+        scope = "connection"
+        target = { kind = "connection", id = "qq" }
         capability = ["access_request"]
     "#
 }

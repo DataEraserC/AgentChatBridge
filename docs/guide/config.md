@@ -225,6 +225,14 @@ scope = "any"
 capability = ["room_read", "room_write", "connection_read"]
 ```
 
+- `scope = "any"` 只覆盖本会话可达的 kind / 目标，不是无条件全开；跨目标要显式写
+  `scope = "room"` / `"connection"` 并给 typed target：
+  `target = { kind = "room", id = "qq:group/123" }` 或
+  `target = { kind = "connection", id = "qq" }`。旧字符串 target 会在启动期报错。
+- 能力词表：`room_read` / `room_write` / `connection_read` / `platform` / `destructive` /
+  `access_request` / `account_read` / `plugin`。`critical` 与 `account_secret` 不可常驻授予，
+  只能走票据。
+
 - `[sessions.access]` 只用于接入外部 access provider；不写就由内置 `[grants]` 评估器判定。
 - 旧键 `all_rooms` / `elevated_in_rooms` / `privileged_origins`（以及 `[sessions.access]`
   的 `rooms` / `origins`）已移除；配置里再出现会**直接启动失败**，错误会明确指向

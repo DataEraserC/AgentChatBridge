@@ -1,7 +1,7 @@
 # 访问授权（Access Grants）设计
 
-> 状态：**已实现（2026-11-05）**。票据申请准入、预检与审批身份已接进 core；
-> `target` 类型化（第二笔）尚未落地，见 §6.2.2 的说明。
+> 状态：**已实现（2026-11-05）**。票据申请准入、预检、typed target 与审批身份
+> 都已接进 core；§6.2.2 记录 typed target 的落地口径。
 > 目标：在不引入完整 RBAC 的前提下，明确「谁、在什么场所、什么范围、能做什么、对哪个目标」，并让默认拒绝、豁免和临时授权可审计。
 
 ---
@@ -171,7 +171,7 @@ capability = ["room_read", "room_write", "plugin"]
 subject = "system_admin"
 place = "private"
 scope = "any"
-capability = ["room_read", "room_write", "connection_read", "platform", "destructive", "access_request", "critical", "plugin"]
+capability = ["room_read", "room_write", "connection_read", "platform", "destructive", "access_request", "account_read", "plugin"]
 ```
 
 `[grants.tickets]` 等票据配置在阶段二再加；当前解析器不认识它，写了会按未知字段启动失败。
@@ -350,11 +350,24 @@ fail-closed 预检。deny / 预检失败都不建票、不发审批私信，并�
 申请被拒时写
 `[access-request] denied sender=... sender_name=... room=... target=... code=<access_request_denied|destructive_disabled|unknown_connection> detail="..."`。
 
-**尚未落地：target 类型化（第二笔）**
+**typed target（2026-11-05 实装）**
 
-`AccessTarget { kind, id, sub }`、`account_read` / `account_secret`、按 kind 匹配规则、
-typed target 审批展示与 `any` 的可达范围都还没有实现。当前 target 仍是 `RoomId` 字符串，
-`access_request` 只接受房间目标；跨账号/插件的 typed target 必须等这一笔落地。
+`AccessTarget { kind, id, sub }` 是唯一的目标形状；`kind` 封闭枚举：`room` / `message` /
+`member` / `file` / `account` / `connection` / `plugin_tool`。规则匹配只看 `kind` + `id`，
+不再对字符串做前缀猜。
+
+- `[[grants.rules]]` 的 `target` 改为 typed 表：
+  `target = { kind = "room", id = "qq:group/123" }` 或
+  `target = { kind = "connection", id = "qq" }`。旧字符串写法在启动解析期直接报错。
+- 能力表：`account_read` 读账号资料；`account_secret` 取账号凭证，与 `critical` 同级，
+  不可常驻授予，只能走票据。
+- `scope = "any"` 只覆盖本会话可达的 kind/目标（房间、连接、账号、可达房间下的
+  成员/消息/文件），不是无条件全开；跨 kind 放宽必须靠显式规则。
+- catalog 的 `MethodSpec::access_kind()` 与 grants 使用同一个 kind：`account.*` /
+  `file.*` / `stream.*` → `account`，其它 connection-scope → `connection`，room-scope →
+  `room`。票据申请与执行都校验这个对应关系（`[target_kind_mismatch]`）。
+- 票据快照存 typed target；审批私信显示 `房间 ...` / `账号 ...（连接 ...）` 等可读文本，
+  不再借用房间号表示账号动作。账号级动作执行时用申请房间做 outbound 句柄锚点。
 
 **已知、接受的威胁：管理员冷却全局单时间戳**
 
