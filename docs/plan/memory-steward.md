@@ -67,6 +67,12 @@ commit_threshold = 5      # 提交量触发：本地自上次同步后新增 5 �
 8. 冲突 → 在演练 worktree 里 `merge --abort` / `rebase --abort`，主工作区完全不受影响。
 9. 演练结果干净 → 落地前再比一次主工作区 `HEAD` / 指纹 / `git status`；任何不一致记 `concurrent_write`，**放弃本次落地**，不覆盖。
 10. 落地：拿 `acb-kernel::memory::worktree_write_lock`（与 core 的 `memory_write` / `git_add` / `git_commit` 同一把），在锁内再检查一次，然后 `git reset --hard <演练结果>`；失败尝试回滚到旧 HEAD。锁只覆盖这一小段，不覆盖演练。
+
+**`reset --hard` 的前提**：落地期间主工作区必须**无人写**。`reset --hard` 会丢弃锁外写入
+（包括暂存区里的改动）；锁内二次比对只是把窗口缩小到「比对完成 → reset」这一瞬，
+**不是绝对保证**。外部进程（shell、另一个 code agent）不遵守这把锁，极端情况下
+在比对之后、reset 之前的写入仍可能被覆盖。想彻底避免，只能靠外部写者也走 core，
+或者接受「宁可这轮不同步」的策略。
 11. 收掉演练 worktree（`Drop` 兜底，无论成功失败），push 主工作区。
 
 启动时 `Steward::new` 会清理 `state_dir/memory-merge/*` 残留：配置里还在的目标走
@@ -158,6 +164,8 @@ rename）。每条目标一个键：`<记忆id>/<会话id>`。
       "last_result": "conflict",
       "conflict_files": ["shared.md"],
       "error": "merge conflict; stopped without choosing a side (auto_resolve is none)",
+      "consecutive_skips": 0,
+      "stuck": false,
       "last_head": "..."
     }
   }
@@ -171,13 +179,16 @@ rename）。每条目标一个键：`<记忆id>/<会话id>`。
 | `last_result` | `ok` / `pushed` / `merged` / `rebased` / `conflict` / `dirty` / `no_remote` / `remote_unreachable` / `concurrent_write` / `landing_failed` / `error` |
 | `conflict_files` | 冲突文件列表；**冲突文件数 = 该列表长度**（不额外存冗余计数字段） |
 | `error` | 失败原因（fetch/push/merge/超时等原文摘要） |
+| `consecutive_skips` | 连续 `dirty` / `concurrent_write` 的次数；成功同步或其他结果清零 |
+| `stuck` | `consecutive_skips >= 5` 时为 true；控制台概览顶部显示红色告警 |
 | `last_head` | 上次成功同步的 HEAD，用于计算新增提交数 |
 
 查询：
 
 - 文件：`state/memory-steward/status.json`（路径可通过 `state_dir` 改）；
 - 控制台：`GET /api/memory-steward`（只读该文件；未启用返回
-  `{"enabled": false}`）。
+  `{"enabled": false}`）；控制台「概览」顶部对 `stuck=true` 的目标显示
+  「该记忆长期未同步：工作区持续脏」告警。
 
 ## 7. 失败模式
 
@@ -188,7 +199,8 @@ rename）。每条目标一个键：`<记忆id>/<会话id>`。
 | 自动策略解析失败 | `error` | abort，冲突文件保留 | `memory_sync_failed` | 不用半成品合并提交；下一次再试 |
 | 演练期间主工作区被外部写入/提交 | `concurrent_write` | 主工作区原样保留，外部写入不覆盖 | `memory_sync_failed`（reason 含 `concurrent_write`） | 放弃本次落地；下一轮主工作区脏则继续跳过，等人提交/清理 |
 | 落地 `reset --hard` 失败 | `landing_failed` | 尝试回滚到旧 HEAD；回滚失败会在 `error` 里注明 | `memory_sync_failed` | 不把半落地当成功；下一次重新演练 |
-| 工作区有未提交改动 | `dirty` | 不动 | 无 | 跳过本次；提交后自然恢复 |
+| 工作区有未提交改动 | `dirty` | 不动 | 无 | 跳过本次；连续 5 次后 `stuck=true`，控制台告警；提交后恢复 |
+| 连续跳过 5 次（dirty / concurrent_write） | `dirty` / `concurrent_write` + `stuck=true` | 不动 | 控制台顶部告警 | 提醒人处理；成功同步后计数清零 |
 | 没有 `origin` | `no_remote` | 不动 | 无 | 跳过；配置远端后恢复 |
 | 非 fast-forward 的 push 被拒 | `error` | 本地提交保留 | `memory_sync_failed` | 下一轮先 fetch + 合并再推 |
 | git 命令超时 | `error` | 本地提交保留 | `memory_sync_failed` | kill 子进程；下一轮再试 |
@@ -212,8 +224,10 @@ rename）。每条目标一个键：`<记忆id>/<会话id>`。
   如果把 `state_dir` 放进某个记忆 worktree，演练目录会被当成未跟踪文件，导致每次
   都 `concurrent_write`。
 - 外部写入检测覆盖 HEAD、`git status`、文件相对路径/大小/mtime/内容哈希（≤4 MiB
-  的文件读内容，大文件只看元数据）。检测到 `concurrent_write` 后主工作区可能变成
-  `dirty`，下一轮会按 `dirty` 跳过，直到人提交或清理。
+  的文件读内容，大文件只看元数据）。**可发现绝大多数外部写入，但理论边角仍存在**
+  （例如超过 4 MiB 且 mtime/size 被刻意保留的改动）；它不是「任何外部写入都能发现」
+  的绝对保证。检测到 `concurrent_write` 后主工作区可能变成 `dirty`，下一轮会按
+  `dirty` 跳过，直到人提交或清理。
 - git 凭据完全交给 git 自身的 credential helper / SSH 配置；管家设置
   `GIT_TERMINAL_PROMPT=0`，不会在后台卡住等待输入。
 
@@ -234,6 +248,8 @@ rename）。每条目标一个键：`<记忆id>/<会话id>`。
   目录与 admin 元数据；
 - `landing_failure_rolls_back_to_old_head`（lib 单测）：落地失败回到旧 HEAD，主工作区
   保持干净；
+- `repeated_skips_mark_stuck_and_reset_after_success`：连续 5 次 dirty 标 `stuck`，
+  状态文件里有 `consecutive_skips` / `stuck`，成功同步后清零；
 - `remote_unreachable_only_records_status`：远端不可达时本地提交不丢、状态可查、
   通知失败、单次同步不被拖死；
 - `merge_strategy_defaults_to_merge_and_auto_resolve_is_explicit`：默认值与 TOML

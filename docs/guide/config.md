@@ -410,7 +410,10 @@ git_timeout_secs = 120
   里的改动，默认关闭就是因为会丢数据。
 - 合并演练在 `state_dir/memory-merge/<记忆>/<会话>` 的临时 worktree 里做，主工作区
   只在最后「检查干净 + 落地」时持锁；演练期间外部写主工作区会被检测为
-  `concurrent_write` 并放弃本次落地，不覆盖别人刚写的内容。
+  `concurrent_write` 并放弃本次落地，不覆盖别人刚写的内容。落地 `reset --hard`
+  的前提是主工作区无人写；锁内二次比对只缩小窗口，不是绝对保证。
+- 连续 5 次 `dirty` / `concurrent_write` 会在 `status.json` 里标 `stuck=true`，
+  控制台「概览」顶部显示「该记忆长期未同步：工作区持续脏」告警。
 - 状态写在 `state_dir/status.json`，控制台 `GET /api/memory-steward` 只读暴露；
   字段包括最近一次同步时间、结果、冲突文件数与失败原因。
 - 远端就是普通的 `origin`；没有远端、worktree 尚不存在都只记状态/跳过，不影响轮次。

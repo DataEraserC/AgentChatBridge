@@ -1244,6 +1244,14 @@ mod tests {
     }
 
     #[test]
+    fn memory_stuck_warning_is_wired_into_the_console() {
+        let html = include_str!("console.html");
+        assert!(html.contains("id=\"memory-warning\""));
+        assert!(html.contains("renderMemoryWarning"));
+        assert!(html.contains("state.stuck"));
+    }
+
+    #[test]
     fn mask_secret_masks_only_when_present() {
         assert_eq!(mask_secret("abc"), json!("******"));
         assert_eq!(mask_secret(""), serde_json::Value::Null);

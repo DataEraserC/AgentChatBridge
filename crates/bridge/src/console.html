@@ -88,6 +88,7 @@
 </nav>
 <main>
   <section id="tab-status" class="active">
+    <div id="memory-warning"></div>
     <div class="card"><h2>概览</h2><div class="stat" id="status"></div><p class="muted" id="status-note"></p></div>
     <div class="card">
       <h2><span data-i18n="console.deps.title">依赖健康</span><button class="mini" onclick="loadStatus()" style="float:right" data-i18n="console.deps.refresh">刷新</button></h2>
@@ -151,7 +152,10 @@ async function loadI18n() {
 
 async function loadStatus() {
   try {
-    const s = await api("/api/status");
+    const [s, memory] = await Promise.all([
+      api("/api/status"),
+      api("/api/memory-steward").catch(() => null),
+    ]);
     $("#status").innerHTML = [
       ["连接", s.connections], ["会话", s.sessions], ["harness", s.harnesses],
       ["忙着的会话", s.busy_sessions], ["排队轮次", s.queued_turns],
@@ -160,10 +164,35 @@ async function loadStatus() {
     $("#status-note").innerHTML = s.staged_config
       ? '<span class="err">有一份暂存的新配置，下一次收消息/开轮时自动生效</span>（去「配置」页可放弃暂存）'
       : "配置按轮次边界热重载（ADR-0009）：在「配置」页编辑保存后，下一次收消息/开轮自动生效。";
+    renderMemoryWarning(memory);
   } catch (e) {
     $("#status-note").innerHTML = '<span class="err">' + esc(t("console.deps.statusError", { error: e.message })) + "</span>";
   }
   await loadDependencies();
+}
+
+/**
+ * 记忆管家长期未同步告警。status.json 里 stuck=true 的目标在概览顶部显示，
+ * 避免 agent 忘了提交导致记忆永久不同步却没人发现。
+ */
+function renderMemoryWarning(memory) {
+  const box = $("#memory-warning");
+  if (!box) return;
+  if (!memory || memory.enabled === false || !memory.targets) {
+    box.innerHTML = "";
+    return;
+  }
+  const stuck = Object.entries(memory.targets).filter(([, state]) => state && state.stuck);
+  if (stuck.length === 0) {
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML = stuck.map(([key, state]) => {
+    const skips = state.consecutive_skips ?? 0;
+    const last = state.last_result || "unknown";
+    const reason = state.error ? `：${state.error}` : "";
+    return `<div class="banner"><b>该记忆长期未同步：${esc(key)}</b>（连续跳过 ${esc(skips)} 次，最近结果 ${esc(last)}${esc(reason)}）<div style="clear:both"></div></div>`;
+  }).join("");
 }
 
 // ---------------------------------------------------------------------------
