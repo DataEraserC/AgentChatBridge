@@ -17,6 +17,10 @@
 #
 # 令牌 + harness id 是 harness 连进来时报的身份：名字对上、令牌对上，那条连接就代表
 # 这个 harness 接管的那组会话。别把示例里的令牌直接用在真环境里。
+#
+# 运行期策略也可以放分片：base 同目录的 config.d/*.toml 会按文件名字典序合并
+# （数组追加、标量/表后覆盖、带 key 的表按键覆盖）；控制台保存写到
+# config.d/90-console.toml。详见 docs/guide/config.md「配置分片」。
 
 [endpoint]
 # harness 连这个地址。默认只听本机，外网连不上。

@@ -33,13 +33,14 @@ pub use adapter::{
     manifest_supports_transport, run_adapter, validate_manifest,
 };
 pub use config::{
-    AccessPolicy, ClockPolicy, Config, Connection, ConsoleConfig, DEFAULT_MAX_AGE_DAYS,
-    DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH, DEFAULT_WORKTREES_ROOT, DeliveryPolicy,
-    EndpointConfig, Harness, InBandNoticeConfig, KNOWN_MEMORY_KINDS, LkgConfig, Memory,
-    NotificationsConfig, OutboundPolicy, Persona, PluginConfig, ProviderCallsConfig, QueueConfig,
-    ReceivePolicy, RetentionConfig, RoutePolicy, Session, StorageConfig, Subscription,
-    ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision,
-    WakeInput, WakePolicy, WakeVerdict,
+    AccessPolicy, CONSOLE_CONFIG_FILENAME, ClockPolicy, Config, ConfigSource, Connection,
+    ConsoleConfig, DEFAULT_MAX_AGE_DAYS, DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH,
+    DEFAULT_WORKTREES_ROOT, DeliveryPolicy, EndpointConfig, Harness, InBandNoticeConfig,
+    KNOWN_MEMORY_KINDS, LkgConfig, LoadedConfig, Memory, NotificationsConfig, OutboundPolicy,
+    Persona, PluginConfig, ProviderCallsConfig, QueueConfig, ReceivePolicy, RetentionConfig,
+    RoutePolicy, Session, StorageConfig, Subscription, ToolPluginConfig, Transport,
+    TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput, WakePolicy,
+    WakeVerdict,
 };
 pub use deps::{DependencyKind, DependencyRegistry, PlatformVersionInfo};
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
