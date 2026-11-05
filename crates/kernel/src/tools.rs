@@ -59,7 +59,7 @@ pub const TOOL_NAMES: &[&str] = &[
 /// 常驻工具：**显式白名单**，每条 harness 都永远注入这一层。
 ///
 /// 只放高频路径与「能力入口」：收发消息、列房间、能力自检、平台调用、票据申请/查询、
-/// 结束轮次确认、投递溢出回看。长尾工具走 [`TOOL_CATALOG`]，不在这里。
+/// 结束轮次确认。补上下文/回看由 harness 在投递溢出时按需注入，不占常驻位。
 /// 新增工具时不要写成「除长尾外都常驻」——反向定义会让常驻层自动膨胀。
 pub const RESIDENT_TOOLS: &[&str] = &[
     "send_message",
@@ -70,9 +70,19 @@ pub const RESIDENT_TOOLS: &[&str] = &[
     "access_request",
     "access_ticket_get",
     "ack_messages",
-    "fetch_records",
-    "get_history",
 ];
+
+/// 按需工具：不进常驻层，也不在普通轮次的可见集里。
+///
+/// `get_history` / `fetch_records` 的使用场景是「投递溢出」和「补齐上下文」——
+/// 这两件事 harness 自己知道（`delivery.omitted` / `delivery.more`）。harness 在
+/// 触发时把它们临时加进本轮工具面，其余时候不预先注入。
+pub const ON_DEMAND_TOOLS: &[&str] = &["get_history", "fetch_records"];
+
+/// 这个工具是否按需注入（只影响 harness 的可见集，不影响可调用性）。
+pub fn is_on_demand(tool: &str) -> bool {
+    ON_DEMAND_TOOLS.contains(&tool)
+}
 
 /// 目录层的一条索引：名字 + 一句话用途 + 何时用。
 ///
@@ -86,6 +96,16 @@ pub struct ToolCatalogEntry {
 /// 非驻留工具的目录索引。覆盖 `TOOL_NAMES` 里所有不在 [`RESIDENT_TOOLS`] 的条目；
 /// 测试会锁住这个覆盖关系。
 pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
+    ToolCatalogEntry {
+        name: "get_history",
+        purpose: "翻房间历史记录，补齐上下文",
+        when: "投递溢出或需要往前翻时（harness 按需注入）",
+    },
+    ToolCatalogEntry {
+        name: "fetch_records",
+        purpose: "按水位编号精确回看记录",
+        when: "投递溢出、只拿到部分编号时（harness 按需注入）",
+    },
     ToolCatalogEntry {
         name: "wait_message",
         purpose: "阻塞等同房间下一条消息",
@@ -777,16 +797,20 @@ mod tests {
 
     #[test]
     fn resident_set_is_explicit_and_bounded() {
-        assert_eq!(
-            RESIDENT_TOOLS.len(),
-            10,
-            "常驻层固定 10 个，别让反向定义膨胀"
-        );
+        assert_eq!(RESIDENT_TOOLS.len(), 8, "常驻层固定 8 个，别让反向定义膨胀");
         for tool in RESIDENT_TOOLS {
             assert!(TOOL_NAMES.contains(tool), "常驻工具 {tool} 不在 TOOL_NAMES");
             assert!(
                 !TOOL_CATALOG.iter().any(|entry| entry.name == *tool),
                 "常驻工具 {tool} 不能再进目录层"
+            );
+        }
+        for tool in ON_DEMAND_TOOLS {
+            assert!(TOOL_NAMES.contains(tool), "按需工具 {tool} 不在 TOOL_NAMES");
+            assert!(!is_resident(tool), "按需工具 {tool} 不能同时在常驻层");
+            assert!(
+                catalog_entry(tool).is_some(),
+                "按需工具 {tool} 仍要有目录索引"
             );
         }
     }

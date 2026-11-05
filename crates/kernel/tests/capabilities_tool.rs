@@ -1,14 +1,15 @@
 //! `capabilities` 只读自检：复用现有判定，不消费票据，不泄露别的会话。
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use acb_kernel::engine::TICKET_OPS;
 use acb_kernel::{
     AccessAction, AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Bridge, CallError,
     CallOutcome, Capability, Config, Effect, Element, ExtensionPoint, MemoryStore, MethodSpec,
-    Outbound, OutboundError, PLUGIN_API_VERSION, PluginManager, ProviderDescriptor, ProviderId,
-    RESIDENT_TOOLS, RecordDraft, RecordMode, Risk, RoomId, Scope, Sender, Sent, TOOL_NAMES,
-    Verification,
+    ON_DEMAND_TOOLS, Outbound, OutboundError, PLUGIN_API_VERSION, PluginManager,
+    ProviderDescriptor, ProviderId, RESIDENT_TOOLS, RecordDraft, RecordMode, Risk, RoomId, Scope,
+    Sender, Sent, TOOL_NAMES, Verification,
 };
 use serde_json::{Value, json};
 
@@ -53,6 +54,11 @@ fn catalog() -> Arc<[MethodSpec]> {
     for index in 0..116 {
         methods.push(MethodSpec {
             name: format!("fake.op{index}").into(),
+            aliases: if index == 0 {
+                vec![Cow::Borrowed("fake.alias")].into()
+            } else {
+                Cow::Borrowed(&[])
+            },
             summary: "假 op".into(),
             tags: Vec::new().into(),
             risk: Risk::Read,
@@ -66,6 +72,7 @@ fn catalog() -> Arc<[MethodSpec]> {
     }
     methods.push(MethodSpec {
         name: "fake.kick".into(),
+        aliases: Cow::Borrowed(&[]),
         summary: "假破坏性 op".into(),
         tags: Vec::new().into(),
         risk: Risk::Destructive,
@@ -78,6 +85,7 @@ fn catalog() -> Arc<[MethodSpec]> {
     });
     methods.push(MethodSpec {
         name: "account.cookies".into(),
+        aliases: Cow::Borrowed(&[]),
         summary: "假 critical op".into(),
         tags: Vec::new().into(),
         risk: Risk::Critical,
@@ -90,6 +98,7 @@ fn catalog() -> Arc<[MethodSpec]> {
     });
     methods.push(MethodSpec {
         name: "fake.unverified".into(),
+        aliases: Cow::Borrowed(&[]),
         summary: "假 unverified op".into(),
         tags: Vec::new().into(),
         risk: Risk::Write,
@@ -229,7 +238,7 @@ fn open_turn(bridge: &mut Bridge<MemoryStore>, room: &str) -> acb_kernel::Ticket
 }
 
 /// surface 不再重复列 `visible`：可见集 = 常驻 ∪ catalog 里不带
-/// `direct_executable=false` 的长尾工具。
+/// `direct_executable=false` 且不是按需注入的长尾工具。
 fn visible_tools(value: &Value) -> std::collections::BTreeSet<String> {
     let resident = value["resident"]
         .as_array()
@@ -243,6 +252,7 @@ fn visible_tools(value: &Value) -> std::collections::BTreeSet<String> {
         .iter()
         .filter(|entry| entry["direct_executable"] != false)
         .filter_map(|entry| entry["tool"].as_str())
+        .filter(|tool| !ON_DEMAND_TOOLS.contains(tool))
         .map(str::to_owned);
     resident.chain(catalog).collect()
 }
@@ -463,6 +473,38 @@ fn tool_scope_reports_stable_reasons() {
 }
 
 #[test]
+fn alias_lookups_normalize_to_the_main_op() {
+    let mut bridge = bridge();
+    let ticket = open_turn(&mut bridge, "qq:group/123");
+    let alias = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "tool", "name": "fake.alias"}),
+        )
+        .expect("能查");
+    assert_eq!(alias["op"], "fake.op0", "别名必须归一化到主 op");
+    assert_eq!(alias["kind"], "op");
+    assert_eq!(alias["aliases"][0], "fake.alias", "主 op 要列出别名");
+
+    let main = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "capabilities",
+            json!({"scope": "tool", "name": "fake.op0"}),
+        )
+        .expect("能查");
+    assert_eq!(main["op"], "fake.op0");
+    assert_eq!(main["risk"], alias["risk"], "别名继承主 op 的 risk");
+    assert_eq!(
+        main["verification"], alias["verification"],
+        "别名继承主 op 的 verification"
+    );
+}
+
+#[test]
 fn surface_splits_resident_catalog_and_hidden() {
     let mut bridge = bridge();
     let ticket = open_turn(&mut bridge, "qq:group/123");
@@ -613,7 +655,10 @@ fn catalog_scope_is_the_long_tail_index() {
         .expect("能查");
 
     assert_eq!(value["scope"], "catalog");
-    assert_eq!(value["resident"].as_array().expect("resident").len(), 10);
+    assert_eq!(
+        value["resident"].as_array().expect("resident").len(),
+        RESIDENT_TOOLS.len()
+    );
     let tools = value["tools"].as_array().expect("tools 是数组");
     assert_eq!(tools.len(), TOOL_NAMES.len() - RESIDENT_TOOLS.len());
     assert!(

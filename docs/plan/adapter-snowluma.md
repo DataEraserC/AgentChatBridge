@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 19 项、部分实现 2 项、未实现 2 项**。动作级：现有 catalog 暴露 189 个层级 op / 192 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考），200 个中文动作里只剩 8 个平台占位/未实现的外部约束项。逐动作覆盖矩阵见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 19 项、部分实现 2 项、未实现 2 项**。动作级：现有 catalog 暴露 184 个层级 op / 192 个 OneBot action（5 个平台别名挂在主 op 的 `aliases` 上，不单列 op）；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考），200 个中文动作里只剩 8 个平台占位/未实现的外部约束项。逐动作覆盖矩阵见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -116,8 +116,8 @@
 - **连接**：正向 WebSocket（`ws-client`）与反向 WebSocket（`ws-server`，桥监听，SnowLuma 连入）；HTTP API、HTTP 事件上报与 `wss://` 未实现。
 - **鉴权**：`ws-client` 用 `Authorization: Bearer`（地址里的 `?access_token=` 原样保留）；`ws-server` 接受 `?access_token=` 或 `Authorization: Bearer`，不匹配直接 401。
 - **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、自定义收藏表情（`msg.face`）、合并转发发送与读取。
-- **平台方法**：`catalog.rs` 的 `ROUTES` 共 189 个层级 op，映射 192 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**；现在只剩 8 个平台占位/未实现的动作没列。
-- **目录体积**：不带 `op` 列目录时，189 个 op 的原始清单约 25–27 KB；索引化后仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
+- **平台方法**：`catalog.rs` 的 `ROUTES` 共 184 个层级 op，映射 192 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作；5 个平台别名挂在主 op 的 `aliases` 上）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**；现在只剩 8 个平台占位/未实现的动作没列。
+- **目录体积**：不带 `op` 列目录时，184 个 op 的原始清单约 25–27 KB；索引化后仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
 - **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略（`reportSelfMessage = true` 时不重复记账）；`meta_event/heartbeat` 只刷新平台依赖条目的 `lastOkAt`，生命周期忽略；`bot_status` / `bot_offline` 走账号状态，不再写进私聊房间；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot-snowluma/src/event.rs#L55-L200)）。
 - **账号**：连上后另起线程调 `get_login_info` 核对 `account`，并调 `get_version_info` / `get_status` 采集三层版本与在线状态（[link.rs](../../crates/adapters/onebot-snowluma/src/link.rs)）。
 - **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 写进 `accountOnline` / `accountGood`；`bot_status` 的上下线按失败阈值迁移依赖状态，心跳只刷新 `lastOkAt`。版本信息写进 `version`。
@@ -238,9 +238,10 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 但 59 个 `Unverified` op 要等实验完成才算完全实现。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 189 个层级 op / 192 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 现有 `ROUTES` 184 个层级 op / 192 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
 - 其中 59 个 op 带 `Verification::Unverified`（批次 8 的 4 个 + 批次 9 的 55 个），
-  按 critical 档管理；7 个批次 9 别名 op 有明确出处，标 `Verified`。
+  按 critical 档管理；5 个平台别名挂在主 op 的 `aliases` 上，继承主 op 的
+  `Verified`。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 逐动作「已暴露 / 未暴露 + 原因分类」见 [snowluma-action-coverage.md](snowluma-action-coverage.md)：
   已暴露 192、未暴露 8（全部是外部约束，白名单 + 理由由测试锁定）。
@@ -868,7 +869,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **目标**：按「任何平台功能均要有，可以标高危，但必须要有」把 62 个未排期动作全部落地。
 
-**新增 62 个 op（127 → 189），映射 62 个 action（130 → 192）**
+**新增 62 个动作（127 → 184 个 op，130 → 192 个 action；5 个别名不单列 op）**
 - 账号资料/在线状态：`friend.dress`、`msg.mark_all_read`、`account.online_clients`、
   `account.profile_likes`、`account.user_status`、`account.diy_status`、
   `account.input_status`、`account.online_status`、`account.avatar`、
@@ -883,9 +884,11 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - 单条转发/Ark/分享/翻译：`msg.forward_single_friend`、`msg.forward_single_group`、
   `msg.mini_app_ark`、`msg.ark_share`、`msg.group_ark_share`、`msg.tuwen_ark`、
   `msg.group_share_ex`、`msg.peer_share`、`msg.translate`、`face.super_id`。
-- 别名/已读/拍一拍/群信息：`msg.send_alias`、`group.file.folder_delete_alias`、
-  `group.ignored_requests_alias`、`msg.emoji_likes_alias`、`msg.mark_read_group`、
-  `msg.mark_read_private`、`msg.poke_alias`、`group.info_ex`。
+- 别名/已读/群信息：`msg.mark_read_group`、`msg.mark_read_private`、`group.info_ex`；
+  `send_msg` / `delete_group_folder` / `get_group_ignore_add_request` /
+  `get_emoji_likes` / `send_poke` 作为 `aliases` 挂在 `msg.send` /
+  `group.file.folder_delete` / `group.ignored_requests` / `msg.reaction_users` /
+  `msg.poke` 上，不再单列 op。
 - QQ 空间：`account.qzone.feeds/list/detail/send/comment/delete/like/unlike/ban/right`。
 
 **风险分级（逐条按动作，不为清单好看放宽）**
@@ -898,16 +901,19 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - `Read`：纯查询。
 
 **verification**
-- 7 个别名 op（`msg.send_alias`、`group.file.folder_delete_alias`、
-  `group.ignored_requests_alias`、`msg.emoji_likes_alias`、`msg.mark_read_group`、
-  `msg.mark_read_private`、`msg.poke_alias`）语义等于已核实动作，标 `Verified` 并写出处。
+- 5 个平台别名（`send_msg`、`delete_group_folder`、`get_group_ignore_add_request`、
+  `get_emoji_likes`、`send_poke`）挂在主 op 的 `aliases` 上，继承主 op 的 `Verified`；
+  `msg.mark_read_group` / `msg.mark_read_private` 仍是独立 op，语义等于已核实的
+  `mark_msg_as_read`。
 - 其余 55 个只有 SnowLuma 动作目录来源，全部标 `Unverified { reason, experiment }`
   （research §3.4–§3.8），门槛等同 critical：直调拒绝，只能走票据 + 审批。
   全表 `Unverified` 59 个（含批次 8 的 4 个）。
 
 **证据**
-- `every_op_is_hierarchical_tagged_and_routed`：189 个 op 逐个检查层级名、risk tag、
+- `every_op_is_hierarchical_tagged_and_routed`：184 个 op 逐个检查层级名、risk tag、
   scope tag、路由、TargetSpec 非空、verification 的 source/reason/experiment。
+- `aliases_attach_to_the_main_op_and_stay_out_of_the_catalog`：别名挂在主 op 上、
+  目录里没有别名条目、主 op 是 `Verified`。
 - `action_coverage_matrix_is_complete_and_exceptions_have_reasons`：直接解析
   `snowluma-action-coverage.md`，断言 200 行、192 已暴露、8 未暴露且逐条命中白名单
   并有非空理由。

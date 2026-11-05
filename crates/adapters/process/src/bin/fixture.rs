@@ -166,6 +166,7 @@ fn catalog() -> Vec<WireMethodSpec> {
     vec![
         WireMethodSpec {
             name: "fixture.echo".into(),
+            aliases: Vec::new(),
             summary: "回显收到的参数".into(),
             tags: vec!["send".into()],
             risk: "read".into(),
@@ -178,6 +179,7 @@ fn catalog() -> Vec<WireMethodSpec> {
         },
         WireMethodSpec {
             name: "fixture.send".into(),
+            aliases: Vec::new(),
             summary: "假装发一条消息并记账".into(),
             tags: vec!["send".into(), "message".into()],
             risk: "write".into(),
@@ -190,6 +192,7 @@ fn catalog() -> Vec<WireMethodSpec> {
         },
         WireMethodSpec {
             name: "fixture.fail".into(),
+            aliases: Vec::new(),
             summary: "永远返回参数错误".into(),
             tags: vec!["system".into()],
             risk: "read".into(),
@@ -202,6 +205,7 @@ fn catalog() -> Vec<WireMethodSpec> {
         },
         WireMethodSpec {
             name: "fixture.exit".into(),
+            aliases: Vec::new(),
             summary: "直接退出进程（测试自动重启）".into(),
             tags: vec!["system".into()],
             risk: "write".into(),

@@ -656,6 +656,9 @@ impl Verification {
 pub struct MethodSpec {
     /// 层级化 op 全名，至少两段（`msg.send`、`group.file.list`）。
     pub name: Cow<'static, str>,
+    /// 这个 op 的别名。别名不出现在目录里；解析时归一化到主 op，
+    /// risk / scope / targets / verification 全部继承主 op。
+    pub aliases: Cow<'static, [Cow<'static, str>]>,
     pub summary: Cow<'static, str>,
     /// 用途标签，跨归属表达「这是干什么的」。值域是封闭枚举 [`PlatformTag`]。
     pub tags: Cow<'static, [PlatformTag]>,
@@ -1132,6 +1135,7 @@ mod tests {
 
     static METHODS: &[MethodSpec] = &[MethodSpec {
         name: Cow::Borrowed("msg.forward"),
+        aliases: Cow::Borrowed(&[]),
         summary: Cow::Borrowed("读合并转发的正文"),
         tags: Cow::Borrowed(FORWARD_TAGS),
         risk: Risk::Read,
@@ -1202,6 +1206,7 @@ mod tests {
     fn method_path_is_the_parent_prefix() {
         let spec = MethodSpec {
             name: Cow::Borrowed("member.info"),
+            aliases: Cow::Borrowed(&[]),
             summary: Cow::Borrowed(""),
             tags: Cow::Borrowed(&[]),
             risk: Risk::Read,
@@ -1224,6 +1229,7 @@ mod tests {
         static MIXED: &[MethodSpec] = &[
             MethodSpec {
                 name: Cow::Borrowed("msg.send"),
+                aliases: Cow::Borrowed(&[]),
                 summary: Cow::Borrowed("发一条消息"),
                 tags: Cow::Borrowed(&[tags::SEND, tags::IMAGE]),
                 risk: Risk::Write,
@@ -1236,6 +1242,7 @@ mod tests {
             },
             MethodSpec {
                 name: Cow::Borrowed("member.info"),
+                aliases: Cow::Borrowed(&[]),
                 summary: Cow::Borrowed("查群成员"),
                 tags: Cow::Borrowed(&[tags::MEMBER]),
                 risk: Risk::Read,

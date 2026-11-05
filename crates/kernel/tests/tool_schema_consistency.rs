@@ -5,9 +5,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use acb_kernel::RESIDENT_TOOLS;
 use acb_kernel::TOOL_NAMES;
 use acb_kernel::engine::TICKET_OPS;
+use acb_kernel::{ON_DEMAND_TOOLS, RESIDENT_TOOLS};
 
 fn tools_mjs() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -35,13 +35,23 @@ fn js_tool_names(source: &str) -> BTreeSet<String> {
 
 /// 解析 `export const RESIDENT_TOOL_NAMES = [...]` 里的字符串字面量。
 fn js_resident_names(source: &str) -> BTreeSet<String> {
+    js_array_names(source, "RESIDENT_TOOL_NAMES")
+}
+
+/// 解析 `export const ON_DEMAND_TOOL_NAMES = [...]` 里的字符串字面量。
+fn js_on_demand_names(source: &str) -> BTreeSet<String> {
+    js_array_names(source, "ON_DEMAND_TOOL_NAMES")
+}
+
+fn js_array_names(source: &str, export: &str) -> BTreeSet<String> {
+    let marker = format!("export const {export} = [");
     let start = source
-        .find("export const RESIDENT_TOOL_NAMES = [")
-        .expect("tools.mjs 里没有 RESIDENT_TOOL_NAMES");
+        .find(&marker)
+        .unwrap_or_else(|| panic!("tools.mjs 里没有 {export}"));
     let block = source[start..]
         .split(']')
         .next()
-        .expect("RESIDENT_TOOL_NAMES 有闭合括号");
+        .unwrap_or_else(|| panic!("{export} 有闭合括号"));
     block
         .lines()
         .filter_map(|line| {
@@ -114,7 +124,25 @@ fn resident_names_match_the_shared_schema() {
         "常驻白名单漂移：\n  harness RESIDENT_TOOL_NAMES 有、内核没有：{only_js:?}\n  \
          内核 RESIDENT_TOOLS 有、harness 没有：{only_kernel:?}"
     );
-    assert_eq!(kernel.len(), 10, "常驻集合固定 10 个");
+    assert_eq!(kernel.len(), 8, "常驻集合固定 8 个");
+}
+
+#[test]
+fn on_demand_names_match_the_shared_schema() {
+    let js = js_on_demand_names(&tools_mjs());
+    let kernel: BTreeSet<String> = ON_DEMAND_TOOLS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+
+    let only_js: Vec<&String> = js.difference(&kernel).collect();
+    let only_kernel: Vec<&String> = kernel.difference(&js).collect();
+    assert!(
+        only_js.is_empty() && only_kernel.is_empty(),
+        "按需注入清单漂移：\n  harness ON_DEMAND_TOOL_NAMES 有、内核没有：{only_js:?}\n  \
+         内核 ON_DEMAND_TOOLS 有、harness 没有：{only_kernel:?}"
+    );
+    assert_eq!(kernel.len(), 2, "按需集合固定 2 个");
 }
 
 #[test]

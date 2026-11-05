@@ -2073,6 +2073,37 @@
     `node --check harnesses/shared/tools.mjs` 全绿。
 
 
+## 2026-11-05 — 常驻集 10→8、按需注入与别名收敛
+
+- 做了什么：
+  - `crates/kernel/src/tools.rs`：`RESIDENT_TOOLS` 10 → 8，移出 `get_history` /
+    `fetch_records`；新增 `ON_DEMAND_TOOLS`，这两个工具仍在 `TOOL_CATALOG`，
+    但 `capabilities scope=surface` 默认不把它们算进可见集。
+  - `harnesses/shared/tools.mjs`：`RESIDENT_TOOL_NAMES` 同步 8 个，新增
+    `ON_DEMAND_TOOL_NAMES`；`toolsForSurface(surface, {includeOnDemand})` 只在
+    调用方显式要求时给这两个工具完整 schema。
+  - dsh / opencode：每轮根据 `delivery.omitted` / `delivery.more` 设置 `onDemand`，
+    投递溢出时临时注入 `get_history` / `fetch_records`，普通轮次不注入，下一轮自动收回。
+  - `MethodSpec` / `WireMethodSpec` 新增 `aliases`；`find_platform_op` 把别名归一化
+    到主 op，`platform_call` 执行时用主 op 名；目录（brief/detail）不展开别名条目。
+  - SnowLuma：`msg.send_alias` / `group.file.folder_delete_alias` /
+    `group.ignored_requests_alias` / `msg.emoji_likes_alias` / `msg.poke_alias`
+    收敛到 5 个主 op 的 `aliases`；op 189 → 184，action 仍 192。
+- 取舍：
+  - 常驻只留真正的高频路径；回看工具的使用场景框架自己知道，不该让模型预先看见。
+  - 别名不单列 op：action 数不变，但目录和权限表少 5 条重复项；risk / target /
+    verification 全部继承主 op，不维护第二份。
+- 证据：
+  - `surface_response_stays_within_budget`：surface 1,877 B（旧 1,762 B；两个按需工具
+    进了目录索引）。
+  - 空轮次（MCP tools/list 紧凑 JSON）：8 份常驻 schema 7,960 B + surface 1,877 B
+    = 9,837 B；同口径旧 10 份 + 旧 surface 为 11,832 B（-16.9%）。
+  - `resident_names_match_the_shared_schema` / `on_demand_names_match_the_shared_schema`
+  - `投递溢出时临时注入 get_history/fetch_records`（dsh + opencode）
+  - `alias_lookups_normalize_to_the_main_op`（内核）
+  - `aliases_attach_to_the_main_op_and_stay_out_of_the_catalog`（SnowLuma）
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode `npm test` 全绿。
+
 ## 2026-11-05 — 批次 9：剩余 62 个 SnowLuma 动作全部暴露
 
 - 做了什么：

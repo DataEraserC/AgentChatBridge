@@ -212,8 +212,10 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
             }
         };
 
+        let aliases = spec.aliases.into_iter().map(Cow::Owned).collect::<Vec<_>>();
         Ok(MethodSpec {
             name: Cow::Owned(name.to_owned()),
+            aliases: aliases.into(),
             summary: Cow::Owned(spec.summary),
             tags: tags.into(),
             risk,
@@ -406,6 +408,7 @@ mod tests {
     fn wire_method() -> WireMethodSpec {
         WireMethodSpec {
             name: "demo.echo".into(),
+            aliases: Vec::new(),
             summary: "回显".into(),
             tags: vec!["send".into()],
             risk: "write".into(),

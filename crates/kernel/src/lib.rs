@@ -85,7 +85,8 @@ pub use storage::{
 };
 pub use task::{TaskHandler, TaskOutcome};
 pub use tools::{
-    RESIDENT_TOOLS, TOOL_CATALOG, TOOL_NAMES, ToolCatalogEntry, catalog_entry, is_resident,
+    ON_DEMAND_TOOLS, RESIDENT_TOOLS, TOOL_CATALOG, TOOL_NAMES, ToolCatalogEntry, catalog_entry,
+    is_on_demand, is_resident,
 };
 
 /// 协议类型顺手转出去：下游（接入点、适配器）依赖 kernel 一个 crate 就够。

@@ -3,12 +3,13 @@
 状态：**全部排期动作已落地（2026-11-05，批次 9）**。输入为 SnowLuma 中文 API 索引的
 200 个唯一动作（页面分类合计 200，英文页 219；以中文索引的实际条目为基准）。
 
-- 已暴露：**192 个**（`ROUTES` 189 个 op / 192 个 action，按群/私聊分动作的 op 会映射到两条）。
+- 已暴露：**192 个**（`ROUTES` 184 个 op / 192 个 action；5 个平台别名动作挂在
+  主 op 的 `aliases` 上，不再单列 op。按群/私聊分动作的 op 会映射到两条）。
 - 未暴露：**8 个**，全部是外部约束（平台标注占位 / 未实现 / mock），不是没排期。
   例外白名单写在 `outbound.rs` 的 `UNEXPOSED` 常量里，测试逐条要求非空理由。
-- 批次 9 新增 62 个 op：7 个别名 op 为 `Verified` 并写出处，其余 55 个为
-  `Unverified`（门槛等同 critical，只能走票据 + 审批）。全表 `Unverified` 共 59 个
-  （含批次 8 的 `group.tag_*` / `group.add_option`）。
+- 批次 9 新增 62 个动作：5 个别名收敛到主 op（`Verified`，主 op 有出处），
+  其余 55 个为 `Unverified`（门槛等同 critical，只能走票据 + 审批）。全表
+  `Unverified` 共 59 个（含批次 8 的 `group.tag_*` / `group.add_option`）。
 - 风险分级逐条按动作：rkey / 文件集下载 / 闪传下载地址为 `Critical`；删除、取消、
   QQ 空间代表账号对外发布为 `Destructive`；资料/在线状态/群待办为 `Write`；纯查询为
   `Read`。
@@ -57,7 +58,7 @@
 | `delete_custom_face` | 已暴露 | `face.custom_delete` |
 | `delete_essence_msg` | 已暴露 | `group.essence.delete` |
 | `delete_flash_file` | 已暴露 | `file.flash_file_delete`（Unverified） |
-| `delete_group_folder` | 已暴露 | `group.file.folder_delete_alias`（别名） |
+| `delete_group_folder` | 已暴露 | `group.file.folder_delete`（别名 `group.file.folder_delete_alias`） |
 | `download_file` | 已暴露 | `file.download` |
 | `download_fileset` | 已暴露 | `file.fileset_download`（Unverified，Critical） |
 | `fetch_custom_face` | 已暴露 | `face.custom_list` |
@@ -75,7 +76,7 @@
 | `get_credentials` | 已暴露 | `account.credentials` |
 | `get_csrf_token` | 已暴露 | `account.csrf_token` |
 | `get_doubt_friends_add_request` | 已暴露 | `friend.doubt_list` |
-| `get_emoji_likes` | 已暴露 | `msg.emoji_likes_alias`（别名） |
+| `get_emoji_likes` | 已暴露 | `msg.reaction_users`（别名 `msg.emoji_likes_alias`） |
 | `get_essence_msg_list` | 已暴露 | `group.essence.list` |
 | `get_file` | 已暴露 | `file.info` |
 | `get_fileset_id` | 已暴露 | `file.fileset_id`（Unverified） |
@@ -88,7 +89,7 @@
 | `get_group_at_all_remain` | 已暴露 | `group.at_all_remain` |
 | `get_group_detail_info` | 已暴露 | `group.detail` |
 | `get_group_file_system_info` | 已暴露 | `group.file.info` |
-| `get_group_ignore_add_request` | 已暴露 | `group.ignored_requests_alias`（别名） |
+| `get_group_ignore_add_request` | 已暴露 | `group.ignored_requests`（别名 `group.ignored_requests_alias`） |
 | `get_group_ignored_notifies` | 已暴露 | `group.ignored_requests` |
 | `get_group_info_ex` | 已暴露 | `group.info_ex`（Unverified） |
 | `get_group_msg_history` | 已暴露 | `msg.history` |
@@ -126,7 +127,7 @@
 | `send_group_forward_msg` | 已暴露 | `msg.send_group_forward` |
 | `send_like` | 已暴露 | `like.send` |
 | `send_packet` | 已暴露 | `system.send_packet` |
-| `send_poke` | 已暴露 | `msg.poke_alias`（别名） |
+| `send_poke` | 已暴露 | `msg.poke`（别名 `msg.poke_alias`） |
 | `send_private_forward_msg` | 已暴露 | `msg.send_private_forward` |
 | `send_tuwen_ark` | 已暴露 | `msg.tuwen_ark`（Unverified） |
 | `set_diy_online_status` | 已暴露 | `account.diy_status`（Unverified） |
@@ -262,7 +263,7 @@
 | `get_msg` | 已暴露 | `msg.get` |
 | `send_custom_face` | 已暴露 | `msg.face` |
 | `send_group_msg` | 已暴露 | `msg.send` |
-| `send_msg` | 已暴露 | `msg.send_alias`（别名） |
+| `send_msg` | 已暴露 | `msg.send`（别名 `msg.send_alias`） |
 | `send_private_msg` | 已暴露 | `msg.send` |
 
 ### 系统表情
@@ -295,8 +296,8 @@
 
 ## 清零口径
 
-- 未排期项已清零。62 个动作全部有独立 op；7 个别名 op 路由到平台别名动作，
-  其余 55 个直接路由到 SnowLuma 动作名。
+- 未排期项已清零。62 个动作全部有 op 归属；5 个平台别名动作挂在主 op 的
+  `aliases` 上（action 数不减、op 数减 5），其余 57 个直接路由到 SnowLuma 动作名。
 - 外部约束项要等 SnowLuma 补文档或实现；不能靠猜参数把 op 写进 catalog。
   剩下的 8 个（`_get_model_show` / `_set_model_show` / `.get_word_slices` /
   `create_collection` / `get_recent_contact` / `nc_get_packet_status` /
