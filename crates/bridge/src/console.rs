@@ -54,16 +54,86 @@ const CONSOLE_HTML: &str = include_str!("console.html");
 
 /// 没带 token 打开 `/` 时给的一小块登录页：弹窗要 token，拼进 URL 重进。
 /// 跟旧 Node 版同一招——不让完整页面在未授权时先渲染出来。
-const LOGIN_HTML: &str = r#"<!doctype html><meta charset="utf-8"><title>需要令牌</title>
-<body style="font-family:system-ui;background:#14161a;color:#d8dce3;display:grid;place-items:center;height:100vh">
-<div style="text-align:center">
-<p>请输入控制台访问令牌</p>
-<input id="t" type="password" style="padding:6px 10px;border-radius:6px;border:1px solid #33373f;background:#1e2127;color:#d8dce3">
-<button onclick="go()" style="padding:6px 14px;margin-left:8px;cursor:pointer">进入</button>
-</div>
-<script>function go(){var t=document.getElementById('t').value;if(t)location.href='/?token='+encodeURIComponent(t)}
-document.getElementById('t').addEventListener('keydown',function(e){if(e.key==='Enter')go()})</script>
-</body>"#;
+/// 文案全部来自 locale 表，按请求 locale 渲染；登录前拿不到 `/api/i18n`。
+fn login_html(locale: &str) -> String {
+    let title = acb_i18n::tr_in(locale, "bridge.console.login_title");
+    let prompt = acb_i18n::tr_in(locale, "bridge.console.login_prompt");
+    let placeholder = acb_i18n::tr_in(locale, "bridge.console.login_placeholder");
+    let enter = acb_i18n::tr_in(locale, "bridge.console.login_enter");
+    format!(
+        r#"<!doctype html><html lang="{locale}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  :root {{ color-scheme:dark; --bg:#14161a; --surface:#1b1e24; --border:#2f343d; --text:#dfe3ea; --muted:#939aa6; --accent:#4f9cf9; --space-2:8px; --space-3:12px; --space-4:16px; --space-6:24px; --radius:8px; --control:32px; }}
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,"PingFang SC","Microsoft YaHei",sans-serif; }}
+  form {{ width:min(360px, calc(100vw - 32px)); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:var(--space-6); }}
+  h1 {{ font-size:16px; line-height:1.4; margin:0 0 var(--space-1,4px); font-weight:600; }}
+  p {{ margin:0 0 var(--space-4); color:var(--muted); font-size:12px; line-height:1.5; }}
+  input {{ width:100%; height:var(--control); padding:0 var(--space-2); background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; font:inherit; }}
+  input:focus-visible {{ outline:2px solid var(--accent); outline-offset:2px; }}
+  button {{ width:100%; height:var(--control); margin-top:var(--space-3); background:var(--accent); color:#fff; border:1px solid var(--accent); border-radius:6px; font:inherit; cursor:pointer; }}
+  button:focus-visible {{ outline:2px solid var(--accent); outline-offset:2px; }}
+  @media (max-width:480px) {{ button, input {{ min-height:44px; }} }}
+</style>
+<body>
+<form onsubmit="event.preventDefault();go()">
+<h1>{title}</h1>
+<p>{prompt}</p>
+<input id="t" type="password" placeholder="{placeholder}" aria-label="{placeholder}" autocomplete="current-password" autofocus>
+<button type="submit">{enter}</button>
+</form>
+<script>function go(){{var t=document.getElementById('t').value;if(t)location.href='/?token='+encodeURIComponent(t)}}</script>
+</body></html>"#
+    )
+}
+
+/// 大小写不敏感的请求头查找。
+fn header_value<'a>(header_text: &'a str, name: &str) -> Option<&'a str> {
+    header_text.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// 请求 locale：`?locale=` 优先，其次 `Accept-Language`，最后进程默认。
+fn request_locale(header_text: &str, query: &str) -> &'static str {
+    query_param(query, "locale")
+        .filter(|value| !value.is_empty())
+        .map(acb_i18n::normalize_locale)
+        .or_else(|| {
+            header_value(header_text, "accept-language")
+                .and_then(acb_i18n::locale_from_accept_language)
+        })
+        .unwrap_or_else(acb_i18n::locale)
+}
+
+/// 渲染一个 key + 参数错误；`detail` 只放无法 key 化的底层原文。
+fn error_json(message: acb_i18n::Message, detail: Option<String>) -> String {
+    let locale = acb_i18n::request_locale();
+    match detail {
+        Some(detail) => json!({"error": message.render(locale), "detail": detail}).to_string(),
+        None => json!({"error": message.render(locale)}).to_string(),
+    }
+}
+
+fn error_response(
+    status: u16,
+    message: acb_i18n::Message,
+    detail: Option<String>,
+) -> (u16, String) {
+    (status, error_json(message, detail))
+}
+
+/// 配置保存失败：除了 error/detail 还带 `saved: false`（页面据此留在编辑器）。
+fn config_error(status: u16, message: acb_i18n::Message, detail: Option<String>) -> (u16, String) {
+    let locale = acb_i18n::request_locale();
+    let mut body = json!({"error": message.render(locale), "saved": false});
+    if let Some(detail) = detail {
+        body["detail"] = json!(detail);
+    }
+    (status, body.to_string())
+}
 
 /// 控制台服务。桥本体之外的一条 HTTP 服务，跟接入点（TCP 7700）互不相干。
 pub struct Console<S: Store> {
@@ -134,14 +204,13 @@ impl<S: Store + Send + 'static> Console<S> {
         };
         text.map(|text| (path.display().to_string(), text))
             .map_err(|error| {
-                (
+                error_response(
                     500,
-                    json!({"error": acb_i18n::t!(
+                    acb_i18n::msg!(
                         "bridge.console.read_config_failed",
-                        path = path.display().to_string(),
-                        error = error
-                    )})
-                    .to_string(),
+                        path = path.display().to_string()
+                    ),
+                    Some(error.to_string()),
                 )
             })
     }
@@ -199,8 +268,7 @@ impl<S: Store + Send + 'static> Console<S> {
             }
         }
         let Some(header_end) = header_end else {
-            let body =
-                json!({"error": acb_i18n::t!("bridge.console.incomplete_headers")}).to_string();
+            let body = error_json(acb_i18n::msg!("bridge.console.incomplete_headers"), None);
             return write_response(&mut stream, 400, "application/json", &body, &[]);
         };
         let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
@@ -211,59 +279,63 @@ impl<S: Store + Send + 'static> Console<S> {
             .find_map(|l| l.strip_prefix("Cookie:").map(str::trim))
             .unwrap_or_default()
             .to_owned();
-        // 读 body（反馈改状态要带 {"status": "...", "note": "..."}）。
-        let body = read_body(&mut stream, &buffer[header_end + 4..], &header_text);
+        let locale = request_locale(&header_text, split_query(&path).1);
+        acb_i18n::with_locale(locale, || {
+            // 读 body（反馈改状态要带 {"status": "...", "note": "..."}）。
+            let body = read_body(&mut stream, &buffer[header_end + 4..], &header_text);
 
-        // 浏览器自动请求 favicon 且不带 token；放鉴权前 204 收掉，别给 DevTools 留 401 噪音。
-        if method == "GET" && (path == "/favicon.ico" || path == "/apple-touch-icon.png") {
-            return write_response(&mut stream, 204, "text/plain", "", &[]);
-        }
+            // 浏览器自动请求 favicon 且不带 token；放鉴权前 204 收掉，别给 DevTools 留 401 噪音。
+            if method == "GET" && (path == "/favicon.ico" || path == "/apple-touch-icon.png") {
+                return write_response(&mut stream, 204, "text/plain", "", &[]);
+            }
 
-        let (path, query) = split_query(&path);
-        // 三条门路：Authorization: Bearer 头、浏览器 cookie（进门时种下的）、
-        // ?token=（登录表单跳转用）。cookie 是刷新后不掉登录的关键：localStorage
-        // 在某些嵌入环境（沙箱 iframe）里会被禁/清掉，cookie 由浏览器自己管。
-        let query_ok = query_token_matches(query, &self.token);
-        let authorized =
-            self.authorized(&auth) || query_ok || cookie_token_matches(&cookie, &self.token);
+            let (path, query) = split_query(&path);
+            // 三条门路：Authorization: Bearer 头、浏览器 cookie（进门时种下的）、
+            // ?token=（登录表单跳转用）。cookie 是刷新后不掉登录的关键：localStorage
+            // 在某些嵌入环境（沙箱 iframe）里会被禁/清掉，cookie 由浏览器自己管。
+            let query_ok = query_token_matches(query, &self.token);
+            let authorized =
+                self.authorized(&auth) || query_ok || cookie_token_matches(&cookie, &self.token);
 
-        if !authorized {
-            // 页面本身：没 token 时给登录页（不是 JSON），人才能输 token 进来。
+            if !authorized {
+                // 页面本身：没 token 时给登录页（不是 JSON），人才能输 token 进来。
+                if method == "GET" && path == "/" {
+                    let html = login_html(acb_i18n::request_locale());
+                    return write_response(
+                        &mut stream,
+                        401,
+                        "text/html; charset=utf-8",
+                        &html,
+                        &[],
+                    );
+                }
+                let body = error_json(acb_i18n::msg!("bridge.console.unauthorized"), None);
+                return write_response(&mut stream, 401, "application/json", &body, &[]);
+            }
+
+            // 管理页。route 只管 JSON API。进门带 ?token= 时顺手种个 cookie：
+            // 之后刷新/关掉重开都靠它，不用再输一遍令牌。
             if method == "GET" && path == "/" {
+                let set_cookie = if query_ok {
+                    format!(
+                        "Set-Cookie: acb_console={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000\r\n",
+                        self.token
+                    )
+                } else {
+                    String::new()
+                };
                 return write_response(
                     &mut stream,
-                    401,
+                    200,
                     "text/html; charset=utf-8",
-                    LOGIN_HTML,
-                    &[],
+                    CONSOLE_HTML,
+                    &[&set_cookie],
                 );
             }
-            let body = json!({"error": acb_i18n::t!("bridge.console.unauthorized")}).to_string();
-            return write_response(&mut stream, 401, "application/json", &body, &[]);
-        }
 
-        // 管理页。route 只管 JSON API。进门带 ?token= 时顺手种个 cookie：
-        // 之后刷新/关掉重开都靠它，不用再输一遍令牌。
-        if method == "GET" && path == "/" {
-            let set_cookie = if query_ok {
-                format!(
-                    "Set-Cookie: acb_console={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000\r\n",
-                    self.token
-                )
-            } else {
-                String::new()
-            };
-            return write_response(
-                &mut stream,
-                200,
-                "text/html; charset=utf-8",
-                CONSOLE_HTML,
-                &[&set_cookie],
-            );
-        }
-
-        let (status, body) = self.route(&method, path, &body, peer);
-        write_response(&mut stream, status, "application/json", &body, &[])
+            let (status, body) = self.route(&method, path, &body, peer);
+            write_response(&mut stream, status, "application/json", &body, &[])
+        })
     }
 
     fn authorized(&self, auth: &str) -> bool {
@@ -284,10 +356,10 @@ impl<S: Store + Send + 'static> Console<S> {
             // 健康/排空探针：只给本机。仍走控制台 token 鉴权（在 handle 里）。
             ("GET", "/healthz") => {
                 if !peer.is_some_and(|ip| ip.is_loopback()) {
-                    return (
+                    return error_response(
                         403,
-                        json!({"error": acb_i18n::t!("bridge.console.health_loopback_only")})
-                            .to_string(),
+                        acb_i18n::msg!("bridge.console.health_loopback_only"),
+                        None,
                     );
                 }
                 let bridge = lock(&self.bridge);
@@ -329,8 +401,8 @@ impl<S: Store + Send + 'static> Console<S> {
             // 动态扩展目录：模块级目录与轮次边界重载。
             ("GET", "/api/extensions") => (200, self.extensions(query)),
             ("POST", "/api/extensions/reload") => self.reload_extensions(body),
-            // 控制台前端 i18n：当前 locale + 完整 message map。
-            ("GET", "/api/i18n") => (200, acb_i18n::catalog_json()),
+            // 控制台前端 i18n：当前请求 locale + 完整 message map。
+            ("GET", "/api/i18n") => (200, acb_i18n::catalog_json_for(acb_i18n::request_locale())),
             ("GET", "/api/feedback") => self.feedback(query),
             ("POST", p) if p.starts_with("/api/feedback/") && p.ends_with("/reply") => {
                 self.feedback_reply(p, body)
@@ -353,10 +425,7 @@ impl<S: Store + Send + 'static> Console<S> {
                 let discarded = bridge.discard_staged_config();
                 (200, json!({"ok": true, "discarded": discarded}).to_string())
             }
-            _ => (
-                404,
-                json!({"error": acb_i18n::t!("bridge.console.no_endpoint")}).to_string(),
-            ),
+            _ => error_response(404, acb_i18n::msg!("bridge.console.no_endpoint"), None),
         }
     }
 
@@ -367,11 +436,17 @@ impl<S: Store + Send + 'static> Console<S> {
         };
         match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(error) => json!({
-                "enabled": true,
-                "error": format!("cannot read {}: {error}", path.display()),
-            })
-            .to_string(),
+            Err(error) => {
+                let locale = acb_i18n::request_locale();
+                json!({
+                    "enabled": true,
+                    "error": acb_i18n::msg!("bridge.console.memory_status_unavailable")
+                        .render(locale),
+                    // 底层 IO 原文只作附注，不混进主文案。
+                    "detail": format!("{}: {error}", path.display()),
+                })
+                .to_string()
+            }
         }
     }
 
@@ -504,17 +579,18 @@ impl<S: Store + Send + 'static> Console<S> {
         let parsed: serde_json::Value = match serde_json::from_str(body) {
             Ok(value) => value,
             Err(error) => {
-                return (
+                return config_error(
                     400,
-                    json!({"error": acb_i18n::t!("bridge.console.body_json_text", error = error)})
-                        .to_string(),
+                    acb_i18n::msg!("bridge.console.body_json_text"),
+                    Some(error.to_string()),
                 );
             }
         };
         let Some(text) = parsed.get("text").and_then(serde_json::Value::as_str) else {
-            return (
+            return config_error(
                 400,
-                json!({"error": acb_i18n::t!("bridge.console.body_text_required")}).to_string(),
+                acb_i18n::msg!("bridge.console.body_text_required"),
+                None,
             );
         };
 
@@ -526,16 +602,10 @@ impl<S: Store + Send + 'static> Console<S> {
         ) {
             Ok(loaded) => loaded.config,
             Err(error) => {
-                return (
+                return config_error(
                     400,
-                    json!({
-                        "error": acb_i18n::t!(
-                            "bridge.console.config_parse_failed",
-                            error = error
-                        ),
-                        "saved": false,
-                    })
-                    .to_string(),
+                    acb_i18n::msg!("bridge.console.config_parse_failed"),
+                    Some(error.to_string()),
                 );
             }
         };
@@ -555,24 +625,18 @@ impl<S: Store + Send + 'static> Console<S> {
         let parsed: serde_json::Value = match serde_json::from_str(body) {
             Ok(value) => value,
             Err(error) => {
-                return (
+                return config_error(
                     400,
-                    json!({"error": acb_i18n::t!("bridge.console.body_json_ops", error = error)})
-                        .to_string(),
+                    acb_i18n::msg!("bridge.console.body_json_ops"),
+                    Some(error.to_string()),
                 );
             }
         };
         let Some(ops) = parsed.get("ops").and_then(serde_json::Value::as_array) else {
-            return (
-                400,
-                json!({"error": acb_i18n::t!("bridge.console.ops_required")}).to_string(),
-            );
+            return config_error(400, acb_i18n::msg!("bridge.console.ops_required"), None);
         };
         if ops.is_empty() {
-            return (
-                400,
-                json!({"error": acb_i18n::t!("bridge.console.ops_empty")}).to_string(),
-            );
+            return config_error(400, acb_i18n::msg!("bridge.console.ops_empty"), None);
         }
 
         let (_path, text) = match self.console_document() {
@@ -582,7 +646,7 @@ impl<S: Store + Send + 'static> Console<S> {
         let (new_text, changes) = match crate::config_patch::apply_patch(&text, ops) {
             Ok(result) => result,
             Err(error) => {
-                return (400, json!({"error": error, "saved": false}).to_string());
+                return config_error(400, error.message, error.detail);
             }
         };
         let new_config = match acb_kernel::Config::load_with_console_overlay(
@@ -592,16 +656,10 @@ impl<S: Store + Send + 'static> Console<S> {
         ) {
             Ok(loaded) => loaded.config,
             Err(error) => {
-                return (
+                return config_error(
                     400,
-                    json!({
-                        "error": acb_i18n::t!(
-                            "bridge.console.patched_config_parse_failed",
-                            error = error
-                        ),
-                        "saved": false,
-                    })
-                    .to_string(),
+                    acb_i18n::msg!("bridge.console.patched_config_parse_failed"),
+                    Some(error.to_string()),
                 );
             }
         };
@@ -617,8 +675,9 @@ impl<S: Store + Send + 'static> Console<S> {
         &self,
         new_config: acb_kernel::Config,
         text: &str,
-        changes: Vec<String>,
+        changes: Vec<acb_i18n::Message>,
     ) -> Result<serde_json::Value, (u16, serde_json::Value)> {
+        let locale = acb_i18n::request_locale();
         // 影响清单在改桥之前算（用的是当前生效的这份）。
         let (hot, restart) = {
             let bridge = lock(&self.bridge);
@@ -632,10 +691,9 @@ impl<S: Store + Send + 'static> Console<S> {
                 return Err((
                     400,
                     json!({
-                        "error": acb_i18n::t!(
-                            "bridge.console.provider_unavailable",
-                            error = error
-                        ),
+                        "error": acb_i18n::msg!("bridge.console.provider_unavailable")
+                            .render(locale),
+                        "detail": error.to_string(),
                         "saved": false,
                     }),
                 ));
@@ -649,11 +707,12 @@ impl<S: Store + Send + 'static> Console<S> {
                 return Err((
                     500,
                     json!({
-                        "error": acb_i18n::t!(
+                        "error": acb_i18n::msg!(
                             "bridge.console.write_config_failed",
-                            path = self.console_config_path().display().to_string(),
-                            error = error
-                        ),
+                            path = self.console_config_path().display().to_string()
+                        )
+                        .render(locale),
+                        "detail": error.to_string(),
                         "saved": false
                     }),
                 ));
@@ -668,10 +727,10 @@ impl<S: Store + Send + 'static> Console<S> {
         Ok(json!({
             "ok": true,
             "saved": true,
-            "note": acb_i18n::t!("bridge.console.saved_note"),
-            "changes": changes,
-            "hot_reload": hot,
-            "needs_restart": restart,
+            "note": acb_i18n::msg!("bridge.console.saved_note").render(locale),
+            "changes": changes.iter().map(|change| change.render(locale)).collect::<Vec<_>>(),
+            "hot_reload": hot.iter().map(|item| item.render(locale)).collect::<Vec<_>>(),
+            "needs_restart": restart.iter().map(|item| item.render(locale)).collect::<Vec<_>>(),
             "backup": backup,
         }))
     }
@@ -709,18 +768,15 @@ impl<S: Store + Send + 'static> Console<S> {
         let value: serde_json::Value = match serde_json::from_str(body) {
             Ok(value) => value,
             Err(error) => {
-                return (
+                return error_response(
                     400,
-                    json!({"error": acb_i18n::t!("bridge.console.invalid_json", error = error)})
-                        .to_string(),
+                    acb_i18n::msg!("bridge.console.invalid_json"),
+                    Some(error.to_string()),
                 );
             }
         };
         let Some(id) = value.get("id").and_then(serde_json::Value::as_str) else {
-            return (
-                400,
-                json!({"error": acb_i18n::t!("bridge.console.body_plugin_id")}).to_string(),
-            );
+            return error_response(400, acb_i18n::msg!("bridge.console.body_plugin_id"), None);
         };
         let mut bridge = lock(&self.bridge);
         let result = if reload {
@@ -735,17 +791,22 @@ impl<S: Store + Send + 'static> Console<S> {
                 } else {
                     "pending_unload"
                 };
+                let locale = acb_i18n::request_locale();
                 let note = if reload {
-                    acb_i18n::t!("bridge.console.plugin_reload_queued", id = id)
+                    acb_i18n::msg!("bridge.console.plugin_reload_queued", id = id).render(locale)
                 } else {
-                    acb_i18n::t!("bridge.console.plugin_unload_queued", id = id)
+                    acb_i18n::msg!("bridge.console.plugin_unload_queued", id = id).render(locale)
                 };
                 (
                     202,
                     json!({"queued": true, "id": id, "state": state, "note": note}).to_string(),
                 )
             }
-            Err(error) => (409, json!({"error": error.to_string()}).to_string()),
+            Err(error) => error_response(
+                409,
+                acb_i18n::msg!("bridge.console.plugin_action_failed"),
+                Some(error.to_string()),
+            ),
         }
     }
 
@@ -762,10 +823,10 @@ impl<S: Store + Send + 'static> Console<S> {
         let value: serde_json::Value = match serde_json::from_str(body) {
             Ok(value) => value,
             Err(error) => {
-                return (
+                return error_response(
                     400,
-                    json!({"error": acb_i18n::t!("bridge.console.invalid_json", error = error)})
-                        .to_string(),
+                    acb_i18n::msg!("bridge.console.invalid_json"),
+                    Some(error.to_string()),
                 );
             }
         };
@@ -782,14 +843,19 @@ impl<S: Store + Send + 'static> Console<S> {
                     "queued": true,
                     "namespace": namespace,
                     "state": "pending_reload",
-                    "note": acb_i18n::t!(
+                    "note": acb_i18n::msg!(
                         "bridge.console.extension_reload_queued",
                         namespace = namespace
-                    ),
+                    )
+                    .render(acb_i18n::request_locale()),
                 })
                 .to_string(),
             ),
-            Err(error) => (409, json!({"error": error.to_string()}).to_string()),
+            Err(error) => error_response(
+                409,
+                acb_i18n::msg!("bridge.console.extension_action_failed"),
+                Some(error.to_string()),
+            ),
         }
     }
 
@@ -811,7 +877,11 @@ impl<S: Store + Send + 'static> Console<S> {
                 });
                 (200, body.to_string())
             }
-            Err(error) => (500, json!({"error": error.to_string()}).to_string()),
+            Err(error) => error_response(
+                500,
+                acb_i18n::msg!("bridge.console.feedback_list_failed"),
+                Some(error.to_string()),
+            ),
         }
     }
 
@@ -824,10 +894,7 @@ impl<S: Store + Send + 'static> Console<S> {
             .trim_start_matches("/api/feedback/")
             .trim_end_matches("/status");
         let Ok(id) = rest.parse::<i64>() else {
-            return (
-                400,
-                json!({"error": acb_i18n::t!("bridge.console.feedback_path")}).to_string(),
-            );
+            return error_response(400, acb_i18n::msg!("bridge.console.feedback_path"), None);
         };
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
         let status = parsed
@@ -835,9 +902,10 @@ impl<S: Store + Send + 'static> Console<S> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("resolved");
         if !["open", "acked", "resolved", "wontfix"].contains(&status) {
-            return (
+            return error_response(
                 400,
-                json!({"error": acb_i18n::t!("bridge.console.bad_feedback_status")}).to_string(),
+                acb_i18n::msg!("bridge.console.bad_feedback_status"),
+                None,
             );
         }
         let note = parsed.get("note").and_then(serde_json::Value::as_str);
@@ -848,12 +916,16 @@ impl<S: Store + Send + 'static> Console<S> {
                 200,
                 json!({"ok": true, "id": id, "status": status}).to_string(),
             ),
-            Ok(false) => (
+            Ok(false) => error_response(
                 404,
-                json!({"error": acb_i18n::t!("bridge.console.feedback_not_found", id = id)})
-                    .to_string(),
+                acb_i18n::msg!("bridge.console.feedback_not_found", id = id),
+                None,
             ),
-            Err(error) => (500, json!({"error": error.to_string()}).to_string()),
+            Err(error) => error_response(
+                500,
+                acb_i18n::msg!("bridge.console.feedback_update_failed"),
+                Some(error.to_string()),
+            ),
         }
     }
 
@@ -864,10 +936,7 @@ impl<S: Store + Send + 'static> Console<S> {
             .trim_start_matches("/api/feedback/")
             .trim_end_matches("/reply");
         let Ok(id) = rest.parse::<i64>() else {
-            return (
-                400,
-                json!({"error": acb_i18n::t!("bridge.console.feedback_path")}).to_string(),
-            );
+            return error_response(400, acb_i18n::msg!("bridge.console.feedback_path"), None);
         };
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
         let text = parsed
@@ -876,15 +945,20 @@ impl<S: Store + Send + 'static> Console<S> {
             .unwrap_or("")
             .trim();
         if text.is_empty() {
-            return (
+            return error_response(
                 400,
-                json!({"error": acb_i18n::t!("bridge.console.feedback_reply_empty")}).to_string(),
+                acb_i18n::msg!("bridge.console.feedback_reply_empty"),
+                None,
             );
         }
         let mut bridge = lock(&self.bridge);
         match bridge.reply_feedback(id, "console", "console", text) {
             Ok(result) => (200, result.to_string()),
-            Err(error) => (400, json!({"error": error.message}).to_string()),
+            Err(error) => error_response(
+                400,
+                acb_i18n::msg!("bridge.console.feedback_reply_failed"),
+                Some(error.message),
+            ),
         }
     }
 
@@ -899,10 +973,7 @@ impl<S: Store + Send + 'static> Console<S> {
         };
         let session = session.to_owned();
         if session.is_empty() {
-            return (
-                400,
-                json!({"error": acb_i18n::t!("bridge.console.session_id_empty")}).to_string(),
-            );
+            return error_response(400, acb_i18n::msg!("bridge.console.session_id_empty"), None);
         }
         // 确认会话存在。
         let exists = {
@@ -910,10 +981,10 @@ impl<S: Store + Send + 'static> Console<S> {
             bridge.config().session(&session).is_some()
         };
         if !exists {
-            return (
+            return error_response(
                 404,
-                json!({"error": acb_i18n::t!("bridge.console.session_not_found", session = session)})
-                    .to_string(),
+                acb_i18n::msg!("bridge.console.session_not_found", session = session),
+                None,
             );
         }
         // 发 control 帧（reset / interrupt）给管理这个会话的 harness。
@@ -930,7 +1001,8 @@ impl<S: Store + Send + 'static> Console<S> {
                 json!({
                     "ok": true,
                     "session": session,
-                    "note": acb_i18n::t!("bridge.console.command_sent", command = command)
+                    "note": acb_i18n::msg!("bridge.console.command_sent", command = command)
+                        .render(acb_i18n::request_locale())
                 })
                 .to_string(),
             )
@@ -940,7 +1012,8 @@ impl<S: Store + Send + 'static> Console<S> {
                 json!({
                     "ok": false,
                     "session": session,
-                    "error": acb_i18n::t!("bridge.console.no_harness", session = session)
+                    "error": acb_i18n::msg!("bridge.console.no_harness", session = session)
+                        .render(acb_i18n::request_locale())
                 })
                 .to_string(),
             )
@@ -1168,63 +1241,66 @@ fn now_millis() -> i64 {
 ///
 /// 注意 `file_relay`：`listen` 变了要重启（HTTP 服务启动时绑定），
 /// 但 `public_base`/`dir` 不用——发布端（桥这边）每轮用当前配置重建。
-fn reload_impact(old: &acb_kernel::Config, new: &acb_kernel::Config) -> (Vec<String>, Vec<String>) {
+fn reload_impact(
+    old: &acb_kernel::Config,
+    new: &acb_kernel::Config,
+) -> (Vec<acb_i18n::Message>, Vec<acb_i18n::Message>) {
     let mut hot = Vec::new();
     let mut restart = Vec::new();
 
     if old.sessions != new.sessions {
-        hot.push(acb_i18n::t!("bridge.console.hot_sessions"));
+        hot.push(acb_i18n::msg!("bridge.console.hot_sessions"));
     }
     if old.harnesses != new.harnesses {
-        hot.push(acb_i18n::t!("bridge.console.hot_harnesses"));
+        hot.push(acb_i18n::msg!("bridge.console.hot_harnesses"));
     }
     if old.personas != new.personas {
-        hot.push(acb_i18n::t!("bridge.console.hot_personas"));
+        hot.push(acb_i18n::msg!("bridge.console.hot_personas"));
     }
     if old.memories != new.memories {
-        hot.push(acb_i18n::t!("bridge.console.hot_memories"));
+        hot.push(acb_i18n::msg!("bridge.console.hot_memories"));
     }
     if old.retention != new.retention {
-        hot.push(acb_i18n::t!("bridge.console.hot_retention"));
+        hot.push(acb_i18n::msg!("bridge.console.hot_retention"));
     }
     if old.default_on_turn_error != new.default_on_turn_error {
-        hot.push(acb_i18n::t!("bridge.console.hot_turn_error"));
+        hot.push(acb_i18n::msg!("bridge.console.hot_turn_error"));
     }
     if old.delivery_limit != new.delivery_limit {
-        hot.push(acb_i18n::t!("bridge.console.hot_delivery_limit"));
+        hot.push(acb_i18n::msg!("bridge.console.hot_delivery_limit"));
     }
     if old.turn_timeout_secs != new.turn_timeout_secs {
-        hot.push(acb_i18n::t!("bridge.console.hot_turn_timeout"));
+        hot.push(acb_i18n::msg!("bridge.console.hot_turn_timeout"));
     }
     match (&old.file_relay, &new.file_relay) {
         (Some(a), Some(b)) => {
             if a.public_base != b.public_base || a.dir != b.dir {
-                hot.push(acb_i18n::t!("bridge.console.hot_file_relay"));
+                hot.push(acb_i18n::msg!("bridge.console.hot_file_relay"));
             }
             if a.listen != b.listen {
-                restart.push(acb_i18n::t!("bridge.console.restart_file_relay_listen"));
+                restart.push(acb_i18n::msg!("bridge.console.restart_file_relay_listen"));
             }
         }
         (None, Some(_)) | (Some(_), None) => {
-            restart.push(acb_i18n::t!("bridge.console.restart_file_relay_toggle"));
+            restart.push(acb_i18n::msg!("bridge.console.restart_file_relay_toggle"));
         }
         (None, None) => {}
     }
 
     if old.endpoint != new.endpoint {
-        restart.push(acb_i18n::t!("bridge.console.restart_endpoint"));
+        restart.push(acb_i18n::msg!("bridge.console.restart_endpoint"));
     }
     if old.console != new.console {
-        restart.push(acb_i18n::t!("bridge.console.restart_console"));
+        restart.push(acb_i18n::msg!("bridge.console.restart_console"));
     }
     if old.connections != new.connections {
-        restart.push(acb_i18n::t!("bridge.console.restart_connections"));
+        restart.push(acb_i18n::msg!("bridge.console.restart_connections"));
     }
     if old.storage != new.storage {
-        restart.push(acb_i18n::t!("bridge.console.restart_storage"));
+        restart.push(acb_i18n::msg!("bridge.console.restart_storage"));
     }
     if old.worktrees_root != new.worktrees_root {
-        restart.push(acb_i18n::t!("bridge.console.restart_worktrees_root"));
+        restart.push(acb_i18n::msg!("bridge.console.restart_worktrees_root"));
     }
 
     (hot, restart)
@@ -1259,6 +1335,251 @@ fn persist_console_config(config_dir: &str, text: &str) -> std::io::Result<Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn is_cjk(ch: char) -> bool {
+        matches!(
+            ch as u32,
+            0x3000..=0x303F | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF
+        )
+    }
+
+    fn count_cjk(text: &str) -> usize {
+        text.chars().filter(|ch| is_cjk(*ch)).count()
+    }
+
+    fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start = source
+            .find(start)
+            .unwrap_or_else(|| panic!("缺少起始标记 {start}"))
+            + start.len();
+        let end = source[start..]
+            .find(end)
+            .unwrap_or_else(|| panic!("缺少结束标记 {end}"))
+            + start;
+        &source[start..end]
+    }
+
+    fn strip_js_comments(source: &str) -> String {
+        let mut out = String::new();
+        let mut chars = source.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '/' {
+                match chars.peek() {
+                    Some('/') => {
+                        chars.next();
+                        for next in chars.by_ref() {
+                            if next == '\n' {
+                                out.push('\n');
+                                break;
+                            }
+                        }
+                    }
+                    Some('*') => {
+                        chars.next();
+                        let mut previous = ' ';
+                        for next in chars.by_ref() {
+                            if previous == '*' && next == '/' {
+                                break;
+                            }
+                            previous = next;
+                        }
+                    }
+                    _ => out.push(ch),
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    fn strip_rust_comments(source: &str) -> String {
+        let mut out = String::new();
+        let mut chars = source.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '/' {
+                match chars.peek() {
+                    Some('/') => {
+                        chars.next();
+                        for next in chars.by_ref() {
+                            if next == '\n' {
+                                out.push('\n');
+                                break;
+                            }
+                        }
+                    }
+                    Some('*') => {
+                        chars.next();
+                        let mut previous = ' ';
+                        for next in chars.by_ref() {
+                            if previous == '*' && next == '/' {
+                                break;
+                            }
+                            previous = next;
+                        }
+                    }
+                    _ => out.push(ch),
+                }
+            } else if ch == '"' {
+                out.push(ch);
+                let mut escaped = false;
+                for next in chars.by_ref() {
+                    out.push(next);
+                    if escaped {
+                        escaped = false;
+                    } else if next == '\\' {
+                        escaped = true;
+                    } else if next == '"' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// 样板页（概览）范围零硬编码：HTML 区块与标记之间的 JS 都不允许出现中文。
+    #[test]
+    fn overview_sample_scope_has_no_hardcoded_cjk() {
+        let section = between(
+            CONSOLE_HTML,
+            "<!-- status-scope:start -->",
+            "<!-- status-scope:end -->",
+        );
+        assert_eq!(
+            count_cjk(section),
+            0,
+            "概览页 HTML 仍有硬编码中文：{section}"
+        );
+        let js = strip_js_comments(between(
+            CONSOLE_HTML,
+            "// status-scope:start",
+            "// status-scope:end",
+        ));
+        assert_eq!(count_cjk(&js), 0, "概览页 JS 仍有硬编码中文：{js}");
+    }
+
+    /// 控制台相关的 Rust 非测试代码里不允许出现中文成品文案；
+    /// 中文只允许出现在 locale 表与注释里。
+    #[test]
+    fn rust_console_copy_has_no_hardcoded_cjk() {
+        for (name, source) in [
+            ("console.rs", include_str!("console.rs")),
+            ("config_patch.rs", include_str!("config_patch.rs")),
+        ] {
+            let code = source
+                .split("#[cfg(test)]")
+                .next()
+                .expect("至少有一段非测试代码");
+            let stripped = strip_rust_comments(code);
+            assert_eq!(
+                count_cjk(&stripped),
+                0,
+                "{name} 的非测试代码里仍有硬编码中文"
+            );
+        }
+    }
+
+    /// 页面用到的每个 i18n key 都必须在 en / zh-CN 两张表里存在。
+    #[test]
+    fn console_i18n_keys_exist_in_both_locales() {
+        let mut keys = Vec::new();
+        for attribute in ["data-i18n=\"", "data-i18n-aria=\"", "data-tip-key=\""] {
+            for (index, _) in CONSOLE_HTML.match_indices(attribute) {
+                let start = index + attribute.len();
+                let Some(end) = CONSOLE_HTML[start..].find('"') else {
+                    continue;
+                };
+                let key = &CONSOLE_HTML[start..start + end];
+                if key.contains('$') || key.contains('{') {
+                    continue;
+                }
+                keys.push(key.to_owned());
+            }
+        }
+        for (index, _) in CONSOLE_HTML.match_indices("t(\"") {
+            if index > 0 {
+                let previous = CONSOLE_HTML[..index].chars().next_back().unwrap_or(' ');
+                if previous.is_alphanumeric() || previous == '_' || previous == '.' {
+                    continue;
+                }
+            }
+            let start = index + 3;
+            let Some(end) = CONSOLE_HTML[start..].find('"') else {
+                continue;
+            };
+            let key = &CONSOLE_HTML[start..start + end];
+            if !key.ends_with('.')
+                && !key.contains(" + ")
+                && !key.contains('$')
+                && !key.contains('{')
+            {
+                keys.push(key.to_owned());
+            }
+        }
+        // 运行时拼出来的 key（前缀 + 枚举值）单独列出。
+        for key in [
+            "console.deps.kind.harness",
+            "console.deps.kind.model",
+            "console.deps.kind.platform",
+            "console.deps.state.up",
+            "console.deps.state.down",
+            "console.deps.state.unknown",
+            "console.deps.account.online",
+            "console.deps.account.offline",
+            "console.deps.account.unknown",
+            "console.plugins.state.resident",
+            "console.plugins.state.unloadable",
+            "console.plugins.state.pending_unload",
+            "console.plugins.state.pending_reload",
+            "console.plugins.state.unloaded",
+        ] {
+            keys.push(key.to_owned());
+        }
+        for key in keys {
+            assert!(
+                acb_i18n::has_key("en", &key),
+                "en locale 缺少控制台 key：{key}"
+            );
+            assert!(
+                acb_i18n::has_key("zh-CN", &key),
+                "zh-CN locale 缺少控制台 key：{key}"
+            );
+        }
+    }
+
+    /// `?locale=` 优先于 `Accept-Language`；两者都没有时回退到进程 locale。
+    #[test]
+    fn request_locale_prefers_query_over_accept_language() {
+        assert_eq!(
+            request_locale("Accept-Language: zh-CN,zh;q=0.9\r\n", "locale=en"),
+            "en"
+        );
+        assert_eq!(
+            request_locale("Accept-Language: en-US,en;q=0.9\r\n", ""),
+            "en"
+        );
+        assert_eq!(request_locale("Accept-Language: zh-Hant\r\n", ""), "zh-CN");
+        assert_eq!(
+            request_locale("Accept-Language: fr-FR\r\n", ""),
+            acb_i18n::locale()
+        );
+    }
+
+    /// 错误响应在请求 locale 下渲染，而不是进程 locale。
+    #[test]
+    fn error_json_renders_in_request_locale() {
+        let en = acb_i18n::with_locale("en", || {
+            error_json(acb_i18n::msg!("bridge.console.unauthorized"), None)
+        });
+        assert!(en.contains("unauthorized"), "{en}");
+        let zh = acb_i18n::with_locale("zh-CN", || {
+            error_json(acb_i18n::msg!("bridge.console.unauthorized"), None)
+        });
+        assert!(zh.contains("未授权"), "{zh}");
+    }
 
     #[test]
     fn sensitive_key_matches_parts_not_substrings() {
@@ -1397,6 +1718,10 @@ token = "ctok123"
         )
     }
 
+    fn rendered(items: &[acb_i18n::Message]) -> Vec<String> {
+        items.iter().map(|item| item.render("en")).collect()
+    }
+
     #[test]
     fn reload_impact_sorts_hot_from_restart() {
         // 只改唤醒策略 → 热重载；只改监听/连接 → 要重启；什么都不改 → 两边都空。
@@ -1411,14 +1736,18 @@ token = "ctok123"
         );
         let new = acb_kernel::Config::parse(&hot_only).expect("能解析");
         let (hot, restart) = reload_impact(&old, &new);
-        assert_eq!(restart, Vec::<String>::new());
-        assert!(hot.iter().any(|item| item.contains("sessions")));
+        assert!(restart.is_empty());
+        assert!(rendered(&hot).iter().any(|item| item.contains("sessions")));
 
         let restart_only = toml_with("", "127.0.0.1:39999", "ws://127.0.0.1:53001/ws");
         let new = acb_kernel::Config::parse(&restart_only).expect("能解析");
         let (hot, restart) = reload_impact(&old, &new);
-        assert_eq!(hot, Vec::<String>::new());
-        assert!(restart.iter().any(|item| item.contains("endpoint")));
+        assert!(hot.is_empty());
+        assert!(
+            rendered(&restart)
+                .iter()
+                .any(|item| item.contains("endpoint"))
+        );
 
         let conn_changed = toml_with(
             "",
@@ -1427,12 +1756,16 @@ token = "ctok123"
         );
         let new = acb_kernel::Config::parse(&conn_changed).expect("能解析");
         let (_, restart) = reload_impact(&old, &new);
-        assert!(restart.iter().any(|item| item.contains("connections")));
+        assert!(
+            rendered(&restart)
+                .iter()
+                .any(|item| item.contains("connections"))
+        );
 
         let same = acb_kernel::Config::parse(&base).expect("能解析");
         let (hot, restart) = reload_impact(&old, &same);
-        assert_eq!(hot, Vec::<String>::new());
-        assert_eq!(restart, Vec::<String>::new());
+        assert!(hot.is_empty());
+        assert!(restart.is_empty());
     }
 
     static TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

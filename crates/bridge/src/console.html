@@ -3,114 +3,274 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>acb-bridge 控制台</title>
+<title>acb-bridge console</title>
 <style>
-  :root { color-scheme: dark; --bg:#14161a; --panel:#1e2127; --line:#33373f; --text:#d8dce3; --dim:#8b919c; --accent:#4f9cf9; --ok:#59c37f; --warn:#e0a33e; --err:#e06c6c; }
-  * { box-sizing:border-box; }
-  /* 输入控件统一暗色：弹窗表单里的 input/select 不写这条会走浏览器默认白底，夜间刺眼。 */
-  input, select, textarea { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; font:inherit; padding:4px 8px; }
-  input:focus, select:focus, textarea:focus { outline:1px solid var(--accent); }
-  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.6 system-ui,"PingFang SC","Microsoft YaHei",sans-serif; }
-  header { display:flex; align-items:center; gap:12px; padding:10px 18px; border-bottom:1px solid var(--line); background:var(--panel); }
-  header h1 { font-size:16px; margin:0; font-weight:600; }
-  header .spacer { flex:1; }
-  header button { background:none; border:1px solid var(--line); color:var(--dim); border-radius:6px; padding:3px 10px; cursor:pointer; }
-  nav { display:flex; gap:4px; padding:8px 18px 0; }
-  nav button { background:none; border:1px solid transparent; border-bottom:none; color:var(--dim); padding:6px 14px; border-radius:8px 8px 0 0; cursor:pointer; font-size:14px; }
-  nav button.active { background:var(--panel); color:var(--text); border-color:var(--line); }
-  main { padding:16px 18px 40px; max-width:1100px; }
-  section { display:none; }
-  section.active { display:block; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:14px; }
-  .card h2 { font-size:14px; margin:0 0 10px; color:var(--accent); font-weight:600; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--dim); font-weight:500; white-space:nowrap; }
-  td.wrap { word-break:break-all; }
-  .pill { display:inline-block; padding:0 8px; border-radius:10px; font-size:12px; margin-right:4px; }
-  .pill.open { background:#3a2b2b; color:var(--err); }
-  .pill.acked { background:#3a342b; color:var(--warn); }
-  .pill.resolved { background:#2b3a2e; color:var(--ok); }
-  .pill.wontfix { background:#2b2d3a; color:var(--dim); }
-  .pill.resident { background:#2b2d3a; color:var(--dim); }
-  .pill.unloadable { background:#22303f; color:var(--accent); }
-  .pill.pending { background:#3a342b; color:var(--warn); }
-  .pill.unloaded { background:#2b2d3a; color:var(--dim); }
-  .pill.dep-up { background:#223a2e; color:var(--ok); }
-  .pill.dep-down { background:#3a2b2b; color:var(--err); }
-  .pill.dep-unknown { background:#2b2d3a; color:var(--dim); }
-  .ok { color:var(--ok); }
-  button.act { background:var(--accent); border:none; color:#fff; border-radius:6px; padding:4px 12px; cursor:pointer; font-size:13px; }
-  button.act.danger { background:var(--err); }
-  button.act.ghost { background:none; border:1px solid var(--line); color:var(--dim); }
-  .stat { display:flex; gap:18px; flex-wrap:wrap; }
-  .stat div { min-width:120px; }
-  .stat b { display:block; font-size:22px; font-weight:600; }
-  .stat span { color:var(--dim); font-size:12px; }
-  .kv { display:grid; grid-template-columns:180px 1fr; gap:2px 12px; font-size:13px; }
-  .kv .k { color:var(--dim); }
-  .secret { color:var(--warn); letter-spacing:2px; }
-  .muted { color:var(--dim); }
-  pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; overflow:auto; font-size:12px; }
-  .err { color:var(--err); }
-  .empty { color:var(--dim); font-style:italic; }
-  textarea { width:100%; min-height:420px; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:8px; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; padding:10px; resize:vertical; }
-  .banner { border:1px solid var(--warn); background:#33290f; color:var(--warn); border-radius:8px; padding:8px 12px; margin-bottom:12px; }
-  .banner button { float:right; }
-  .mini { padding:1px 8px; font-size:12px; border:1px solid var(--line); background:none; color:var(--accent); border-radius:5px; cursor:pointer; margin-left:6px; vertical-align:middle; }
-  .mini.danger { color:var(--err); }
-  #edit-area input, #edit-area select { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; font-size:13px; }
-  #edit-area input[type=text] { width:100%; }
-  .form-row { display:flex; gap:10px; align-items:center; margin:7px 0; flex-wrap:wrap; }
-  .form-row > label:first-child { min-width:110px; color:var(--dim); font-size:13px; }
-  .form-row input[type=checkbox] { width:auto; }
-  .hint { color:var(--dim); font-size:12px; }
-  /* 表单弹窗：从对应条目点开，浮层居中，不再插到页面顶部 */
-  #modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:flex-start; justify-content:center; z-index:50; overflow:auto; padding:40px 16px; }
-  #modal.open { display:flex; }
-  #modal-box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px 20px; width:min(640px, 100%); box-shadow:0 12px 40px rgba(0,0,0,.5); }
-  #modal-box h2 { margin-top:0; }
+  /* ---------------------------------------------------------------------
+     Design tokens：间距只用 4/8/12/16/24/32；字号只有标题/正文/辅助三档。
+     颜色是中性灰阶 + 单一强调色；状态色只用于状态标记。
+     --------------------------------------------------------------------- */
+  :root {
+    color-scheme: dark;
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-6: 24px;
+    --space-8: 32px;
+    --text-title: 16px;
+    --text-body: 14px;
+    --text-aux: 12px;
+    --leading-title: 1.4;
+    --leading-body: 1.5;
+    --leading-aux: 1.5;
+    --bg: #14161a;
+    --surface: #1b1e24;
+    --surface-raised: #22262e;
+    --border: #2f343d;
+    --border-strong: #3a414b;
+    --text: #dfe3ea;
+    --text-muted: #939aa6;
+    --text-strong: #f1f3f7;
+    --accent: #4f9cf9;
+    --accent-weak: #1c2a3d;
+    --ok: #5cc07f;
+    --ok-weak: #1c2a22;
+    --warn: #d9a03f;
+    --warn-weak: #32280f;
+    --err: #dd6b6b;
+    --err-weak: #332020;
+    --radius-sm: 6px;
+    --radius: 8px;
+    --control-h: 32px;
+    --control-sm: 24px;
+    --touch: 44px;
+    --icon: 16px;
+    --font-sans: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: var(--text-body)/var(--leading-body) var(--font-sans); }
+  h1, h2, h3 { margin: 0; color: var(--text-strong); font-weight: 600; line-height: var(--leading-title); }
+  h1 { font-size: var(--text-title); }
+  h2 { font-size: var(--text-body); }
+  code, pre { font-family: var(--font-mono); }
+
+  header { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--surface); border-bottom: 1px solid var(--border); }
+  .brand { display: flex; align-items: center; gap: var(--space-1); min-width: 0; }
+  header .spacer { flex: 1; }
+  header select.locale-switch { width: auto; min-width: 96px; height: var(--control-h); font-size: var(--text-aux); }
+
+  nav { display: flex; gap: var(--space-1); padding: 0 var(--space-4); background: var(--bg); border-bottom: 1px solid var(--border); overflow-x: auto; }
+  nav button { flex: 0 0 auto; padding: var(--space-2) var(--space-3); background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-muted); font: var(--text-body)/1 var(--font-sans); cursor: pointer; }
+  nav button.active { color: var(--text-strong); border-bottom-color: var(--accent); }
+  nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  main { max-width: 1120px; margin: 0 auto; padding: var(--space-4); }
+  section { display: none; }
+  section.active { display: block; }
+
+  .card { padding: var(--space-4); margin-bottom: var(--space-4); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+  .card:last-child { margin-bottom: 0; }
+  .card h2 { margin: 0 0 var(--space-3); }
+  .card-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+  .card-head h2 { margin: 0; }
+  .card-head .spacer { flex: 1; }
+
+  .notice { padding: var(--space-2) var(--space-3); margin-bottom: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
+
+  .icon { width: var(--icon); height: var(--icon); flex: 0 0 auto; display: inline-block; vertical-align: middle; }
+  .info { display: inline-flex; align-items: center; justify-content: center; width: var(--icon); height: var(--icon); padding: 0; background: none; border: 0; border-radius: 50%; color: var(--text-muted); cursor: pointer; }
+  .info:hover, .info[aria-expanded="true"] { color: var(--accent); }
+  .info:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .btn, .act, .mini { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); border-radius: var(--radius-sm); font: var(--text-body)/1 var(--font-sans); white-space: nowrap; cursor: pointer; }
+  .btn, .act { height: var(--control-h); padding: 0 var(--space-3); background: var(--accent); border: 1px solid var(--accent); color: #fff; }
+  .btn.ghost, .act.ghost { background: none; border-color: var(--border); color: var(--text-muted); }
+  .btn.sm, .mini { height: var(--control-sm); padding: 0 var(--space-2); background: none; border: 1px solid var(--border); color: var(--text-muted); font-size: var(--text-aux); }
+  .mini { margin-left: var(--space-1); vertical-align: middle; }
+  .mini.danger, .btn.danger, .act.danger { color: var(--err); }
+  .btn.danger, .act.danger { background: var(--err); border-color: var(--err); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .stat { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--space-3); }
+  .stat-item { min-width: 0; }
+  .stat-item .label { display: block; color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
+  .stat-item .value { display: block; color: var(--text-strong); font-size: var(--text-title); line-height: var(--leading-title); font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+  .banner { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-2) var(--space-3); margin-bottom: var(--space-3); border: 1px solid var(--warn); border-radius: var(--radius-sm); background: var(--warn-weak); color: var(--warn); font-size: var(--text-body); line-height: var(--leading-body); }
+  .banner.err { border-color: var(--err); background: var(--err-weak); color: var(--err); }
+  .banner.info { border-color: var(--border); background: var(--surface-raised); color: var(--text); }
+  .banner .detail, .state .detail { display: block; color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); overflow-wrap: anywhere; }
+  details.detail summary { cursor: pointer; color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
+  details.detail span { display: block; margin-top: var(--space-1); color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); overflow-wrap: anywhere; }
+  .banner button { margin-left: auto; }
+
+  .state { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3); border: 1px dashed var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: var(--text-body); line-height: var(--leading-body); }
+  .state.error { border-color: var(--err); color: var(--err); }
+  .spinner { width: var(--icon); height: var(--icon); border: 1.5px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { width: 100%; border-collapse: collapse; font-size: var(--text-aux); line-height: var(--leading-aux); }
+  th, td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  th { color: var(--text-muted); font-weight: 500; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.wrap { overflow-wrap: anywhere; }
+  table.table-responsive { min-width: 720px; }
+
+  .pill { display: inline-flex; align-items: center; gap: var(--space-1); height: var(--control-sm); padding: 0 var(--space-2); border-radius: 999px; font-size: var(--text-aux); line-height: 1; white-space: nowrap; }
+  .pill.dep-up, .pill.resolved { background: var(--ok-weak); color: var(--ok); }
+  .pill.dep-down, .pill.open { background: var(--err-weak); color: var(--err); }
+  .pill.dep-unknown, .pill.wontfix, .pill.resident, .pill.unloaded { background: var(--surface-raised); color: var(--text-muted); }
+  .pill.acked, .pill.pending { background: var(--warn-weak); color: var(--warn); }
+  .pill.unloadable { background: var(--accent-weak); color: var(--accent); }
+
+  .kv { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: var(--space-1) var(--space-3); font-size: var(--text-body); }
+  .kv .k { color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
+  .secret { color: var(--warn); letter-spacing: 2px; }
+  .muted { color: var(--text-muted); }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  .empty { color: var(--text-muted); }
+  .warn { color: var(--warn); }
+  .hint { color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
+
+  pre { margin: 0; padding: var(--space-3); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: var(--text-aux); line-height: var(--leading-aux); overflow: auto; }
+
+  input, select, textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font: var(--text-body)/var(--leading-body) var(--font-sans); }
+  input, select { height: var(--control-h); padding: 0 var(--space-2); }
+  textarea { width: 100%; min-height: 120px; padding: var(--space-2); font-family: var(--font-mono); font-size: var(--text-aux); line-height: var(--leading-aux); resize: vertical; }
+  #toml-text { min-height: 50vh; }
+  input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  input.invalid, select.invalid, textarea.invalid { border-color: var(--err); }
+  .form-row { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); flex-wrap: wrap; }
+  .form-row > label:first-child { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 160px; color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
+  .form-row .control { flex: 1 1 200px; min-width: 0; }
+  .form-row input[type="text"], .form-row select { flex: 1 1 200px; min-width: 0; width: auto; }
+  .form-row input[type="checkbox"] { width: var(--space-4); height: var(--space-4); min-height: 0; }
+
+  #modal { position: fixed; inset: 0; z-index: 50; display: none; align-items: flex-start; justify-content: center; padding: var(--space-8) var(--space-4); background: rgba(0, 0, 0, .55); overflow: auto; }
+  #modal.open { display: flex; }
+  #modal-box { width: min(640px, 100%); padding: var(--space-6); background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 24px 64px rgba(0, 0, 0, .45); }
+  #modal-box h2 { margin: 0; font-size: var(--text-title); line-height: var(--leading-title); }
+  .modal-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-4); }
+  .modal-head .spacer { flex: 1; }
+  .modal-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
+  .form-error { margin: 0 0 var(--space-2); font-size: var(--text-aux); line-height: var(--leading-aux); }
+
+  .tip { position: fixed; z-index: 80; display: none; max-width: min(320px, calc(100vw - var(--space-8))); padding: var(--space-2) var(--space-3); background: var(--surface-raised); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgba(0, 0, 0, .35); font-size: var(--text-aux); line-height: var(--leading-aux); pointer-events: none; }
+  .tip.open { display: block; }
+
+  @media (max-width: 720px) {
+    header { flex-wrap: wrap; padding: var(--space-2) var(--space-3); }
+    header .spacer { display: none; }
+    header .brand { flex: 1 1 auto; }
+    nav { padding: 0 var(--space-3); }
+    main { padding: var(--space-3); }
+    .card { padding: var(--space-3); margin-bottom: var(--space-3); }
+    .stat { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .kv { grid-template-columns: 1fr; gap: var(--space-1); }
+    .kv .k { margin-top: var(--space-2); }
+    .form-row > label:first-child { flex: 1 1 100%; min-width: 0; }
+    .form-row input[type="text"], .form-row select { flex: 1 1 100%; width: 100%; }
+    #modal { padding: 0; }
+    #modal-box { width: 100%; min-height: 100%; padding: var(--space-4); border-radius: 0; }
+  }
+
+  @media (pointer: coarse) {
+    button, select, input, textarea, .info { min-height: var(--touch); }
+    .info { min-width: var(--touch); }
+    .mini, .btn.sm { min-height: var(--touch); }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>acb-bridge 控制台</h1>
-  <span class="muted" id="conn-note"></span>
+  <div class="brand">
+    <h1 data-i18n="console.ui.page.title">acb-bridge console</h1>
+    <button type="button" class="info" data-tip-key="console.ui.header.tip" data-i18n-aria="console.ui.info.more" aria-label="More information">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>
+    </button>
+  </div>
   <div class="spacer"></div>
-  <button id="logout">退出</button>
+  <select id="locale" class="locale-switch" data-i18n-aria="console.ui.locale.label" aria-label="Interface language">
+    <option value="zh-CN" data-i18n="console.ui.locale.zh"></option>
+    <option value="en" data-i18n="console.ui.locale.en"></option>
+  </select>
+  <button id="logout" class="btn ghost" data-i18n="console.ui.logout">Sign out</button>
 </header>
+
 <nav>
-  <button data-tab="status" class="active">概览</button>
-  <button data-tab="sessions">会话</button>
-  <button data-tab="feedback">反馈</button>
-  <button data-tab="plugins" data-i18n="console.nav.plugins">插件</button>
-  <button data-tab="config">配置</button>
+  <button data-tab="status" class="active" data-i18n="console.nav.status">Overview</button>
+  <button data-tab="sessions" data-i18n="console.nav.sessions">Sessions</button>
+  <button data-tab="feedback" data-i18n="console.nav.feedback">Feedback</button>
+  <button data-tab="plugins" data-i18n="console.nav.plugins">Plugins</button>
+  <button data-tab="config" data-i18n="console.nav.config">Config</button>
 </nav>
+
 <main>
+  <!-- status-scope:start -->
   <section id="tab-status" class="active">
     <div id="memory-warning"></div>
-    <div class="card"><h2>概览</h2><div class="stat" id="status"></div><p class="muted" id="status-note"></p></div>
     <div class="card">
-      <h2><span data-i18n="console.deps.title">依赖健康</span><button class="mini" onclick="loadStatus()" style="float:right" data-i18n="console.deps.refresh">刷新</button></h2>
-      <p class="muted" data-i18n="console.deps.intro">逐依赖展示 harness、平台连接与模型状态；接口失败时保留上次数据并标注过期。</p>
-      <p id="deps-note"></p>
-      <div id="dependencies"><p class="muted">…</p></div>
+      <div class="card-head">
+        <h2 data-i18n="console.ui.overview.title">Overview</h2>
+        <button type="button" class="info" data-tip-key="console.ui.status.reloadTip" data-i18n-aria="console.ui.info.more" aria-label="More information">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>
+        </button>
+      </div>
+      <div class="stat" id="status"></div>
+      <div id="status-note"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2 data-i18n="console.deps.title">Dependency health</h2>
+        <button type="button" class="info" data-tip-key="console.deps.intro" data-i18n-aria="console.ui.info.more" aria-label="More information">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>
+        </button>
+        <div class="spacer"></div>
+        <button type="button" class="btn ghost sm" onclick="loadStatus()">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14-5"/><path d="M4 4v6h6"/><path d="M4 13a8 8 0 0 0 14 5"/><path d="M20 20v-6h-6"/></svg>
+          <span data-i18n="console.deps.refresh">Refresh</span>
+        </button>
+      </div>
+      <div id="deps-note"></div>
+      <div id="dependencies"></div>
     </div>
   </section>
-  <section id="tab-sessions"><div id="sessions"></div></section>
-  <section id="tab-feedback"><div class="card"><h2>agent 反馈</h2><div id="feedback"></div></div></section>
-  <section id="tab-plugins"><div class="card">
-    <h2><span data-i18n="console.plugins.title">插件生命周期</span><button class="mini" onclick="loadPlugins()" style="float:right" data-i18n="console.plugins.refresh">刷新</button></h2>
-    <p class="muted" data-i18n="console.plugins.intro">这里展示 Root 目录与热卸载状态。只有声明 UNLOAD_SAFE 的 v2 策略插件可以在轮次边界卸载或重新加载；内置、v1 动态库和平台适配器保持常驻。</p>
-    <p class="err" id="plugins-error"></p>
-    <div id="plugins"></div>
-  </div></section>
-  <section id="tab-config"><div id="config"></div></section>
+  <!-- status-scope:end -->
+
+  <section id="tab-sessions">
+    <div class="notice" data-i18n="console.ui.pending.tab">This tab is not localized yet.</div>
+    <div id="sessions"></div>
+  </section>
+  <section id="tab-feedback">
+    <div class="notice" data-i18n="console.ui.pending.tab">This tab is not localized yet.</div>
+    <div class="card"><h2 data-i18n="console.ui.feedback.title">Agent feedback</h2><div id="feedback"></div></div>
+  </section>
+  <section id="tab-plugins">
+    <div class="notice" data-i18n="console.ui.pending.tab">This tab is not localized yet.</div>
+    <div class="card">
+      <h2><span data-i18n="console.plugins.title">Plugin lifecycle</span><button class="mini" onclick="loadPlugins()" style="float:right" data-i18n="console.plugins.refresh">Refresh</button></h2>
+      <p class="muted" data-i18n="console.plugins.intro">Root catalog and hot-unload state.</p>
+      <p class="err" id="plugins-error"></p>
+      <div id="plugins"></div>
+    </div>
+  </section>
+  <section id="tab-config">
+    <div class="notice" data-i18n="console.ui.pending.tab">This tab is not localized yet.</div>
+    <div id="config"></div>
+  </section>
 </main>
+
 <div id="modal" onclick="if(event.target===this)closeModal()"><div id="modal-box"></div></div>
+<div id="tip" class="tip" role="presentation"></div>
+
 <script>
 "use strict";
-const $ = (s, el=document) => el.querySelector(s);
+const $ = (s, el = document) => el.querySelector(s);
 // token 存 localStorage；包 try/catch——某些嵌入环境（沙箱 iframe）禁存储会直接抛异常。
 // 就算 localStorage 用不了，服务端种的 HttpOnly cookie 也能保住登录。
 const store = {
@@ -118,6 +278,7 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
   del(k) { try { localStorage.removeItem(k); } catch {} },
 };
+const pageLocale = new URLSearchParams(location.search).get("locale");
 const token = (() => {
   const m = location.search.match(/[?&]token=([^&]*)/);
   if (m) { store.set("acb-console-token", decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname); }
@@ -125,48 +286,249 @@ const token = (() => {
 })();
 if (!token) { location.href = "/?login=1"; }
 
-async function api(path, options = {}) {
-  const res = await fetch(path, { ...options, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json", ...(options.headers||{}) } });
-  if (res.status === 401) { store.del("acb-console-token"); location.href = "/?login=1"; throw new Error("未授权"); }
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
-  return body;
+const ICONS = {
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/>',
+  refresh: '<path d="M20 11a8 8 0 0 0-14-5"/><path d="M4 4v6h6"/><path d="M4 13a8 8 0 0 0 14 5"/><path d="M20 20v-6h-6"/>',
+  alert: '<path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
+  inbox: '<path d="M4 13h5l2 3h2l2-3h5"/><path d="M5 5h14l2 8v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5l2-8z"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
+  close: '<path d="M6 6l12 12"/><path d="M18 6 6 18"/>',
+};
+function icon(name) {
+  return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 }
+
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const secret = (v) => '<span class="secret">******</span>';
 
-// 前端 i18n：locale 与消息表由桥侧 /api/i18n 提供（和 Rust 日志同一套 key）。
-// 插件页所有文案都走 t()，不在页面里硬编码。
-let locale = "zh-CN";
+// ---------------------------------------------------------------------------
+// i18n：locale 由用户显式选择并持久化；首次按浏览器语言猜一次。
+// 每次请求都带 ?locale=（服务端优先）和 Accept-Language（服务端兜底）。
+// ---------------------------------------------------------------------------
+const LOCALE_KEY = "acb-console-locale";
+const SUPPORTED = ["zh-CN", "en"];
+function guessLocale() {
+  if (SUPPORTED.includes(pageLocale)) {
+    store.set(LOCALE_KEY, pageLocale);
+    return pageLocale;
+  }
+  const saved = store.get(LOCALE_KEY);
+  if (SUPPORTED.includes(saved)) return saved;
+  const langs = navigator.languages || [navigator.language || ""];
+  return langs.some((l) => String(l).toLowerCase().startsWith("zh")) ? "zh-CN" : "en";
+}
+let locale = guessLocale();
 let messages = {};
 const t = (key, params = {}) => String(messages[key] ?? key).replace(/\{(\w+)\}/g, (m, name) => params[name] ?? m);
+
+function withLocale(path) {
+  if (path.includes("locale=")) return path;
+  return path + (path.includes("?") ? "&" : "?") + "locale=" + encodeURIComponent(locale);
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(withLocale(path), {
+    ...options,
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Content-Type": "application/json",
+      "Accept-Language": locale,
+      ...(options.headers || {}),
+    },
+  });
+  if (res.status === 401) { store.del("acb-console-token"); location.href = "/?login=1"; throw new Error("401"); }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const error = new Error(body.error || ("HTTP " + res.status));
+    error.detail = body.detail || "";
+    throw error;
+  }
+  return body;
+}
+
+function applyStaticTexts() {
+  document.documentElement.lang = locale;
+  document.title = t("console.ui.page.title");
+  document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-aria]").forEach((el) => { el.setAttribute("aria-label", t(el.dataset.i18nAria)); });
+  const switcher = $("#locale");
+  if (switcher) switcher.value = locale;
+}
+
 async function loadI18n() {
-  try {
-    const reply = await api("/api/i18n");
-    locale = reply.locale || locale;
-    messages = reply.messages || {};
-    document.documentElement.lang = locale;
-    document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
-  } catch (e) { console.error("i18n failed", e); }
+  const reply = await api("/api/i18n?locale=" + encodeURIComponent(locale));
+  if (reply.locale && SUPPORTED.includes(reply.locale)) locale = reply.locale;
+  messages = reply.messages || {};
+  applyStaticTexts();
+}
+
+async function switchLocale(next) {
+  if (!SUPPORTED.includes(next) || next === locale) return;
+  locale = next;
+  store.set(LOCALE_KEY, next);
+  hideTip(true);
+  closeModal();
+  await loadI18n();
+  await renderActiveTab();
+}
+
+function activeTab() {
+  const button = document.querySelector("nav button.active");
+  return button ? button.dataset.tab : "status";
+}
+
+async function renderActiveTab() {
+  const editor = $("#toml-text");
+  if (editor) tomlEditorText = editor.value;
+  const name = activeTab();
+  if (tabs[name]) await tabs[name]();
+}
+
+// ---------------------------------------------------------------------------
+// ⓘ：悬停/聚焦 tooltip，点按固定 popover。浮层用 position:fixed，
+// 位置按视口钳制，不会被任何 overflow 容器裁切。
+// ---------------------------------------------------------------------------
+let tipOwner = null;
+let tipPinned = false;
+
+function tipText(el) {
+  const key = el.dataset.tipKey;
+  return key ? t(key) : (el.dataset.tip || "");
+}
+
+function positionTip(el) {
+  const tip = $("#tip");
+  const anchor = el.getBoundingClientRect();
+  const box = tip.getBoundingClientRect();
+  const gap = 8;
+  const pad = 8;
+  let left = anchor.left + anchor.width / 2 - box.width / 2;
+  let top = anchor.bottom + gap;
+  if (top + box.height > window.innerHeight - pad) top = anchor.top - gap - box.height;
+  left = Math.max(pad, Math.min(left, window.innerWidth - box.width - pad));
+  top = Math.max(pad, Math.min(top, window.innerHeight - box.height - pad));
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
+}
+
+function showTip(el, pinned) {
+  const text = tipText(el);
+  if (!text) return;
+  const tip = $("#tip");
+  tip.textContent = text;
+  tip.classList.add("open");
+  tipOwner = el;
+  tipPinned = pinned;
+  el.setAttribute("aria-expanded", "true");
+  positionTip(el);
+}
+
+function hideTip(force) {
+  if (tipPinned && !force) return;
+  const tip = $("#tip");
+  tip.classList.remove("open");
+  if (tipOwner) tipOwner.setAttribute("aria-expanded", "false");
+  tipOwner = null;
+  tipPinned = false;
+}
+
+document.addEventListener("mouseover", (e) => {
+  const el = e.target.closest && e.target.closest(".info");
+  if (el && !tipPinned) showTip(el, false);
+});
+document.addEventListener("mouseout", (e) => {
+  const el = e.target.closest && e.target.closest(".info");
+  if (el && !tipPinned && tipOwner === el) hideTip(true);
+});
+document.addEventListener("focusin", (e) => {
+  const el = e.target.closest && e.target.closest(".info");
+  if (el && !tipPinned) showTip(el, false);
+});
+document.addEventListener("focusout", () => { if (!tipPinned) hideTip(true); });
+document.addEventListener("click", (e) => {
+  const el = e.target.closest && e.target.closest(".info");
+  if (el) {
+    e.preventDefault();
+    if (tipOwner === el && tipPinned) hideTip(true);
+    else showTip(el, true);
+  } else if (tipPinned) {
+    hideTip(true);
+  }
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && tipPinned) hideTip(true); });
+window.addEventListener("scroll", () => { if (tipOwner) positionTip(tipOwner); }, true);
+window.addEventListener("resize", () => { if (tipOwner) positionTip(tipOwner); });
+
+// ---------------------------------------------------------------------------
+// 统一状态块：加载 / 空 / 错 用同一套排版和间距。
+// ---------------------------------------------------------------------------
+function loadingBox() {
+  return `<div class="state" role="status"><span class="spinner" aria-hidden="true"></span><span>${esc(t("console.ui.state.loading"))}</span></div>`;
+}
+
+function emptyBox(messageKey) {
+  return `<div class="state">${icon("inbox")}<span>${esc(t(messageKey))}</span></div>`;
+}
+
+function detailBlock(detail) {
+  if (!detail) return "";
+  return `<details class="detail"><summary>${esc(t("console.ui.error.detail"))}</summary><span>${esc(detail)}</span></details>`;
+}
+
+function errorBox(error, fallbackKey) {
+  const message = error && error.message ? error.message : t(fallbackKey || "console.ui.state.error");
+  return `<div class="state error">${icon("alert")}<div><span>${esc(message)}</span>${detailBlock(error && error.detail)}</div></div>`;
+}
+
+function infoButton(key) {
+  return `<button type="button" class="info" data-tip-key="${esc(key)}" aria-label="${esc(t("console.ui.info.more"))}">${icon("info")}</button>`;
+}
+
+// ---------------------------------------------------------------------------
+// 概览（样板页）：所有可见文案走 t()，长说明收进 ⓘ。
+// ---------------------------------------------------------------------------
+// status-scope:start
+let statusCache = null;
+
+function statItem(labelKey, value) {
+  return `<div class="stat-item"><span class="label">${esc(t(labelKey))}</span><span class="value">${esc(value)}</span></div>`;
+}
+
+function renderStatus(s) {
+  const box = $("#status");
+  if (!box) return;
+  box.innerHTML = [
+    statItem("console.ui.status.connections", s.connections),
+    statItem("console.ui.status.sessions", s.sessions),
+    statItem("console.ui.status.harnesses", s.harnesses),
+    statItem("console.ui.status.busySessions", s.busy_sessions),
+    statItem("console.ui.status.queuedTurns", s.queued_turns),
+    statItem("console.ui.status.configVersion", s.config_version),
+  ].join("");
 }
 
 async function loadStatus() {
+  const box = $("#status");
+  const note = $("#status-note");
+  if (box) box.innerHTML = loadingBox();
+  if (note) note.innerHTML = "";
   try {
     const [s, memory] = await Promise.all([
       api("/api/status"),
       api("/api/memory-steward").catch(() => null),
     ]);
-    $("#status").innerHTML = [
-      ["连接", s.connections], ["会话", s.sessions], ["harness", s.harnesses],
-      ["忙着的会话", s.busy_sessions], ["排队轮次", s.queued_turns],
-      ["配置版本", s.config_version],
-    ].map(([k, v]) => `<div><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("");
-    $("#status-note").innerHTML = s.staged_config
-      ? '<span class="err">有一份暂存的新配置，下一次收消息/开轮时自动生效</span>（去「配置」页可放弃暂存）'
-      : "配置按轮次边界热重载（ADR-0009）：在「配置」页编辑保存后，下一次收消息/开轮自动生效。";
+    statusCache = s;
+    renderStatus(s);
+    if (note) {
+      note.innerHTML = s.staged_config
+        ? `<div class="banner">${icon("alert")}<span>${esc(t("console.ui.status.staged"))}</span></div>`
+        : "";
+    }
     renderMemoryWarning(memory);
   } catch (e) {
-    $("#status-note").innerHTML = '<span class="err">' + esc(t("console.deps.statusError", { error: e.message })) + "</span>";
+    if (statusCache) renderStatus(statusCache);
+    else if (box) box.innerHTML = errorBox(e, "console.deps.statusError");
+    if (note) note.innerHTML = `<div class="banner err">${icon("alert")}<div><span>${esc(e.message)}</span>${detailBlock(e.detail)}</div></div>`;
   }
   await loadDependencies();
 }
@@ -179,7 +541,11 @@ function renderMemoryWarning(memory) {
   const box = $("#memory-warning");
   if (!box) return;
   if (!memory || memory.enabled === false || !memory.targets) {
-    box.innerHTML = "";
+    if (memory && memory.error) {
+      box.innerHTML = `<div class="banner err">${icon("alert")}<div><span>${esc(memory.error)}</span>${detailBlock(memory.detail)}</div></div>`;
+    } else {
+      box.innerHTML = "";
+    }
     return;
   }
   const stuck = Object.entries(memory.targets).filter(([, state]) => state && state.stuck);
@@ -189,16 +555,11 @@ function renderMemoryWarning(memory) {
   }
   box.innerHTML = stuck.map(([key, state]) => {
     const skips = state.consecutive_skips ?? 0;
-    const last = state.last_result || "unknown";
-    const reason = state.error ? `：${state.error}` : "";
-    return `<div class="banner"><b>该记忆长期未同步：${esc(key)}</b>（连续跳过 ${esc(skips)} 次，最近结果 ${esc(last)}${esc(reason)}）<div style="clear:both"></div></div>`;
+    const last = state.last_result || t("console.ui.common.unknown");
+    return `<div class="banner err">${icon("alert")}<div><span>${esc(t("console.ui.memory.stuck", { key }))}</span> <span class="muted">${esc(t("console.ui.memory.detail", { skips, last }))}</span>${detailBlock(state.error)}</div></div>`;
   }).join("");
 }
 
-// ---------------------------------------------------------------------------
-// 依赖健康：/api/dependencies 的逐依赖视图。
-// 状态映射单独成函数，up/down/unknown 用不同 class；失败时保留上次成功数据。
-// ---------------------------------------------------------------------------
 let depsCache = null;
 let depsCacheAt = 0;
 
@@ -215,7 +576,7 @@ function depLabel(prefix, value) {
 }
 
 function depTime(ms) {
-  return ms ? new Date(ms).toLocaleString() : t("console.deps.never");
+  return ms ? new Date(ms).toLocaleString(locale) : t("console.deps.never");
 }
 
 function depBool(value) {
@@ -235,59 +596,65 @@ function depVersion(dep) {
   const impl = v.impl || {};
   const adapter = v.adapter || {};
   const compat = (adapter.compat || {}).state || "";
+  const unknown = t("console.ui.common.unknown");
   return [
     protocol.version,
-    `${impl.name || "unknown"} ${impl.version || "unknown"}`,
-    `adapter ${adapter.version || "unknown"}`,
+    `${impl.name || unknown} ${impl.version || unknown}`,
+    `adapter ${adapter.version || unknown}`,
     compat,
   ].filter(Boolean).join(" · ");
 }
 
-function renderDependencies(data, stale, error) {
+function renderDependencies(data, stale, error, detail) {
   const box = $("#dependencies");
   const note = $("#deps-note");
   if (!box || !note) return;
   const items = (data && data.dependencies) || [];
   if (stale) {
-    note.className = "banner";
-    note.textContent = t("console.deps.stale", {
-      time: depsCacheAt ? new Date(depsCacheAt).toLocaleString() : t("console.deps.never"),
-      error,
-    });
+    note.className = "";
+    note.innerHTML = `<div class="banner err">${icon("alert")}<div><span>${esc(t("console.deps.stale", { time: depsCacheAt ? new Date(depsCacheAt).toLocaleString(locale) : t("console.deps.never") }))}</span>${detailBlock(detail)}</div></div>`;
   } else {
-    note.className = "muted";
-    note.textContent = "";
+    note.innerHTML = "";
   }
   if (!items.length) {
-    box.innerHTML = `<p class="empty">${esc(t("console.deps.empty"))}</p>`;
+    box.innerHTML = emptyBox("console.deps.empty");
     return;
   }
+  const label = (key) => esc(t(key));
   const rows = items.map((dep) => {
     const err = dep.lastError || "";
     const cls = dep.lastErrorClass || "";
+    const classKey = "console.deps.errorClass." + cls;
+    const classText = cls ? t(classKey) : "";
+    const classLabel = classText && classText !== classKey ? classText : t("console.deps.errorClass.unknown");
     const errorCell = (err || cls)
-      ? `<td class="wrap">${esc(err || t("console.deps.none"))}${cls ? `<br><span class="muted">${esc(t("console.deps.class"))}: ${esc(cls)}</span>` : ""}</td>`
-      : `<td class="muted">${esc(t("console.deps.none"))}</td>`;
+      ? `<td class="wrap" data-label="${label("console.deps.col.lastError")}">${esc(classLabel)}${detailBlock(err)}</td>`
+      : `<td class="muted" data-label="${label("console.deps.col.lastError")}">${esc(t("console.deps.none"))}</td>`;
     return `<tr>
-      <td class="wrap"><code>${esc(dep.id)}</code>${dep.version ? `<br><span class="muted">${esc(depVersion(dep))}</span>` : ""}</td>
-      <td>${esc(depLabel("console.deps.kind.", dep.kind))}</td>
-      <td><span class="pill ${depStateClass(dep.state)}">${esc(depLabel("console.deps.state.", dep.state))}</span></td>
-      <td>${esc(depAccount(dep))}</td>
-      <td>${esc(depTime(dep.since))}</td>
-      <td>${esc(dep.lastOkAt ? depTime(dep.lastOkAt) : t("console.deps.never"))}</td>
-      <td>${esc(dep.attempts ?? 0)}</td>
+      <td class="wrap" data-label="${label("console.deps.col.id")}"><code>${esc(dep.id)}</code>${dep.version ? `<br><span class="muted">${esc(depVersion(dep))}</span>` : ""}</td>
+      <td data-label="${label("console.deps.col.kind")}">${esc(depLabel("console.deps.kind.", dep.kind))}</td>
+      <td data-label="${label("console.deps.col.state")}"><span class="pill ${depStateClass(dep.state)}">${esc(depLabel("console.deps.state.", dep.state))}</span></td>
+      <td data-label="${label("console.deps.col.account")}">${esc(depAccount(dep))}</td>
+      <td data-label="${label("console.deps.col.since")}">${esc(depTime(dep.since))}</td>
+      <td data-label="${label("console.deps.col.lastOkAt")}">${esc(dep.lastOkAt ? depTime(dep.lastOkAt) : t("console.deps.never"))}</td>
+      <td class="num" data-label="${label("console.deps.col.attempts")}">${esc(dep.attempts ?? 0)}</td>
       ${errorCell}
-      <td>${esc(depBool(dep.configured))} / ${esc(depBool(dep.expected))}</td>
+      <td data-label="${label("console.deps.col.scope")}">${esc(depBool(dep.configured))} / ${esc(depBool(dep.expected))}</td>
     </tr>`;
   }).join("");
-  box.innerHTML = `<table>
-    <tr><th>${esc(t("console.deps.col.id"))}</th><th>${esc(t("console.deps.col.kind"))}</th>
-    <th>${esc(t("console.deps.col.state"))}</th><th>${esc(t("console.deps.col.account"))}</th><th>${esc(t("console.deps.col.since"))}</th>
-    <th>${esc(t("console.deps.col.lastOkAt"))}</th><th>${esc(t("console.deps.col.attempts"))}</th>
-    <th>${esc(t("console.deps.col.lastError"))}</th><th>${esc(t("console.deps.col.scope"))}</th></tr>${rows}</table>`;
+  box.innerHTML = `<div class="table-wrap"><table class="table-responsive">
+    <thead><tr><th>${label("console.deps.col.id")}</th><th>${label("console.deps.col.kind")}</th>
+    <th>${label("console.deps.col.state")}</th><th>${label("console.deps.col.account")}</th><th>${label("console.deps.col.since")}</th>
+    <th>${label("console.deps.col.lastOkAt")}</th><th class="num">${label("console.deps.col.attempts")}</th>
+    <th>${label("console.deps.col.lastError")}</th><th>${label("console.deps.col.scope")}</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
 }
 
 async function loadDependencies() {
+  const box = $("#dependencies");
+  const note = $("#deps-note");
+  if (box) box.innerHTML = loadingBox();
+  if (note) note.innerHTML = "";
   try {
     const data = await api("/api/dependencies");
     depsCache = data;
@@ -295,19 +662,17 @@ async function loadDependencies() {
     renderDependencies(data, false, "");
   } catch (e) {
     if (depsCache) {
-      renderDependencies(depsCache, true, e.message);
-    } else {
-      const note = $("#deps-note");
-      const box = $("#dependencies");
-      if (note) {
-        note.className = "err";
-        note.textContent = t("console.deps.error", { error: e.message });
-      }
-      if (box) box.innerHTML = `<p class="empty">${esc(t("console.deps.empty"))}</p>`;
+      renderDependencies(depsCache, true, e.message, e.detail || "");
+    } else if (box) {
+      box.innerHTML = errorBox(e, "console.deps.error");
     }
   }
 }
+// status-scope:end
 
+// ---------------------------------------------------------------------------
+// 会话 / 反馈 / 插件 / 配置：本轮保留旧渲染逻辑，只继承 token。
+// ---------------------------------------------------------------------------
 async function loadSessions() {
   const [{ sessions }, status] = await Promise.all([api("/api/sessions"), api("/api/status")]);
   const busy = new Set(status.busy_sessions || []);
@@ -320,7 +685,7 @@ async function loadSessions() {
       <div class="k">模型</div><div>${esc(s.model || "由 harness 侧决定")}</div>
       <div class="k">记忆</div><div>${esc((s.memories||[]).join(", ") || "无")}</div>
       <div class="k">订阅</div><div>${(s.subscriptions||[]).map(esc).join("<br>") || "无"}</div>
-      <div class="k">harness 侧映射</div><div>${map ? esc(map.harness_session) + '<br><span class="muted">更新于 ' + esc(new Date(map.updated_at).toLocaleString()) + '</span>' : '<span class="muted">还没有（harness 连上后声明）</span>'}</div>
+      <div class="k">harness 侧映射</div><div>${map ? esc(map.harness_session) + '<br><span class="muted">更新于 ' + esc(new Date(map.updated_at).toLocaleString(locale)) + '</span>' : '<span class="muted">还没有（harness 连上后声明）</span>'}</div>
     </div>
     <p><button class="act" onclick="interruptSession('${esc(s.id)}')" ${busy.has(s.id) ? "" : "disabled"}>打断当前轮</button>
     <button class="act danger" onclick="resetSession('${esc(s.id)}')">断开映射并重置会话</button></p>
@@ -350,18 +715,18 @@ async function resetSession(id) {
 
 async function loadFeedback() {
   const { feedback } = await api("/api/feedback?limit=50");
-  $("#feedback").innerHTML = feedback.length ? `<table>
-    <tr><th>#</th><th>状态</th><th>类型</th><th>标题</th><th>来源</th><th>次数</th><th>最近</th><th></th></tr>
-    ${feedback.map((f) => `<tr>
-      <td>${f.id}</td>
+  $("#feedback").innerHTML = feedback.length ? `<div class="table-wrap"><table class="table-responsive">
+    <thead><tr><th>#</th><th>状态</th><th>类型</th><th>标题</th><th>来源</th><th class="num">次数</th><th>最近</th><th></th></tr></thead>
+    <tbody>${feedback.map((f) => `<tr>
+      <td class="num">${f.id}</td>
       <td><span class="pill ${esc(f.status)}">${esc(f.status)}</span></td>
       <td>${esc(f.kind || "—")}${f.severity && f.severity !== "info" ? '<br><span class="muted">' + esc(f.severity) + "</span>" : ""}</td>
       <td class="wrap">${esc(f.title)}${f.body ? '<br><span class="muted">' + esc(String(f.body).slice(0, 160)) + "</span>" : ""}${f.suggestion ? '<br><span class="muted">建议：' + esc(String(f.suggestion).slice(0, 120)) + "</span>" : ""}${(f.replies || []).map((r) => '<br><span class="muted">回复（' + esc(r.author) + "）：" + esc(r.text) + "</span>").join("")}</td>
       <td class="wrap">${esc(f.tool || "—")}${f.session ? '<br><span class="muted">' + esc(f.session) + "</span>" : ""}</td>
-      <td>${f.occurrences || 1}${f.repeats ? "（重复）" : ""}</td>
-      <td class="muted">${esc(new Date(f.last_at).toLocaleString())}</td>
+      <td class="num">${f.occurrences || 1}${f.repeats ? "（重复）" : ""}</td>
+      <td class="muted">${esc(new Date(f.last_at).toLocaleString(locale))}</td>
       <td><button class="act" onclick="replyFeedback(${f.id})">回复</button> <button class="act ghost" onclick="resolveFeedback(${f.id})">标记</button></td>
-    </tr>`).join("")}</table>` : '<p class="empty">没有反馈记录</p>';
+    </tr>`).join("")}</tbody></table></div>` : '<p class="empty">没有反馈记录</p>';
 }
 
 async function replyFeedback(id) {
@@ -379,9 +744,6 @@ async function resolveFeedback(id) {
   catch (e) { alert(e.message); }
 }
 
-// ---------------------------------------------------------------------------
-// 插件生命周期（ADR-0029 D4/D8）：常驻 / 可卸载 / 已入队 / 已卸载
-// ---------------------------------------------------------------------------
 const pluginStateClass = (state) => (state === "pending_unload" || state === "pending_reload" ? "pending" : state);
 
 function pluginHealth(health) {
@@ -410,11 +772,11 @@ async function loadPlugins() {
   const error = $("#plugins-error");
   error.className = "err";
   error.textContent = "";
-  box.innerHTML = `<p class="muted">…</p>`;
+  box.innerHTML = loadingBox();
   try {
     const { plugins } = await api("/api/plugins");
     if (!plugins.length) {
-      box.innerHTML = `<p class="empty">${esc(t("console.plugins.empty"))}</p>`;
+      box.innerHTML = emptyBox("console.plugins.empty");
       return;
     }
     const rows = plugins.map((p) => {
@@ -434,11 +796,11 @@ async function loadPlugins() {
         <td>${pluginActions(p)}</td>
       </tr>`;
     }).join("");
-    box.innerHTML = `<table>
-      <tr><th>${esc(t("console.plugins.col.id"))}</th><th>${esc(t("console.plugins.col.extension"))}</th>
+    box.innerHTML = `<div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>${esc(t("console.plugins.col.id"))}</th><th>${esc(t("console.plugins.col.extension"))}</th>
       <th>${esc(t("console.plugins.col.source"))}</th><th>${esc(t("console.plugins.col.state"))}</th>
       <th>${esc(t("console.plugins.col.refs"))}</th><th>${esc(t("console.plugins.col.health"))}</th>
-      <th>${esc(t("console.plugins.col.actions"))}</th></tr>${rows}</table>`;
+      <th>${esc(t("console.plugins.col.actions"))}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   } catch (e) {
     box.innerHTML = "";
     error.textContent = t("console.plugins.actionFailed", { error: e.message });
@@ -470,24 +832,24 @@ function wakeText(w) {
   const parts = [];
   if (w.at_mention) parts.push("@我");
   if (w.reply) parts.push("引用我");
-  if (w.name_mention && (w.names||[]).length) parts.push("叫名字(" + w.names.join("/") + ")");
+  if (w.name_mention && (w.names || []).length) parts.push("叫名字(" + w.names.join("/") + ")");
   if (w.poke) parts.push("拍我");
   if (w.accumulate) parts.push("攒" + w.accumulate + "条");
-  if ((w.event_tags||[]).length) parts.push("标签:" + w.event_tags.join("/"));
-  if ((w.events||[]).length) parts.push("事件:" + w.events.join("/"));
-  if ((w.keywords||[]).length) parts.push("关键词:" + w.keywords.join("/"));
-  if ((w.ignore_speakers||[]).length) parts.push("无视:" + w.ignore_speakers.join("/"));
+  if ((w.event_tags || []).length) parts.push("标签:" + w.event_tags.join("/"));
+  if ((w.events || []).length) parts.push("事件:" + w.events.join("/"));
+  if ((w.keywords || []).length) parts.push("关键词:" + w.keywords.join("/"));
+  if ((w.ignore_speakers || []).length) parts.push("无视:" + w.ignore_speakers.join("/"));
   return parts.join("，") || "（全关）";
 }
 
-let tomlEditorText = null;   // 非 null = 正在编辑 TOML（textarea 的当前内容）
-let tomlResult = null;       // 刚保存完的结果（changes / hot_reload / needs_restart 清单）
-let cfgCache = null;         // 最近一次加载的 /api/config（表单的数据源）
+let tomlEditorText = null;
+let tomlResult = null;
+let cfgCache = null;
 
 async function loadConfig() {
   const s = await api("/api/status");
   const banner = s.staged_config
-    ? `<div class="banner">有暂存的新配置，下一次收消息/开轮时自动生效。<button class="act ghost" onclick="discardStaged()">放弃暂存</button><div style="clear:both"></div></div>`
+    ? `<div class="banner">${icon("alert")}<span>有暂存的新配置，下一次收消息/开轮时自动生效。</span><button class="act ghost" onclick="discardStaged()">放弃暂存</button></div>`
     : "";
   if (tomlEditorText !== null) {
     $("#config").innerHTML = banner + `
@@ -508,28 +870,28 @@ async function loadConfig() {
   }
   const c = await api("/api/config");
   cfgCache = c;
-  const connRows = (c.connections||[]).map((k) => `<tr>
+  const connRows = (c.connections || []).map((k) => `<tr>
     <td>${esc(k.id)}</td><td>${esc(k.platform)}/${esc(k.kind)}</td><td class="wrap">${esc(k.url)}</td>
     <td>${k.token === null ? '<span class="muted">无</span>' : secret(k.token)}</td>
     <td>${esc(k.account)}</td>
     <td><button class="mini" onclick="editConnection('${esc(k.id)}')">编辑</button><button class="mini danger" onclick="delEntry('connection','${esc(k.id)}')">删</button></td></tr>`).join("");
-  const sessRows = (c.sessions||[]).map((s) => `<tr>
+  const sessRows = (c.sessions || []).map((s) => `<tr>
     <td>${esc(s.id)}${s.name && s.name !== s.id ? '<br><span class="muted">' + esc(s.name) + "</span>" : ""}</td>
     <td>${esc(s.harness)}</td><td>${esc(s.persona || "—")}</td>
     <td>${s.token === null ? "" : secret(s.token)}</td>
-    <td class="wrap">${(s.subscriptions||[]).map((sub, i) => esc(sub.room) + '<br><span class="muted">唤醒：' + esc(wakeText(sub.wake)) + "</span>"
+    <td class="wrap">${(s.subscriptions || []).map((sub, i) => esc(sub.room) + '<br><span class="muted">唤醒：' + esc(wakeText(sub.wake)) + "</span>"
       + `<button class="mini" onclick="editWake('${esc(s.id)}',${i})">唤醒</button><button class="mini danger" onclick="delSub('${esc(s.id)}',${i})">删</button>`
-    ).join("<hr style='border:none;border-top:1px solid var(--line);margin:6px 0'>") || "无"}
+    ).join("<hr style='border:none;border-top:1px solid var(--border);margin:var(--space-2) 0'>") || "无"}
     <button class="mini" onclick="addSub('${esc(s.id)}')">+ 订阅</button>
     <button class="mini" onclick="editSession('${esc(s.id)}')">会话信息</button>
     <button class="mini danger" onclick="delEntry('session','${esc(s.id)}')">删会话</button></td></tr>`).join("");
   $("#config").innerHTML = `
-  <div class="card"><h2>连接（一个账号一条）<span class="hint">改了要重启桥</span><button class="mini" onclick="addConnection()" style="float:right">+ 新连接</button></h2><table>
-    <tr><th>id</th><th>平台</th><th>地址</th><th>令牌</th><th>账号</th><th></th></tr>${connRows}</table></div>
-  <div class="card"><h2>harness 会话<button class="mini" onclick="addSession()" style="float:right">+ 新会话</button></h2><table>
-    <tr><th>id</th><th>harness</th><th>人格</th><th>接入令牌</th><th>订阅与唤醒</th></tr>${sessRows}</table></div>
-  <div class="card"><h2>人格<button class="mini" onclick="addPersona()" style="float:right">+ 新人格</button></h2>${(c.personas||[]).map((p) => `<div class="kv"><div class="k">${esc(p.id)}（${esc(p.name)}）<button class="mini" onclick="editPersona('${esc(p.id)}')">编辑</button><button class="mini danger" onclick="delEntry('persona','${esc(p.id)}')">删</button></div><pre>${esc(p.text)}</pre></div>`).join("") || '<p class="empty">无</p>'}</div>
-  <div class="card"><h2>记忆<button class="mini" onclick="addMemory()" style="float:right">+ 新记忆仓库</button></h2>${(c.memories||[]).map((m) => `<div class="kv"><div class="k">${esc(m.id)}（${esc(m.name)}）<button class="mini" onclick="editMemory('${esc(m.id)}')">编辑</button><button class="mini danger" onclick="delEntry('memory','${esc(m.id)}')">删</button></div><div>${esc(m.kind)} @ <span class="wrap">${esc(m.location)}</span></div></div>`).join("") || '<p class="empty">无</p>'}</div>
+  <div class="card"><h2>连接（一个账号一条）<span class="hint">改了要重启桥</span><button class="mini" onclick="addConnection()" style="float:right">+ 新连接</button></h2><div class="table-wrap"><table class="table-responsive">
+    <thead><tr><th>id</th><th>平台</th><th>地址</th><th>令牌</th><th>账号</th><th></th></tr></thead><tbody>${connRows}</tbody></table></div></div>
+  <div class="card"><h2>harness 会话<button class="mini" onclick="addSession()" style="float:right">+ 新会话</button></h2><div class="table-wrap"><table class="table-responsive">
+    <thead><tr><th>id</th><th>harness</th><th>人格</th><th>接入令牌</th><th>订阅与唤醒</th></tr></thead><tbody>${sessRows}</tbody></table></div></div>
+  <div class="card"><h2>人格<button class="mini" onclick="addPersona()" style="float:right">+ 新人格</button></h2>${(c.personas || []).map((p) => `<div class="kv"><div class="k">${esc(p.id)}（${esc(p.name)}）<button class="mini" onclick="editPersona('${esc(p.id)}')">编辑</button><button class="mini danger" onclick="delEntry('persona','${esc(p.id)}')">删</button></div><pre>${esc(p.text)}</pre></div>`).join("") || '<p class="empty">无</p>'}</div>
+  <div class="card"><h2>记忆<button class="mini" onclick="addMemory()" style="float:right">+ 新记忆仓库</button></h2>${(c.memories || []).map((m) => `<div class="kv"><div class="k">${esc(m.id)}（${esc(m.name)}）<button class="mini" onclick="editMemory('${esc(m.id)}')">编辑</button><button class="mini danger" onclick="delEntry('memory','${esc(m.id)}')">删</button></div><div>${esc(m.kind)} @ <span class="wrap">${esc(m.location)}</span></div></div>`).join("") || '<p class="empty">无</p>'}</div>
   <div class="card"><h2>文件中继</h2>${c.file_relay ? `<div class="kv">
     <div class="k">mode</div><div>${esc(c.file_relay.mode)}</div>
     <div class="k">listen</div><div>${esc(c.file_relay.listen)}</div>
@@ -541,7 +903,7 @@ async function loadConfig() {
     <div class="k">一轮投递上限</div><div>${esc(c.delivery_limit)}</div>
     <div class="k">单轮自动超时</div><div>${c.turn_timeout_secs > 0 ? esc(c.turn_timeout_secs) + " 秒" : "关（跑多久都等）"}</div>
     <div class="k">记忆 worktree 根</div><div>${esc(c.worktrees_root)}</div>
-    <div class="k">失败通知默认动作</div><div>${esc((c.default_on_turn_error||[]).join(", ") || "只记日志")}</div></div>
+    <div class="k">失败通知默认动作</div><div>${esc((c.default_on_turn_error || []).join(", ") || "只记日志")}</div></div>
     <p><button class="mini" onclick="editGlobals()">编辑运行参数</button></p></div>
   <div class="card"><h2>其他改动</h2>
     <div id="toml-result">${tomlResult ? renderTomlResult() : ""}</div>
@@ -573,7 +935,6 @@ async function saveToml() {
     tomlEditorText = null;
     loadConfig();
   } catch (e) {
-    // 校验失败：留在编辑器里，错误贴在按钮下面，原文不动。
     tomlResult = { error: e.message };
     const box = $("#toml-result");
     if (box) box.innerHTML = '<p class="err">' + esc(e.message) + "</p>";
@@ -589,13 +950,13 @@ async function discardStaged() {
 function renderTomlResult() {
   if (!tomlResult) return "";
   if (tomlResult.error) return '<p class="err">' + esc(tomlResult.error) + "</p>";
-  const list = (items, cls) => (items||[]).map((i) => `<li class="${cls}">${esc(i)}</li>`).join("");
-  return `<div class="card">
-    <p>✓ ${esc(tomlResult.note || "已保存")}</p>
-    ${(tomlResult.changes||[]).length ? "<p><b>本次改动：</b></p><ul>" + list(tomlResult.changes, "") + "</ul>" : ""}
-    ${(tomlResult.hot_reload||[]).length ? "<p><b>下一轮自动生效：</b></p><ul>" + list(tomlResult.hot_reload, "") + "</ul>" : ""}
-    ${(tomlResult.needs_restart||[]).length ? "<p class='err'><b>要重启桥才生效：</b></p><ul>" + list(tomlResult.needs_restart, "err") + "</ul>" : ""}
-    ${!(tomlResult.hot_reload||[]).length && !(tomlResult.needs_restart||[]).length ? '<p class="muted">配置没变化（或变化不影响行为）。</p>' : ""}
+  const list = (items, cls) => (items || []).map((i) => `<li class="${cls}">${esc(i)}</li>`).join("");
+  return `<div class="result">
+    <p>${icon("check")} ${esc(tomlResult.note || "已保存")}</p>
+    ${(tomlResult.changes || []).length ? "<p><b>本次改动：</b></p><ul>" + list(tomlResult.changes, "") + "</ul>" : ""}
+    ${(tomlResult.hot_reload || []).length ? "<p><b>下一轮自动生效：</b></p><ul>" + list(tomlResult.hot_reload, "") + "</ul>" : ""}
+    ${(tomlResult.needs_restart || []).length ? "<p class='err'><b>要重启桥才生效：</b></p><ul>" + list(tomlResult.needs_restart, "err") + "</ul>" : ""}
+    ${!(tomlResult.hot_reload || []).length && !(tomlResult.needs_restart || []).length ? '<p class="muted">配置没变化（或变化不影响行为）。</p>' : ""}
   </div>`;
 }
 
@@ -607,15 +968,32 @@ const tabs = {
   config: loadConfig,
 };
 
-// ---------------------------------------------------------------------------
-// 结构化表单编辑（主入口）：表单 → ops → POST /api/config/patch
-// ---------------------------------------------------------------------------
-
 const csv = (v) => String(v ?? "").split(/[,，]/).map((x) => x.trim()).filter(Boolean);
 const findSession = (id) => (cfgCache?.sessions || []).find((s) => s.id === id);
 const findPersona = (id) => (cfgCache?.personas || []).find((p) => p.id === id);
 const findMemory = (id) => (cfgCache?.memories || []).find((m) => m.id === id);
 const findConnection = (id) => (cfgCache?.connections || []).find((c) => c.id === id);
+
+function showFormError(message) {
+  const box = $("#form-error");
+  if (!box) return false;
+  box.hidden = false;
+  box.textContent = message;
+  return true;
+}
+
+function clearFormError() {
+  const box = $("#form-error");
+  if (!box) return;
+  box.hidden = true;
+  box.textContent = "";
+}
+
+function reportError(message) {
+  if (!showFormError(message)) alert(message);
+  const box = $("#toml-result");
+  if (box) box.innerHTML = '<p class="err">' + esc(message) + "</p>";
+}
 
 async function submitPatch(ops) {
   try {
@@ -625,15 +1003,11 @@ async function submitPatch(ops) {
     return true;
   } catch (e) {
     tomlResult = { error: e.message };
-    const box = $("#toml-result");
-    if (box) box.innerHTML = '<p class="err">' + esc(e.message) + "</p>";
-    // 弹窗开着时错误别只写进被遮住的角落，要让人看见。
-    alert(e.message);
+    reportError(e.message);
     return false;
   }
 }
 
-/** 删除一个具名条目（连接/会话/人格/记忆）。引用完整性由保存时的整体校验兜住。 */
 async function delEntry(section, id) {
   if (!confirm(`确定删除 ${section}「${id}」？\n保存后按轮次边界热生效；配置文件同目录会留 .bak 备份。`)) return;
   await submitPatch([{ op: "delete", section, id }]);
@@ -643,32 +1017,35 @@ function closeModal() {
   $("#modal").classList.remove("open");
 }
 
-/** 表单弹窗：从点开的位置浮出，居中显示；点遮罩/取消关闭。 */
 function formFrame(titleHtml, bodyHtml, onSave) {
-  $("#modal-box").innerHTML = `<h2>${titleHtml}</h2>${bodyHtml}
-    <p style="margin-bottom:0"><button class="act" id="form-save">保存</button>
-    <button class="act ghost" onclick="closeModal()">取消</button></p>`;
+  $("#modal-box").innerHTML = `<div class="modal-head"><h2>${titleHtml}</h2><div class="spacer"></div>
+    <button type="button" class="info" onclick="closeModal()" aria-label="${esc(t("console.ui.close"))}">${icon("close")}</button></div>
+    <p class="form-error err" id="form-error" hidden></p>${bodyHtml}
+    <div class="modal-actions"><button class="act" id="form-save">${esc(t("console.ui.form.save"))}</button>
+    <button class="act ghost" onclick="closeModal()">${esc(t("console.ui.form.cancel"))}</button></div>`;
   $("#modal").classList.add("open");
   $("#form-save").addEventListener("click", async () => {
+    clearFormError();
     try {
-      // onSave 返回 false（通常是补丁没保存成功）就不关弹窗，让人改完再存。
       const result = await onSave();
       if (result !== false) closeModal();
-    } catch (e) { alert(e.message); }
+    } catch (e) { reportError(e.message); }
   });
 }
+
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 
 const wakeFormHtml = (w) => `
   <div class="form-row"><label>@ 我</label><input type="checkbox" id="w-at" ${w?.at_mention ? "checked" : ""}><span class="hint">群里有人 @ 本账号</span></div>
   <div class="form-row"><label>引用我</label><input type="checkbox" id="w-reply" ${w?.reply ? "checked" : ""}></div>
   <div class="form-row"><label>叫名字</label><input type="checkbox" id="w-nm" ${w?.name_mention ? "checked" : ""}>
-    <input type="text" id="w-names" placeholder="名字列表，逗号分隔" value="${esc((w?.names||[]).join(", "))}"></div>
-  <div class="form-row"><label>攒条数</label><input type="text" id="w-acc" placeholder="不按条数就留空" value="${w?.accumulate ?? ""}" style="width:80px"></div>
+    <input type="text" id="w-names" placeholder="名字列表，逗号分隔" value="${esc((w?.names || []).join(", "))}"></div>
+  <div class="form-row"><label>攒条数</label><input type="text" id="w-acc" placeholder="不按条数就留空" value="${w?.accumulate ?? ""}" style="max-width:96px"></div>
   <div class="form-row"><label>被拍醒</label><input type="checkbox" id="w-poke" ${w?.poke ? "checked" : ""}></div>
-  <div class="form-row"><label>事件标签</label><input type="text" id="w-etags" placeholder="跨平台语义标签，逗号分隔" value="${esc((w?.event_tags||[]).join(", "))}"></div>
-  <div class="form-row"><label>额外事件</label><input type="text" id="w-events" placeholder="事件类型（可写 qq.poke / qq.*），逗号分隔" value="${esc((w?.events||[]).join(", "))}"></div>
-  <div class="form-row"><label>关键词</label><input type="text" id="w-kw" placeholder="命中就醒，逗号分隔" value="${esc((w?.keywords||[]).join(", "))}"></div>
-  <div class="form-row"><label>无视这些人</label><input type="text" id="w-ign" placeholder="发送者 id，逗号分隔" value="${esc((w?.ignore_speakers||[]).join(", "))}"></div>`;
+  <div class="form-row"><label>事件标签</label><input type="text" id="w-etags" placeholder="跨平台语义标签，逗号分隔" value="${esc((w?.event_tags || []).join(", "))}"></div>
+  <div class="form-row"><label>额外事件</label><input type="text" id="w-events" placeholder="事件类型（可写 qq.poke / qq.*），逗号分隔" value="${esc((w?.events || []).join(", "))}"></div>
+  <div class="form-row"><label>关键词</label><input type="text" id="w-kw" placeholder="命中就醒，逗号分隔" value="${esc((w?.keywords || []).join(", "))}"></div>
+  <div class="form-row"><label>无视这些人</label><input type="text" id="w-ign" placeholder="发送者 id，逗号分隔" value="${esc((w?.ignore_speakers || []).join(", "))}"></div>`;
 
 function wakeOpsFromForm(session, room, connection) {
   const val = (id) => document.getElementById(id).value;
@@ -702,8 +1079,8 @@ function addSub(sessionId) {
     ${wakeFormHtml(null)}`,
     () => {
       const room = document.getElementById("s-room").value.trim();
-      if (!room) return alert("房间路径不能为空");
-      if (room.includes(":")) return alert("只填路径（group/…），不要带连接名前缀");
+      if (!room) { showFormError("房间路径不能为空"); return false; }
+      if (room.includes(":")) { showFormError("只填路径（group/…），不要带连接名前缀"); return false; }
       submitPatch(wakeOpsFromForm(sessionId, room, document.getElementById("s-conn").value));
     });
 }
@@ -721,9 +1098,9 @@ function editSession(sessionId) {
   if (!s) return alert("找不到会话");
   formFrame(`会话信息 — ${esc(sessionId)}`, `
     <div class="form-row"><label>显示名</label><input type="text" id="e-name" value="${esc(s.name || "")}"></div>
-    <div class="form-row"><label>人格</label><select id="e-persona">${(cfgCache?.personas||[]).map((p) => `<option ${p.id === s.persona ? "selected" : ""}>${esc(p.id)}</option>`).join("")}</select></div>
+    <div class="form-row"><label>人格</label><select id="e-persona">${(cfgCache?.personas || []).map((p) => `<option ${p.id === s.persona ? "selected" : ""}>${esc(p.id)}</option>`).join("")}</select></div>
     <div class="form-row"><label>模型</label><input type="text" id="e-model" placeholder="留空 = harness 侧自定" value="${esc(s.model || "")}"></div>
-    <div class="form-row"><label>记忆（逗号分隔）</label><input type="text" id="e-mems" value="${esc((s.memories||[]).join(", "))}"></div>
+    <div class="form-row"><label>记忆（逗号分隔）</label><input type="text" id="e-mems" value="${esc((s.memories || []).join(", "))}"></div>
     <p class="hint">接入令牌与 harness 绑定请走「编辑 TOML 原文」。</p>`,
     () => {
       const patch = { name: document.getElementById("e-name").value.trim(), persona: document.getElementById("e-persona").value };
@@ -759,7 +1136,7 @@ function editConnection(id) {
   formFrame(`连接 — ${esc(id)} <span class="hint">（改了要重启桥）</span>`, `
     <div class="form-row"><label>地址</label><input type="text" id="c-url" value="${esc(c.url)}"></div>
     <div class="form-row"><label>账号</label><input type="text" id="c-account" value="${esc(c.account || "")}"></div>
-    <div class="form-row"><label>令牌</label><input type="text" id="c-token" placeholder="留空不改；填单个 - 表示清除" style="width:320px"></div>`,
+    <div class="form-row"><label>令牌</label><input type="text" id="c-token" placeholder="留空不改；填单个 - 表示清除" style="max-width:320px"></div>`,
     () => {
       const patch = {};
       const url = document.getElementById("c-url").value.trim();
@@ -769,7 +1146,7 @@ function editConnection(id) {
       if (account && account !== c.account) patch.account = account;
       if (token === "-") patch.token = null;
       else if (token.trim() !== "") patch.token = token.trim();
-      if (!Object.keys(patch).length) return alert("没有改动");
+      if (!Object.keys(patch).length) { showFormError("没有改动"); return false; }
       submitPatch([{ op: "connection", id, patch }]);
     });
 }
@@ -777,11 +1154,11 @@ function editConnection(id) {
 function editGlobals() {
   const c = cfgCache;
   formFrame("运行参数", `
-    <div class="form-row"><label>单轮投递上限</label><input type="text" id="g-limit" value="${esc(c?.delivery_limit ?? "")}" style="width:80px"></div>
-    <div class="form-row"><label>单轮自动超时</label><input type="text" id="g-timeout" value="${esc(c?.turn_timeout_secs ?? "")}" style="width:80px"><span class="hint">秒；0 = 关（跑多久都等）</span></div>
-    <div class="form-row"><label>每房间留条数</label><input type="text" id="g-count" value="${esc(c?.retention?.max_records_per_room ?? "")}" style="width:80px"><span class="hint">0 = 不按条数清</span></div>
-    <div class="form-row"><label>最多留天数</label><input type="text" id="g-days" value="${esc(c?.retention?.max_age_days ?? "")}" style="width:80px"><span class="hint">0 = 不按天数清</span></div>
-    <div class="form-row"><label>默认失败通知</label><input type="text" id="g-err" value="${esc((c?.default_on_turn_error||[]).join(", "))}" placeholder="log 或 send:qq:group/123，逗号分隔"><span class="hint">留空 = 只记日志</span></div>`,
+    <div class="form-row"><label>单轮投递上限</label><input type="text" id="g-limit" value="${esc(c?.delivery_limit ?? "")}" style="max-width:96px"></div>
+    <div class="form-row"><label>单轮自动超时</label><input type="text" id="g-timeout" value="${esc(c?.turn_timeout_secs ?? "")}" style="max-width:96px"><span class="hint">秒；0 = 关（跑多久都等）</span></div>
+    <div class="form-row"><label>每房间留条数</label><input type="text" id="g-count" value="${esc(c?.retention?.max_records_per_room ?? "")}" style="max-width:96px"><span class="hint">0 = 不按条数清</span></div>
+    <div class="form-row"><label>最多留天数</label><input type="text" id="g-days" value="${esc(c?.retention?.max_age_days ?? "")}" style="max-width:96px"><span class="hint">0 = 不按天数清</span></div>
+    <div class="form-row"><label>默认失败通知</label><input type="text" id="g-err" value="${esc((c?.default_on_turn_error || []).join(", "))}" placeholder="log 或 send:qq:group/123，逗号分隔"><span class="hint">留空 = 只记日志</span></div>`,
     () => {
       const patch = {};
       const num = (id) => { const v = document.getElementById(id).value.trim(); return v === "" ? undefined : Number(v); };
@@ -795,10 +1172,6 @@ function editGlobals() {
     });
 }
 
-// ---------------------------------------------------------------------------
-// 新增表单
-// ---------------------------------------------------------------------------
-
 const randToken = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 
 function addConnection() {
@@ -806,14 +1179,14 @@ function addConnection() {
     <div class="form-row"><label>连接 id</label><input type="text" id="nc-id" placeholder="qq2"></div>
     <div class="form-row"><label>平台</label><input type="text" id="nc-platform" value="qq"><span class="hint">平台标识（连接名参与房间路由）</span></div>
     <div class="form-row"><label>适配器</label><input type="text" id="nc-kind" value="onebot11"></div>
-    <div class="form-row"><label>地址</label><input type="text" id="nc-url" placeholder="ws://127.0.0.1:53001/ws?token=…" style="width:340px"></div>
+    <div class="form-row"><label>地址</label><input type="text" id="nc-url" placeholder="ws://127.0.0.1:53001/ws?token=…" style="max-width:340px"></div>
     <div class="form-row"><label>账号</label><input type="text" id="nc-account" placeholder="机器人 QQ 号"></div>
     <div class="form-row"><label>令牌</label><input type="text" id="nc-token" placeholder="可选（OneBot access token）"></div>`,
     () => {
       const g = (id) => document.getElementById(id).value.trim();
       const id = g("nc-id");
-      if (!id) { alert("连接 id 不能为空"); return false; }
-      if (!g("nc-url") || !g("nc-account")) { alert("地址和账号都得填"); return false; }
+      if (!id) { showFormError("连接 id 不能为空"); return false; }
+      if (!g("nc-url") || !g("nc-account")) { showFormError("地址和账号都得填"); return false; }
       const create = {
         platform: g("nc-platform"), kind: g("nc-kind"),
         url: g("nc-url"), account: g("nc-account"),
@@ -832,19 +1205,19 @@ function addSession() {
     <div class="form-row"><label>harness</label><select id="ns-harness">${harnesses.map((h) => `<option>${esc(h.id)}</option>`).join("")}</select></div>
     <div class="form-row"><label>人格</label><select id="ns-persona">${personas.map((p) => `<option>${esc(p.id)}</option>`).join("")}</select><span class="hint">必填；没有就先去建一个</span></div>
     <div class="form-row"><label>显示名</label><input type="text" id="ns-name" placeholder="可选"></div>
-    <div class="form-row"><label>接入令牌</label><input type="text" id="ns-token" value="${randToken()}" style="width:340px"><span class="hint">harness 连桥用；驱动要重启才能拿到新会话的令牌</span></div>
+    <div class="form-row"><label>接入令牌</label><input type="text" id="ns-token" value="${randToken()}" style="max-width:340px"><span class="hint">harness 连桥用；驱动要重启才能拿到新会话的令牌</span></div>
     <p class="hint">建好后去「订阅」给它加房间；驱动侧要在 start-drivers.sh 里登记这个会话 id 才会被驱动。</p>`,
     () => {
       const g = (id) => document.getElementById(id).value.trim();
       const id = g("ns-id");
-      if (!id) { alert("会话 id 不能为空"); return false; }
+      if (!id) { showFormError("会话 id 不能为空"); return false; }
       const create = {
         harness: document.getElementById("ns-harness").value,
         token: g("ns-token"),
       };
-      if (!create.token) { alert("接入令牌不能为空"); return false; }
+      if (!create.token) { showFormError("接入令牌不能为空"); return false; }
       create.persona = document.getElementById("ns-persona").value;
-      if (!create.persona) { alert("人格必填（配置里 persona 是必填项）"); return false; }
+      if (!create.persona) { showFormError("人格必填（配置里 persona 是必填项）"); return false; }
       if (g("ns-name")) create.name = g("ns-name");
       return submitPatch([{ op: "session", id, create }]);
     });
@@ -857,7 +1230,7 @@ function addPersona() {
     <div class="form-row"><label style="align-self:flex-start">人设文本</label><textarea id="np-text" style="width:100%;min-height:120px" placeholder="你是谁 / 性格 / 语气…"></textarea></div>`,
     () => {
       const g = (id) => document.getElementById(id).value.trim();
-      if (!g("np-id")) { alert("人格 id 不能为空"); return false; }
+      if (!g("np-id")) { showFormError("人格 id 不能为空"); return false; }
       return submitPatch([{ op: "persona", id: g("np-id"), name: g("np-name") || g("np-id"), text: document.getElementById("np-text").value }]);
     });
 }
@@ -867,15 +1240,17 @@ function addMemory() {
     <div class="form-row"><label>仓库 id</label><input type="text" id="nm-id" placeholder="shared-notes"></div>
     <div class="form-row"><label>名字</label><input type="text" id="nm-name" placeholder="显示用"></div>
     <div class="form-row"><label>类型</label><input type="text" id="nm-kind" value="git"><span class="hint">目前 git</span></div>
-    <div class="form-row"><label>位置</label><input type="text" id="nm-loc" placeholder="~/Documents/notes.git" style="width:320px"></div>`,
+    <div class="form-row"><label>位置</label><input type="text" id="nm-loc" placeholder="~/Documents/notes.git" style="max-width:320px"></div>`,
     () => {
       const g = (id) => document.getElementById(id).value.trim();
-      if (!g("nm-id") || !g("nm-loc")) { alert("仓库 id 和位置都得填"); return false; }
+      if (!g("nm-id") || !g("nm-loc")) { showFormError("仓库 id 和位置都得填"); return false; }
       return submitPatch([{ op: "memory", id: g("nm-id"), name: g("nm-name") || g("nm-id"), kind: g("nm-kind") || "git", location: g("nm-loc") }]);
     });
 }
+
 async function boot() {
-  // 先拉 i18n，再绑定导航；插件页文案不在页面里写死。
+  const switcher = $("#locale");
+  if (switcher) switcher.addEventListener("change", (e) => switchLocale(e.target.value).catch((err) => console.error(err)));
   await loadI18n();
   document.querySelectorAll("nav button").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -885,7 +1260,6 @@ async function boot() {
     });
   });
   $("#logout").addEventListener("click", () => { store.del("acb-console-token"); location.href = "/?login=1"; });
-  $("#conn-note").textContent = "登录态存在浏览器 cookie 和 localStorage 里，刷新不用重输";
   loadStatus().catch((e) => console.error(e));
 }
 boot().catch((e) => console.error(e));

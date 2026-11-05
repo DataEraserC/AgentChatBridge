@@ -7,13 +7,59 @@
 //! 补丁原子性：任何一条 op 失败就整体报错，一个字节都不落盘（落盘前的校验、
 //! 备份由 console 的保存流程统一管，这里只负责「改文本」）。
 
+use acb_i18n::{Message, msg};
 use toml_edit::{DocumentMut, Item, Table, value};
 
+/// 补丁错误：主文案是 key + 参数，渲染由调用方按请求 locale 完成；
+/// `detail` 只放无法 key 化的底层原文（TOML 解析器、provider 校验等）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchError {
+    pub message: Message,
+    pub detail: Option<String>,
+}
+
+impl PatchError {
+    pub fn new(message: Message) -> Self {
+        Self {
+            message,
+            detail: None,
+        }
+    }
+
+    pub fn with_detail(message: Message, detail: impl ToString) -> Self {
+        Self {
+            message,
+            detail: Some(detail.to_string()),
+        }
+    }
+
+    /// 把内层错误包成「第 N 条补丁（kind）：<内层>」，保留内层 detail。
+    fn wrap(self, context: Message) -> Self {
+        Self {
+            message: msg!(
+                "bridge.patch.op_failed",
+                context = context,
+                error = self.message
+            ),
+            detail: self.detail,
+        }
+    }
+}
+
+impl From<Message> for PatchError {
+    fn from(message: Message) -> Self {
+        Self::new(message)
+    }
+}
+
 /// 应用一组补丁操作，返回（改完的 TOML 全文，人话改动清单）。
-pub fn apply_patch(text: &str, ops: &[serde_json::Value]) -> Result<(String, Vec<String>), String> {
-    let mut doc: DocumentMut = text
-        .parse()
-        .map_err(|error| acb_i18n::t!("bridge.patch.existing_config_unparsable", error = error))?;
+pub fn apply_patch(
+    text: &str,
+    ops: &[serde_json::Value],
+) -> Result<(String, Vec<Message>), PatchError> {
+    let mut doc: DocumentMut = text.parse().map_err(|error| {
+        PatchError::with_detail(msg!("bridge.patch.existing_config_unparsable"), error)
+    })?;
     let mut changes = Vec::new();
 
     for (index, op) in ops.iter().enumerate() {
@@ -21,7 +67,7 @@ pub fn apply_patch(text: &str, ops: &[serde_json::Value]) -> Result<(String, Vec
             .get("op")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        let where_ = acb_i18n::t!("bridge.patch.op_context", index = index + 1, kind = kind);
+        let where_ = msg!("bridge.patch.op_context", index = index + 1, kind = kind);
         match kind {
             "session" => session_op(&mut doc, op, &mut changes),
             "subscription" => subscription_op(&mut doc, op, &mut changes),
@@ -31,9 +77,9 @@ pub fn apply_patch(text: &str, ops: &[serde_json::Value]) -> Result<(String, Vec
             "connection" => connection_op(&mut doc, op, &mut changes),
             "global" => global_op(&mut doc, op, &mut changes),
             "delete" => delete_op(&mut doc, op, &mut changes),
-            other => Err(acb_i18n::t!("bridge.patch.unknown_op", op = other)),
+            other => Err(msg!("bridge.patch.unknown_op", op = other).into()),
         }
-        .map_err(|error| acb_i18n::t!("bridge.patch.op_failed", context = where_, error = error))?;
+        .map_err(|error: PatchError| error.wrap(where_))?;
     }
 
     Ok((doc.to_string(), changes))
@@ -52,40 +98,37 @@ pub fn apply_patch(text: &str, ops: &[serde_json::Value]) -> Result<(String, Vec
 fn session_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     let id = string_field(op, "id")?;
     if session_table_mut(doc, &id).is_none() {
         let create = op
             .get("create")
             .and_then(serde_json::Value::as_object)
-            .ok_or(acb_i18n::t!("bridge.patch.session_missing_create", id = id))?;
+            .ok_or(msg!("bridge.patch.session_missing_create", id = &id))?;
         let harness = create
             .get("harness")
             .and_then(serde_json::Value::as_str)
-            .ok_or(acb_i18n::t!("bridge.patch.session_harness_required"))?;
+            .ok_or(msg!("bridge.patch.session_harness_required"))?;
         if harness_table(doc, harness).is_none() {
-            return Err(acb_i18n::t!(
-                "bridge.patch.session_unknown_harness",
-                harness = harness
-            ));
+            return Err(msg!("bridge.patch.session_unknown_harness", harness = harness).into());
         }
         let token = create
             .get("token")
             .and_then(serde_json::Value::as_str)
             .filter(|t| !t.is_empty())
-            .ok_or(acb_i18n::t!("bridge.patch.session_token_required"))?;
+            .ok_or(msg!("bridge.patch.session_token_required"))?;
         let persona = create
             .get("persona")
             .and_then(serde_json::Value::as_str)
             .filter(|p| !p.is_empty())
-            .ok_or(acb_i18n::t!("bridge.patch.session_persona_required"))?;
+            .ok_or(msg!("bridge.patch.session_persona_required"))?;
         let persona_id = persona.to_owned();
 
         let sessions = doc
             .get_mut("sessions")
             .and_then(Item::as_array_of_tables_mut)
-            .ok_or(acb_i18n::t!("bridge.patch.session_section_missing"))?;
+            .ok_or(msg!("bridge.patch.session_section_missing"))?;
         let mut table = Table::new();
         table.insert("id", value(id.clone()));
         table.insert("harness", value(harness.to_owned()));
@@ -100,15 +143,15 @@ fn session_op(
         }
         if let Some(list) = create.get("memories") {
             let memories =
-                str_list(list).map_err(|_| acb_i18n::t!("bridge.patch.memories_must_be_list"))?;
+                str_list(list).map_err(|_| msg!("bridge.patch.memories_must_be_list"))?;
             if !memories.is_empty() {
                 table.insert("memories", str_array(&memories));
             }
         }
         sessions.push(table);
-        changes.push(acb_i18n::t!(
+        changes.push(msg!(
             "bridge.patch.session_created",
-            id = id,
+            id = &id,
             harness = harness
         ));
     }
@@ -116,22 +159,22 @@ fn session_op(
     let patch = match op.get("patch").map(serde_json::Value::as_object) {
         Some(Some(patch)) => patch,
         // create-only 的 op（只建不改）没有 patch，直接完事。
-        Some(None) => return Err(acb_i18n::t!("bridge.patch.patch_must_be_object")),
+        Some(None) => return Err(msg!("bridge.patch.patch_must_be_object").into()),
         None => return Ok(()),
     };
-    let table = session_table_mut(doc, &id)
-        .ok_or(acb_i18n::t!("bridge.patch.session_not_found", id = id))?;
+    let table =
+        session_table_mut(doc, &id).ok_or(msg!("bridge.patch.session_not_found", id = &id))?;
 
     for (key, val) in patch {
         match key.as_str() {
             "name" | "persona" => {
                 let text = val
                     .as_str()
-                    .ok_or(acb_i18n::t!("bridge.patch.field_must_be_string", key = key))?;
+                    .ok_or(msg!("bridge.patch.field_must_be_string", key = key))?;
                 table.insert(key.as_str(), value(text.to_owned()));
-                changes.push(acb_i18n::t!(
+                changes.push(msg!(
                     "bridge.patch.session_field_set",
-                    id = id,
+                    id = &id,
                     key = key,
                     value = text
                 ));
@@ -139,33 +182,29 @@ fn session_op(
             "model" => match val {
                 serde_json::Value::Null => {
                     table.remove("model");
-                    changes.push(acb_i18n::t!("bridge.patch.session_model_cleared", id = id));
+                    changes.push(msg!("bridge.patch.session_model_cleared", id = &id));
                 }
                 serde_json::Value::String(text) => {
                     table.insert("model", value(text.clone()));
-                    changes.push(acb_i18n::t!(
+                    changes.push(msg!(
                         "bridge.patch.session_model_set",
-                        id = id,
+                        id = &id,
                         value = text
                     ));
                 }
-                _ => return Err(acb_i18n::t!("bridge.patch.model_wrong_type")),
+                _ => return Err(msg!("bridge.patch.model_wrong_type").into()),
             },
             "memories" => {
-                let list = str_list(val)
-                    .map_err(|_| acb_i18n::t!("bridge.patch.memories_must_be_list"))?;
+                let list = str_list(val).map_err(|_| msg!("bridge.patch.memories_must_be_list"))?;
                 table.insert("memories", str_array(&list));
-                changes.push(acb_i18n::t!(
+                changes.push(msg!(
                     "bridge.patch.session_memories_set",
-                    id = id,
+                    id = &id,
                     list = list.join(", ")
                 ));
             }
             other => {
-                return Err(acb_i18n::t!(
-                    "bridge.patch.session_unknown_field",
-                    field = other
-                ));
+                return Err(msg!("bridge.patch.session_unknown_field", field = other).into());
             }
         }
     }
@@ -181,13 +220,11 @@ fn session_op(
 fn subscription_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     let session_id = string_field(op, "session")?;
-    let session = session_table_mut(doc, &session_id).ok_or(acb_i18n::t!(
-        "bridge.patch.session_not_found",
-        id = session_id
-    ))?;
+    let session = session_table_mut(doc, &session_id)
+        .ok_or(msg!("bridge.patch.session_not_found", id = &session_id))?;
 
     if op
         .get("remove")
@@ -199,25 +236,25 @@ fn subscription_op(
         let subs = session
             .get_mut("subscriptions")
             .and_then(Item::as_array_of_tables_mut)
-            .ok_or(acb_i18n::t!(
+            .ok_or(msg!(
                 "bridge.patch.session_no_subscriptions",
-                session = session_id
+                session = &session_id
             ))?;
         let index = subs
             .iter()
             .position(|t| room_matches(t, &connection, &path))
-            .ok_or(acb_i18n::t!(
+            .ok_or(msg!(
                 "bridge.patch.subscription_not_found",
-                session = session_id,
-                connection = connection,
-                path = path
+                session = &session_id,
+                connection = &connection,
+                path = &path
             ))?;
         subs.remove(index);
-        changes.push(acb_i18n::t!(
+        changes.push(msg!(
             "bridge.patch.subscription_removed",
-            session = session_id,
-            connection = connection,
-            path = path
+            session = &session_id,
+            connection = &connection,
+            path = &path
         ));
         return Ok(());
     }
@@ -226,9 +263,9 @@ fn subscription_op(
     let subs = session
         .get_mut("subscriptions")
         .and_then(Item::as_array_of_tables_mut)
-        .ok_or(acb_i18n::t!(
+        .ok_or(msg!(
             "bridge.patch.subscription_section_missing",
-            session = session_id
+            session = &session_id
         ))?;
 
     if let Some(existing) = subs
@@ -239,20 +276,20 @@ fn subscription_op(
             set_wake(
                 existing,
                 wake,
-                &acb_i18n::t!(
+                &msg!(
                     "bridge.patch.subscription_label",
-                    session = session_id,
-                    connection = connection,
-                    path = path
+                    session = &session_id,
+                    connection = &connection,
+                    path = &path
                 ),
                 changes,
             )?;
         } else {
-            changes.push(acb_i18n::t!(
+            changes.push(msg!(
                 "bridge.patch.subscription_unchanged",
-                session = session_id,
-                connection = connection,
-                path = path
+                session = &session_id,
+                connection = &connection,
+                path = &path
             ));
         }
         return Ok(());
@@ -268,11 +305,11 @@ fn subscription_op(
         sub.insert("wake", Item::Table(wake_table));
     }
     subs.push(sub);
-    changes.push(acb_i18n::t!(
+    changes.push(msg!(
         "bridge.patch.subscription_added",
-        session = session_id,
-        connection = connection,
-        path = path
+        session = &session_id,
+        connection = &connection,
+        path = &path
     ));
     Ok(())
 }
@@ -281,8 +318,8 @@ fn subscription_op(
 fn persona_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     upsert_named_table(doc, "personas", op, &["name", "text"], changes)
 }
 
@@ -290,8 +327,8 @@ fn persona_op(
 fn memory_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     upsert_named_table(doc, "memories", op, &["name", "kind", "location"], changes)
 }
 
@@ -299,8 +336,8 @@ fn memory_op(
 fn harness_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     upsert_named_table(doc, "harnesses", op, &["name"], changes)
 }
 
@@ -319,8 +356,8 @@ fn harness_table<'a>(doc: &'a mut DocumentMut, id: &str) -> Option<&'a Table> {
 fn connection_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     let id = string_field(op, "id")?;
     let exists = doc
         .get("connections")
@@ -335,32 +372,29 @@ fn connection_op(
         let create = op
             .get("create")
             .and_then(serde_json::Value::as_object)
-            .ok_or(acb_i18n::t!(
-                "bridge.patch.connection_missing_create",
-                id = id
-            ))?;
+            .ok_or(msg!("bridge.patch.connection_missing_create", id = &id))?;
         let platform = create
             .get("platform")
             .and_then(serde_json::Value::as_str)
-            .ok_or(acb_i18n::t!("bridge.patch.connection_platform_required"))?;
+            .ok_or(msg!("bridge.patch.connection_platform_required"))?;
         let kind = create
             .get("kind")
             .and_then(serde_json::Value::as_str)
-            .ok_or(acb_i18n::t!("bridge.patch.connection_kind_required"))?;
+            .ok_or(msg!("bridge.patch.connection_kind_required"))?;
         let url = create
             .get("url")
             .and_then(serde_json::Value::as_str)
             .filter(|u| !u.is_empty())
-            .ok_or(acb_i18n::t!("bridge.patch.connection_url_required"))?;
+            .ok_or(msg!("bridge.patch.connection_url_required"))?;
         let account = create
             .get("account")
             .and_then(serde_json::Value::as_str)
-            .ok_or(acb_i18n::t!("bridge.patch.connection_account_required"))?;
+            .ok_or(msg!("bridge.patch.connection_account_required"))?;
 
         let connections = doc
             .get_mut("connections")
             .and_then(Item::as_array_of_tables_mut)
-            .ok_or(acb_i18n::t!("bridge.patch.connection_section_missing"))?;
+            .ok_or(msg!("bridge.patch.connection_section_missing"))?;
         let mut table = Table::new();
         table.insert("id", value(id.clone()));
         table.insert("platform", value(platform.to_owned()));
@@ -373,13 +407,13 @@ fn connection_op(
             }
         }
         connections.push(table);
-        changes.push(acb_i18n::t!("bridge.patch.connection_created", id = id));
+        changes.push(msg!("bridge.patch.connection_created", id = &id));
     }
 
     let patch = match op.get("patch") {
         Some(patch) => patch
             .as_object()
-            .ok_or(acb_i18n::t!("bridge.patch.patch_must_be_object"))?,
+            .ok_or(msg!("bridge.patch.patch_must_be_object"))?,
         // create-only 的 op（只建不改）没有 patch，直接完事。
         None => return Ok(()),
     };
@@ -390,43 +424,34 @@ fn connection_op(
             arr.iter_mut()
                 .find(|t| t.get("id").and_then(Item::as_str) == Some(id.as_str()))
         })
-        .ok_or(acb_i18n::t!("bridge.patch.connection_not_found", id = id))?;
+        .ok_or(msg!("bridge.patch.connection_not_found", id = &id))?;
 
     for (key, val) in patch {
         match key.as_str() {
             "url" | "account" => {
                 let text = val
                     .as_str()
-                    .ok_or(acb_i18n::t!("bridge.patch.field_must_be_string", key = key))?;
+                    .ok_or(msg!("bridge.patch.field_must_be_string", key = key))?;
                 table.insert(key.as_str(), value(text.to_owned()));
-                changes.push(acb_i18n::t!(
+                changes.push(msg!(
                     "bridge.patch.connection_field_updated",
-                    id = id,
+                    id = &id,
                     key = key
                 ));
             }
             "token" => match val {
                 serde_json::Value::Null => {
                     table.remove("token");
-                    changes.push(acb_i18n::t!(
-                        "bridge.patch.connection_token_cleared",
-                        id = id
-                    ));
+                    changes.push(msg!("bridge.patch.connection_token_cleared", id = &id));
                 }
                 serde_json::Value::String(text) => {
                     table.insert("token", value(text.clone()));
-                    changes.push(acb_i18n::t!(
-                        "bridge.patch.connection_token_updated",
-                        id = id
-                    ));
+                    changes.push(msg!("bridge.patch.connection_token_updated", id = &id));
                 }
-                _ => return Err(acb_i18n::t!("bridge.patch.token_wrong_type")),
+                _ => return Err(msg!("bridge.patch.token_wrong_type").into()),
             },
             other => {
-                return Err(acb_i18n::t!(
-                    "bridge.patch.connection_unknown_field",
-                    field = other
-                ));
+                return Err(msg!("bridge.patch.connection_unknown_field", field = other).into());
             }
         }
     }
@@ -438,12 +463,12 @@ fn connection_op(
 fn global_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     let patch = op
         .get("patch")
         .and_then(serde_json::Value::as_object)
-        .ok_or(acb_i18n::t!("bridge.patch.patch_required"))?;
+        .ok_or(msg!("bridge.patch.patch_required"))?;
 
     for (key, val) in patch {
         match key.as_str() {
@@ -452,7 +477,7 @@ fn global_op(
                     doc,
                     "delivery_limit",
                     val,
-                    &acb_i18n::t!("bridge.patch.label_delivery_limit"),
+                    &msg!("bridge.patch.label_delivery_limit"),
                     changes,
                 )?;
             }
@@ -461,7 +486,7 @@ fn global_op(
                     doc,
                     "turn_timeout_secs",
                     val,
-                    &acb_i18n::t!("bridge.patch.label_turn_timeout"),
+                    &msg!("bridge.patch.label_turn_timeout"),
                     changes,
                 )?;
             }
@@ -472,21 +497,21 @@ fn global_op(
                 let table = doc
                     .get_mut("retention")
                     .and_then(Item::as_table_mut)
-                    .ok_or(acb_i18n::t!("bridge.patch.retention_not_table"))?;
+                    .ok_or(msg!("bridge.patch.retention_not_table"))?;
                 match val {
                     serde_json::Value::Null => {
                         table.remove(key.as_str());
-                        changes.push(acb_i18n::t!("bridge.patch.key_removed_default", key = key));
+                        changes.push(msg!("bridge.patch.key_removed_default", key = key));
                     }
                     serde_json::Value::Number(number) => {
                         let n = number
                             .as_u64()
-                            .ok_or(acb_i18n::t!("bridge.patch.key_non_negative_int", key = key))?;
+                            .ok_or(msg!("bridge.patch.key_non_negative_int", key = key))?;
                         table.insert(key.as_str(), value(n as i64));
-                        changes.push(acb_i18n::t!("bridge.patch.key_set", key = key, value = n));
+                        changes.push(msg!("bridge.patch.key_set", key = key, value = n));
                     }
                     _ => {
-                        return Err(acb_i18n::t!("bridge.patch.key_number_or_null", key = key));
+                        return Err(msg!("bridge.patch.key_number_or_null", key = key).into());
                     }
                 }
             }
@@ -494,19 +519,13 @@ fn global_op(
                 let list = match val {
                     serde_json::Value::Null => Vec::new(),
                     other => str_list(other)
-                        .map_err(|_| acb_i18n::t!("bridge.patch.turn_error_list_required"))?,
+                        .map_err(|_| msg!("bridge.patch.turn_error_list_required"))?,
                 };
                 doc.insert("default_on_turn_error", str_array(&list));
-                changes.push(acb_i18n::t!(
-                    "bridge.patch.turn_error_set",
-                    list = list.join(", ")
-                ));
+                changes.push(msg!("bridge.patch.turn_error_set", list = list.join(", ")));
             }
             other => {
-                return Err(acb_i18n::t!(
-                    "bridge.patch.global_unknown_field",
-                    field = other
-                ));
+                return Err(msg!("bridge.patch.global_unknown_field", field = other).into());
             }
         }
     }
@@ -527,12 +546,12 @@ fn session_table_mut<'a>(doc: &'a mut DocumentMut, id: &str) -> Option<&'a mut T
 
 /// `room` 可以写 `qq:group/123`（从页面显示串直接来）或裸路径 `group/123`
 /// （那就要另带 connection 字段）。返回（连接名, 路径）。
-fn split_room(room: &str, op: &serde_json::Value) -> Result<(String, String), String> {
+fn split_room(room: &str, op: &serde_json::Value) -> Result<(String, String), PatchError> {
     if let Some((connection, path)) = room.split_once(':') {
         return Ok((connection.to_owned(), path.to_owned()));
     }
     let connection = string_field(op, "connection")
-        .map_err(|_| acb_i18n::t!("bridge.patch.room_bare_path", room = room))?;
+        .map_err(|_| msg!("bridge.patch.room_bare_path", room = room))?;
     Ok((connection, room.to_owned()))
 }
 
@@ -546,18 +565,18 @@ fn room_matches(table: &Table, connection: &str, path: &str) -> bool {
 fn set_wake(
     sub: &mut Table,
     wake: &serde_json::Map<String, serde_json::Value>,
-    label: &str,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    label: &Message,
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     if sub.get_mut("wake").and_then(Item::as_table_mut).is_none() {
         sub.insert("wake", Item::Table(Table::new()));
     }
     let wake_table = sub
         .get_mut("wake")
         .and_then(Item::as_table_mut)
-        .ok_or(acb_i18n::t!("bridge.patch.wake_not_table"))?;
+        .ok_or(msg!("bridge.patch.wake_not_table"))?;
     fill_wake(wake_table, wake)?;
-    changes.push(acb_i18n::t!("bridge.patch.wake_updated", label = label));
+    changes.push(msg!("bridge.patch.wake_updated", label = label));
     Ok(())
 }
 
@@ -565,7 +584,7 @@ fn set_wake(
 fn fill_wake(
     wake_table: &mut Table,
     wake: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
+) -> Result<(), PatchError> {
     for (key, val) in wake {
         match key.as_str() {
             "provider" => match val {
@@ -574,15 +593,20 @@ fn fill_wake(
                 }
                 serde_json::Value::String(text) => {
                     let text = text.trim();
-                    acb_kernel::ProviderId::parse(text).map_err(|error| error.to_string())?;
+                    acb_kernel::ProviderId::parse(text).map_err(|error| {
+                        PatchError::with_detail(
+                            msg!("bridge.patch.wake_provider_invalid", provider = text),
+                            error,
+                        )
+                    })?;
                     wake_table.insert("provider", value(text));
                 }
-                _ => return Err(acb_i18n::t!("bridge.patch.wake_provider_type")),
+                _ => return Err(msg!("bridge.patch.wake_provider_type").into()),
             },
             "at_mention" | "reply" | "name_mention" | "poke" => {
                 let flag = val
                     .as_bool()
-                    .ok_or(acb_i18n::t!("bridge.patch.wake_flag_type", key = key))?;
+                    .ok_or(msg!("bridge.patch.wake_flag_type", key = key))?;
                 wake_table.insert(key.as_str(), value(flag));
             }
             "accumulate" => match val {
@@ -592,10 +616,10 @@ fn fill_wake(
                 serde_json::Value::Number(number) => {
                     let n = number
                         .as_u64()
-                        .ok_or(acb_i18n::t!("bridge.patch.wake_accumulate_type"))?;
+                        .ok_or(msg!("bridge.patch.wake_accumulate_type"))?;
                     wake_table.insert("accumulate", value(n as i64));
                 }
-                _ => return Err(acb_i18n::t!("bridge.patch.wake_accumulate_nullable")),
+                _ => return Err(msg!("bridge.patch.wake_accumulate_nullable").into()),
             },
             "names" | "events" | "event_tags" | "ignore_event_tags" | "keywords"
             | "ignore_speakers" => match val {
@@ -604,15 +628,12 @@ fn fill_wake(
                 }
                 other => {
                     let list = str_list(other)
-                        .map_err(|_| acb_i18n::t!("bridge.patch.wake_list_type", key = key))?;
+                        .map_err(|_| msg!("bridge.patch.wake_list_type", key = key))?;
                     wake_table.insert(key.as_str(), str_array(&list));
                 }
             },
             other => {
-                return Err(acb_i18n::t!(
-                    "bridge.patch.wake_unknown_field",
-                    field = other
-                ));
+                return Err(msg!("bridge.patch.wake_unknown_field", field = other).into());
             }
         }
     }
@@ -625,16 +646,13 @@ fn upsert_named_table(
     array_key: &str,
     op: &serde_json::Value,
     fields: &[&str],
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     let id = string_field(op, "id")?;
     let array = doc
         .get_mut(array_key)
         .and_then(Item::as_array_of_tables_mut)
-        .ok_or(acb_i18n::t!(
-            "bridge.patch.section_missing",
-            section = array_key
-        ))?;
+        .ok_or(msg!("bridge.patch.section_missing", section = array_key))?;
 
     let existing = array
         .iter_mut()
@@ -644,10 +662,10 @@ fn upsert_named_table(
         for field in fields {
             if let Some(text) = op.get(*field).and_then(serde_json::Value::as_str) {
                 table.insert(field, value(text.to_owned()));
-                changes.push(acb_i18n::t!(
+                changes.push(msg!(
                     "bridge.patch.entry_field_updated",
-                    label = label,
-                    field = field
+                    label = &label,
+                    field = *field
                 ));
             }
         }
@@ -660,15 +678,15 @@ fn upsert_named_table(
         let text = op
             .get(*field)
             .and_then(serde_json::Value::as_str)
-            .ok_or(acb_i18n::t!(
+            .ok_or(msg!(
                 "bridge.patch.new_entry_missing_field",
-                label = label,
-                field = field
+                label = &label,
+                field = *field
             ))?;
         table.insert(field, value(text.to_owned()));
     }
     array.push(table);
-    changes.push(acb_i18n::t!("bridge.patch.entry_created", label = label));
+    changes.push(msg!("bridge.patch.entry_created", label = &label));
     Ok(())
 }
 
@@ -679,8 +697,8 @@ fn upsert_named_table(
 fn delete_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     let id = string_field(op, "id")?;
     let section = string_field(op, "section")?;
     let array_key = match section.as_str() {
@@ -690,16 +708,13 @@ fn delete_op(
         "harness" => "harnesses",
         "session" => "sessions",
         other => {
-            return Err(acb_i18n::t!(
-                "bridge.patch.unknown_section",
-                section = other
-            ));
+            return Err(msg!("bridge.patch.unknown_section", section = other).into());
         }
     };
     let array = doc
         .get_mut(array_key)
         .and_then(Item::as_array_of_tables_mut)
-        .ok_or(acb_i18n::t!(
+        .ok_or(msg!(
             "bridge.patch.section_missing_cannot_delete",
             section = array_key
         ))?;
@@ -707,21 +722,25 @@ fn delete_op(
         .iter()
         .position(|t| t.get("id").and_then(Item::as_str) == Some(id.as_str()))
         .ok_or_else(|| {
-            acb_i18n::t!("bridge.patch.entry_not_found", section = array_key, id = id)
+            msg!(
+                "bridge.patch.entry_not_found",
+                section = array_key,
+                id = &id
+            )
         })?;
     array.remove(position);
-    changes.push(acb_i18n::t!(
+    changes.push(msg!(
         "bridge.patch.entry_deleted",
         label = format!("{array_key}/{id}")
     ));
     Ok(())
 }
 
-fn string_field(op: &serde_json::Value, key: &str) -> Result<String, String> {
+fn string_field(op: &serde_json::Value, key: &str) -> Result<String, PatchError> {
     op.get(key)
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-        .ok_or(acb_i18n::t!("bridge.patch.missing_string_field", key = key))
+        .ok_or(msg!("bridge.patch.missing_string_field", key = key).into())
 }
 
 fn str_list(val: &serde_json::Value) -> Result<Vec<String>, ()> {
@@ -748,40 +767,37 @@ fn set_or_remove_int(
     doc: &mut DocumentMut,
     key: &str,
     val: &serde_json::Value,
-    label: &str,
-    changes: &mut Vec<String>,
-) -> Result<(), String> {
+    label: &Message,
+    changes: &mut Vec<Message>,
+) -> Result<(), PatchError> {
     match val {
         serde_json::Value::Null => {
             doc.remove(key);
-            changes.push(acb_i18n::t!(
-                "bridge.patch.label_removed_default",
-                label = label
-            ));
+            changes.push(msg!("bridge.patch.label_removed_default", label = label));
             Ok(())
         }
         serde_json::Value::Number(number) => {
-            let n = number.as_u64().ok_or(acb_i18n::t!(
-                "bridge.patch.label_non_negative_int",
-                label = label
-            ))?;
+            let n = number
+                .as_u64()
+                .ok_or(msg!("bridge.patch.label_non_negative_int", label = label))?;
             doc.insert(key, value(n as i64));
-            changes.push(acb_i18n::t!(
-                "bridge.patch.label_set",
-                label = label,
-                value = n
-            ));
+            changes.push(msg!("bridge.patch.label_set", label = label, value = n));
             Ok(())
         }
-        _ => Err(acb_i18n::t!(
-            "bridge.patch.label_number_or_null",
-            label = label
-        )),
+        _ => Err(msg!("bridge.patch.label_number_or_null", label = label).into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    fn changes_en(changes: &[acb_i18n::Message]) -> Vec<String> {
+        changes.iter().map(|change| change.render("en")).collect()
+    }
+
+    fn error_en(error: &super::PatchError) -> String {
+        error.message.render("en")
+    }
+
     fn base() -> String {
         r#"
 # 用户手写的注释：机器人主会话
@@ -881,7 +897,7 @@ keywords = ["喂"]
             {"op": "subscription", "session": "main", "room": "qq:group/123", "remove": true}
         ]));
         let (new_text, changes) = super::apply_patch(&new_text, &ops).expect("能删");
-        assert!(changes[0].contains("removed"));
+        assert!(changes_en(&changes)[0].contains("removed"));
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         let subs = &config.session("main").expect("在").subscriptions;
         assert_eq!(subs.len(), 1);
@@ -908,7 +924,7 @@ keywords = ["喂"]
             {"op": "persona", "id": "p2", "name": "二号", "text": "你是二号桥。"}
         ]));
         let (new_text, changes) = super::apply_patch(&text, &ops).expect("能加");
-        assert!(changes[0].contains("created"));
+        assert!(changes_en(&changes)[0].contains("created"));
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         assert_eq!(config.personas.len(), 2);
         assert_eq!(config.personas[1].name, "二号");
@@ -936,14 +952,18 @@ keywords = ["喂"]
             {"op": "nonsense"}
         ]));
         let error = super::apply_patch(&text, &ops).expect_err("该报错");
-        assert!(error.contains("op 2"), "错误要指明第几条：{error}");
+        assert!(
+            error_en(&error).contains("op 2"),
+            "错误要指明第几条：{}",
+            error_en(&error)
+        );
 
         // 不存在的会话报错。
         let ops = parse_ops(serde_json::json!([
             {"op": "session", "id": "ghost", "patch": {"name": "x"}}
         ]));
         let error = super::apply_patch(&text, &ops).expect_err("该报错");
-        assert!(error.contains("ghost"));
+        assert!(error_en(&error).contains("ghost"));
     }
 
     #[test]
@@ -955,7 +975,11 @@ keywords = ["喂"]
         let (new_text, changes) = super::apply_patch(&text, &ops).expect("能打");
         assert!(new_text.contains("ws://127.0.0.1:3002"));
         assert!(!new_text.contains("conn-secret"), "token 键被删");
-        assert!(changes.iter().all(|c| c.contains("restart required")));
+        assert!(
+            changes_en(&changes)
+                .iter()
+                .all(|c| c.contains("restart required"))
+        );
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         assert_eq!(config.connections[0].token, None);
     }
@@ -971,9 +995,10 @@ keywords = ["喂"]
             ),
         )
         .expect_err("该报错");
+        let rendered = error_en(&error);
         assert!(
-            error.contains("new1") && error.contains("create"),
-            "{error}"
+            rendered.contains("new1") && rendered.contains("create"),
+            "{rendered}"
         );
         // create 里 harness 不存在 → 报错指名。
         let error = super::apply_patch(
@@ -982,7 +1007,8 @@ keywords = ["喂"]
                 "create": {"harness": "ghost", "token": "t"}, "patch": {}}])),
         )
         .expect_err("该报错");
-        assert!(error.contains("ghost"), "{error}");
+        let rendered = error_en(&error);
+        assert!(rendered.contains("ghost"), "{rendered}");
         // 正常新建：id/harness/token/persona 齐全，patch 随后应用。
         let (new_text, changes) = super::apply_patch(
             &text,
@@ -993,7 +1019,7 @@ keywords = ["喂"]
             ])),
         )
         .expect("能建");
-        assert!(changes[0].contains("created"));
+        assert!(changes_en(&changes)[0].contains("created"));
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         let session = config.session("new1").expect("新会话在");
         assert_eq!(session.harness, "dsh");
@@ -1016,7 +1042,8 @@ keywords = ["喂"]
             ])),
         )
         .expect("能建");
-        assert!(changes[0].contains("created") && changes[1].contains("created"));
+        let rendered = changes_en(&changes);
+        assert!(rendered[0].contains("created") && rendered[1].contains("created"));
         let config = acb_kernel::Config::parse(&new_text).expect("合法");
         assert_eq!(config.connections.len(), 2);
         assert_eq!(config.connections[1].account, "10002");
