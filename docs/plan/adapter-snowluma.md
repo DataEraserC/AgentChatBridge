@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 19 项、部分实现 2 项、未实现 2 项**。动作级：现有 catalog 暴露 184 个层级 op / 192 个 OneBot action（5 个平台别名挂在主 op 的 `aliases` 上，不单列 op）；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考），200 个中文动作里只剩 8 个平台占位/未实现的外部约束项。逐动作覆盖矩阵见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 19 项、部分实现 2 项、未实现 2 项**。动作级：现有 catalog 暴露 192 个层级 op / 200 个 OneBot action（5 个平台别名挂在主 op 的 `aliases` 上，不单列 op）；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考），200 个中文动作已全部有 op，白名单清零。逐动作覆盖矩阵见 [snowluma-action-coverage.md](snowluma-action-coverage.md)。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -116,8 +116,8 @@
 - **连接**：正向 WebSocket（`ws-client`）与反向 WebSocket（`ws-server`，桥监听，SnowLuma 连入）；HTTP API、HTTP 事件上报与 `wss://` 未实现。
 - **鉴权**：`ws-client` 用 `Authorization: Bearer`（地址里的 `?access_token=` 原样保留）；`ws-server` 接受 `?access_token=` 或 `Authorization: Bearer`，不匹配直接 401。
 - **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、自定义收藏表情（`msg.face`）、合并转发发送与读取。
-- **平台方法**：`catalog.rs` 的 `ROUTES` 共 184 个层级 op，映射 192 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作；5 个平台别名挂在主 op 的 `aliases` 上）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**；现在只剩 8 个平台占位/未实现的动作没列。
-- **目录体积**：不带 `op` 列目录时，184 个 op 的原始清单约 25–27 KB；索引化后仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
+- **平台方法**：`catalog.rs` 的 `ROUTES` 共 192 个层级 op，映射 200 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作；5 个平台别名挂在主 op 的 `aliases` 上）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**；现在 200 个动作全部有 op，包括平台占位/mock（标 `Unverified`）。
+- **目录体积**：不带 `op` 列目录时，192 个 op 的原始清单约 26–28 KB；索引化后仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
 - **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略（`reportSelfMessage = true` 时不重复记账）；`meta_event/heartbeat` 只刷新平台依赖条目的 `lastOkAt`，生命周期忽略；`bot_status` / `bot_offline` 走账号状态，不再写进私聊房间；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot-snowluma/src/event.rs#L55-L200)）。
 - **账号**：连上后另起线程调 `get_login_info` 核对 `account`，并调 `get_version_info` / `get_status` 采集三层版本与在线状态（[link.rs](../../crates/adapters/onebot-snowluma/src/link.rs)）。
 - **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 写进 `accountOnline` / `accountGood`；`bot_status` 的上下线按失败阈值迁移依赖状态，心跳只刷新 `lastOkAt`。版本信息写进 `version`。
@@ -235,16 +235,16 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 **计数（2026-11-05，批次 9 之后）**：25 项中 2 项不适用；
 适用 23 项 = 已实现 19 + 部分 2 + 未实现 2（#2 HTTP API 与 #5 `wss://`）。
 #17 表情回应、#22 QQ 空间、#23 收藏/闪传已由批次 9 补齐；#19 的动作已全，
-但 59 个 `Unverified` op 要等实验完成才算完全实现。
+但 15 个 `Unverified` op 要等实验完成才算完全实现。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 184 个层级 op / 192 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
-- 其中 59 个 op 带 `Verification::Unverified`（批次 8 的 4 个 + 批次 9 的 55 个），
-  按 critical 档管理；5 个平台别名挂在主 op 的 `aliases` 上，继承主 op 的
-  `Verified`。
+- 现有 `ROUTES` 192 个层级 op / 200 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 其中 **15 个 op** 带 `Verification::Unverified`（批次 8 的 4 个、审计后仍无出处的
+  3 个、白名单清零的 8 个），按 critical 档管理；5 个平台别名挂在主 op 的
+  `aliases` 上，继承主 op 的 `Verified`。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 逐动作「已暴露 / 未暴露 + 原因分类」见 [snowluma-action-coverage.md](snowluma-action-coverage.md)：
-  已暴露 192、未暴露 8（全部是外部约束，白名单 + 理由由测试锁定）。
+  已暴露 200、未暴露 0；8 个平台占位/mock 也暴露成 `Unverified`，白名单为空。
 - 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。
 
 **曾经最容易造成实际事故的三个缺口，已由批次 1 / 2 收口**：
@@ -252,8 +252,8 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 2. 账号上下线进入平台依赖健康，`/healthz` 能看到 `accountOnline` / `accountGood`（批次 1 / 2）。
 3. `get_version_info` 已采集三层版本并写进依赖元数据（批次 1）。
 
-动作覆盖面已收口：200 个中文动作里 192 个有 op，剩下 8 个是平台占位/未实现。
-现在的主要风险转为 `Unverified` 语义（59 个）与 QQ 空间等账号级写操作的实机行为。
+动作覆盖面已收口：200 个中文动作全部有 op / 别名归属，白名单为空。
+现在的主要风险转为 15 个 `Unverified` 语义与 QQ 空间等账号级写操作的实机行为。
 
 ---
 
@@ -870,6 +870,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 **目标**：按「任何平台功能均要有，可以标高危，但必须要有」把 62 个未排期动作全部落地。
 
 **新增 62 个动作（127 → 184 个 op，130 → 192 个 action；5 个别名不单列 op）**
+随后白名单清零再补 8 个 op（184 → 192；action 192 → 200）。
 - 账号资料/在线状态：`friend.dress`、`msg.mark_all_read`、`account.online_clients`、
   `account.profile_likes`、`account.user_status`、`account.diy_status`、
   `account.input_status`、`account.online_status`、`account.avatar`、
@@ -905,20 +906,101 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   `get_emoji_likes`、`send_poke`）挂在主 op 的 `aliases` 上，继承主 op 的 `Verified`；
   `msg.mark_read_group` / `msg.mark_read_private` 仍是独立 op，语义等于已核实的
   `mark_msg_as_read`。
-- 其余 55 个只有 SnowLuma 动作目录来源，全部标 `Unverified { reason, experiment }`
-  （research §3.4–§3.8），门槛等同 critical：直调拒绝，只能走票据 + 审批。
-  全表 `Unverified` 59 个（含批次 8 的 4 个）。
+- 批次 9 审计后，55 个中 52 个按 SnowLuma 动作目录的摘要+参数改 `Verified`；
+  3 个保留 `Unverified`（`account.qzone.detail` / `account.qzone.unlike` /
+  `msg.tuwen_ark`）。白名单清零的 8 个平台占位/mock 也标 `Unverified`。
+  全表 `Unverified` 15 个（4 + 3 + 8）。
 
 **证据**
-- `every_op_is_hierarchical_tagged_and_routed`：184 个 op 逐个检查层级名、risk tag、
+- `every_op_is_hierarchical_tagged_and_routed`：192 个 op 逐个检查层级名、risk tag、
   scope tag、路由、TargetSpec 非空、verification 的 source/reason/experiment。
 - `aliases_attach_to_the_main_op_and_stay_out_of_the_catalog`：别名挂在主 op 上、
   目录里没有别名条目、主 op 是 `Verified`。
 - `action_coverage_matrix_is_complete_and_exceptions_have_reasons`：直接解析
-  `snowluma-action-coverage.md`，断言 200 行、192 已暴露、8 未暴露且逐条命中白名单
-  并有非空理由。
-- `catalog_lists_the_unverified_ops`：59 个 unverified op 的逐字清单。
+  `snowluma-action-coverage.md`，断言 200 已暴露 / 0 未暴露；`UNEXPOSED` 为空时
+  仍保留「非空则每条必须有理由」。
+- `catalog_lists_the_unverified_ops`：15 个 unverified op 的逐字清单。
 - **配置**：无新增配置项；风险仍由 `allow_destructive` + 票据审批控制。
+
+### 批次 9 审计表（2026-11-05）
+
+审计输入：`_snowluma-catalog.json`（190 个运行目录动作，含 summary / params）与
+中文 API 索引的 200 个动作。逐条结论如下；表里 `Verified` 表示目录有摘要与参数、
+catalog 已按目录对齐参数；`Unverified` 表示目录自述未核实、运行目录无条目，或
+平台标注 mock/占位/未实现（协议可调用但没有可观察语义）。
+
+| op | 动作 | 查了哪里 | 结论 |
+|---|---|---|---|
+| `friend.dress` | `_get_friend_dress` | 运行目录条目「获取指定 QQ 号正在使用的个性装扮（挂件/名片/来电/输入状态等）」；参数：user_id | Verified：摘要与参数对齐 |
+| `msg.mark_all_read` | `_mark_all_as_read` | 运行目录条目「标记全部已读」；参数：无 | Verified：摘要与参数对齐 |
+| `group.todo.cancel` | `cancel_group_todo` | 运行目录条目「取消群待办」；参数：group_id, message_id | Verified：摘要与参数对齐 |
+| `msg.inline_button` | `click_inline_keyboard_button` | 运行目录条目「点击内联键盘按钮」；参数：group_id, bot_appid, msg_seq | Verified：摘要与参数对齐 |
+| `group.todo.complete` | `complete_group_todo` | 运行目录条目「完成群待办」；参数：group_id, message_id | Verified：摘要与参数对齐 |
+| `file.flash_task_create` | `create_flash_task` | 运行目录条目「创建闪传任务」；参数：files, name, thumb_path | Verified：摘要与参数对齐 |
+| `file.flash_file_delete` | `delete_flash_file` | 运行目录条目「删除闪传文件」；参数：fileset_id | Verified：摘要与参数对齐 |
+| `group.file.folder_delete` | `delete_group_folder` | 运行目录条目「删除群文件夹」；参数：group_id, folder_id | Verified：摘要与参数对齐 |
+| `file.fileset_download` | `download_fileset` | 运行目录条目「解析闪传文件下载直链（不下载，由调用方实现下载）」；参数：fileset_id, file_name, file_index | Verified：摘要与参数对齐 |
+| `msg.forward_single_friend` | `forward_friend_single_msg` | 运行目录条目「转发单条消息给好友」；参数：message_id, user_id | Verified：摘要与参数对齐 |
+| `msg.forward_single_group` | `forward_group_single_msg` | 运行目录条目「转发单条消息到群」；参数：message_id, group_id | Verified：摘要与参数对齐 |
+| `file.collection_list` | `get_collection_list` | 运行目录条目「获取收藏列表」；参数：category, count | Verified：摘要与参数对齐 |
+| `msg.reaction_users` | `get_emoji_likes` | 运行目录条目「获取表情回应用户」；参数：message_id, emoji_id | Verified：摘要与参数对齐 |
+| `file.fileset_id` | `get_fileset_id` | 运行目录条目「从 QQ 闪传分享码或官方分享链接获取 fileset_id」；参数：share_code | Verified：摘要与参数对齐 |
+| `file.fileset_info` | `get_fileset_info` | 运行目录条目「获取文件集信息」；参数：fileset_id | Verified：摘要与参数对齐 |
+| `file.flash_file_list` | `get_flash_file_list` | 运行目录条目「获取闪传文件列表」；参数：fileset_id | Verified：摘要与参数对齐 |
+| `file.flash_file_url` | `get_flash_file_url` | 运行目录条目「获取闪传文件链接」；参数：fileset_id, file_name, file_index | Verified：摘要与参数对齐 |
+| `group.ignored_requests` | `get_group_ignore_add_request` | 运行目录条目「获取被忽略的入群请求（NapCat）」；参数：无 | Verified：摘要与参数对齐 |
+| `group.info_ex` | `get_group_info_ex` | 运行目录条目「获取群信息（扩展）」；参数：group_id, no_cache | Verified：摘要与参数对齐 |
+| `group.todo.list` | `get_group_todo_list` | 运行目录条目「获取群待办列表」；参数：group_id | Verified：摘要与参数对齐 |
+| `msg.mini_app_ark` | `get_mini_app_ark` | 运行目录条目「获取小程序卡片 ark」；参数：无 | Verified：摘要与参数对齐 |
+| `account.online_clients` | `get_online_clients` | 运行目录条目「获取在线客户端」；参数：no_cache | Verified：摘要与参数对齐 |
+| `account.profile_likes` | `get_profile_like` | 运行目录条目「获取资料点赞」；参数：user_id, start, count | Verified：摘要与参数对齐 |
+| `account.rkey` | `get_rkey` | 运行目录条目「获取下载 rkey」；参数：无 | Verified：摘要与参数对齐 |
+| `account.rkey_server` | `get_rkey_server` | 运行目录条目「获取 rkey 服务器信息」；参数：无 | Verified：摘要与参数对齐 |
+| `file.fileset_list` | `list_filesets` | 运行目录条目「列出当前账号的所有闪传文件集」；参数：无 | Verified：摘要与参数对齐 |
+| `msg.mark_read_group` | `mark_group_msg_as_read` | 运行目录条目「标记群消息已读」；参数：message_id, group_id | Verified：摘要与参数对齐 |
+| `msg.mark_read_private` | `mark_private_msg_as_read` | 运行目录条目「标记私聊消息已读」；参数：message_id, user_id | Verified：摘要与参数对齐 |
+| `face.custom_move_front` | `move_custom_face_to_front` | 运行目录条目「收藏表情移到最前」；参数：emoji_id | Verified：摘要与参数对齐 |
+| `account.user_status` | `nc_get_user_status` | 运行目录条目「获取用户在线/扩展状态」；参数：user_id | Verified：摘要与参数对齐 |
+| `file.flash_file_rename` | `rename_flash_file` | 运行目录条目「重命名闪传文件」；参数：fileset_id, new_name | Verified：摘要与参数对齐 |
+| `msg.ark_share` | `send_ark_share` | 运行目录条目「分享用户/群 Ark 卡片（NapCat 标准名）」；参数：user_id, group_id, phone_number | Verified：摘要与参数对齐 |
+| `file.flash_msg_send` | `send_flash_msg` | 运行目录条目「发送闪传消息（私聊或群聊，引用 fileset_id 让对端下载）」；参数：fileset_id, user_id, group_id | Verified：摘要与参数对齐 |
+| `msg.group_ark_share` | `send_group_ark_share` | 运行目录条目「分享群 Ark 卡片（NapCat 标准名）」；参数：group_id | Verified：摘要与参数对齐 |
+| `msg.poke` | `send_poke` | 运行目录条目「拍一拍（群聊/私聊自动路由）」；参数：user_id, group_id | Verified：摘要与参数对齐 |
+| `msg.tuwen_ark` | `send_tuwen_ark` | 运行目录（_snowluma-catalog.json）无条目；只见于中文索引 | Unverified：参数/返回结构无出处 |
+| `account.diy_status` | `set_diy_online_status` | 运行目录条目「设置自定义在线状态」；参数：face_id, face_type, wording | Verified：摘要与参数对齐 |
+| `group.robot_add_option` | `set_group_robot_add_option` | 运行目录条目「设置群机器人加群选项」；参数：group_id, robot_member_switch, robot_member_examine | Verified：摘要与参数对齐 |
+| `group.todo.set` | `set_group_todo` | 运行目录条目「设置群待办」；参数：group_id, message_id | Verified：摘要与参数对齐 |
+| `account.input_status` | `set_input_status` | 运行目录条目「设置输入状态」；参数：user_id, event_type | Verified：摘要与参数对齐 |
+| `account.online_status` | `set_online_status` | 运行目录条目「设置在线状态」；参数：status, ext_status, battery_status | Verified：摘要与参数对齐 |
+| `account.avatar` | `set_qq_avatar` | 运行目录条目「设置 QQ 头像」；参数：file | Verified：摘要与参数对齐 |
+| `account.profile` | `set_qq_profile` | 运行目录条目「设置 QQ 资料」；参数：nickname, personal_note | Verified：摘要与参数对齐 |
+| `account.long_nick` | `set_self_longnick` | 运行目录条目「设置个性签名（longNick/long_nick，严格 string）」；参数：longNick, long_nick | Verified：摘要与参数对齐 |
+| `msg.group_share_ex` | `share_group_ex` | 运行目录条目「分享群 Ark 卡片」；参数：group_id | Verified：摘要与参数对齐 |
+| `msg.peer_share` | `share_peer` | 运行目录条目「分享用户/群 Ark 卡片」；参数：user_id, group_id, phone_number | Verified：摘要与参数对齐 |
+| `msg.translate` | `translate_en2zh` | 运行目录条目「英译中」；参数：words | Verified：摘要与参数对齐 |
+| `account.can_send_image` | `can_send_image` | 运行目录条目「」；参数：无 | Verified：摘要与参数对齐 |
+| `account.can_send_record` | `can_send_record` | 运行目录条目「」；参数：无 | Verified：摘要与参数对齐 |
+| `account.qzone.comment` | `comment_qzone` | 运行目录条目「评论一条说说（QQ 空间，支持纯文字或带图；传 images 自动上传）」；参数：tid, content, target_uin, images | Verified：摘要与参数对齐 |
+| `account.qzone.delete` | `delete_qzone_msg` | 运行目录条目「删除一条说说（QQ 空间，按 tid）」；参数：tid | Verified：摘要与参数对齐 |
+| `account.qzone.feeds` | `get_qzone_feeds` | 运行目录条目「获取 QQ 空间好友动态（feed）；page_num 仅首页可靠，深翻页需时间游标（暂未实现）」；参数：page_num, count | Verified：摘要与参数对齐 |
+| `account.qzone.detail` | `get_qzone_msg_detail` | 运行目录（_snowluma-catalog.json）无条目；只见于中文索引 | Unverified：参数/返回结构无出处 |
+| `account.qzone.list` | `get_qzone_msg_list` | 运行目录条目「获取 QQ 空间说说列表（默认机器人自己的空间）」；参数：target_uin, pos, num | Verified：摘要与参数对齐 |
+| `account.qzone.like` | `like_qzone` | 运行目录条目「给一条说说点赞（QQ 空间）」；参数：tid, target_uin, abstime | Verified：摘要与参数对齐 |
+| `account.qzone.send` | `send_qzone_msg` | 运行目录条目「发表说说（QQ 空间，支持纯文字或带图；传 images 自动上传；可设置查看权限）」；参数：content, images, ugc_right, target_uins | Verified：摘要与参数对齐 |
+| `account.qzone.ban` | `set_qzone_ban` | 运行目录条目「拉黑或解除拉黑某人（修改机器人自身 QQ 空间黑名单；enable=true 拉黑，false 解除）」；参数：user_id, enable | Verified：摘要与参数对齐 |
+| `account.qzone.right` | `set_qzone_msg_right` | 运行目录条目「修改一条已发说说的查看权限（QQ 空间，按 tid）」；参数：tid, ugc_right, target_uins | Verified：摘要与参数对齐 |
+| `account.qzone.unlike` | `unlike_qzone` | 运行目录条目「取消对一条说说的点赞（QQ 空间；取消赞端点待真机核实）」 | Unverified：目录自述「取消赞端点待真机核实」 |
+| `file.private_upload` | `upload_private_file` | 运行目录条目「上传私聊文件」；参数：user_id, file, name, upload_file | Verified：摘要与参数对齐 |
+| `msg.send` | `send_msg` | 运行目录条目「发送消息（按 message_type/群号 自动路由群聊或私聊）」；参数：message, message_type, group_id, user_id, auto_escape | Verified：摘要与参数对齐 |
+| `face.super_id` | `fetch_super_face_id` | 运行目录条目「判断 QQ 系统表情是否使用超级表情格式」；参数：face_id, refresh | Verified：摘要与参数对齐 |
+| `account.model_show` | `_get_model_show` | 运行目录条目「获取机型展示（兼容 mock）」 | Unverified：平台标注为兼容 mock，协议可调用但无语义 |
+| `account.model_show_set` | `_set_model_show` | 运行目录条目「设置机型展示（占位）」 | Unverified：平台标注为占位，协议可调用但无语义 |
+| `msg.word_slices` | `.get_word_slices` | 运行目录条目「分词（未实现）」 | Unverified：平台标注未实现，协议可调用但无语义 |
+| `file.collection_create` | `create_collection` | 运行目录条目「创建收藏（未实现）」 | Unverified：平台标注未实现，协议可调用但无语义 |
+| `friend.recent_contacts` | `get_recent_contact` | 运行目录条目「获取最近会话（占位）」 | Unverified：平台标注为占位，协议可调用但无语义 |
+| `system.packet_status` | `nc_get_packet_status` | 运行目录条目「获取 packet 状态（占位）」 | Unverified：平台标注为占位，协议可调用但无语义 |
+| `group.anonymous` | `set_group_anonymous` | 运行目录条目「匿名开关（未实现，返回 ok）」 | Unverified：平台标注未实现（返回 ok），协议可调用但无语义 |
+| `group.anonymous_ban` | `set_group_anonymous_ban` | 运行目录条目「匿名禁言（未实现，返回 ok）」 | Unverified：平台标注未实现（返回 ok），协议可调用但无语义 |
 
 ### 批次之间的依赖
 

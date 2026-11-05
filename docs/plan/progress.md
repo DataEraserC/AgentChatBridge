@@ -2149,6 +2149,48 @@
   - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode
     `npm test`、`node --check` 全绿。
 
+## 2026-11-05 — 白名单清零 + 批次 9 的 Unverified 审计
+
+- 做了什么：
+  - 8 个平台占位/未实现动作全部暴露成 `Unverified`：
+    `account.model_show`（`_get_model_show`）、`account.model_show_set`（`_set_model_show`）、
+    `msg.word_slices`（`.get_word_slices`）、`file.collection_create`（`create_collection`）、
+    `friend.recent_contacts`（`get_recent_contact`）、`system.packet_status`
+    （`nc_get_packet_status`）、`group.anonymous`（`set_group_anonymous`）、
+    `group.anonymous_ban`（`set_group_anonymous_ban`）。op 184 → 192，action
+    192 → 200，`UNEXPOSED` 白名单清零。
+  - 55 个批次 9 `Unverified` 逐条对 `_snowluma-catalog.json`（190 个运行目录动作，
+    含 summary / params）审计：52 个有摘要+参数出处，改 `Verified` 并写出处；
+    3 个保留 `Unverified`：`account.qzone.detail` / `msg.tuwen_ark`（运行目录无条目）、
+    `account.qzone.unlike`（目录自述「取消赞端点待真机核实」）。
+  - 按目录参数修正批次 9 op 的参数名：`set_diy_online_status` 用
+    face_id/face_type/wording，`set_input_status` 用 user_id/event_type，
+    `set_online_status` 用 status/ext_status/battery_status，`set_qq_profile` 只留
+    nickname/personal_note，`set_self_longnick` 用 longNick/long_nick，
+    `get_online_clients` / `get_group_info_ex` 加 no_cache，`get_profile_like` 加 start，
+    `get_group_todo_*` 用 message_id，`click_inline_keyboard_button` 用
+    bot_appid/msg_seq 并改为群路由，`set_group_robot_add_option` 用两个开关，
+    `get_collection_list` / `create_flash_task` / `get_flash_file_*` / `get_fileset_*` /
+    `download_fileset` 用 fileset_id / share_code / file_name / file_index，
+    `translate_en2zh` 用 words，`send_ark_share` / `share_peer` 用
+    user_id/group_id/phone_number，空间动作用 tid/target_uin/ugc_right/target_uins。
+- 取舍：
+  - 白名单只留「技术上无法调用」的动作；这 8 个动作协议上都能调用（只是平台标
+    mock/占位/未实现），所以清零，不假装它们不可调用。
+  - 审计口径用运行目录（`_snowluma-catalog.json`）而不是中文索引：摘要与参数
+    能逐条对照；中文索引才有的 2 个动作不硬标 `Verified`。
+  - `Unverified` 从 59 降到 15，仍保留 reason + experiment；不为了清单干净把
+    平台占位动作标成 `Verified`。
+- 证据：
+  - `every_op_is_hierarchical_tagged_and_routed`：192 个 op。
+  - `action_coverage_matrix_is_complete_and_exceptions_have_reasons`：200 已暴露 /
+    0 未暴露；白名单为空时仍保留「非空则每条必须有理由」。
+  - `catalog_lists_the_unverified_ops`：15 个 unverified 的逐字清单。
+  - `docs/plan/adapter-snowluma.md` 新增「批次 9 审计表」（70 行：62 个动作 +
+    8 个白名单动作），逐条写 `查了哪里` 与结论。
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode
+    `npm test` 全绿。
+
 ## 部署注意事项（nix-config 打包）
 
 - `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置

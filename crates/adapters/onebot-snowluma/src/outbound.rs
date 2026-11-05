@@ -1671,6 +1671,12 @@ mod tests {
                     | "account.qzone.unlike"
                     | "account.qzone.ban"
                     | "account.qzone.right"
+                    | "account.model_show"
+                    | "account.model_show_set"
+                    | "msg.word_slices"
+                    | "file.collection_create"
+                    | "friend.recent_contacts"
+                    | "system.packet_status"
             );
             let expected = if account_level {
                 Scope::Connection
@@ -1758,7 +1764,7 @@ mod tests {
     #[test]
     fn every_op_is_hierarchical_tagged_and_routed() {
         let methods = catalog();
-        assert_eq!(methods.len(), 184, "别名收敛后应有 184 个层级 op");
+        assert_eq!(methods.len(), 192, "白名单清零后应有 192 个层级 op");
         assert!(!methods.is_empty());
         for method in methods.iter() {
             let name = method.name.as_ref();
@@ -1841,22 +1847,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../../docs/plan/snowluma-action-coverage.md"
         ));
-        const UNEXPOSED: &[(&str, &str)] = &[
-            (
-                "_get_model_show",
-                "外部约束：平台标注为兼容 mock，没有真实语义",
-            ),
-            ("_set_model_show", "外部约束：平台标注为占位，未实现"),
-            (".get_word_slices", "外部约束：平台标注未实现"),
-            ("create_collection", "外部约束：平台标注未实现"),
-            ("get_recent_contact", "外部约束：平台标注为占位"),
-            ("nc_get_packet_status", "外部约束：平台标注为占位"),
-            ("set_group_anonymous", "外部约束：平台标注未实现（返回 ok）"),
-            (
-                "set_group_anonymous_ban",
-                "外部约束：平台标注未实现（返回 ok）",
-            ),
-        ];
+        // 白名单只允许放「技术上无法调用」的动作；8 个平台占位/未实现动作都有
+        // 合法协议调用，因此白名单为空。常量保留是为了以后真有不可调用动作时
+        // 仍能要求逐条理由。
+        const UNEXPOSED: &[(&str, &str)] = &[];
 
         let rows: Vec<(String, String)> = COVERAGE
             .lines()
@@ -1897,8 +1891,12 @@ mod tests {
                 unexposed.push(action);
             }
         }
-        assert_eq!(exposed, 192, "192 个动作必须有路由");
-        assert_eq!(unexposed.len(), 8, "只剩 8 个外部约束动作未暴露");
+        assert_eq!(exposed, 200, "200 个动作都必须有 op 或别名");
+        assert_eq!(
+            unexposed.len(),
+            UNEXPOSED.len(),
+            "未暴露清单必须逐字等于白名单：{unexposed:?}"
+        );
         for (action, reason) in UNEXPOSED {
             assert!(
                 unexposed.contains(action),
@@ -1906,11 +1904,6 @@ mod tests {
             );
             assert!(!reason.trim().is_empty(), "例外 {action} 必须有理由");
         }
-        assert_eq!(
-            unexposed.len(),
-            UNEXPOSED.len(),
-            "未暴露清单必须逐字等于白名单：{unexposed:?}"
-        );
     }
 
     #[test]
@@ -2936,65 +2929,21 @@ mod tests {
         assert_eq!(
             unverified,
             [
-                "account.avatar",
-                "account.can_send_image",
-                "account.can_send_record",
-                "account.diy_status",
-                "account.input_status",
-                "account.long_nick",
-                "account.online_clients",
-                "account.online_status",
-                "account.profile",
-                "account.profile_likes",
-                "account.qzone.ban",
-                "account.qzone.comment",
-                "account.qzone.delete",
+                "account.model_show",
+                "account.model_show_set",
                 "account.qzone.detail",
-                "account.qzone.feeds",
-                "account.qzone.like",
-                "account.qzone.list",
-                "account.qzone.right",
-                "account.qzone.send",
                 "account.qzone.unlike",
-                "account.rkey",
-                "account.rkey_server",
-                "account.user_status",
-                "face.custom_move_front",
-                "face.super_id",
-                "file.collection_list",
-                "file.fileset_download",
-                "file.fileset_id",
-                "file.fileset_info",
-                "file.fileset_list",
-                "file.flash_file_delete",
-                "file.flash_file_list",
-                "file.flash_file_rename",
-                "file.flash_file_url",
-                "file.flash_msg_send",
-                "file.flash_task_create",
-                "file.private_upload",
-                "friend.dress",
+                "file.collection_create",
+                "friend.recent_contacts",
                 "group.add_option",
-                "group.info_ex",
-                "group.robot_add_option",
+                "group.anonymous",
+                "group.anonymous_ban",
                 "group.tag_add",
                 "group.tag_delete",
                 "group.tag_list",
-                "group.todo.cancel",
-                "group.todo.complete",
-                "group.todo.list",
-                "group.todo.set",
-                "msg.ark_share",
-                "msg.forward_single_friend",
-                "msg.forward_single_group",
-                "msg.group_ark_share",
-                "msg.group_share_ex",
-                "msg.inline_button",
-                "msg.mark_all_read",
-                "msg.mini_app_ark",
-                "msg.peer_share",
-                "msg.translate",
                 "msg.tuwen_ark",
+                "msg.word_slices",
+                "system.packet_status",
             ],
             "只有 research §3 里需要实验的 op 才能标 unverified"
         );

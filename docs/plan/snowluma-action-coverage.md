@@ -3,23 +3,25 @@
 状态：**全部排期动作已落地（2026-11-05，批次 9）**。输入为 SnowLuma 中文 API 索引的
 200 个唯一动作（页面分类合计 200，英文页 219；以中文索引的实际条目为基准）。
 
-- 已暴露：**192 个**（`ROUTES` 184 个 op / 192 个 action；5 个平台别名动作挂在
+- 已暴露：**200 个**（`ROUTES` 192 个 op / 200 个 action；5 个平台别名动作挂在
   主 op 的 `aliases` 上，不再单列 op。按群/私聊分动作的 op 会映射到两条）。
-- 未暴露：**8 个**，全部是外部约束（平台标注占位 / 未实现 / mock），不是没排期。
-  例外白名单写在 `outbound.rs` 的 `UNEXPOSED` 常量里，测试逐条要求非空理由。
-- 批次 9 新增 62 个动作：5 个别名收敛到主 op（`Verified`，主 op 有出处），
-  其余 55 个为 `Unverified`（门槛等同 critical，只能走票据 + 审批）。全表
-  `Unverified` 共 59 个（含批次 8 的 `group.tag_*` / `group.add_option`）。
+- 未暴露：**0 个**。8 个平台占位/未实现动作也按用户口径暴露成 `Unverified`
+  （协议上有合法调用，只是没有可观察语义）；白名单为空，测试仍要求「非空则每条
+  必须有理由」。
+- 批次 9 审计后 `Unverified` 从 59 降到 **15**：批次 8 的 4 个、审计后仍无出处的
+  3 个（`account.qzone.detail` / `account.qzone.unlike` / `msg.tuwen_ark`）、
+  白名单清零新增的 8 个。其余 52 个按 SnowLuma 动作目录的摘要+参数改
+  `Verified`。
 - 风险分级逐条按动作：rkey / 文件集下载 / 闪传下载地址为 `Critical`；删除、取消、
-  QQ 空间代表账号对外发布为 `Destructive`；资料/在线状态/群待办为 `Write`；纯查询为
-  `Read`。
+  匿名禁言、QQ 空间代表账号对外发布为 `Destructive`；资料/在线状态/群待办为
+  `Write`；纯查询为 `Read`。
 
 ## 分类汇总
 
 | 分类 | 动作数 | 已暴露 | 未暴露（外部约束） | 未暴露（未排期） |
 |---|---|---|---|---|
-| 扩展 | 115 | 109 | 6 | 0 |
-| 群管理 | 21 | 19 | 2 | 0 |
+| 扩展 | 115 | 115 | 0 | 0 |
+| 群管理 | 21 | 21 | 0 | 0 |
 | 信息 | 5 | 5 | 0 | 0 |
 | 群相册 | 9 | 9 | 0 | 0 |
 | 流式接口 | 6 | 6 | 0 | 0 |
@@ -30,7 +32,7 @@
 | 系统表情 | 4 | 4 | 0 | 0 |
 | 群信息 | 7 | 7 | 0 | 0 |
 | 请求 | 2 | 2 | 0 | 0 |
-| **合计** | **200** | **192** | **8** | **0** |
+| **合计** | **200** | **200** | **0** | **0** |
 
 ## 逐动作
 
@@ -41,11 +43,11 @@
 | `_del_group_notice` | 已暴露 | `group.notice.delete` |
 | `_get_friend_dress` | 已暴露 | `friend.dress`（Unverified） |
 | `_get_group_notice` | 已暴露 | `group.notice.get` |
-| `_get_model_show` | 未暴露 | 外部约束：平台标注为兼容 mock，无真实语义 |
+| `_get_model_show` | 已暴露 | `account.model_show`（Unverified） |
 | `_mark_all_as_read` | 已暴露 | `msg.mark_all_read`（Unverified） |
 | `_send_group_notice` | 已暴露 | `group.notice.send` |
-| `_set_model_show` | 未暴露 | 外部约束：平台标注为占位 |
-| `.get_word_slices` | 未暴露 | 外部约束：平台标注未实现 |
+| `_set_model_show` | 已暴露 | `account.model_show_set`（Unverified） |
+| `.get_word_slices` | 已暴露 | `msg.word_slices`（Unverified） |
 | `add_custom_face` | 已暴露 | `face.custom_add`（两段式：先加收藏，再用 emoji_id 调 `msg.face`） |
 | `bot_exit` | 已暴露 | `system.bot_exit` |
 | `cancel_group_todo` | 已暴露 | `group.todo.cancel`（Unverified） |
@@ -53,7 +55,7 @@
 | `clean_cache` | 已暴露 | `system.clean_cache` |
 | `click_inline_keyboard_button` | 已暴露 | `msg.inline_button`（Unverified） |
 | `complete_group_todo` | 已暴露 | `group.todo.complete`（Unverified） |
-| `create_collection` | 未暴露 | 外部约束：平台标注未实现 |
+| `create_collection` | 已暴露 | `file.collection_create`（Unverified） |
 | `create_flash_task` | 已暴露 | `file.flash_task_create`（Unverified） |
 | `delete_custom_face` | 已暴露 | `face.custom_delete` |
 | `delete_essence_msg` | 已暴露 | `group.essence.delete` |
@@ -101,7 +103,7 @@
 | `get_msg_emoji_likes` | 已暴露 | `msg.reactions` |
 | `get_online_clients` | 已暴露 | `account.online_clients`（Unverified） |
 | `get_profile_like` | 已暴露 | `account.profile_likes`（Unverified） |
-| `get_recent_contact` | 未暴露 | 外部约束：平台标注为占位 |
+| `get_recent_contact` | 已暴露 | `friend.recent_contacts`（Unverified） |
 | `get_record` | 已暴露 | `msg.voice` |
 | `get_rkey` | 已暴露 | `account.rkey`（Unverified，Critical） |
 | `get_rkey_server` | 已暴露 | `account.rkey_server`（Unverified，Critical） |
@@ -114,7 +116,7 @@
 | `mark_private_msg_as_read` | 已暴露 | `msg.mark_read_private`（别名） |
 | `modify_custom_face` | 已暴露 | `face.custom_modify` |
 | `move_custom_face_to_front` | 已暴露 | `face.custom_move_front`（Unverified） |
-| `nc_get_packet_status` | 未暴露 | 外部约束：平台标注为占位 |
+| `nc_get_packet_status` | 已暴露 | `system.packet_status`（Unverified） |
 | `nc_get_user_status` | 已暴露 | `account.user_status`（Unverified） |
 | `ocr_image` | 已暴露 | `msg.ocr` |
 | `rename_flash_file` | 已暴露 | `file.flash_file_rename`（Unverified） |
@@ -164,8 +166,8 @@
 | `get_group_tags` | 已暴露 | `group.tag_list`（Unverified：分类语义待实验） |
 | `set_group_add_option` | 已暴露 | `group.add_option`（Unverified：add_type 0/1-3 待实验） |
 | `set_group_admin` | 已暴露 | `member.admin` |
-| `set_group_anonymous` | 未暴露 | 外部约束：平台标注未实现（返回 ok） |
-| `set_group_anonymous_ban` | 未暴露 | 外部约束：平台标注未实现（返回 ok） |
+| `set_group_anonymous` | 已暴露 | `group.anonymous`（Unverified） |
+| `set_group_anonymous_ban` | 已暴露 | `group.anonymous_ban`（Unverified） |
 | `set_group_ban` | 已暴露 | `group.mute` |
 | `set_group_card` | 已暴露 | `member.card` |
 | `set_group_kick` | 已暴露 | `member.kick` |
@@ -298,13 +300,16 @@
 
 - 未排期项已清零。62 个动作全部有 op 归属；5 个平台别名动作挂在主 op 的
   `aliases` 上（action 数不减、op 数减 5），其余 57 个直接路由到 SnowLuma 动作名。
-- 外部约束项要等 SnowLuma 补文档或实现；不能靠猜参数把 op 写进 catalog。
-  剩下的 8 个（`_get_model_show` / `_set_model_show` / `.get_word_slices` /
-  `create_collection` / `get_recent_contact` / `nc_get_packet_status` /
-  `set_group_anonymous` / `set_group_anonymous_ban`）仍是平台占位/未实现。
-  它们是**白名单例外**：表里写明理由，测试断言未暴露清单逐条命中白名单且理由非空。
-- 带 `Unverified` 的 op 不是「没实现」：它们在 catalog 里可申请、可审批、可执行，
-  只是直调被拒且审批私信会显示 `[UNVERIFIED]`；实验完成后把标记改成 `Verified`，
-  测试不要求清单「看起来干净」，只要求每条都有原因和实验。
+- 白名单已清零。8 个平台占位/未实现动作（`_get_model_show` / `_set_model_show` /
+  `.get_word_slices` / `create_collection` / `get_recent_contact` /
+  `nc_get_packet_status` / `set_group_anonymous` / `set_group_anonymous_ban`）
+  协议上都有合法调用，按用户口径暴露成 `Unverified`；没有「技术上无法调用」的
+  动作可留在白名单里。测试仍保留 `UNEXPOSED` 常量：非空时每条必须有理由。
+- 带 `Unverified` 的 15 个 op 分两类：3 个是真没出处/目录自述待核实，8 个是平台
+  mock/占位（协议可调用但无语义），4 个是批次 8 的待实验项。它们在 catalog 里
+  可申请、可审批、可执行，只是直调被拒且审批私信会显示 `[UNVERIFIED]`；
+  实验完成后把标记改成 `Verified`。
+- 审计结论逐条写在 `adapter-snowluma.md` 的「批次 9 审计表」，包括每条查的是
+  SnowLuma 动作目录的哪个条目、参数是否对齐、为什么保留 `Unverified`。
 - QQ 空间写操作至少 `Destructive`：`account.qzone.send` / `comment` / `like` /
   `unlike` / `delete` / `ban` / `right` 都代表账号对外发布或改变可见性，不给 `Write`。
