@@ -2354,6 +2354,28 @@ mod tests {
                 .unwrap_or_else(|| panic!("没有 {name}"))
         };
         assert_eq!(find("account.cookies").risk, Risk::Critical);
+        assert_eq!(
+            find("account.cookies").access_kind(),
+            acb_kernel::AccessTargetKind::Account,
+            "account op 必须声明账号目标"
+        );
+        assert_eq!(
+            find("file.download").access_kind(),
+            acb_kernel::AccessTargetKind::Account,
+            "file op 必须声明账号目标"
+        );
+        assert_eq!(
+            find("stream.upload_file").access_kind(),
+            acb_kernel::AccessTargetKind::Account
+        );
+        assert_eq!(
+            find("system.send_packet").access_kind(),
+            acb_kernel::AccessTargetKind::Connection
+        );
+        assert_eq!(
+            find("msg.send").access_kind(),
+            acb_kernel::AccessTargetKind::Room
+        );
         assert_eq!(find("file.download").risk, Risk::Destructive);
         assert_eq!(find("stream.download_file").risk, Risk::Read);
         assert_eq!(find("msg.send_private_forward").risk, Risk::Write);
@@ -2426,6 +2448,66 @@ mod tests {
             .is_err(),
             "流式总大小超限拒绝"
         );
+    }
+
+    /// catalog 声明的目标种类必须与 grants 判定的种类一致：同一个 op 不能
+    /// catalog 说 Connection、grants 却在比 Room。这条测试把对应关系钉死。
+    #[test]
+    fn catalog_target_kinds_match_grant_kinds() {
+        use acb_kernel::AccessTargetKind;
+
+        let methods = catalog();
+        for spec in methods.iter() {
+            let room_targets = spec
+                .targets
+                .iter()
+                .filter(|target| target.role == TargetRole::Room)
+                .count();
+            let member_targets = spec
+                .targets
+                .iter()
+                .filter(|target| target.role == TargetRole::Member)
+                .count();
+            let account_namespace = ["account.", "file.", "stream."]
+                .iter()
+                .any(|prefix| spec.name.starts_with(prefix));
+
+            match spec.scope {
+                Scope::Room => {
+                    assert_eq!(
+                        spec.access_kind(),
+                        AccessTargetKind::Room,
+                        "{} 是房间 op，grants 必须比 room 目标",
+                        spec.name
+                    );
+                }
+                Scope::Connection => {
+                    assert_eq!(
+                        room_targets, 0,
+                        "{} 是连接 op，catalog 不该声明 room 目标参数",
+                        spec.name
+                    );
+                    assert_eq!(
+                        spec.access_kind(),
+                        if account_namespace {
+                            AccessTargetKind::Account
+                        } else {
+                            AccessTargetKind::Connection
+                        },
+                        "{} 是连接 op，grants 不能拿房间目标去比",
+                        spec.name
+                    );
+                }
+            }
+            if room_targets > 0 || member_targets > 0 {
+                assert_eq!(
+                    spec.scope,
+                    Scope::Room,
+                    "{} 声明了房间/成员目标，必须同时声明 room scope",
+                    spec.name
+                );
+            }
+        }
     }
 
     #[test]

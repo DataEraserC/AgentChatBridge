@@ -149,7 +149,8 @@ fn config() -> &'static str {
         [[grants.rules]]
         subject = "user"
         place = "group"
-        scope = "any"
+        scope = "connection"
+        target = { kind = "connection", id = "qq" }
         capability = ["access_request"]
     "#
 }
@@ -630,7 +631,7 @@ fn session_cooldown_rejects_the_next_request() {
 
 fn config_without_request_rule() -> String {
     config().replace(
-        "        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"any\"\n        capability = [\"access_request\"]\n",
+        "        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"connection\"\n        target = { kind = \"connection\", id = \"qq\" }\n        capability = [\"access_request\"]\n",
         "",
     )
 }
@@ -828,6 +829,14 @@ fn critical_is_refused_by_allow_destructive_and_runs_only_via_ticket() {
 
     let approval = approval_dm(&sends);
     assert!(approval.contains("[CRITICAL]"), "{approval}");
+    assert!(
+        approval.contains("account_secret"),
+        "账号级 critical 的能力集要带 account_secret：{approval}"
+    );
+    assert!(
+        approval.contains("账号 bot（连接 qq）"),
+        "审批私信要显示 typed target：{approval}"
+    );
     assert!(approval.contains("参数："), "{approval}");
     assert!(
         !approval.contains("SECRET-COOKIE") && !approval.contains("SECRET-TOKEN"),
@@ -862,6 +871,10 @@ fn critical_is_refused_by_allow_destructive_and_runs_only_via_ticket() {
     assert_eq!(queried["state"], "used");
     assert_eq!(queried["execution_status"], "succeeded");
     assert_eq!(
+        queried["target"]["kind"], "account",
+        "票据快照存 typed target"
+    );
+    assert_eq!(
         queried["result"]["ops"][0]["result"]["cookies"], "SECRET-COOKIE",
         "显式查询 access_ticket_get 才能看到结果"
     );
@@ -875,16 +888,53 @@ fn critical_is_refused_by_allow_destructive_and_runs_only_via_ticket() {
 }
 
 #[test]
-fn config_cannot_grant_critical_capability() {
-    let text = format!(
-        "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"any\"\n        capability = [\"critical\"]\n",
-        config()
+fn mixed_target_kinds_are_refused_before_a_ticket_exists() {
+    let text = config().replace(
+        "account = \"bot\"",
+        "account = \"bot\"\n        allow_destructive = true",
     );
-    let error = Config::parse(&text).expect_err("critical 常驻授予必须启动失败");
+    let (mut bridge, sends) = bridge_with(&text);
+    bridge
+        .ingest(message("qq:group/123", "user1", "混合目标", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["notes:list", "platform_call:account.cookies"]
+            }]}),
+        )
+        .expect_err("一张票不能混房间和账号目标");
+    assert_eq!(error.code, ErrorCode::BadRequest);
     assert!(
-        format!("{error:?}").contains("critical"),
-        "错误要说清 critical 只能走票据：{error:?}"
+        error.message.contains("target_kind_mismatch"),
+        "错误要带稳定码：{}",
+        error.message
     );
+    assert!(
+        sends.lock().expect("没被毒死").is_empty(),
+        "被拒的申请不能产生审批私信"
+    );
+}
+
+#[test]
+fn config_cannot_grant_critical_capability() {
+    for capability in ["critical", "account_secret"] {
+        let text = format!(
+            "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"any\"\n        capability = [\"{capability}\"]\n",
+            config()
+        );
+        let error = Config::parse(&text).expect_err("高敏能力常驻授予必须启动失败");
+        let detail = format!("{error:?}").to_lowercase();
+        assert!(
+            detail.contains(&capability.to_lowercase()),
+            "错误要说清 {capability} 只能走票据：{error:?}"
+        );
+    }
 }
 
 #[test]

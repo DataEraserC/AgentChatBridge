@@ -588,6 +588,24 @@ pub struct MethodSpec {
 }
 
 impl MethodSpec {
+    /// catalog 声明的授权目标种类。grants 判定必须用同一个种类，不能拿字符串猜。
+    pub fn access_kind(&self) -> crate::grants::AccessTargetKind {
+        match self.scope {
+            Scope::Room => crate::grants::AccessTargetKind::Room,
+            Scope::Connection => {
+                let name = self.name.as_ref();
+                if name.starts_with("account.")
+                    || name.starts_with("file.")
+                    || name.starts_with("stream.")
+                {
+                    // 账号资料/凭证与平台侧文件都挂在账号上。
+                    crate::grants::AccessTargetKind::Account
+                } else {
+                    crate::grants::AccessTargetKind::Connection
+                }
+            }
+        }
+    }
     /// 归属：名字里最后一个点之前那段。`group.file.list` 的归属是 `group.file`，
     /// `msg.send` 的归属是 `msg`。目录按前缀过滤时也用这个层级。
     pub fn path(&self) -> &str {

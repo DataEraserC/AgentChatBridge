@@ -3220,10 +3220,19 @@ mod tests {
             "{}\n[[grants.rules]]\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ntarget = \"qq:group/1\"\ncapability = [\"room_read\"]\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        assert!(matches!(
-            Config::parse(&bad_target),
-            Err(ConfigError::BadGrantConfig { .. })
-        ));
+        assert!(
+            Config::parse(&bad_target).is_err(),
+            "旧字符串 target 必须在启动期报错，不留兼容层"
+        );
+
+        let typed_target = format!(
+            "{}\n[[grants.rules]]\nsubject = \"user\"\nplace = \"group\"\nscope = \"room\"\ntarget = {{ kind = \"room\", id = \"qq:group/1\" }}\ncapability = [\"room_read\"]\n",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        assert!(
+            Config::parse(&typed_target).is_ok(),
+            "typed target 应能解析"
+        );
 
         let bad_capability = format!(
             "{}\n[[grants.rules]]\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ncapability = [\"root\"]\n",

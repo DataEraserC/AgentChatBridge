@@ -11,9 +11,136 @@
 
 use std::fmt;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::RoomId;
+
+/// 授权目标种类。规则匹配只看这个枚举，不再对字符串做前缀猜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessTargetKind {
+    Room,
+    Message,
+    Member,
+    File,
+    Account,
+    Connection,
+    PluginTool,
+}
+
+impl AccessTargetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Room => "room",
+            Self::Message => "message",
+            Self::Member => "member",
+            Self::File => "file",
+            Self::Account => "account",
+            Self::Connection => "connection",
+            Self::PluginTool => "plugin_tool",
+        }
+    }
+}
+
+/// 一个类型化的授权目标。
+///
+/// `id` 是目标自己的标识（房间全名、消息 id、成员 id、账号、连接名……）；
+/// `sub` 是可选从属范围（成员/文件/消息所属房间，账号所属连接）。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessTarget {
+    pub kind: AccessTargetKind,
+    pub id: String,
+    #[serde(default)]
+    pub sub: Option<String>,
+}
+
+impl AccessTarget {
+    pub fn room(room: &RoomId) -> Self {
+        Self {
+            kind: AccessTargetKind::Room,
+            id: room.to_string(),
+            sub: None,
+        }
+    }
+
+    pub fn connection(connection: &str) -> Self {
+        Self {
+            kind: AccessTargetKind::Connection,
+            id: connection.to_owned(),
+            sub: None,
+        }
+    }
+
+    pub fn account(connection: &str, account: &str) -> Self {
+        Self {
+            kind: AccessTargetKind::Account,
+            id: account.to_owned(),
+            sub: Some(connection.to_owned()),
+        }
+    }
+
+    pub fn member(room: &RoomId, member: &str) -> Self {
+        Self {
+            kind: AccessTargetKind::Member,
+            id: member.to_owned(),
+            sub: Some(room.to_string()),
+        }
+    }
+
+    /// 从 `room / member / message / file` 这类带房间从属的目标里取回房间。
+    pub fn room_ref(&self) -> Option<&str> {
+        match self.kind {
+            AccessTargetKind::Room => Some(&self.id),
+            AccessTargetKind::Member | AccessTargetKind::Message | AccessTargetKind::File => {
+                self.sub.as_deref()
+            }
+            _ => None,
+        }
+    }
+
+    pub fn connection_ref(&self) -> Option<&str> {
+        match self.kind {
+            AccessTargetKind::Connection => Some(&self.id),
+            AccessTargetKind::Account => self.sub.as_deref(),
+            _ => self
+                .room_ref()
+                .and_then(|room| room.split_once(':').map(|(connection, _)| connection)),
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match self.kind {
+            AccessTargetKind::Room => format!("房间 {}", self.id),
+            AccessTargetKind::Account => format!(
+                "账号 {}{}",
+                self.id,
+                self.sub
+                    .as_deref()
+                    .map(|connection| format!("（连接 {connection}）"))
+                    .unwrap_or_default()
+            ),
+            AccessTargetKind::Connection => format!("连接 {}", self.id),
+            AccessTargetKind::Member => format!(
+                "成员 {}{}",
+                self.id,
+                self.sub
+                    .as_deref()
+                    .map(|room| format!("（房间 {room}）"))
+                    .unwrap_or_default()
+            ),
+            AccessTargetKind::Message => format!("消息 {}", self.id),
+            AccessTargetKind::File => format!("文件 {}", self.id),
+            AccessTargetKind::PluginTool => format!("插件工具 {}", self.id),
+        }
+    }
+}
+
+impl fmt::Display for AccessTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}:{}", self.kind.as_str(), self.id)
+    }
+}
 
 /// 授权主体。`System` 表示没有人类触发者的轮次（clock/自发唤醒）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -78,6 +205,10 @@ pub enum GrantCapability {
     Destructive,
     /// 最高风险档。只由 `access_request` 票据携带，配置里的常驻授予一律拒绝。
     Critical,
+    /// 读账号资料。与取账号凭证的 `account_secret` 分开。
+    AccountRead,
+    /// 取账号凭证。与 `critical` 同级，不可常驻授予，只能走票据。
+    AccountSecret,
     /// 能不能发起 `access_request`。与房间读写能力正交。
     AccessRequest,
     Plugin,
@@ -92,6 +223,8 @@ impl GrantCapability {
             Self::Platform => "platform",
             Self::Destructive => "destructive",
             Self::Critical => "critical",
+            Self::AccountRead => "account_read",
+            Self::AccountSecret => "account_secret",
             Self::AccessRequest => "access_request",
             Self::Plugin => "plugin",
         }
@@ -106,7 +239,7 @@ pub struct GrantRule {
     pub place: GrantPlace,
     pub scope: GrantScope,
     #[serde(default)]
-    pub target: Option<String>,
+    pub target: Option<AccessTarget>,
     pub capability: Vec<GrantCapability>,
 }
 
@@ -175,10 +308,14 @@ impl GrantsConfig {
             }
             let mut seen = std::collections::BTreeSet::new();
             for capability in &rule.capability {
-                if *capability == GrantCapability::Critical {
+                if matches!(
+                    *capability,
+                    GrantCapability::Critical | GrantCapability::AccountSecret
+                ) {
                     return Err(format!(
-                        "grants.rules[{index}] capability critical cannot be granted by config; \
-                         critical operations require an access_request ticket approved in private"
+                        "grants.rules[{index}] capability {} cannot be granted by config; \
+                         it requires an access_request ticket approved in private",
+                        capability.as_str()
                     ));
                 }
                 if !seen.insert(*capability) {
@@ -196,23 +333,27 @@ impl GrantsConfig {
                     }
                 }
                 GrantScope::Room => {
-                    let target = rule.target.as_deref().unwrap_or("").trim();
-                    if target.is_empty() {
+                    let Some(target) = rule.target.as_ref() else {
                         return Err(format!("grants.rules[{index}] scope room requires target"));
+                    };
+                    if target.kind != AccessTargetKind::Room || target.id.trim().is_empty() {
+                        return Err(format!(
+                            "grants.rules[{index}] scope room target must be kind = \"room\" with a room id"
+                        ));
                     }
-                    RoomId::parse(target).map_err(|error| {
+                    RoomId::parse(target.id.trim()).map_err(|error| {
                         format!("grants.rules[{index}] target is not a room: {error}")
                     })?;
                 }
                 GrantScope::Connection => {
-                    if rule
-                        .target
-                        .as_deref()
-                        .map(str::trim)
-                        .is_none_or(str::is_empty)
-                    {
+                    let Some(target) = rule.target.as_ref() else {
                         return Err(format!(
                             "grants.rules[{index}] scope connection requires target"
+                        ));
+                    };
+                    if target.kind != AccessTargetKind::Connection || target.id.trim().is_empty() {
+                        return Err(format!(
+                            "grants.rules[{index}] scope connection target must be kind = \"connection\" with a connection id"
                         ));
                     }
                 }
@@ -261,28 +402,13 @@ impl GrantsConfig {
 }
 
 /// 一次评估的目标。
-#[derive(Debug, Clone, Copy)]
-pub enum GrantTarget<'a> {
-    Room(&'a RoomId),
-    Connection(&'a str),
-}
-
-impl GrantTarget<'_> {
-    pub fn connection(&self) -> &str {
-        match self {
-            Self::Room(room) => &room.connection,
-            Self::Connection(connection) => connection,
-        }
-    }
-}
-
 /// 一次授权评估的全部输入。把参数收成一个结构，避免 evaluator 接口继续膨胀。
 #[derive(Debug, Clone, Copy)]
 pub struct GrantQuery<'a> {
     pub subject: GrantSubject,
     pub place: GrantPlace,
     pub capability: GrantCapability,
-    pub target: GrantTarget<'a>,
+    pub target: &'a AccessTarget,
     pub subscriptions: &'a [RoomId],
 }
 
@@ -382,7 +508,8 @@ pub fn evaluate_platform(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Optio
 /// 票据申请能力的评估。默认口径：
 /// - `system_admin` / `bot_admin` 在私信或控制台可以申请任意目标；
 /// - 其它主体只能申请本会话已订阅的目标（`base:subscription`）；
-/// - 显式规则可以放开跨目标（`scope = any` / `room` / `connection`）。
+/// - 显式规则可以放开跨目标（`scope = room` / `connection` 写 typed target）；
+///   `scope = any` 只覆盖本会话可达目标，不跨范围。
 pub fn evaluate_access_request(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDecision {
     if let Some(decision) = evaluate_rules(grants, query) {
         return decision;
@@ -451,48 +578,64 @@ fn evaluate_rules(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Option<Grant
 }
 
 fn base_access(query: &GrantQuery<'_>) -> GrantDecision {
-    let allowed = match query.target {
-        GrantTarget::Room(room) => query.subscriptions.iter().any(|listed| listed == room),
-        GrantTarget::Connection(connection) => query
-            .subscriptions
-            .iter()
-            .any(|listed| listed.connection == connection),
-    };
-    if allowed {
+    if target_is_reachable(query.target, query.subscriptions) {
         GrantDecision::allow(
             "base:subscription",
-            format!("subscribed target for {:?}", query.capability),
+            format!("reachable target for {:?}", query.capability),
         )
     } else {
         GrantDecision::deny(
             "base:not_subscribed",
-            format!("target not in subscriptions for {:?}", query.capability),
+            format!("target not reachable for {:?}", query.capability),
         )
     }
 }
 
-fn scope_matches(rule: &GrantRule, target: GrantTarget<'_>, subscriptions: &[RoomId]) -> bool {
-    match rule.scope {
-        GrantScope::Any => true,
-        GrantScope::Subscribed => match target {
-            GrantTarget::Room(room) => subscriptions.iter().any(|listed| listed == room),
-            GrantTarget::Connection(connection) => subscriptions
+/// `any` / `subscribed` 的可达范围：房间与连接来自订阅；账号来自订阅连接的
+/// 账号；成员/消息/文件必须挂在可达房间上。插件工具不靠订阅判定，交给上层。
+fn target_is_reachable(target: &AccessTarget, subscriptions: &[RoomId]) -> bool {
+    match target.kind {
+        AccessTargetKind::Room => subscriptions
+            .iter()
+            .any(|listed| listed.to_string() == target.id),
+        AccessTargetKind::Connection => subscriptions
+            .iter()
+            .any(|listed| listed.connection == target.id),
+        AccessTargetKind::Account => target.sub.as_deref().is_some_and(|connection| {
+            subscriptions
                 .iter()
-                .any(|listed| listed.connection == connection),
-        },
-        GrantScope::Room => match target {
-            GrantTarget::Room(room) => rule
-                .target
-                .as_deref()
-                .is_some_and(|target| target == room.to_string()),
-            GrantTarget::Connection(_) => false,
-        },
-        GrantScope::Connection => {
-            let connection = target.connection();
-            rule.target
-                .as_deref()
-                .is_some_and(|target| target == connection)
+                .any(|listed| listed.connection == connection)
+        }),
+        AccessTargetKind::Member | AccessTargetKind::Message | AccessTargetKind::File => {
+            target.sub.as_deref().is_some_and(|room| {
+                subscriptions
+                    .iter()
+                    .any(|listed| listed.to_string() == room)
+            })
         }
+        AccessTargetKind::PluginTool => !subscriptions.is_empty(),
+    }
+}
+
+fn scope_matches(rule: &GrantRule, target: &AccessTarget, subscriptions: &[RoomId]) -> bool {
+    match rule.scope {
+        GrantScope::Any | GrantScope::Subscribed => target_is_reachable(target, subscriptions),
+        GrantScope::Room => match rule.target.as_ref() {
+            Some(wanted) if wanted.kind == AccessTargetKind::Room => match target.kind {
+                AccessTargetKind::Room => target.id == wanted.id,
+                AccessTargetKind::Member | AccessTargetKind::Message | AccessTargetKind::File => {
+                    target.sub.as_deref().is_some_and(|room| room == wanted.id)
+                }
+                _ => false,
+            },
+            _ => false,
+        },
+        GrantScope::Connection => match rule.target.as_ref() {
+            Some(wanted) if wanted.kind == AccessTargetKind::Connection => {
+                target.connection_ref() == Some(wanted.id.as_str())
+            }
+            _ => false,
+        },
     }
 }
 
@@ -523,7 +666,7 @@ mod tests {
                     subject,
                     place,
                     capability: GrantCapability::AccessRequest,
-                    target: GrantTarget::Room(&target),
+                    target: &AccessTarget::room(&target),
                     subscriptions,
                 },
             )
@@ -552,12 +695,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn any_does_not_escape_the_sessions_reachable_targets() {
+        let grants = config(vec![rule(
+            GrantSubject::User,
+            GrantPlace::Group,
+            GrantScope::Any,
+            None,
+            &[GrantCapability::RoomRead],
+        )]);
+        let inside = RoomId::parse("qq:group/1").expect("房间");
+        let outside = RoomId::parse("qq:group/2").expect("房间");
+        let decision = eval_access(
+            &grants,
+            GrantSubject::User,
+            GrantPlace::Group,
+            GrantCapability::RoomRead,
+            &AccessTarget::room(&outside),
+            std::slice::from_ref(&inside),
+        );
+        assert!(
+            !decision.allow,
+            "scope=any 不能越过会话可达范围：{decision:?}"
+        );
+        let allowed = eval_access(
+            &grants,
+            GrantSubject::User,
+            GrantPlace::Group,
+            GrantCapability::RoomRead,
+            &AccessTarget::room(&inside),
+            std::slice::from_ref(&inside),
+        );
+        assert!(allowed.allow, "可达目标应被 scope=any 放行");
+    }
+
     fn eval_access(
         grants: &GrantsConfig,
         subject: GrantSubject,
         place: GrantPlace,
         capability: GrantCapability,
-        target: GrantTarget<'_>,
+        target: &AccessTarget,
         subscriptions: &[RoomId],
     ) -> GrantDecision {
         evaluate_access(
@@ -576,7 +753,7 @@ mod tests {
         grants: &GrantsConfig,
         subject: GrantSubject,
         place: GrantPlace,
-        target: GrantTarget<'_>,
+        target: &AccessTarget,
         subscriptions: &[RoomId],
     ) -> GrantDecision {
         evaluate_tool(
@@ -598,11 +775,15 @@ mod tests {
         target: Option<&str>,
         capability: &[GrantCapability],
     ) -> GrantRule {
+        let target = target.map(|text| match scope {
+            GrantScope::Connection => AccessTarget::connection(text),
+            _ => AccessTarget::room(&RoomId::parse(text).expect("房间")),
+        });
         GrantRule {
             subject,
             place,
             scope,
-            target: target.map(ToOwned::to_owned),
+            target,
             capability: capability.to_vec(),
         }
     }
@@ -625,7 +806,7 @@ mod tests {
             GrantSubject::User,
             GrantPlace::Group,
             GrantCapability::RoomRead,
-            GrantTarget::Room(&inside),
+            &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
         assert!(decision.allow);
@@ -636,7 +817,7 @@ mod tests {
             GrantSubject::User,
             GrantPlace::Group,
             GrantCapability::RoomRead,
-            GrantTarget::Room(&outside),
+            &AccessTarget::room(&outside),
             std::slice::from_ref(&inside),
         );
         assert!(!decision.allow);
@@ -654,7 +835,7 @@ mod tests {
             GrantSubject::User,
             GrantPlace::Group,
             GrantCapability::RoomRead,
-            GrantTarget::Room(&outside),
+            &AccessTarget::room(&outside),
             std::slice::from_ref(&inside),
         );
         assert!(!deny.allow);
@@ -677,7 +858,7 @@ mod tests {
             GrantSubject::User,
             GrantPlace::Group,
             GrantCapability::RoomRead,
-            GrantTarget::Room(&inside),
+            &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
         assert!(allow.allow);
@@ -693,7 +874,7 @@ mod tests {
             GrantSubject::User,
             GrantPlace::Group,
             GrantCapability::RoomRead,
-            GrantTarget::Room(&inside),
+            &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
         let line = decision.audit_line(
@@ -722,7 +903,7 @@ mod tests {
             GrantSubject::BotAdmin,
             GrantPlace::Private,
             GrantCapability::RoomWrite,
-            GrantTarget::Room(&inside),
+            &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
         assert!(decision.allow);
@@ -734,7 +915,7 @@ mod tests {
             GrantSubject::BotAdmin,
             GrantPlace::Private,
             GrantCapability::RoomRead,
-            GrantTarget::Room(&inside),
+            &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
         assert!(!decision.allow, "同一规则缺能力要拒绝");
@@ -774,7 +955,7 @@ mod tests {
             GrantSubject::BotAdmin,
             GrantPlace::Group,
             GrantCapability::RoomWrite,
-            GrantTarget::Room(&inside),
+            &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
         assert!(decision.allow, "群聊里没有 bot_admin 规则时退回订阅边界");
@@ -795,7 +976,7 @@ mod tests {
             GrantSubject::System,
             GrantPlace::None,
             GrantCapability::RoomRead,
-            GrantTarget::Room(&outside),
+            &AccessTarget::room(&outside),
             std::slice::from_ref(&inside),
         );
         assert!(!decision.allow, "无主体轮次不继承任何人类豁免");
@@ -810,7 +991,7 @@ mod tests {
             &grants,
             GrantSubject::BotAdmin,
             GrantPlace::Private,
-            GrantTarget::Room(&inside),
+            &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
         assert!(!decision.allow);

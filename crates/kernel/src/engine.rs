@@ -34,7 +34,8 @@ use crate::config::{
 };
 use crate::deps::{DependencyKind, DependencyRegistry};
 use crate::grants::{
-    self, GrantCapability, GrantDecision, GrantPlace, GrantSubject, GrantTarget, GrantsConfig,
+    self, AccessTarget, AccessTargetKind, GrantCapability, GrantDecision, GrantPlace, GrantSubject,
+    GrantsConfig,
 };
 use crate::lkg::PluginLkg;
 use crate::memory::{
@@ -4223,6 +4224,9 @@ impl<S: Store> Bridge<S> {
                 );
                 let capability = if spec.risk == Risk::Destructive {
                     GrantCapability::Destructive
+                } else if spec.access_kind() == AccessTargetKind::Account {
+                    // 账号资料读与连接读分开：账号级 op 不能靠 connection_read 顺手放行。
+                    GrantCapability::AccountRead
                 } else {
                     GrantCapability::Platform
                 };
@@ -4231,11 +4235,12 @@ impl<S: Store> Bridge<S> {
                     .iter()
                     .map(|subscription| subscription.room.clone())
                     .collect();
+                let target = access_target_for_spec(&ctx.config, &room, spec);
                 let query = grants::GrantQuery {
                     subject,
                     place,
                     capability,
-                    target: GrantTarget::Room(&room),
+                    target: &target,
                     subscriptions: &subscriptions,
                 };
                 if let Some(decision) = grants::evaluate_platform(&ctx.config.grants, &query) {
@@ -4245,7 +4250,7 @@ impl<S: Store> Bridge<S> {
                             subject,
                             place,
                             capability,
-                            GrantTarget::Room(&room),
+                            &target,
                             &decision,
                         );
                     }
@@ -4620,11 +4625,12 @@ impl<S: Store> Bridge<S> {
             .iter()
             .map(|subscription| subscription.room.clone())
             .collect();
+        let plugin_target = AccessTarget::room(&ctx.room);
         let query = grants::GrantQuery {
             subject,
             place,
             capability: GrantCapability::Plugin,
-            target: GrantTarget::Room(&ctx.room),
+            target: &plugin_target,
             subscriptions: &subscriptions,
         };
         let decision = grants::evaluate_tool(&ctx.config.grants, &query);
@@ -4634,7 +4640,7 @@ impl<S: Store> Bridge<S> {
                 subject,
                 place,
                 GrantCapability::Plugin,
-                GrantTarget::Room(&ctx.room),
+                &plugin_target,
                 &decision,
             );
         }
@@ -4825,22 +4831,32 @@ impl<S: Store> Bridge<S> {
             .unwrap_or_default();
         let mut requests = Vec::with_capacity(args.items.len());
         for (index, item) in args.items.iter().enumerate() {
-            let target = resolve_room(&item.target)
+            let room = resolve_room(&item.target)
                 .map_err(|error| batch_item_error(index, &error.message))?;
-            if ctx.config.connection(&target.connection).is_none() {
-                self.audit_ticket_denied(ctx, &target, "unknown_connection", &target.connection);
+            if ctx.config.connection(&room.connection).is_none() {
+                self.audit_ticket_denied(
+                    ctx,
+                    &AccessTarget::room(&room),
+                    "unknown_connection",
+                    &room.connection,
+                );
                 return Err(batch_item_error(
                     index,
-                    &format!("unknown connection {}", target.connection),
+                    &format!("unknown connection {}", room.connection),
                 ));
             }
+            let ops = crate::tickets::normalize_ops(&item.ops)
+                .map_err(|reason| batch_item_error(index, &reason))?;
+            let target = self
+                .ticket_access_target(&ctx.config, &room, &ops)
+                .map_err(|error| batch_item_error(index, &error.message))?;
             let decision = crate::grants::evaluate_access_request(
                 &ctx.config.grants,
                 &crate::grants::GrantQuery {
                     subject: principal,
                     place,
                     capability: GrantCapability::AccessRequest,
-                    target: GrantTarget::Room(&target),
+                    target: &target,
                     subscriptions: &subscriptions,
                 },
             );
@@ -4854,12 +4870,10 @@ impl<S: Store> Bridge<S> {
                     ),
                 ));
             }
-            let ops = crate::tickets::normalize_ops(&item.ops)
-                .map_err(|reason| batch_item_error(index, &reason))?;
             let capabilities = self
                 .ticket_capabilities(&target, &ops)
                 .map_err(|error| batch_item_error(index, &error.message))?;
-            let methods = self.outbound.catalog(&target.connection);
+            let methods = self.outbound.catalog(&room.connection);
             for op in &ops {
                 let Some(name) = op.strip_prefix("platform_call:") else {
                     continue;
@@ -4867,7 +4881,7 @@ impl<S: Store> Bridge<S> {
                 let spec = find_platform_op(&methods, name)
                     .map_err(|error| batch_item_error(index, &error.message))?;
                 if spec.risk == Risk::Destructive
-                    && !Self::allows_destructive(&ctx.config, &target.connection, name)
+                    && !Self::allows_destructive(&ctx.config, &room.connection, name)
                 {
                     self.audit_ticket_denied(ctx, &target, "destructive_disabled", name);
                     return Err(ToolError::new(
@@ -4876,7 +4890,7 @@ impl<S: Store> Bridge<S> {
                             "[access_request] items[{index}]: [destructive_disabled] {name} is \
                              destructive and connection {} does not allow it; enable \
                              allow_destructive before requesting a ticket; whole batch rejected",
-                            target.connection
+                            room.connection
                         ),
                     ));
                 }
@@ -5438,12 +5452,19 @@ impl<S: Store> Bridge<S> {
     /// 挂起动作的参数快照在申请期就校验；批准后只按快照执行，不再信模型重写。
     fn validate_ticket_params(
         &self,
-        target: &RoomId,
+        target: &AccessTarget,
         ops: &[String],
         params: Option<&Value>,
     ) -> Result<(), String> {
+        let room = target.room_ref().and_then(|room| RoomId::parse(room).ok());
         for op in ops {
             if matches!(op.as_str(), "send_message" | "send_message_to") {
+                if target.kind != AccessTargetKind::Room {
+                    return Err(format!(
+                        "[target_kind_mismatch] {op} requires a room target, got {}",
+                        target.kind.as_str()
+                    ));
+                }
                 let Some(params) = params else {
                     return Err(format!("{op} requires params with elements/text"));
                 };
@@ -5453,8 +5474,19 @@ impl<S: Store> Bridge<S> {
             let Some(op_name) = op.strip_prefix("platform_call:") else {
                 continue;
             };
-            let methods = self.outbound.catalog(&target.connection);
+            let methods = self.outbound.catalog(
+                target
+                    .connection_ref()
+                    .ok_or_else(|| format!("target {} has no connection", target.display()))?,
+            );
             let spec = find_platform_op(&methods, op_name).map_err(|error| error.message)?;
+            if spec.access_kind() != target.kind {
+                return Err(format!(
+                    "[target_kind_mismatch] {op_name} declares {} target, ticket has {}",
+                    spec.access_kind().as_str(),
+                    target.kind.as_str()
+                ));
+            }
             if spec.scope != Scope::Room && spec.risk != Risk::Critical {
                 return Err(format!(
                     "{op_name} is connection-scope; tickets can only carry room actions"
@@ -5464,43 +5496,76 @@ impl<S: Store> Bridge<S> {
             let params = params.unwrap_or(&empty);
             check_params(spec, params).map_err(|error| error.message)?;
             if spec.scope == Scope::Room {
-                check_target_params(spec, target, params).map_err(|error| error.message)?;
+                let room = room.as_ref().ok_or_else(|| {
+                    format!("[target_kind_mismatch] {op_name} requires a room target")
+                })?;
+                check_target_params(spec, room, params).map_err(|error| error.message)?;
             }
         }
         Ok(())
     }
 
-    /// 从 op 列表推导票据能力集。平台方法必须能在目标连接的目录里查到。
+    /// 从 op 列表推导票据能力集。平台方法必须能在目标连接的目录里查到，
+    /// 且 catalog 声明的目标种类必须与票据的 typed target 一致。
     fn ticket_capabilities(
         &self,
-        target: &RoomId,
+        target: &AccessTarget,
         ops: &[String],
     ) -> Result<BTreeSet<GrantCapability>, ToolError> {
         let mut capabilities = BTreeSet::new();
         for op in ops {
             if let Some((_, capability)) = TICKET_OPS.iter().find(|(name, _)| *name == op.as_str())
             {
+                if target.kind != AccessTargetKind::Room {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        format!(
+                            "[target_kind_mismatch] {op} requires a room target, got {}",
+                            target.kind.as_str()
+                        ),
+                    ));
+                }
                 capabilities.insert(*capability);
                 continue;
             }
             match op.as_str() {
                 other if other.starts_with("platform_call:") => {
                     let op_name = &other["platform_call:".len()..];
-                    let methods = self.outbound.catalog(&target.connection);
+                    let connection = target.connection_ref().ok_or_else(|| {
+                        ToolError::new(
+                            ErrorCode::BadRequest,
+                            format!("target {} has no connection", target.display()),
+                        )
+                    })?;
+                    let methods = self.outbound.catalog(connection);
                     let spec = find_platform_op(&methods, op_name)?;
+                    if spec.access_kind() != target.kind {
+                        return Err(ToolError::new(
+                            ErrorCode::BadRequest,
+                            format!(
+                                "[target_kind_mismatch] {op_name} declares {} target, ticket has {}",
+                                spec.access_kind().as_str(),
+                                target.kind.as_str()
+                            ),
+                        ));
+                    }
                     capabilities.insert(GrantCapability::Platform);
                     match spec.risk {
                         Risk::Critical => {
                             capabilities.insert(GrantCapability::Critical);
+                            // 账号级 critical = 取凭证，能力表里单独记 account_secret。
+                            if spec.access_kind() == AccessTargetKind::Account {
+                                capabilities.insert(GrantCapability::AccountSecret);
+                            }
                         }
                         Risk::Destructive => {
                             capabilities.insert(GrantCapability::Destructive);
                         }
                         _ => {}
                     }
-                    // critical 由审批本身放行，不再需要房间读写能力；其余平台动作
+                    // critical 由审批本身放行，不再需要房间读写能力；其余房间平台动作
                     // 之前先过房间访问检查，所以票据必须带上对应的房间能力。
-                    if spec.risk == Risk::Critical {
+                    if spec.risk == Risk::Critical || spec.scope != Scope::Room {
                         continue;
                     }
                     if spec.effect == Effect::Read {
@@ -5521,6 +5586,69 @@ impl<S: Store> Bridge<S> {
             }
         }
         Ok(capabilities)
+    }
+
+    /// 从 op 列表推导这张票的 typed target。同一张票只能覆盖一种目标种类。
+    fn ticket_access_target(
+        &self,
+        config: &Config,
+        room: &RoomId,
+        ops: &[String],
+    ) -> Result<AccessTarget, ToolError> {
+        let mut kind: Option<AccessTargetKind> = None;
+        let mut remember = |wanted: AccessTargetKind| -> Result<(), ToolError> {
+            match kind {
+                Some(existing) if existing != wanted => Err(ToolError::new(
+                    ErrorCode::BadRequest,
+                    format!(
+                        "[target_kind_mismatch] one ticket cannot mix {} and {} targets",
+                        existing.as_str(),
+                        wanted.as_str()
+                    ),
+                )),
+                _ => {
+                    kind = Some(wanted);
+                    Ok(())
+                }
+            }
+        };
+        for op in ops {
+            if TICKET_OPS.iter().any(|(name, _)| *name == op.as_str()) {
+                remember(AccessTargetKind::Room)?;
+                continue;
+            }
+            let Some(name) = op.strip_prefix("platform_call:") else {
+                return Err(ToolError::new(
+                    ErrorCode::BadRequest,
+                    format!("[access_request] unsupported op {op}"),
+                ));
+            };
+            let methods = self.outbound.catalog(&room.connection);
+            let spec = find_platform_op(&methods, name)?;
+            remember(spec.access_kind())?;
+        }
+        match kind.unwrap_or(AccessTargetKind::Room) {
+            AccessTargetKind::Room => Ok(AccessTarget::room(room)),
+            AccessTargetKind::Connection => Ok(AccessTarget::connection(&room.connection)),
+            AccessTargetKind::Account => {
+                let account = config.account_of_room(room);
+                if account.is_empty() {
+                    Err(ToolError::new(
+                        ErrorCode::Internal,
+                        "[target_kind_mismatch] account target requires a bound account",
+                    ))
+                } else {
+                    Ok(AccessTarget::account(&room.connection, &account))
+                }
+            }
+            other => Err(ToolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "[target_kind_mismatch] {} targets are not supported by access_request yet",
+                    other.as_str()
+                ),
+            )),
+        }
     }
 
     fn send_admin_text(&self, room: &RoomId, text: &str) -> Result<(), String> {
@@ -5653,16 +5781,30 @@ impl<S: Store> Bridge<S> {
                         continue;
                     };
                     match parse::<SendArgs>(params) {
-                        Ok(args) => match self.deliver_out(
-                            config.clone(),
-                            &ticket.session,
-                            &ticket.target,
-                            SendOrigin::Message,
-                            args.elements.0,
-                        ) {
-                            Ok(value) => ("succeeded", Some(value), None),
-                            Err(error) => ("failed", None, Some(error.message)),
-                        },
+                        Ok(args) => {
+                            let Some(room) = ticket
+                                .target
+                                .room_ref()
+                                .and_then(|room| RoomId::parse(room).ok())
+                            else {
+                                let reason = format!("{op} requires a room target");
+                                any_failed = true;
+                                first_failure.get_or_insert(reason.clone());
+                                per_op
+                                    .push(json!({"op": op, "status": "failed", "reason": reason}));
+                                continue;
+                            };
+                            match self.deliver_out(
+                                config.clone(),
+                                &ticket.session,
+                                &room,
+                                SendOrigin::Message,
+                                args.elements.0,
+                            ) {
+                                Ok(value) => ("succeeded", Some(value), None),
+                                Err(error) => ("failed", None, Some(error.message)),
+                            }
+                        }
                         Err(error) => ("failed", None, Some(error.message)),
                     }
                 }
@@ -5717,11 +5859,32 @@ impl<S: Store> Bridge<S> {
         config: Arc<Config>,
     ) -> (&'static str, Option<Value>, Option<String>) {
         let params = params.unwrap_or_else(|| json!({}));
-        let methods = self.outbound.catalog(&ticket.target.connection);
+        let Some(connection) = ticket.target.connection_ref() else {
+            return (
+                "failed",
+                None,
+                Some(format!(
+                    "target {} has no connection",
+                    ticket.target.display()
+                )),
+            );
+        };
+        let methods = self.outbound.catalog(connection);
         let spec = match find_platform_op(&methods, method) {
             Ok(spec) => spec.clone(),
             Err(error) => return ("failed", None, Some(error.message)),
         };
+        if spec.access_kind() != ticket.target.kind {
+            return (
+                "failed",
+                None,
+                Some(format!(
+                    "[target_kind_mismatch] {method} declares {} target, ticket has {}",
+                    spec.access_kind().as_str(),
+                    ticket.target.kind.as_str()
+                )),
+            );
+        }
         if spec.scope != Scope::Room && spec.risk != Risk::Critical {
             return (
                 "skipped",
@@ -5731,22 +5894,23 @@ impl<S: Store> Bridge<S> {
                 )),
             );
         }
+        // 连接/账号级动作没有房间目标，用一个已申请时的房间做 outbound 句柄锚点。
+        let anchor = ticket
+            .target
+            .room_ref()
+            .and_then(|room| RoomId::parse(room).ok())
+            .unwrap_or_else(|| ticket.request_room.clone());
         let args = PlatformCallArgs {
-            room: Some(ticket.target.to_string()),
+            room: Some(anchor.to_string()),
             op: method.to_owned(),
             params: params.clone(),
             ..Default::default()
         };
-        let mut prepared = match self.assemble_platform_call(
-            config,
-            ticket.target.clone(),
-            spec,
-            args,
-            Some(ticket),
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => return ("failed", None, Some(error.message)),
-        };
+        let mut prepared =
+            match self.assemble_platform_call(config, anchor, spec, args, Some(ticket)) {
+                Ok(prepared) => prepared,
+                Err(error) => return ("failed", None, Some(error.message)),
+            };
         if let Err(error) = prepared.relay() {
             return ("failed", None, Some(error.message));
         }
@@ -5831,8 +5995,8 @@ impl<S: Store> Bridge<S> {
                 AccessAction::Connection => GrantCapability::ConnectionRead,
             };
             let target = match room {
-                Some(room) => GrantTarget::Room(room),
-                None => GrantTarget::Connection(connection),
+                Some(room) => AccessTarget::room(room),
+                None => AccessTarget::connection(connection),
             };
 
             let (mut allowed, mut basis, decision) = if built_in {
@@ -5840,7 +6004,7 @@ impl<S: Store> Bridge<S> {
                     subject,
                     place,
                     capability,
-                    target,
+                    target: &target,
                     subscriptions: &subscriptions,
                 };
                 let decision = grants::evaluate_access(&config.grants, &query);
@@ -5929,9 +6093,13 @@ impl<S: Store> Bridge<S> {
                 && !probe
                 && let (Some(target_room), Some(op)) = (room, op)
                 && matches!(action, AccessAction::Read | AccessAction::Send)
-                && let Some(ticket_id) =
-                    self.access_tickets
-                        .authorize(id, target_room, capability, op, now_millis())
+                && let Some(ticket_id) = self.access_tickets.authorize(
+                    id,
+                    &AccessTarget::room(target_room),
+                    capability,
+                    op,
+                    now_millis(),
+                )
             {
                 allowed = true;
                 basis = format!("ticket:{ticket_id}");
@@ -5940,7 +6108,7 @@ impl<S: Store> Bridge<S> {
 
             if let Some(decision) = &decision {
                 if decision.should_audit() && !ticket_used {
-                    self.audit_grant(id, subject, place, capability, target, decision);
+                    self.audit_grant(id, subject, place, capability, &target, decision);
                 }
             } else if !allowed {
                 let denial = GrantDecision {
@@ -5948,7 +6116,7 @@ impl<S: Store> Bridge<S> {
                     basis: basis.clone(),
                     reason: "external access provider denied".to_owned(),
                 };
-                self.audit_grant(id, subject, place, capability, target, &denial);
+                self.audit_grant(id, subject, place, capability, &target, &denial);
             }
 
             if allowed {
@@ -6028,7 +6196,7 @@ impl<S: Store> Bridge<S> {
             .filter(|name| !name.is_empty())
     }
 
-    fn audit_ticket_denied(&self, ctx: &TurnCtx, target: &RoomId, code: &str, detail: &str) {
+    fn audit_ticket_denied(&self, ctx: &TurnCtx, target: &AccessTarget, code: &str, detail: &str) {
         let sender_name = ctx
             .origin_sender
             .as_deref()
@@ -6039,7 +6207,7 @@ impl<S: Store> Bridge<S> {
             ctx.origin_sender.as_deref().unwrap_or("-"),
             sender_name,
             ctx.room,
-            target,
+            target.display(),
             code,
             detail.replace('"', "'"),
         );
@@ -6051,16 +6219,12 @@ impl<S: Store> Bridge<S> {
         subject: GrantSubject,
         place: GrantPlace,
         capability: GrantCapability,
-        target: GrantTarget<'_>,
+        target: &AccessTarget,
         decision: &GrantDecision,
     ) {
-        let target = match target {
-            GrantTarget::Room(room) => room.to_string(),
-            GrantTarget::Connection(connection) => connection.to_owned(),
-        };
         eprintln!(
             "{}",
-            decision.audit_line(subject, place, capability, &target, session)
+            decision.audit_line(subject, place, capability, &target.display(), session)
         );
     }
 
@@ -8634,7 +8798,7 @@ fn ticket_result_text(ticket: &AccessTicket, status: &str, _failure: Option<&str
         "ticket {} {}：目标 {}，op {}。用 access_ticket_get {{\"id\":\"{}\"}} 查详情。",
         ticket.id,
         status,
-        ticket.target,
+        ticket.target.display(),
         ticket.ops.join(", "),
         ticket.id,
     )
@@ -8665,7 +8829,12 @@ fn ticket_json(ticket: &crate::tickets::AccessTicket) -> Value {
         "ticket": ticket.id,
         "batch_id": ticket.batch_id,
         "state": ticket.state.as_str(),
-        "target": ticket.target.to_string(),
+        "target": {
+            "kind": ticket.target.kind.as_str(),
+            "id": ticket.target.id,
+            "sub": ticket.target.sub,
+        },
+        "target_display": ticket.target.display(),
         "ops": ticket.ops,
         "capabilities": ticket.capabilities.iter().map(|capability| capability.as_str()).collect::<Vec<_>>(),
         "created_at": ticket.created_at,
@@ -8716,7 +8885,7 @@ fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
             ticket.batch_id.as_deref().unwrap_or("-"),
             ticket.nonce,
             destructive,
-            ticket.target,
+            ticket.target.display(),
             ticket.ops.join(", "),
             ticket_params_summary(&ticket.ops, ticket.params.as_ref()),
             capabilities,
@@ -9037,6 +9206,21 @@ fn access_error_code(error: ToolError) -> &'static str {
         ErrorCode::Internal => "access_provider_unavailable",
         ErrorCode::ToolNotAllowed => "forbidden",
         _ => "forbidden",
+    }
+}
+
+fn access_target_for_spec(config: &Config, room: &RoomId, spec: &MethodSpec) -> AccessTarget {
+    match spec.access_kind() {
+        AccessTargetKind::Account => {
+            let account = config.account_of_room(room);
+            if account.is_empty() {
+                AccessTarget::connection(&room.connection)
+            } else {
+                AccessTarget::account(&room.connection, &account)
+            }
+        }
+        AccessTargetKind::Connection => AccessTarget::connection(&room.connection),
+        _ => AccessTarget::room(room),
     }
 }
 

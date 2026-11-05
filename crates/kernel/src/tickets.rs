@@ -16,7 +16,7 @@ use acb_proto::RoomId;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::grants::{GrantCapability, GrantPlace, GrantSubject, truncate_target};
+use crate::grants::{AccessTarget, GrantCapability, GrantPlace, GrantSubject, truncate_target};
 
 /// `[tickets]`：审批冷却与聚合的节奏。0 = 关闭对应冷却。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -96,7 +96,7 @@ pub struct AccessTicket {
     pub session: String,
     /// 申请时所在的房间（原会话流水写结果指针的位置）。
     pub request_room: RoomId,
-    pub target: RoomId,
+    pub target: AccessTarget,
     pub ops: Vec<String>,
     /// 挂起动作的参数快照；只存内存，随票据终态释放。
     pub params: Option<Value>,
@@ -132,7 +132,7 @@ pub struct TicketRequest {
     pub place: GrantPlace,
     pub session: String,
     pub request_room: RoomId,
-    pub target: RoomId,
+    pub target: AccessTarget,
     pub ops: Vec<String>,
     pub params: Option<Value>,
     pub origin_sender: Option<String>,
@@ -666,7 +666,7 @@ impl AccessTickets {
     pub fn authorize(
         &mut self,
         session: &str,
-        target: &RoomId,
+        target: &AccessTarget,
         capability: GrantCapability,
         op: &str,
         now: i64,
@@ -785,7 +785,7 @@ impl AccessTickets {
             ticket.principal.as_str(),
             ticket.place.as_str(),
             capabilities,
-            truncate_target(&ticket.target.to_string()),
+            truncate_target(&ticket.target.display()),
             ops,
             ticket.session,
             ticket.request_turn,
@@ -883,8 +883,8 @@ fn random_hex() -> String {
 mod tests {
     use super::*;
 
-    fn target() -> RoomId {
-        RoomId::parse("qq:group/999").expect("房间")
+    fn target() -> AccessTarget {
+        AccessTarget::room(&RoomId::parse("qq:group/999").expect("房间"))
     }
 
     fn request(now: i64, ops: &[&str]) -> TicketRequest {
@@ -1098,7 +1098,7 @@ mod tests {
         let requests = vec![
             request(1000, &["send_message_to"]),
             TicketRequest {
-                target: RoomId::parse("qq:group/998").expect("房间"),
+                target: AccessTarget::room(&RoomId::parse("qq:group/998").expect("房间")),
                 ..request(1000, &["get_history"])
             },
         ];
@@ -1145,7 +1145,9 @@ mod tests {
         let mut tickets = AccessTickets::new();
         let too_many: Vec<TicketRequest> = (0..=MAX_ITEMS_PER_BATCH)
             .map(|index| TicketRequest {
-                target: RoomId::parse(&format!("qq:group/{index}")).expect("房间"),
+                target: AccessTarget::room(
+                    &RoomId::parse(&format!("qq:group/{index}")).expect("房间"),
+                ),
                 ..request(1000, &["get_history"])
             })
             .collect();
@@ -1244,7 +1246,7 @@ mod tests {
             tickets
                 .authorize(
                     "main",
-                    &RoomId::parse("qq:group/998").expect("房间"),
+                    &AccessTarget::room(&RoomId::parse("qq:group/998").expect("房间")),
                     GrantCapability::RoomWrite,
                     "send_message_to",
                     2500
@@ -1285,7 +1287,9 @@ mod tests {
             tickets
                 .request(TicketRequest {
                     request_turn: "turn-2".to_owned(),
-                    target: RoomId::parse(&format!("qq:group/{index}")).expect("房间"),
+                    target: AccessTarget::room(
+                        &RoomId::parse(&format!("qq:group/{index}")).expect("房间"),
+                    ),
                     ..request(3000, &["send_message_to"])
                 })
                 .expect("申请");
@@ -1294,7 +1298,7 @@ mod tests {
             tickets
                 .request(TicketRequest {
                     request_turn: "turn-2".to_owned(),
-                    target: RoomId::parse("qq:group/3").expect("房间"),
+                    target: AccessTarget::room(&RoomId::parse("qq:group/3").expect("房间")),
                     ..request(3000, &["send_message_to"])
                 })
                 .is_err(),
