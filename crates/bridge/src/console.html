@@ -493,7 +493,8 @@ async function loadConfig() {
     $("#config").innerHTML = banner + `
     <div class="card"><h2>编辑配置 TOML（高级）</h2>
       <p class="muted">结构化表单能满足日常改动；这里留了原文编辑做兜底。
-      保存时先校验再落盘：解析不过一个字节都不写；落盘前自动备份成 config.toml.bak。</p>
+      保存时先校验再落盘：解析不过一个字节都不写；保存到 config.d/90-console.toml，
+      旧覆盖层自动备份成 90-console.toml.bak。</p>
       <textarea id="toml-text" spellcheck="false"></textarea>
       <p>
         <button class="act" onclick="saveToml()">校验并保存</button>

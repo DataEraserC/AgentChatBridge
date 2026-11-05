@@ -19,7 +19,7 @@ use acb_adapter_dynamic::DynamicLoader;
 use acb_adapter_onebot_snowluma::OneBotSnowLumaAdapterFactory;
 use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::{
-    AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ControlRegistry,
+    AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ConfigSource, ControlRegistry,
     DependencyRegistry, Element, EventQueue, FileRelay, Outbounds, PluginManager, RecordDraft,
     RecordKind, RouteWorker, Sender, SqliteStore, carrier_create_failed, drain_events, run_adapter,
     serve,
@@ -92,13 +92,16 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let options = Options::parse(std::env::args().skip(1))?;
 
-    let text = std::fs::read_to_string(&options.config)?;
-    let config = Config::parse(&text)?;
+    let config_dir = options.config_dir_path();
+    let loaded = Config::load(Path::new(&options.config), Some(&config_dir))?;
+    let config = loaded.config;
+    let sources = loaded.sources;
     // 记忆管家的配置独立校验：开关、调度器、合并策略都在这里定，core 不硬编码。
-    let steward_config = StewardConfig::from_toml(&text)?;
+    // 分片模式下用合并后的 TOML，保证 fragment 里的段也能被这些独立解析器看到。
+    let steward_config = StewardConfig::from_toml(&loaded.merged_toml)?;
     // 外置进程 provider 同样独立校验；列表为空就不启动任何子进程。
-    let process_providers = ProcessProviderConfig::from_toml(&text)?;
-    print_summary(&config, &options.config);
+    let process_providers = ProcessProviderConfig::from_toml(&loaded.merged_toml)?;
+    print_summary(&config, &options.config, &sources);
     if let Some(admin) = &config.grants.system_admin {
         eprintln!(
             "{}",
@@ -343,6 +346,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 controls,
                 console.token.clone(),
                 options.config.clone(),
+                config_dir.display().to_string(),
+                sources.clone(),
                 inbound_stats.clone(),
                 route_worker.clone(),
                 deps.clone(),
@@ -742,12 +747,14 @@ impl MemoryNotifier for MemorySyncNotifier {
 /// 命令行参数。
 struct Options {
     config: String,
+    config_dir: Option<String>,
     check_only: bool,
 }
 
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut config = "config.toml".to_owned();
+        let mut config_dir = None;
         let mut check_only = false;
         let mut args = args.peekable();
 
@@ -758,9 +765,19 @@ impl Options {
                         .next()
                         .ok_or(acb_i18n::t!("bridge.main.config_arg_required"))?;
                 }
+                "--config-dir" => {
+                    let value = args
+                        .next()
+                        .ok_or(acb_i18n::t!("bridge.main.config_dir_arg_required"))?;
+                    if value.is_empty() {
+                        return Err(acb_i18n::t!("bridge.main.config_dir_arg_required").into());
+                    }
+                    config_dir = Some(value);
+                }
                 "--check" => check_only = true,
                 "--help" | "-h" => {
                     println!("{}", acb_i18n::t!("bridge.main.usage"));
+                    println!("{}", acb_i18n::t!("bridge.main.usage_merge"));
                     std::process::exit(0);
                 }
                 other => {
@@ -769,12 +786,49 @@ impl Options {
             }
         }
 
-        Ok(Self { config, check_only })
+        Ok(Self {
+            config,
+            config_dir,
+            check_only,
+        })
+    }
+
+    /// 分片目录：显式 `--config-dir`，否则取 base 配置同目录下的 `config.d`。
+    fn config_dir_path(&self) -> PathBuf {
+        match &self.config_dir {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                let base = Path::new(&self.config);
+                base.parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("config.d")
+            }
+        }
     }
 }
 
-fn print_summary(config: &Config, path: &str) {
+fn print_summary(config: &Config, path: &str, sources: &[ConfigSource]) {
     println!("{}", acb_i18n::t!("bridge.main.config_path", path = path));
+    for source in sources {
+        println!(
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.config_source",
+                path = source.path,
+                connections = source.connections,
+                sessions = source.sessions,
+                rules = source.rules
+            )
+        );
+    }
+    println!(
+        "{}",
+        acb_i18n::t!(
+            "bridge.main.config_rules_total",
+            count = config.grants.rules.len()
+        )
+    );
 
     println!(
         "{}",
