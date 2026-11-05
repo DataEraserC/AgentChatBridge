@@ -1716,6 +1716,48 @@
 - 未决/风险：反向 WS 一次只服务一条活动连接；多客户端并发需要额外的路由/替换策略，
   当前 Deployment 只有一个 SnowLuma `wsClients`，不扩大范围。
 
+## 2026-11-05 — 批次 6：媒体增强（流式按判断不做）
+
+- 任务编号：adapter-snowluma 批次 6
+- 做了什么：
+  - `crates/adapters/onebot-snowluma/src/catalog.rs`：新增 6 个层级 op、6 条路由；
+    83 op / 86 action → 89 op / 92 action。
+  - `msg.voice_text` → `fetch_ptt_text`（Read）：语音消息转文字。
+  - `msg.ocr` → `ocr_image`（Read）：图片 URL 或缓存 file_id 的文字识别。
+  - `file.info` → `get_file`（Read，连接级）：缓存图片/语音的路径、地址、大小。
+  - `group.ai_characters` → `get_ai_characters`（Read）：群可用 AI 语音角色。
+  - `group.ai_voice` → `get_ai_record`（Write）：只生成语音，不发送。
+  - `group.ai_voice_send` → `send_group_ai_record`（Write，`Effect::Send`，
+    `RecordMode::Message`）：生成并发送 AI 语音，流水写「[AI 语音]」。
+  - `crates/adapters/onebot-snowluma/src/outbound.rs`：补充语音 id、OCR 地址长度、
+    `file.info` 标识、AI 语音 `character`/`text` 的空值/长度校验。
+  - `crates/i18n/locales/{zh-CN,en}.json`：新增 `file.info` 与长度上限文案。
+- 新增 op：**6 个**；新增工具位：**0 个**（工具数保持 28）。
+  没有新增 `PlatformTag`，没有第二张 risk 表。
+- 目录体积复核：op 数 89；默认 20 条/页的页面仍是同样 20 条，约 **2.9 KB**；
+  全量清单约 18 KB、索引化后约 12–13 KB（按 83 op 的实测线性外推）。
+- 按文档/风险判断不做：
+  - 原始流式动作（`upload_file_stream`、`download_file_image_stream` /
+    `download_file_record_stream` / `download_file_stream`、`test_download_stream`）：
+    多帧协议、无逐请求取消、WS 无背压，且会把大文件字节搬进 core，本轮不接。
+  - `download_file`：任意 URL/base64、无文档化大小上限，等于把平台当下载器，不暴露。
+  - `clean_stream_temp_file`：没有流式动作就没有清理入口的必要，留给流式一起做。
+  - `musicSignUrl`：SnowLuma 配置项，不是 OneBot 动作，不能变成 op。
+- 连接类改动：**本批没有改连接代码**；沿用批次 5 的
+  `reverse_ws_token_accepts_query_and_bearer` / `ws_server_listen_prefers_options_and_falls_back_to_url`，
+  role 仍是「单活动连接 + 必须配 Universal」。
+- 证据：
+  - `batch_six_media_ops_have_explicit_risk_and_routes`（6 个 op 的 risk/action/effect；
+    AI 语音发送是 `Effect::Send` + `RecordMode::Message`）
+  - `media_ops_state_their_preconditions`（语音必须是语音消息、OCR 失败报错、
+    `file.info` 至少一个标识、AI 语音 text 非空）
+  - `media_and_ai_identifiers_are_validated`
+  - `ai_voice_send_is_recorded_as_a_message`
+  - `every_op_is_hierarchical_tagged_and_routed`（89 op 全部层级名、有 tag、有路由）
+  - `cargo test --workspace`、clippy `-D warnings`、dsh/opencode 测试、`node --check` 全绿。
+- 能力状态：计数仍是 **8 完全 / 8 部分 / 7 未实现**；#18 语音/媒体仍为「部分」，
+  缺口缩为原始流式上传下载、`download_file`、音乐签名；#16 流式传输仍未实现。
+
 
 
 ## 部署注意事项（nix-config 打包）

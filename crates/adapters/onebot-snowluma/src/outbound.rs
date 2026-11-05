@@ -32,6 +32,9 @@ const MAX_BATCH_KICK: usize = 20;
 /// 自定义表情 id 的长度上限：32 位 MD5 加上完整 id 的前缀余量。
 const MAX_EMOJI_ID_LEN: usize = 256;
 
+/// OCR 的图片地址/缓存 id 上限：只收标识，不替模型搬运图片内容。
+const MAX_OCR_SOURCE_LEN: usize = 2048;
+
 // 平台方法表在 `catalog.rs`：那里的每一行都是「人也做得到的事」。
 
 /// OneBot 出站通道。一条连接一个。
@@ -451,6 +454,35 @@ fn validate_call_params(method: &str, params: &Value) -> Result<(), CallError> {
                 )));
             }
         }
+        "msg.voice_text" => {
+            required_text(map, "message_id")?;
+        }
+        "msg.ocr" => {
+            let source = required_text(map, "image")?;
+            if source.chars().count() > MAX_OCR_SOURCE_LEN {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "image",
+                    max = MAX_OCR_SOURCE_LEN
+                )));
+            }
+        }
+        "file.info" => {
+            let present = ["file_id", "file"].iter().any(|key| {
+                map.get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            });
+            if !present {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.file_info_needs_identifier"
+                )));
+            }
+        }
+        "group.ai_voice" | "group.ai_voice_send" => {
+            required_text(map, "character")?;
+            required_text(map, "text")?;
+        }
         _ => {}
     }
     Ok(())
@@ -605,6 +637,12 @@ fn outgoing_record(method: &str, params: &Value, value: &Value) -> Option<Outgoi
         "msg.face" => OutgoingRecord {
             kind: OutgoingKind::Message,
             elements: vec![Element::text("[自定义表情]")],
+            platform_id,
+            at: None,
+        },
+        "group.ai_voice_send" => OutgoingRecord {
+            kind: OutgoingKind::Message,
+            elements: vec![Element::text("[AI 语音]")],
             platform_id,
             at: None,
         },
@@ -1053,6 +1091,11 @@ mod tests {
             "msg.reactions",
             "msg.reaction_users",
             "group.reaction",
+            "msg.voice_text",
+            "msg.ocr",
+            "group.ai_characters",
+            "group.ai_voice",
+            "group.ai_voice_send",
             "msg.poke",
             "like.send",
         ] {
@@ -1083,6 +1126,7 @@ mod tests {
                     | "group.list"
                     | "group.ignored_requests"
                     | "file.private_url"
+                    | "file.info"
                     | "face.custom_list"
                     | "face.custom_detail"
                     | "face.custom_delete"
@@ -1179,7 +1223,7 @@ mod tests {
     #[test]
     fn every_op_is_hierarchical_tagged_and_routed() {
         let methods = catalog();
-        assert_eq!(methods.len(), 83, "批次 4 后应有 83 个层级 op");
+        assert_eq!(methods.len(), 89, "批次 6 后应有 89 个层级 op");
         assert!(!methods.is_empty());
         for method in methods.iter() {
             let name = method.name.as_ref();
@@ -1788,5 +1832,116 @@ mod tests {
         assert_eq!(record.kind, OutgoingKind::Message);
         assert_eq!(record.platform_id.as_deref(), Some("77"));
         assert_eq!(record.elements, vec![Element::text("[自定义表情]")]);
+    }
+
+    /// 批次 6 的媒体/语音 op：显式 risk、确定路由；发送 AI 语音要标成 Send。
+    #[test]
+    fn batch_six_media_ops_have_explicit_risk_and_routes() {
+        let methods = catalog();
+        for (name, risk, action, effect) in [
+            ("msg.voice_text", Risk::Read, "fetch_ptt_text", Effect::Read),
+            ("msg.ocr", Risk::Read, "ocr_image", Effect::Read),
+            ("file.info", Risk::Read, "get_file", Effect::Read),
+            (
+                "group.ai_characters",
+                Risk::Read,
+                "get_ai_characters",
+                Effect::Read,
+            ),
+            (
+                "group.ai_voice",
+                Risk::Write,
+                "get_ai_record",
+                Effect::Write,
+            ),
+            (
+                "group.ai_voice_send",
+                Risk::Write,
+                "send_group_ai_record",
+                Effect::Send,
+            ),
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("没有 {name}"));
+            assert_eq!(method.risk, risk, "{name} 的 risk 标错了");
+            assert_eq!(method.effect, effect, "{name} 的 effect 标错了");
+            let route = ROUTES
+                .iter()
+                .find(|route| route.method == name)
+                .unwrap_or_else(|| panic!("{name} 没有路由"));
+            match route.target {
+                Target::Fixed(target) => assert_eq!(target, action, "{name} 路由不对"),
+                Target::ByRoom { .. } => panic!("{name} 不该按房间分叉"),
+            }
+        }
+
+        let send = methods
+            .iter()
+            .find(|method| method.name.as_ref() == "group.ai_voice_send")
+            .expect("有 AI 语音发送");
+        assert_eq!(
+            send.record,
+            RecordMode::Message,
+            "AI 语音发送是一条消息，要进流水"
+        );
+    }
+
+    /// 语音/OCR/AI 语音的前提取自平台文档，不让模型猜。
+    #[test]
+    fn media_ops_state_their_preconditions() {
+        let methods = catalog();
+        for (name, keyword) in [
+            ("msg.voice_text", "必须是一条语音消息"),
+            ("msg.ocr", "识别不了时平台会报错"),
+            ("file.info", "至少给一个"),
+            ("group.ai_voice", "不能为空"),
+            ("group.ai_voice_send", "不能为空"),
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("没有 {name}"));
+            assert!(
+                method.summary.contains(keyword),
+                "{name} 的描述没写清前提「{keyword}」：{}",
+                method.summary
+            );
+        }
+    }
+
+    #[test]
+    fn media_and_ai_identifiers_are_validated() {
+        assert!(validate_call_params("msg.voice_text", &json!({"message_id": ""})).is_err());
+        assert!(validate_call_params("msg.ocr", &json!({"image": ""})).is_err());
+        let long = "a".repeat(MAX_OCR_SOURCE_LEN + 1);
+        assert!(validate_call_params("msg.ocr", &json!({"image": long})).is_err());
+        assert!(validate_call_params("file.info", &json!({})).is_err());
+        assert!(validate_call_params("file.info", &json!({"file_id": "f1"})).is_ok());
+        assert!(
+            validate_call_params("group.ai_voice", &json!({"character": "c1", "text": " "}))
+                .is_err()
+        );
+        assert!(
+            validate_call_params(
+                "group.ai_voice_send",
+                &json!({"character": "c1", "text": "你好"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn ai_voice_send_is_recorded_as_a_message() {
+        let record = outgoing_record(
+            "group.ai_voice_send",
+            &json!({"character": "c1", "text": "你好"}),
+            &json!({"message_id": 88}),
+        )
+        .expect("发送要记账");
+        assert_eq!(record.kind, OutgoingKind::Message);
+        assert_eq!(record.platform_id.as_deref(), Some("88"));
+        assert_eq!(record.elements, vec![Element::text("[AI 语音]")]);
     }
 }

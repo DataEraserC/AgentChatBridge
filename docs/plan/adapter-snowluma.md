@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 8 项、部分实现 8 项、未实现 7 项**。动作级：现有 catalog 暴露 83 个层级 op / 86 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 8 项、部分实现 8 项、未实现 7 项**。动作级：现有 catalog 暴露 89 个层级 op / 92 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -116,8 +116,8 @@
 - **连接**：正向 WebSocket（`ws-client`）与反向 WebSocket（`ws-server`，桥监听，SnowLuma 连入）；HTTP API、HTTP 事件上报与 `wss://` 未实现。
 - **鉴权**：`ws-client` 用 `Authorization: Bearer`（地址里的 `?access_token=` 原样保留）；`ws-server` 接受 `?access_token=` 或 `Authorization: Bearer`，不匹配直接 401。
 - **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、自定义收藏表情（`msg.face`）、合并转发发送与读取。
-- **平台方法**：`catalog.rs` 的 `ROUTES` 共 83 个层级 op，映射 86 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
-- **目录体积**：不带 `op` 列目录时，83 个 op 的原始清单约 17 KB；索引化后约 12 KB，仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3–4 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
+- **平台方法**：`catalog.rs` 的 `ROUTES` 共 89 个层级 op，映射 92 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
+- **目录体积**：不带 `op` 列目录时，89 个 op 的原始清单约 18 KB；索引化后约 12–13 KB，仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
 - **事件**：`message` / `message_sent` / `notice` / `request` / `meta_event` 有分流；`message_sent` 直接忽略（`reportSelfMessage = true` 时不重复记账）；`meta_event/heartbeat` 只刷新平台依赖条目的 `lastOkAt`，生命周期忽略；`bot_status` / `bot_offline` 走账号状态，不再写进私聊房间；`notice` 只对 `group_increase`、`group_decrease`、`group_ban`、`group_recall`、`friend_recall`、`group_admin` 与 `notify/poke` 有人话，其余降级为 `[类型]（未解析事件）` + Opaque 原载荷（[event.rs](../../crates/adapters/onebot-snowluma/src/event.rs#L55-L200)）。
 - **账号**：连上后另起线程调 `get_login_info` 核对 `account`，并调 `get_version_info` / `get_status` 采集三层版本与在线状态（[link.rs](../../crates/adapters/onebot-snowluma/src/link.rs)）。
 - **健康**：连接建立/断开决定 up/down；`get_status` 的 `online` / `good` 写进 `accountOnline` / `accountGood`；`bot_status` 的上下线按失败阈值迁移依赖状态，心跳只刷新 `lastOkAt`。版本信息写进 `version`。
@@ -223,7 +223,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 15 | 群文件 | 12 | **部分** | 根/子目录列表、下载链接、系统信息、群/私聊上传、群删除、文件夹创建/删除、文件移动/重命名、私聊下载链接有；缺文件夹重命名（两个名称参数优先级未成文）、群文件分享链接（`get_share_link` 只收 `fileset_id`）、转存（`trans_group_file` 没有目标参数） |
 | 16 | 流式传输 | 6 | **未实现** | 没有 HTTP 流式通道；现有文件中继（ADR-0025）不是流式 |
 | 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **部分** | `set_msg_emoji_like` / `set_group_reaction`、回应汇总、回应用户列表、收藏表情列表/详情/改/删、系统表情列表/搜索/单查有；缺收藏表情新增（`file` 格式未成文）、置顶、`get_emoji_likes`（与 `fetch_emoji_like` 重叠） |
-| 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **部分** | `get_record` / `get_image` 有；缺语音转写、OCR、AI 语音、音乐签名、`get_file` |
+| 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **部分** | `get_record` / `get_image` / `get_file`、语音转写（`msg.voice_text`）、OCR（`msg.ocr`）、AI 语音角色/生成/发送有；缺原始流式上传下载、`download_file`（任意 URL/base64，无大小上限）、音乐签名（`musicSignUrl` 是配置项不是动作） |
 | 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 启动已调用 `get_login_info` / `get_status` / `get_version_info`；三层版本 + 兼容下限进依赖元数据。仍缺 `can_send_*`、资料设置、在线状态设置 |
 | 20 | 事件类型 | message / message_sent / notice / request / meta | **部分** | 有分流；notice 只解析 6 类 + poke；`bot_status` / `bot_offline` 已走账号状态并驱动依赖健康，心跳只刷新 `lastOkAt`，`message_sent` 已忽略。仍缺 `group_upload`、`essence`、`notify.*` 的字段解析（SnowLuma 未成文），未知 notice 保留 Opaque |
 | 21 | 群相册 | 9 | **未实现** | 无 |
@@ -242,9 +242,11 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 #15 群文件 / #17 表情回应仍是「部分」，缺口分别缩为文件夹重命名/分享链接/转存与
 收藏表情新增/置顶。批次 5 完成后：#3 反向 WS 从「未实现」升为「已实现」，
 计数变为 **8 完全 / 8 部分 / 7 未实现**；HTTP API、HTTP 事件上报、`wss://` 仍未实现。
+批次 6 完成后计数不变：#18 语音/媒体仍是「部分」，缺口缩为原始流式上传下载、
+`download_file` 与音乐签名；#16 流式传输仍未实现。
 
 **动作级覆盖**：
-- 现有 `ROUTES` 83 个层级 op / 86 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
+- 现有 `ROUTES` 89 个层级 op / 92 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 由于 `platform_call` 只认 catalog（[engine.rs](../../crates/kernel/src/engine.rs#L3820-L3849)），未列入的动作不是「文档没写」，而是**agent 实际调不到**。这是「完整实现 SnowLuma 能力」的主要工作量。
 
@@ -679,7 +681,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **前置**：这是「必须先解决鉴权/连接形态」的批次本身。批次 6 依赖它；如果部署只用 HTTP，批次 3/4 也要等它。
 
-### 批次 6：流式传输与媒体增强
+### 批次 6：流式传输与媒体增强（媒体增强已完成，流式按判断不做）
 
 **能力范围**
 - 6 个流式动作：上传、下载图片/语音/文件、测试下载、清理临时文件。
@@ -687,15 +689,37 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - 流式响应的取消、超时、临时文件清理。
 
 **涉及文件**
-- `crates/adapters/onebot11/src/outbound.rs`（HTTP 流式请求）
-- `crates/adapters/onebot11/src/catalog.rs`
-- 可能新增 transport 模块
+- `crates/adapters/onebot-snowluma/src/outbound.rs`、`crates/adapters/onebot-snowluma/src/catalog.rs`
+- `crates/i18n/locales/{zh-CN,en}.json`
 - `docs/05-adapters.md`、`docs/guide/troubleshooting.md`
 
 **验证方式**
 - 真机 SnowLuma：上传/下载各一次，校验大小、校验取消、校验临时文件清理。
 - 大文件不整段进内存；超时后不重试。
 - 语音转写/OCR 失败时错误信息可读。
+
+**实际落地**
+- **新增 6 个 op（83 → 89），映射 6 个新 action（86 → 92）**：
+  - `msg.voice_text` → `fetch_ptt_text`（Read）：语音消息转文字，前提「message_id 必须是一条语音消息」。
+  - `msg.ocr` → `ocr_image`（Read）：图片 URL 或缓存 file_id，前提「识别不了时平台报错」。
+  - `file.info` → `get_file`（Read，连接级）：缓存图片/语音的路径、地址、大小；`file_id` / `file` 至少一个。
+  - `group.ai_characters` → `get_ai_characters`（Read）：群可用 AI 语音角色。
+  - `group.ai_voice` → `get_ai_record`（Write）：只生成语音，不发送。
+  - `group.ai_voice_send` → `send_group_ai_record`（Write，`Effect::Send`，`RecordMode::Message`）：
+    生成并发送 AI 语音，流水写「[AI 语音]」。
+- **参数校验**：语音消息 id 非空；OCR 图片地址非空且 ≤ 2048 字符；`file.info` 至少一个标识；
+  AI 语音 `character` / `text` 非空。
+- **工具位不变**：仍为 28 个工具；全部新能力走 `platform_call` 的层级 op。
+- **按文档/风险判断不做（记缺口）**：
+  - 原始流式动作（`upload_file_stream`、`download_file_image_stream` /
+    `download_file_record_stream` / `download_file_stream`、`test_download_stream`）：
+    多帧协议、无逐请求取消、WS 无背压，且会把大文件字节搬进 core；不在本轮接。
+  - `download_file`：接受任意 URL / base64 且没有文档化大小上限，属于把平台当下载器，
+    先不暴露。
+  - `clean_stream_temp_file`：没有流式上传/下载就没必要先给清理入口；留给实现流式时一起做。
+  - `musicSignUrl`：它是 SnowLuma 配置项，不是 OneBot 动作，不能变成 op。
+- **连接失败路径**：本批没有改连接代码，沿用批次 5 的反向 WS 鉴权/监听测试；
+  role 仍是「单活动连接 + 必须配 Universal」，没有新增多连接分流。
 
 **前置**：**批次 5**。流式大概率只能走 HTTP；WS 不适合分段响应。
 

@@ -421,6 +421,17 @@ fn methods() -> Vec<MethodSpec> {
                 opt("file_hash", "文件 hash；平台需要时再给"),
             ],
         ),
+        cm(
+            "file.info",
+            "查平台缓存里的图片/语音文件元数据：本地路径、地址、大小、文件名。\
+             file_id 和 file 至少给一个；群文件请用 group.file.url",
+            &[tags::FILE, tags::DOWNLOAD],
+            Risk::Read,
+            &[
+                opt("file_id", "缓存文件 id"),
+                opt("file", "文件标识；和 file_id 至少给一个"),
+            ],
+        ),
         m(
             "group.essence.list",
             "群精华消息列表",
@@ -477,6 +488,42 @@ fn methods() -> Vec<MethodSpec> {
             &[tags::GROUP, tags::MEMBER],
             Risk::Read,
             &[opt("group_id", "群号；在群里调用可以不填")],
+        ),
+        m(
+            "group.ai_characters",
+            "列出这个群可用的 AI 语音角色：角色 id、名字、试听地址",
+            &[tags::GROUP, tags::VOICE],
+            Risk::Read,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                num("chat_type", "聊天类型，默认 1"),
+            ],
+        ),
+        m(
+            "group.ai_voice",
+            "生成一段 AI 语音文件，不直接发送。character 从 group.ai_characters 拿；\
+             text 不能为空。要发到群里用 group.ai_voice_send",
+            &[tags::GROUP, tags::VOICE, tags::MEDIA],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("character", "AI 语音角色 id"),
+                req("text", "要合成的文字，不能为空"),
+                num("chat_type", "聊天类型，默认 1"),
+            ],
+        ),
+        m(
+            "group.ai_voice_send",
+            "生成并发送 AI 语音到群里。character 从 group.ai_characters 拿；\
+             text 不能为空。这是一条会进流水的语音消息",
+            &[tags::GROUP, tags::VOICE, tags::SEND, tags::MEDIA],
+            Risk::Write,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("character", "AI 语音角色 id"),
+                req("text", "要合成并发送的文字，不能为空"),
+                num("chat_type", "聊天类型，默认 1"),
+            ],
         ),
         cm(
             "group.ignored_requests",
@@ -870,6 +917,20 @@ fn methods() -> Vec<MethodSpec> {
             ],
         ),
         m(
+            "msg.voice_text",
+            "把一条语音消息转成文字。message_id 必须是一条语音消息；转不出来时平台会报错",
+            &[tags::VOICE, tags::MEDIA, tags::MESSAGE],
+            Risk::Read,
+            &[req("message_id", "语音消息 id")],
+        ),
+        m(
+            "msg.ocr",
+            "识别图片里的文字。image 给图片 URL 或已缓存图片的 file_id；识别不了时平台会报错",
+            &[tags::IMAGE, tags::MEDIA],
+            Risk::Read,
+            &[req("image", "图片 URL 或缓存 file_id")],
+        ),
+        m(
             "msg.react",
             "给一条消息加表情回应（那个小表情）。emoji_id 是平台的表情 id",
             &[tags::MESSAGE, tags::IMAGE],
@@ -1065,12 +1126,16 @@ pub static ROUTES: &[Route] = &[
     group_route("group.detail", "get_group_detail_info"),
     group_route("group.shut_list", "get_group_shut_list"),
     group_route("group.signed_list", "get_group_signed_list"),
+    group_route("group.ai_characters", "get_ai_characters"),
+    group_route("group.ai_voice", "get_ai_record"),
+    group_route("group.ai_voice_send", "send_group_ai_record"),
     group_route("group.notice.delete", "_del_group_notice"),
     group_route("group.file.list", "get_group_root_files"),
     group_route("group.file.folder", "get_group_files_by_folder"),
     group_route("group.file.url", "get_group_file_url"),
     group_route("group.file.info", "get_group_file_system_info"),
     route("file.private_url", "get_private_file_url"),
+    route("file.info", "get_file"),
     group_route("group.essence.list", "get_essence_msg_list"),
     group_route("group.at_all_remain", "get_group_at_all_remain"),
     group_route("group.notice.send", "_send_group_notice"),
@@ -1114,6 +1179,8 @@ pub static ROUTES: &[Route] = &[
     route("msg.forward", "get_forward_msg"),
     route("msg.image", "get_image"),
     route("msg.voice", "get_record"),
+    route("msg.voice_text", "fetch_ptt_text"),
+    route("msg.ocr", "ocr_image"),
     route("msg.react", "set_msg_emoji_like"),
     route("msg.reactions", "get_msg_emoji_likes"),
     route("msg.reaction_users", "fetch_emoji_like"),
@@ -1239,7 +1306,7 @@ const DELETE_METHODS: &[&str] = &[
 /// 调用成功后要写进流水的那几个。core 靠它判断“这次调用会不会改变房间”。
 fn record_of(method: &str) -> RecordMode {
     match method {
-        "msg.send" | "msg.face" => RecordMode::Message,
+        "msg.send" | "msg.face" | "group.ai_voice_send" => RecordMode::Message,
         "msg.send_forward" | "group.notice.send" => RecordMode::Event,
         _ => RecordMode::None,
     }
