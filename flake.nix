@@ -40,6 +40,24 @@
         # `.override { sessions = [ { preset = "..."; port = 3101; } ]; }` 注入。
         dsh-bundle = pkgs.callPackage ./nix/dsh-bundle { };
 
+        # 参考 WASM 宿主：可选包，不进默认环境，也不链接进 acb-bridge。
+        # 只有显式装配 + 配置 [[process_providers]] 才会用。
+        acb-wasm-host = pkgs.rustPlatform.buildRustPackage {
+          pname = "acb-wasm-host";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+          buildFeatures = [ "wasm-host" ];
+          cargoBuildFlags = [ "--package" "acb-wasm-host" ];
+          doCheck = false;
+          installPhase = ''
+            mkdir -p $out/bin
+            cp target/*/release/acb-wasm-host $out/bin/
+          '';
+        };
+
         # 仅供当前测试环境使用：把 Lua 目录固化在 store 路径里，
         # 不依赖手工 drop-in 或宿主环境变量。实际部署应另行决定用户、权限和配置来源。
         acb-bridge-test = pkgs.writeShellApplication {

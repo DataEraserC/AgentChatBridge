@@ -146,6 +146,35 @@ path = "/绝对路径/libacb_example_wake.so"
 - 策略的专属参数写在对应的 `.options`（Lua 里是 `options.extra`）；适配器的参数写在
   连接的 `options`。扩展点、manifest、生命周期和 wire 形状见[插件开发](../08-plugin-development.md)。
 
+### 外置进程策略 provider（WASM 载体）
+
+core 不链接任何 wasm 运行时。WASM 插件由一个独立宿主进程加载，桥只按命令启动它
+并通过 stdio 行 JSON 转发 `decide`：
+
+```toml
+[[process_providers]]
+id = "demo.wasm_access"          # provider id；namespace 不能是 acb
+extension = "access"             # 当前只支持 access
+command = ["/绝对路径/acb-wasm-host", "--module", "/绝对路径/access.wasm", "--provider", "demo.wasm_access"]
+startup_timeout_secs = 10        # 等第一行 manifest 的上限
+timeout_ms = 5000                # 单次 decide 的上限
+# env = { RUST_BACKTRACE = "0" }
+# cwd = "/绝对路径"
+```
+
+会话通过 `[sessions.access] provider = "demo.wasm_access"` 使用它。列表为空 =
+不启动任何宿主；宿主起不来或 manifest 不合法会在启动期直接失败（退出 78），
+不会带病运行。运行期 trap / 超时会把 provider 标成 `Unhealthy` 并对后续请求
+返回 `deny`，不会自动重启。设计与失败映射见 [wasm-carriers](../plan/wasm-carriers.md)。
+
+参考 `.so` 载体走现有 `[[plugins]]`，要求 ABI v2 + `UNLOAD_SAFE`；它与 WASM 载体
+共享同一份 access 决策契约。构建与测试命令：
+
+```bash
+cargo build -p acb-wasm-host --features wasm-host --bin acb-wasm-host
+cargo test -p acb-wasm-host --features native-so
+```
+
 ## 会话与订阅：谁在哪个群、怎么醒
 
 ```toml

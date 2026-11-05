@@ -14,6 +14,7 @@ acb-kernel = { path = "../kernel" }
 acb-plugin-trusted = { path = "../plugins/trusted" }
 acb-plugin-lua = { path = "../plugins/lua" }
 acb-plugin-process-tools = { path = "../plugins/process-tools" }
+acb-plugin-process-provider = { path = "../plugins/process-provider" }
 acb-adapter-onebot-snowluma = { path = "../adapters/onebot-snowluma" }
 acb-adapter-process = { path = "../adapters/process" }
 acb-adapter-dynamic = { path = "../adapters/dynamic" }

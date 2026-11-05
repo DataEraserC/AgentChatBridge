@@ -2878,6 +2878,15 @@ impl<S: Store> Bridge<S> {
         self.draining
     }
 
+    /// 进程退出前收尾所有 manager。
+    ///
+    /// 外置进程载体（进程 provider / 工具）靠 manager 的 `shutdown()` 杀子进程；
+    /// 不调用的话，手动运行的桥退出后子进程可能变成孤儿。systemd 的
+    /// `KillMode=control-group` 会兜底，但这里不能只依赖部署侧。
+    pub fn shutdown_plugins(&self) {
+        self.plugins.shutdown_managers();
+    }
+
     /// 排空/健康探针的快照。
     pub fn drain_snapshot(&self) -> Value {
         json!({

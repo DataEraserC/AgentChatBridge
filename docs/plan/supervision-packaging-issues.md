@@ -231,7 +231,10 @@
 - 排期：**先做 ①，② 随后**。
   - ① 的运行时在独立进程中，bridge 进程地址空间不进入 wasm 运行时；
   - ② 的 bridge **构建**同样不含 wasm 依赖，但 `.so` 被 `dlopen` 后运行时进入 bridge 地址空间，故排在 ① 之后。
-- 状态：**已定（待实现）**。
+- 状态：**已实现参考载体（2026-11-05）**。代码：`crates/wasm-host`（宿主 +
+  参考 wasm）、`crates/plugins/process-provider`（`ProcessProviderLoader`）、
+  `crates/fixtures/access-so`（ABI v2 参考 `.so`）。协议、feature flag 与失败映射
+  见 [wasm-carriers](wasm-carriers.md)。
 - 代价：两套产物 × 三平台（Linux / macOS / Windows）+ CI 双跑；① 需要新增最小进程协议与 `ProcessProviderLoader`，② 需要跨平台 `.so` 构建与 v2 入口。
 
 **构建与部署边界**

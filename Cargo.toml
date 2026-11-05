@@ -12,7 +12,9 @@ members = [
     "crates/plugins/trusted",
     "crates/plugins/lua",
     "crates/plugins/process-tools",
+    "crates/plugins/process-provider",
     "crates/plugins/wake-fixture",
+    "crates/wasm-host",
     "crates/notifier-process",
     "crates/extensions",
     "crates/supervisor-policy",
@@ -20,6 +22,12 @@ members = [
     "crates/launcher",
     "crates/memory-steward",
     "crates/bridge",
+]
+
+# 参考 .so 只作为 conformance fixture 构建；默认 workspace 不编译它们。
+exclude = [
+    "crates/fixtures/access-so",
+    "crates/fixtures/access-so-bad-abi",
 ]
 
 [workspace.package]
