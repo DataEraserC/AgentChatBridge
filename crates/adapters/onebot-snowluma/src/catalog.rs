@@ -490,6 +490,25 @@ fn methods() -> Vec<MethodSpec> {
             &[opt("group_id", "群号；在群里调用可以不填")],
         ),
         m(
+            "group.album.list",
+            "列出群相册：相册 id、名字、照片数、封面、最后上传时间",
+            &[tags::GROUP, tags::IMAGE],
+            Risk::Read,
+            &[opt("group_id", "群号；在群里调用可以不填")],
+        ),
+        m(
+            "group.album.media",
+            "列出群相册里的照片/视频。album_id 必须存在；attach_info 用来翻页，\
+             把上一次返回的 nextAttachInfo 原样带回来",
+            &[tags::GROUP, tags::IMAGE, tags::MEDIA],
+            Risk::Read,
+            &[
+                opt("group_id", "群号；在群里调用可以不填"),
+                req("album_id", "相册 id，从 group.album.list 拿"),
+                opt("attach_info", "翻页游标，原样带回上一次的 nextAttachInfo"),
+            ],
+        ),
+        m(
             "group.ai_characters",
             "列出这个群可用的 AI 语音角色：角色 id、名字、试听地址",
             &[tags::GROUP, tags::VOICE],
@@ -1126,6 +1145,8 @@ pub static ROUTES: &[Route] = &[
     group_route("group.detail", "get_group_detail_info"),
     group_route("group.shut_list", "get_group_shut_list"),
     group_route("group.signed_list", "get_group_signed_list"),
+    group_route("group.album.list", "get_group_album_list"),
+    group_route("group.album.media", "get_group_album_media_list"),
     group_route("group.ai_characters", "get_ai_characters"),
     group_route("group.ai_voice", "get_ai_record"),
     group_route("group.ai_voice_send", "send_group_ai_record"),

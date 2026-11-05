@@ -483,6 +483,9 @@ fn validate_call_params(method: &str, params: &Value) -> Result<(), CallError> {
             required_text(map, "character")?;
             required_text(map, "text")?;
         }
+        "group.album.media" => {
+            required_text(map, "album_id")?;
+        }
         _ => {}
     }
     Ok(())
@@ -1096,6 +1099,8 @@ mod tests {
             "group.ai_characters",
             "group.ai_voice",
             "group.ai_voice_send",
+            "group.album.list",
+            "group.album.media",
             "msg.poke",
             "like.send",
         ] {
@@ -1223,7 +1228,7 @@ mod tests {
     #[test]
     fn every_op_is_hierarchical_tagged_and_routed() {
         let methods = catalog();
-        assert_eq!(methods.len(), 89, "批次 6 后应有 89 个层级 op");
+        assert_eq!(methods.len(), 91, "批次 7 后应有 91 个层级 op");
         assert!(!methods.is_empty());
         for method in methods.iter() {
             let name = method.name.as_ref();
@@ -1943,5 +1948,49 @@ mod tests {
         assert_eq!(record.kind, OutgoingKind::Message);
         assert_eq!(record.platform_id.as_deref(), Some("88"));
         assert_eq!(record.elements, vec![Element::text("[AI 语音]")]);
+    }
+
+    /// 批次 7 只暴露群相册的只读主路径；上传/删除/评论/点赞都不接。
+    #[test]
+    fn batch_seven_album_ops_are_read_only_and_routed() {
+        let methods = catalog();
+        for (name, action) in [
+            ("group.album.list", "get_group_album_list"),
+            ("group.album.media", "get_group_album_media_list"),
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("没有 {name}"));
+            assert_eq!(method.risk, Risk::Read, "{name} 只能是只读");
+            assert_eq!(method.effect, Effect::Read, "{name} 只能是只读");
+            let route = ROUTES
+                .iter()
+                .find(|route| route.method == name)
+                .unwrap_or_else(|| panic!("{name} 没有路由"));
+            match route.target {
+                Target::Fixed(target) => assert_eq!(target, action, "{name} 路由不对"),
+                Target::ByRoom { .. } => panic!("{name} 不该按房间分叉"),
+            }
+        }
+        assert!(
+            !methods
+                .iter()
+                .any(|method| method.name.as_ref().contains("album.upload")
+                    || method.name.as_ref().contains("album.delete")),
+            "相册写操作不应进 catalog"
+        );
+    }
+
+    #[test]
+    fn album_media_requires_an_album_id() {
+        assert!(validate_call_params("group.album.media", &json!({"album_id": " "})).is_err());
+        assert!(
+            validate_call_params(
+                "group.album.media",
+                &json!({"album_id": "a1", "attach_info": ""})
+            )
+            .is_ok()
+        );
     }
 }
