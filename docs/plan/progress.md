@@ -1965,6 +1965,32 @@
   - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode、
     `node --check` 全绿。
 
+## 2026-11-05 — 票据申请准入（access grants 第一笔）
+
+- 做了什么：
+  - 新增 `GrantCapability::AccessRequest` 与 `grants::evaluate_access_request`；
+    默认口径：群友只能申请本会话已订阅目标；`system_admin` / `bot_admin` 在私信
+    或控制台可申请任意目标；显式 `[[grants.rules]]` 才能放开跨目标。
+  - `access_request` 申请前先过 grants，再跑 fail-closed 预检：连接存在、op 在
+    catalog、参数形状、`destructive` 未开 `allow_destructive` 时直接
+    `[destructive_disabled]` 且不建票不发私信。
+  - `/approve` `/deny` `/revoke` 身份改走 `grants.subject_for`（system_admin 或
+    bot_admin），不再硬编码账号；允许/拒绝都写 `[access-approval]` 审计行。
+  - 审批私信新增 `申请者：<id>（<显示名>）`；票据审计行补 `sender` /
+    `sender_name` / `reason`；申请被拒写 `[access-request] denied ... code=...`。
+  - 冷却与额度数值不变。
+- 未落地（第二笔）：`AccessTarget` 类型化、`account_read` / `account_secret`、
+  按 kind 匹配规则、typed target 审批展示、`any` 的可达范围。当前 target 仍是
+  `RoomId`。
+- 已知接受：管理员冷却是全局单时间戳，存在轻量 DoS；已写进 access-grants.md。
+- 证据：
+  - `group_user_defaults_to_subscribed_targets_only`
+  - `bot_admin_can_approve_but_ordinary_user_cannot`
+  - `destructive_platform_call_is_refused_at_request_time`
+  - `access_request_defaults_to_subscriptions_except_admin_private`
+  - `batch_approve_sets_each_ticket_active_and_audits`（sender/name 审计）
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings` 全绿。
+
 
 ## 部署注意事项（nix-config 打包）
 

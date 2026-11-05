@@ -2462,15 +2462,30 @@ impl<S: Store> Bridge<S> {
         if !matches!(verb.as_str(), "/approve" | "/deny" | "/revoke") {
             return Ok(None);
         }
-        // 只认私信里的 system admin；群聊、控制台和其他账号都不行。
-        let Some(admin) = self.config.grants.system_admin.as_ref() else {
+        // 只认私信里的管理员：system_admin 与配置的 bot_admin。身份走 grants 判定，
+        // 不再硬编码某一个账号；拒绝也留审计行。
+        if room.path.first().map(String::as_str) != Some("private") {
+            eprintln!(
+                "[access-approval] verb={} room={} sender={} result=deny reason=not_private",
+                verb, room, draft.sender.id
+            );
             return Ok(None);
-        };
-        if room.connection != admin.connection
-            || room.path.first().map(String::as_str) != Some("private")
-            || room.path.get(1).map(String::as_str) != Some(admin.account.as_str())
-            || draft.sender.id != admin.account
-        {
+        }
+        let place = GrantsConfig::place_of(room, true);
+        let subject =
+            self.config
+                .grants
+                .subject_for(&room.connection, Some(draft.sender.id.as_str()), place);
+        let allowed = matches!(subject, GrantSubject::SystemAdmin | GrantSubject::BotAdmin);
+        eprintln!(
+            "[access-approval] verb={} room={} sender={} subject={} result={}",
+            verb,
+            room,
+            draft.sender.id,
+            subject.as_str(),
+            if allowed { "allow" } else { "deny" }
+        );
+        if !allowed {
             return Ok(None);
         }
 
@@ -4749,6 +4764,10 @@ impl<S: Store> Bridge<S> {
             ctx.origin_sender.as_deref(),
             place,
         );
+        let origin_sender_name = ctx
+            .origin_sender
+            .as_deref()
+            .and_then(|sender| self.origin_sender_name(&ctx.room, sender));
         if principal == GrantSubject::System {
             return Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
@@ -4794,14 +4813,45 @@ impl<S: Store> Bridge<S> {
         }
 
         // 先校验全部条目，再创建：任何一条失败都整批拒绝，不做部分受理。
+        let subscriptions: Vec<RoomId> = ctx
+            .config
+            .session(&ctx.session)
+            .map(|item| {
+                item.subscriptions
+                    .iter()
+                    .map(|subscription| subscription.room.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut requests = Vec::with_capacity(args.items.len());
         for (index, item) in args.items.iter().enumerate() {
             let target = resolve_room(&item.target)
                 .map_err(|error| batch_item_error(index, &error.message))?;
             if ctx.config.connection(&target.connection).is_none() {
+                self.audit_ticket_denied(ctx, &target, "unknown_connection", &target.connection);
                 return Err(batch_item_error(
                     index,
                     &format!("unknown connection {}", target.connection),
+                ));
+            }
+            let decision = crate::grants::evaluate_access_request(
+                &ctx.config.grants,
+                &crate::grants::GrantQuery {
+                    subject: principal,
+                    place,
+                    capability: GrantCapability::AccessRequest,
+                    target: GrantTarget::Room(&target),
+                    subscriptions: &subscriptions,
+                },
+            );
+            if !decision.allow {
+                self.audit_ticket_denied(ctx, &target, "access_request_denied", &decision.reason);
+                return Err(ToolError::new(
+                    ErrorCode::ToolNotAllowed,
+                    format!(
+                        "[access_request] items[{index}]: [access_request_denied] {}; whole batch rejected",
+                        decision.reason
+                    ),
                 ));
             }
             let ops = crate::tickets::normalize_ops(&item.ops)
@@ -4809,6 +4859,28 @@ impl<S: Store> Bridge<S> {
             let capabilities = self
                 .ticket_capabilities(&target, &ops)
                 .map_err(|error| batch_item_error(index, &error.message))?;
+            let methods = self.outbound.catalog(&target.connection);
+            for op in &ops {
+                let Some(name) = op.strip_prefix("platform_call:") else {
+                    continue;
+                };
+                let spec = find_platform_op(&methods, name)
+                    .map_err(|error| batch_item_error(index, &error.message))?;
+                if spec.risk == Risk::Destructive
+                    && !Self::allows_destructive(&ctx.config, &target.connection, name)
+                {
+                    self.audit_ticket_denied(ctx, &target, "destructive_disabled", name);
+                    return Err(ToolError::new(
+                        ErrorCode::ToolNotAllowed,
+                        format!(
+                            "[access_request] items[{index}]: [destructive_disabled] {name} is \
+                             destructive and connection {} does not allow it; enable \
+                             allow_destructive before requesting a ticket; whole batch rejected",
+                            target.connection
+                        ),
+                    ));
+                }
+            }
             if let Some(params) = &item.params
                 && params.to_string().len() > crate::tickets::MAX_SNAPSHOT_BYTES
             {
@@ -4831,6 +4903,7 @@ impl<S: Store> Bridge<S> {
                 ops,
                 params: item.params.clone(),
                 origin_sender: ctx.origin_sender.clone(),
+                origin_sender_name: origin_sender_name.clone(),
                 capabilities,
                 request_turn: ticket.as_str().to_owned(),
                 batch_id: None,
@@ -5940,6 +6013,36 @@ impl<S: Store> Bridge<S> {
             .filter(|turn| turn.session == session && turn.room == *origin)
             .max_by_key(|turn| turn.at)
             .and_then(|turn| turn.origin_sender.clone())
+    }
+
+    /// 触发者的显示名：从最近记录里按 id 找，只用于审批展示，不参与身份判定。
+    fn origin_sender_name(&self, room: &RoomId, sender: &str) -> Option<String> {
+        self.store
+            .since(room, 0, usize::MAX)
+            .ok()?
+            .into_iter()
+            .rev()
+            .take(200)
+            .find(|record| record.sender.id == sender)
+            .map(|record| record.sender.name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+    }
+
+    fn audit_ticket_denied(&self, ctx: &TurnCtx, target: &RoomId, code: &str, detail: &str) {
+        let sender_name = ctx
+            .origin_sender
+            .as_deref()
+            .and_then(|sender| self.origin_sender_name(&ctx.room, sender))
+            .unwrap_or_else(|| "-".to_owned());
+        eprintln!(
+            "[access-request] denied sender={} sender_name={} room={} target={} code={} detail=\"{}\"",
+            ctx.origin_sender.as_deref().unwrap_or("-"),
+            sender_name,
+            ctx.room,
+            target,
+            code,
+            detail.replace('"', "'"),
+        );
     }
 
     fn audit_grant(
@@ -8568,6 +8671,8 @@ fn ticket_json(ticket: &crate::tickets::AccessTicket) -> Value {
         "created_at": ticket.created_at,
         "expires_at": ticket.expires_at,
         "request_turn": ticket.request_turn,
+        "origin_sender": ticket.origin_sender,
+        "origin_sender_name": ticket.origin_sender_name,
         "approval_ref": ticket.approval_ref,
         "execution_status": ticket.execution_status,
         "executed_at": ticket.executed_at,
@@ -8625,6 +8730,11 @@ fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
                 "   注意：critical 结果只在 access_ticket_get 中可见，不进入房间流水或投递正文。\n",
             );
         }
+        text.push_str(&format!(
+            "   申请者：{}（{}）\n",
+            ticket.origin_sender.as_deref().unwrap_or("-"),
+            ticket.origin_sender_name.as_deref().unwrap_or("-"),
+        ));
     }
     text.push_str("批准整批：/approve <batch_id>\n");
     text.push_str("批准单张：/approve <ticket-id> <nonce>\n");

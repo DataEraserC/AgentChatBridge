@@ -89,6 +89,8 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
     name: "access_request",
     description: `申请一次性访问票据。一条 item = 单张；多条 = 批量（共享 batch_id，每张仍是独立票据）。
 申请本身不执行任何平台动作；core 会把归一化后的目标/op 发给 system admin 私信，由人在私信里批准或拒绝。
+申请前会按 grants 判定：群友默认只能申请本会话已订阅目标；system_admin / bot_admin 私信可申请任意目标；
+未订阅目标要显式 [[grants.rules]] capability=["access_request"] 放开。destructive 未开 allow_destructive 时申请阶段直接拒。
 批准后 core 按申请时保存的 params 快照直接执行 send_message / send_message_to / platform_call:<method>；
 快照必须完整（例如 send 的 elements、平台方法的全部参数），批准后不能再改。
 只读 op（get_history 等）不由 core 执行：批准后票据保持 active，由会话在有效期内自己重试一次。

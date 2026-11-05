@@ -102,6 +102,8 @@ pub struct AccessTicket {
     pub params: Option<Value>,
     /// 申请轮次的触发者；唤醒执行结果时沿用，不继承管理员身份。
     pub origin_sender: Option<String>,
+    /// 触发者的显示名，只用于审批私信与审计；不参与身份判定。
+    pub origin_sender_name: Option<String>,
     pub capabilities: BTreeSet<GrantCapability>,
     /// 进程内的创建序号；批量执行按它还原申请顺序。
     pub seq: u64,
@@ -134,6 +136,7 @@ pub struct TicketRequest {
     pub ops: Vec<String>,
     pub params: Option<Value>,
     pub origin_sender: Option<String>,
+    pub origin_sender_name: Option<String>,
     pub capabilities: BTreeSet<GrantCapability>,
     pub request_turn: String,
     pub batch_id: Option<String>,
@@ -331,6 +334,7 @@ impl AccessTickets {
             ops,
             params: request.params,
             origin_sender: request.origin_sender,
+            origin_sender_name: request.origin_sender_name,
             capabilities: request.capabilities,
             seq: self.seq,
             created_at: request.now,
@@ -773,7 +777,7 @@ impl AccessTickets {
             .join("|");
         let ops = ticket.ops.join("|");
         let line = format!(
-            "[access-ticket] event={} ticket={} batch={} state={} principal={} place={} capability={} target={} ops={} session={} turn={} approval_ref={} reason=\"{}\"",
+            "[access-ticket] event={} ticket={} batch={} state={} principal={} place={} capability={} target={} ops={} session={} turn={} sender={} sender_name={} approval_ref={} reason=\"{}\"",
             event,
             ticket.id,
             ticket.batch_id.as_deref().unwrap_or("-"),
@@ -785,6 +789,8 @@ impl AccessTickets {
             ops,
             ticket.session,
             ticket.request_turn,
+            ticket.origin_sender.as_deref().unwrap_or("-"),
+            ticket.origin_sender_name.as_deref().unwrap_or("-"),
             ticket.approval_ref.as_deref().unwrap_or("-"),
             reason.replace('"', "'"),
         );
@@ -891,6 +897,7 @@ mod tests {
             ops: ops.iter().map(|op| (*op).to_owned()).collect(),
             params: Some(serde_json::json!({"elements": [{"type": "text", "text": "x"}]})),
             origin_sender: Some("user1".to_owned()),
+            origin_sender_name: Some("群友一".to_owned()),
             capabilities: BTreeSet::from([GrantCapability::RoomWrite]),
             request_turn: "turn-1".to_owned(),
             batch_id: None,
@@ -1121,6 +1128,14 @@ mod tests {
                 .iter()
                 .any(|line| line.contains(&batch_audit)),
             "整批批准必须留一条 batch 审计：{:?}",
+            tickets.audit_log
+        );
+        assert!(
+            tickets
+                .audit_log
+                .iter()
+                .any(|line| line.contains("sender=user1 sender_name=群友一")),
+            "票据审计要带触发者 id 与显示名：{:?}",
             tickets.audit_log
         );
     }

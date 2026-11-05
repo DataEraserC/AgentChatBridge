@@ -78,6 +78,8 @@ pub enum GrantCapability {
     Destructive,
     /// 最高风险档。只由 `access_request` 票据携带，配置里的常驻授予一律拒绝。
     Critical,
+    /// 能不能发起 `access_request`。与房间读写能力正交。
+    AccessRequest,
     Plugin,
 }
 
@@ -90,6 +92,7 @@ impl GrantCapability {
             Self::Platform => "platform",
             Self::Destructive => "destructive",
             Self::Critical => "critical",
+            Self::AccessRequest => "access_request",
             Self::Plugin => "plugin",
         }
     }
@@ -376,6 +379,26 @@ pub fn evaluate_platform(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Optio
     evaluate_rules(grants, query)
 }
 
+/// 票据申请能力的评估。默认口径：
+/// - `system_admin` / `bot_admin` 在私信或控制台可以申请任意目标；
+/// - 其它主体只能申请本会话已订阅的目标（`base:subscription`）；
+/// - 显式规则可以放开跨目标（`scope = any` / `room` / `connection`）。
+pub fn evaluate_access_request(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDecision {
+    if let Some(decision) = evaluate_rules(grants, query) {
+        return decision;
+    }
+    match (query.subject, query.place) {
+        (GrantSubject::SystemAdmin | GrantSubject::BotAdmin, GrantPlace::Private)
+        | (GrantSubject::SystemAdmin | GrantSubject::BotAdmin, GrantPlace::Console) => {
+            GrantDecision::allow(
+                "base:admin_private",
+                "admin may request tickets for any target from private/console",
+            )
+        }
+        _ => base_access(query),
+    }
+}
+
 /// 插件工具能力检查。普通主体沿用基础放行；管理员主体若配置了匹配规则，
 /// 规则里的 capability 决定是否允许 `plugin`。
 pub fn evaluate_tool(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDecision {
@@ -487,6 +510,47 @@ impl GrantRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_request_defaults_to_subscriptions_except_admin_private() {
+        let grants = GrantsConfig::default();
+        let target = RoomId::parse("qq:group/999").expect("房间");
+        let subscriptions = Vec::new();
+        let decide = |subject, place, subscriptions: &[RoomId]| {
+            evaluate_access_request(
+                &grants,
+                &GrantQuery {
+                    subject,
+                    place,
+                    capability: GrantCapability::AccessRequest,
+                    target: GrantTarget::Room(&target),
+                    subscriptions,
+                },
+            )
+        };
+        assert!(
+            !decide(GrantSubject::User, GrantPlace::Group, &subscriptions).allow,
+            "群友默认不能申请未订阅目标"
+        );
+        assert!(
+            decide(
+                GrantSubject::SystemAdmin,
+                GrantPlace::Private,
+                &subscriptions
+            )
+            .allow,
+            "system_admin 私信可以申请任意目标"
+        );
+        assert!(
+            decide(GrantSubject::BotAdmin, GrantPlace::Private, &subscriptions).allow,
+            "bot_admin 私信可以申请任意目标"
+        );
+        let subscribed = vec![target.clone()];
+        assert!(
+            decide(GrantSubject::User, GrantPlace::Group, &subscribed).allow,
+            "已订阅目标默认可申请"
+        );
+    }
 
     fn eval_access(
         grants: &GrantsConfig,
