@@ -200,6 +200,13 @@ pub struct NotesArgs {
     /// 只看某种笔记：`term` / `member` / `topic`。
     #[serde(default)]
     pub kind: Option<String>,
+    /// 只看某个键；给 key 时通常是一条，用于索引降级后取回完整 value。
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 /// 写一条笔记。
@@ -246,6 +253,10 @@ pub struct NotesToolArgs {
     pub label: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 /// 查平台事件。

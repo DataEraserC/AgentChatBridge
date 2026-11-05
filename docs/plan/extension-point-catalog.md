@@ -142,7 +142,7 @@
 | `fetch_records` | 少量 id ≈ KB 级 | **无上限** | **是**（ids 数 × 单条；且扫全房间流水） | 无 ids 上限 |
 | `wait_message` | 0–几条 ≈ 几 KB | 受 limit/超时约束 | 是 | 默认/上限见参数 |
 | `list_rooms` | < 1 KB | 订阅数 × ~100 B | **是**（房间数） | 无分页 |
-| `get_notes` → `notes`（op=list） | 几 KB | notes 数 × 单条 | **是**（笔记数） | 无分页 |
+| `notes` op=list（原 `get_notes`） | 几 KB | notes 数 × 单条 | **是**（笔记数） | 已有 `limit` / `offset`（默认 20，上限 100）与 4 KiB 索引降级 |
 | `notes`（op=set/del） | < 300 B | < 500 B | 否 | — |
 | `get_platform_events` | 20 条 ≈ 几 KB | 200 条 | **是** | `limit` ≤ 200 |
 | `platform_call`（列目录模式） | 摘要 ≈ 几 KB | 全量 op × 连接数，可达几十 KB | **是**（连接 × op） | `connection` 过滤；无条数上限 |

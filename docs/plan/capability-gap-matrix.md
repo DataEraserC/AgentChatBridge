@@ -143,7 +143,7 @@ ACB 应该走第三条路：
 | 子代理路由提示词（D2） | **明确不做** | 属于模型/harness 的 agent 编排；ACB 不持有模型会话 | 低 | 不做 subagent 编排、handoff 工具 |
 | 系统提示词 / 上下文模板（D3） | **明确不做**（模板编排）；**已有**（数据面） | `Delivery` 已给 persona、memories、records、omitted/more；模板渲染是 harness 职责 | 低 | 避免把某家模型的消息格式写进 core |
 | 预设 CRUD / 克隆 / 列目录（D4） | **已有** | 人格是 core 配置，控制台可增删改；插件不能改核心配置 | 中 | 不给插件第二套人格存储；插件自定义预设用 `PluginState` |
-| Authors Note / Lore Book（D5） | **需要新 hook** | 现只有 `get_notes/set_note` 工具，notes 不会自动进入投递；需要只读的上下文注入/展示注入 hook（可按关键词触发） | 中 | 注入内容与事实记录分开；不要把 note 混进 `elements` 真值 |
+| Authors Note / Lore Book（D5） | **需要新 hook** | 现只有 `notes` 单入口工具（op=list/set/del），notes 不会自动进入投递；需要只读的上下文注入/展示注入 hook（可按关键词触发） | 中 | 注入内容与事实记录分开；不要把 note 混进 `elements` 真值 |
 | `AGENTS.md` 作为记忆与提示（D6） | **已有** | 记忆 worktree + `memory_*` 工具；`Delivery.memories` 给 harness 路径 | 高 | 文件内容由 harness/agent 读；桥只锁路径 |
 | `CLASSIFIER.md` 管理员补充规则（D7） | **插件可实现** | 插件可按 `RouteContext.is_admin/sender` 做策略；规则文件由插件自己持有 | 低 | 不要让 core 认识具体规则文件 |
 

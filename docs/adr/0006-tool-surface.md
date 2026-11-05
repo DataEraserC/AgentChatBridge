@@ -12,7 +12,7 @@ agent 在一轮里可以调用的工具：
 | `send_message_to` | elements, to | 发到指定房间；`to` 的可选目标 = 本设备的全部订阅，越界拒绝 |
 | `get_history` | room, before, limit | 查订阅房间的流水 |
 | `list_rooms` | — | 列出本设备订阅的房间 |
-| `get_notes` / `set_note` / `del_note` | room, key, value | 笔记读写 |
+| `notes` | op(list/set/del), room, kind, key, value | 笔记读写（原 `get_notes` / `set_note` / `del_note`，2026-11-05 合并为单入口） |
 | `get_platform_events` | room, limit | 查最近的平台事件 |
 | `wait_message` | room, timeout | **阻塞**等该房间来新未读，等到就作为工具结果返回（自动确认）；超时返回空。上限受配置约束 |
 | `ack_messages` | ids | 确认这批消息已处理完；水位只前进地推到连续位置，未确认的下一轮重投（见 [0010](0010-ack-watermark.md)） |

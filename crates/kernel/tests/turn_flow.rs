@@ -2006,6 +2006,115 @@ fn notes_written_in_one_room_are_invisible_in_another() {
 }
 
 #[test]
+fn notes_list_paginates_clamps_and_indexes_large_pages() {
+    let (mut bridge, _sends) = bridge();
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    for index in 0..105 {
+        bridge
+            .tool_call(
+                &ticket,
+                &sessions(),
+                "notes",
+                json!({"op": "set", "kind": "term", "key": format!("note-{index}"), "value": "x"}),
+            )
+            .expect("能写");
+    }
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "notes",
+            json!({"op": "set", "kind": "member", "key": "老王", "value": "运维"}),
+        )
+        .expect("能写");
+
+    let page = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "notes",
+            json!({"op": "list", "limit": 2, "offset": 1}),
+        )
+        .expect("能读");
+    assert_eq!(page["total"], 106);
+    assert_eq!(page["offset"], 1);
+    assert_eq!(page["returned"], 2);
+    assert_eq!(page["has_more"], true);
+    assert_eq!(page["next_offset"], 3);
+
+    let lower = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "notes",
+            json!({"op": "list", "limit": 0}),
+        )
+        .expect("能读");
+    assert_eq!(lower["returned"], 1, "limit 0 归一到 1");
+
+    let upper = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "notes",
+            json!({"op": "list", "limit": 999}),
+        )
+        .expect("能读");
+    assert_eq!(upper["returned"], 100, "limit 上限 100");
+    assert_eq!(upper["has_more"], true);
+    assert_eq!(upper["indexed"], true, "超过 4 KiB 要索引降级");
+    assert!(
+        upper["notes"][0].get("value").is_none(),
+        "索引形态省略 value：{}",
+        upper["notes"][0]
+    );
+    assert!(upper["notes"][0]["value_chars"].is_number());
+
+    let beyond = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "notes",
+            json!({"op": "list", "offset": 999}),
+        )
+        .expect("越界不是错误");
+    assert_eq!(beyond["returned"], 0);
+    assert_eq!(beyond["has_more"], false);
+
+    let all = bridge
+        .tool_call(&ticket, &sessions(), "notes", json!({"op": "list"}))
+        .expect("不传 kind 返回全部");
+    assert_eq!(all["total"], 106, "list 不传 kind 不按 term 收窄");
+
+    let members = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "notes",
+            json!({"op": "list", "kind": "member"}),
+        )
+        .expect("能读");
+    assert_eq!(members["total"], 1);
+    assert_eq!(members["notes"][0]["key"], "老王");
+
+    let one = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "notes",
+            json!({"op": "list", "key": "note-7"}),
+        )
+        .expect("按 key 读回");
+    assert_eq!(one["returned"], 1);
+    assert!(one.get("indexed").is_none(), "单条不应触发索引降级");
+    assert_eq!(one["notes"][0]["value"], "x");
+}
+
+#[test]
 fn notes_are_isolated_per_platform_down_to_storage() {
     // 直接打存储层：QQ 群 123 和 Discord 频道 123 是同一个号、不同平台。
     let mut store = MemoryStore::new();

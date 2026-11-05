@@ -1905,6 +1905,26 @@
     `node --check` 全绿。
 - 下一步入口：QQ 空间 10 个动作 + 收藏/闪传 115 个 extended；按新档位另起批次。
 
+## 2026-11-05 — 票据词表、notes 分页与旧工具名清理
+
+- 做了什么：
+  - `access_request` 描述里的 `get_notes` / `set_note` / `del_note` 改为
+    `notes:list` / `notes:set` / `notes:del`，与 `ticket_capabilities` 一致。
+  - `notes op=list` 补 `limit` / `offset`（默认 20、上限 100）、`total` / `returned` /
+    `has_more` / `next_offset`，并按 4 KiB 做索引降级；索引省略 `value`，可用 `key`
+    精确查回单条。`kind` 描述拆开：list 不传=全部，set/del 不传=term。
+  - `memory_git op=log` 的 `limit` clamp 到 1..=100，默认 10 不变。
+  - `docs/02-glossary.md` 工具表按 28 个工具重写；同步修正
+    `01-vision.md` / `03-architecture.md` / `06-harness-adapters.md` / ADR-0006 /
+    ADR-0017 / ADR-0022 / ADR-0029 / `extension-point-catalog.md` /
+    `capability-gap-matrix.md` 里的旧名或旧计数；历史计划文档加迁移注记。
+- 证据：
+  - `notes_list_paginates_clamps_and_indexes_large_pages`
+  - `ticket_ops_use_the_notes_entry_names`
+  - `engine::limit_tests::memory_git_log_limit_is_clamped_to_100`
+  - 全量验证：`cargo test --workspace`、clippy `-D warnings`、dsh/opencode、
+    `node --check` 全绿。
+
 
 ## 部署注意事项（nix-config 打包）
 

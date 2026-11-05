@@ -3,6 +3,10 @@
 来源：ADR-0029（动态扩展）、ADR-0030（unload-safe native）、`/api/feedback` 的 6 条
 agent 反馈，以及 2026-11-03 用户新增要求（PluginManager 嵌套样例、unload-safe native）。
 
+> 注（2026-11-05）：文中 `task_list` / `task_get` / `feedback_list` / `feedback_get` /
+> `memory_git_*` / `set_note` 是工具合并前的名字；当前工具面见
+> [02-glossary.md](../02-glossary.md#工具面)（`tasks` / `feedback` / `memory_git` / `notes`）。
+
 执行规则：
 
 1. 按顺序执行，前一项验收通过后再开始下一项。

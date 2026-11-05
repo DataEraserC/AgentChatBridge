@@ -113,7 +113,7 @@ flowchart TD
 用户未具体拍板，先按下面做，随时可推翻：
 
 1. **唤醒的其它条件**（关键词、免打扰名单、睡眠时段）：做成默认唤醒策略的**可选开关**，默认全关。默认策略本身保持「@ + 昵称 + 攒 N 条」三件套。
-2. **读取类工具第一版范围**：全做——`get_history` / `list_rooms` / `get_notes` / `set_note` / `del_note` / `get_platform_events`。每个工具都很薄，成本主要在协议层，一次做齐省得反复改。之后又补了 `fetch_records` / `platform_call` / `describe_plugins` / `report_feedback` / `memory_*`，当前清单见[术语表](02-glossary.md#工具面)。
+2. **读取类工具第一版范围**：全做——`get_history` / `list_rooms` / `notes`（op=list/set/del）/ `get_platform_events`。每个工具都很薄，成本主要在协议层，一次做齐省得反复改。之后又补了 `fetch_records` / `platform_call` / `describe_plugins` / `report_feedback` / `memory_*`，当前清单见[术语表](02-glossary.md#工具面)。
 3. **标准元素表**：第一版就 8 个（text / at / quote / image / audio / video / file / 表情），不加 markdown。平台富文本走不透明载荷透传；等真有跨平台富文本需求再加元素，加元素是兼容演进。
 
 ## 目录规划

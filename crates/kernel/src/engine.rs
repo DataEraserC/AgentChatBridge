@@ -91,6 +91,11 @@ const PROMPT_MAX_FRAGMENTS: usize = 8;
 const PROMPT_TIMEOUT: Duration = Duration::from_millis(50);
 /// `task_list` 单页上限。
 const TASK_LIST_LIMIT: usize = 100;
+/// 笔记列表默认每页 20 条，上限 100，与 tasks/feedback 一致。
+const NOTE_LIST_DEFAULT: usize = 20;
+const NOTE_LIST_LIMIT: usize = 100;
+/// `memory_git log` 默认 10 条，单次上限与其它列表一致。
+const MEMORY_GIT_LOG_LIMIT: usize = 100;
 
 /// 高信任模块直接唤醒的频率上限：每个来源在窗口内最多请求几次。
 const WAKE_REQUEST_LIMIT: usize = 6;
@@ -3593,6 +3598,8 @@ impl<S: Store> Bridge<S> {
                     value,
                     label,
                     status,
+                    limit,
+                    offset,
                 } = parsed;
                 match op.as_str() {
                     "list" => self.read_notes(
@@ -3602,6 +3609,9 @@ impl<S: Store> Bridge<S> {
                         NotesArgs {
                             room: note_room,
                             kind,
+                            key,
+                            limit,
+                            offset,
                         },
                     ),
                     "set" => {
@@ -6787,19 +6797,46 @@ impl<S: Store> Bridge<S> {
             Some(text) => Some(parse_note_kind(text)?),
             None => None,
         };
+        let key = args
+            .key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let notes: Vec<Note> = self
             .store
             .notes_in(&room)
             .map_err(internal)?
             .into_iter()
             .filter(|note| kind.is_none_or(|wanted| note.key.kind == wanted))
+            .filter(|note| key.is_none_or(|wanted| note.key.key == wanted))
             .collect();
 
-        Ok(json!({
+        let total = notes.len();
+        let offset = args.offset.unwrap_or(0);
+        let limit = args
+            .limit
+            .unwrap_or(NOTE_LIST_DEFAULT)
+            .clamp(1, NOTE_LIST_LIMIT);
+        let page: Vec<&Note> = notes.iter().skip(offset).take(limit).collect();
+        let has_more = offset + page.len() < total;
+        let mut response = json!({
             "room": room,
-            "total": notes.len(),
-            "notes": notes.iter().map(note_json).collect::<Vec<_>>(),
-        }))
+            "kind": kind.map(NoteKind::as_str),
+            "key": key,
+            "total": total,
+            "offset": offset,
+            "returned": page.len(),
+            "has_more": has_more,
+            "next_offset": if has_more { json!(offset + page.len()) } else { Value::Null },
+            "notes": page.iter().map(|note| note_json(note)).collect::<Vec<_>>(),
+        });
+        maybe_index_list(
+            &mut response,
+            "notes",
+            "indexed=true: note values omitted. Call notes {\"op\":\"list\",\"key\":\"<key>\"} to read one note; narrow kind or offset to reduce the page.",
+            note_index,
+        );
+        Ok(response)
     }
 
     fn write_note(
@@ -7929,7 +7966,8 @@ impl<S: Store> Bridge<S> {
         args: MemoryLogArgs,
     ) -> Result<Value, ToolError> {
         let worktree = self.memory_worktree(config, session, &args.memory)?;
-        let log = git_log(&worktree, args.limit.unwrap_or(10));
+        let limit = memory_git_log_limit(args.limit);
+        let log = git_log(&worktree, limit);
         Ok(json!({ "log": log }))
     }
 
@@ -8299,6 +8337,10 @@ fn parse_note_kind(text: &str) -> Result<NoteKind, ToolError> {
     })
 }
 
+fn memory_git_log_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(10).clamp(1, MEMORY_GIT_LOG_LIMIT)
+}
+
 fn note_json(note: &Note) -> Value {
     json!({
         "kind": note.key.kind.as_str(),
@@ -8311,6 +8353,19 @@ fn note_json(note: &Note) -> Value {
         }),
         "corrected": note.corrected,
         "updated_at": note.updated_at,
+    })
+}
+
+/// 笔记索引形态：保留键、标签、状态和时间，省略正文；正文可用 key 精确查回。
+fn note_index(note: &Value) -> Value {
+    json!({
+        "kind": note["kind"],
+        "key": note["key"],
+        "label": note["label"],
+        "status": note["status"],
+        "corrected": note["corrected"],
+        "updated_at": note["updated_at"],
+        "value_chars": note["value"].as_str().map(|value| value.chars().count()),
     })
 }
 
@@ -9271,4 +9326,16 @@ fn with_file_hint(detail: String) -> String {
          (3) place the file in a shared directory mounted on both sides and pass the platform-side \
          path. Do not start by checking path spelling and permissions."
     )
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn memory_git_log_limit_is_clamped_to_100() {
+        assert_eq!(memory_git_log_limit(None), 10, "默认 10 不变");
+        assert_eq!(memory_git_log_limit(Some(0)), 1, "下限 1");
+        assert_eq!(memory_git_log_limit(Some(999)), 100, "上限 100");
+    }
 }

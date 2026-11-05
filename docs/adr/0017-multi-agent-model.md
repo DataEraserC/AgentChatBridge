@@ -150,7 +150,8 @@
     固定为 `根/记忆id/会话id`。
   - 惰性初始化 + 幂等：worktree 存在且有效就复用，异常就报错，不存在才 checkout；空裸仓库
     （HEAD unborn）直接 `init` 成独立仓库（无历史可共享）。
-  - 文件 + git 工具加进桥的工具清单（`memory_read/write/list/search` + `memory_git_*`），
+  - 文件 + git 工具加进桥的工具清单（`memory_read/write/list/search` + `memory_git` 单入口，
+    2026-11-05 由 `memory_git_*` 合并而来），
     走现有 `tool_call` 帧、带 ticket；每个工具带 `memory` 参数指认操作哪个仓库；所有路径
     锁死在 worktree 内，`..`/绝对路径越界一律拒绝。
   - `Delivery` 加 `memories` 字段（id + worktree 路径），投递时带给 harness。

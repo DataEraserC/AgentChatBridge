@@ -51,23 +51,38 @@
 
 ## 工具面
 
-来源：用户裁定——不止有 send，还要有 get 等读取类工具。下表是**现状**（ADR-0017 之后、ADR-0020～0023 之后），不再是提案。
+来源：用户裁定——不止有 send，还要有 get 等读取类工具。下表是**现状**（ADR-0017 之后、ADR-0020～0023 之后），不再是提案。共 **28 个工具**（`TOOL_NAMES`）。
 
 | 工具 | 参数 | 行为 |
 |------|------|------|
 | `send_message` | elements（或 text） | 发到**当前轮次**的房间。回执 `ok` / `platform_id` / `at` / `room`，失败直接报错；正文里夹着调用标记被截断时多一个 `trimmed` + 说明；本机文件路径被换成中继 URL 时多一个 `relayed`（ADR-0025） |
 | `send_message_to` | elements, to | 发到别的房间。`to` 的默认可选目标 = **本会话订阅的房间**，越界拒绝；会话可用 `[sessions.access]` 放宽边界（ADR-0026）。跨会话发送已砍（ADR-0017） |
+| `access_request` | items（target / ops / params） | 申请一次性票据。op 用具体名字（`send_message_to`、`notes:list`、`platform_call:<op>`）；批准后 core 执行写类动作，只读 op 留 active 由会话重试 |
+| `access_ticket_get` | id / batch_id | 只读查询本会话发起的票据：状态、能力、执行结果与失败原因 |
+| `ack_messages` | ids | 确认消息处理完毕，水位前推。**幂等**；未确认的下轮重投（ADR-0010 修订） |
 | `get_history` | room, before, after, limit, columns | 查房间的流水。带 `total` / `has_more` / `next_before` / `next_after`；给了 `after` 就从旧往新翻（补看新消息），`columns` 里有 `quote_ref`（引用对到本房间编号，ADR-0024） |
 | `fetch_records` | room, ids, columns | 按水位编号精确查一批（补投递被截断的部分）；这轮读到的编号可以 `ack_messages` |
 | `wait_message` | room, timeout_ms, limit, columns | 在当前轮次房间里等新消息，最多 60 秒；返回并记为本轮读过，可 `ack_messages`；超时返回空。等待在 core 锁外，不挡别的会话 |
 | `list_rooms` | — | 列出本会话订阅了哪些房间、各自未读多少 |
-| `get_notes` / `set_note` / `del_note` | room, kind, key, value | 房间级笔记（term / member / topic） |
+| `notes` | op(list/set/del), room, kind, key, value, label, status, limit, offset | 房间级笔记（term / member / topic）。list 不传 kind=全部，set/del 不传 kind=term；list 默认 20 条、上限 100，超 4 KiB 索引降级，可用 key 查回单条 |
 | `get_platform_events` | room, limit, offset | 查平台事件，带 `total` / `has_more` |
 | `platform_call` | op, params, path, tags, query, all, room, limit, offset, where, fields, order_by, group_by | 平台能力单入口：给层级 `op`（如 `msg.send`、`member.list`）执行；不给 `op` 按 `path` / 封闭 `tags` / `query` 列目录，命中的 op 带参数表与 `example`（ADR-0024）。分页与查询在桥这层做（ADR-0022 / 0023）；未知 op 直接拒绝 |
 | `describe_plugins` | scope, extension | 插件/策略目录：默认本会话实际生效的 provider 和适配器，`scope=global` 看整个 Root；只读（ADR-0026 Phase 6） |
+| `extensions_list` | namespace | 列动态扩展目录（仅管理员会话） |
+| `extensions_read` | path, namespace | 读模块目录下的一个 `.toml` |
+| `extensions_write` | path, text, namespace | 原子写模块目录下的一个 `.toml` |
+| `extensions_reload` | namespace | 排队重载动态扩展 |
+| `tasks` | op(list/get), status, limit, offset, id | 后台任务记录；list 带分页，超 4 KiB 索引降级 |
 | `report_feedback` | text, refs, count, kind, severity, suggestion | 写一条反馈（ADR-0021）：哪一步卡住、出处编号、撞了几次 |
-| `ack_messages` | ids | 确认消息处理完毕，水位前推。**幂等**；未确认的下轮重投（ADR-0010 修订） |
-| `memory_*` | memory, path, needle, … | 记忆仓库的文件与 git 操作（12 个） |
+| `feedback` | op(list/get), status, limit, offset, id | 查本会话写过的反馈（T7c） |
+| `feedback_reply` | id, text | 给一条反馈写回复 |
+| `plugin_tools` | name, limit, offset | 插件工具索引：不给 name 只给摘要，给 name 返回完整 schema |
+| `plugin_tool_call` | tool, arguments, scope | 调插件工具；`scope` 必须显式声明，不能默认成当前房间 |
+| `memory_read` | memory, path | 读记忆 worktree 里的文件 |
+| `memory_write` | memory, path, content | 写记忆 worktree 里的文件 |
+| `memory_list` | memory, path, limit, offset | 列记忆目录，带分页 |
+| `memory_search` | memory, path, needle, limit, offset | 搜记忆文件，带分页 |
+| `memory_git` | op(status/log/diff/blame/add/commit/push/branch), memory, path, limit, message | 记忆仓库的 git 操作；`log` 默认 10 条、上限 100 |
 
 ## 旧词 → 新词对照
 

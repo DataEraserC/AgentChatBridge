@@ -93,7 +93,7 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
 票据不放宽 destructive 的 allow_destructive 闸门；critical 则相反：只能靠票据 + 私信审批放行，
 结果默认只进 access_ticket_get，不进房间流水或投递正文。
 同一个会话的审批消息会聚合成一条，在本轮结束时发出；冷却期内的申请会被明确拒绝并给出剩余秒数。
-op 列表要具体：send_message，send_message_to，get_history，fetch_records，get_notes，set_note，del_note，
+op 列表要具体：send_message，send_message_to，get_history，fetch_records，notes:list，notes:set，notes:del，
 get_platform_events，wait_message，或 platform_call:<op>（如 platform_call:member.kick）。
 批量最多 8 条；任一条校验失败整批拒绝。`,
     schema: {
@@ -229,7 +229,10 @@ false 是「这次没查」，不是「这条没这个值」，要的话把它�
   {
     name: "notes",
     description: `房间笔记单入口：op=list 查、set 写、del 删。
-kind=term 记词，member 记人，topic 记还没聊完的事（topic 有状态：open / closed）。`,
+kind=term 记词，member 记人，topic 记还没聊完的事（topic 有状态：open / closed）。
+list 不传 kind 是返回全部；set / del 不传 kind 才默认 term。
+list 返回 total / returned / has_more / next_offset；超过 4 KiB 会只给索引（省略 value），
+用 key 精确查回一条，或按 kind / offset 缩小范围。`,
     schema: {
       type: "object",
       properties: {
@@ -239,11 +242,19 @@ kind=term 记词，member 记人，topic 记还没聊完的事（topic 有状态
           description: "list 查、set 写、del 删",
         },
         room: ROOM_SCHEMA,
-        kind: { type: "string", description: "默认 term；list 时只看某种" },
-        key: { type: "string", description: "笔记的键；set / del 必填" },
+        kind: {
+          type: "string",
+          description: "term / member / topic；list 不传=全部，set / del 不传=term",
+        },
+        key: {
+          type: "string",
+          description: "笔记的键；set / del 必填，list 传了只看这一条",
+        },
         value: { type: "string", description: "笔记的内容；set 必填" },
         label: { type: "string", description: "给人看的名字；set 可选" },
         status: { type: "string", description: "只有 topic 用：open / closed" },
+        limit: { type: "number", description: "list 用：最多几条，默认 20，上限 100" },
+        offset: { type: "number", description: "list 用：从第几条开始（翻页）" },
       },
       required: ["op"],
       additionalProperties: false,
@@ -737,7 +748,7 @@ add 暂存改动（path 留空=全部）；commit 提交已暂存内容（要 me
           type: "string",
           description: "相对路径；blame 必填，add 留空=全部，其它 op 可忽略",
         },
-        limit: { type: "number", description: "log 用：看最近几条，默认 10" },
+        limit: { type: "number", description: "log 用：看最近几条，默认 10，上限 100" },
         message: { type: "string", description: "commit 用：提交信息" },
       },
       required: ["op", "memory"],
