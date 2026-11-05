@@ -21,7 +21,7 @@
 ## 0. 结论先行
 
 - **命名推荐**：`onebot-snowluma`。crate / Rust 类型 / 显示名改成这个名字；配置 `kind = "onebot11"` 和 provider id `acb.adapter.onebot11` **保持不动**，新增 `onebot-snowluma` 作为 kind 别名。这样名字同时涵盖协议（OneBot）与实现（SnowLuma），又不破坏现有配置和 LKG 持久化。
-- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 7 项、部分实现 8 项、未实现 8 项**。动作级：现有 catalog 暴露 83 个层级 op / 86 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
+- **缺口总量**：按功能域拆成 25 项，其中 2 项不适用；适用的 23 项里，**完全实现 8 项、部分实现 8 项、未实现 7 项**。动作级：现有 catalog 暴露 83 个层级 op / 86 个 OneBot action；SnowLuma 中文 API 页分类合计 200 个、英文页 219 个（两页计数本身不一致，只能当量级参考）。
 - **实施顺序**：批次 0 改名 → 批次 1 版本/状态采集 → 批次 2 事件通道与平台健康 → 批次 3 消息/群管/成员/好友/请求/公告目录 → 批次 4 文件 CRUD 与表情扩展 → 批次 5 连接形态与鉴权 → 批次 6 流式与媒体 → 批次 7 相册/空间/收藏/闪传等扩展域。批次 6 必须先完成批次 5；若部署只用 HTTP API，批次 5 也要提前到任何消息能力之前。
 
 ---
@@ -113,8 +113,8 @@
 
 ### 1.4 当前实现的能力边界
 
-- **连接**：只做正向 WebSocket（`ws-client`）；`ws-server` 未实现，manifest 会让注册表拒绝（[config.rs](../../crates/kernel/src/config.rs#L3145-L3150)）。
-- **鉴权**：`Authorization: Bearer`，地址里的 `?access_token=` 原样保留（[link.rs](../../crates/adapters/onebot11/src/link.rs#L94-L149)）。
+- **连接**：正向 WebSocket（`ws-client`）与反向 WebSocket（`ws-server`，桥监听，SnowLuma 连入）；HTTP API、HTTP 事件上报与 `wss://` 未实现。
+- **鉴权**：`ws-client` 用 `Authorization: Bearer`（地址里的 `?access_token=` 原样保留）；`ws-server` 接受 `?access_token=` 或 `Authorization: Bearer`，不匹配直接 401。
 - **消息**：群/私聊文本、@、引用、图片、语音、视频、文件（单文件走 `upload_group_file` / `upload_private_file`）、自定义收藏表情（`msg.face`）、合并转发发送与读取。
 - **平台方法**：`catalog.rs` 的 `ROUTES` 共 83 个层级 op，映射 86 个 action（`msg.send` / `msg.history` / `msg.poke` 按群/私聊分动作）。`platform_call` 只允许调用 catalog 里有的 op，所以**没列出的 SnowLuma 动作，agent 根本调不到**。
 - **目录体积**：不带 `op` 列目录时，83 个 op 的原始清单约 17 KB；索引化后约 12 KB，仍超过 4 KiB 阈值，所以 `platform_call` 会自动只回一页（默认 20 个 op，约 3–4 KB，含 tags 概览），`_page` 给 `total` / `next_offset`，可用 `offset` 接着翻，或按 `path` / `tags` 收窄。
@@ -208,7 +208,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 |---|---|---|---|---|
 | 1 | 正向 WS | `wsServers` | **已实现**，`ws-client` | 无 |
 | 2 | HTTP API | `httpServers` | **未实现** | 没有 HTTP transport；出站只走 WS 队列 |
-| 3 | 反向 WS | `wsClients` | **未实现** | 桥不能当 WS 服务端；manifest 会拒绝 `ws-server` |
+| 3 | 反向 WS | `wsClients` | **已实现** | `transport = "ws-server"`，桥监听 `options.listen`；握手校验 `?access_token=` 或 Bearer；一次服务一条活动连接 |
 | 4 | HTTP 事件上报 | `httpClients` | **未实现** | 没有入站 HTTP 端点；也没有签名/令牌校验设计 |
 | 5 | `wss://` | 未成文 | **未实现** | 只接受 `ws://`；TLS 依赖未引入 |
 | 6 | Token 鉴权 | Bearer / query / 每适配器独立 | **已实现** | 单一 `Connection.token`；多 transport 时无法区分不同 token |
@@ -232,7 +232,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 24 | WebUI 邮件/Webhook | 运维通道 | **不适用** | 不在适配器职责 |
 | 25 | MCP / TypeScript SDK | 独立包 | **不适用** | 不是 OneBot 运行时协议 |
 
-**计数**：25 项中 2 项不适用；适用 23 项 = 已实现 7 + 部分 8 + 未实现 8。
+**计数**：25 项中 2 项不适用；适用 23 项 = 已实现 8 + 部分 8 + 未实现 7。
 批次 1 完成后计数不变：第 19 项仍是「部分」，但缺口从「启动不调用版本/状态」缩小为
 「缺能力查询、资料设置、在线状态设置」。批次 2 完成后计数仍不变：第 20 项仍是「部分」，
 但缺口从「`bot_status` 污染私聊房间、心跳不更新健康」缩小为「`group_upload` / `essence` /
@@ -240,7 +240,8 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 #11 群信息 / #12 好友 / #13 请求 / #14 公告从「部分」升为「已实现」；
 #10 群管理仍是「部分」，缺口缩为加群选项、群搜索、群分类标签。批次 4 完成后计数不变：
 #15 群文件 / #17 表情回应仍是「部分」，缺口分别缩为文件夹重命名/分享链接/转存与
-收藏表情新增/置顶。其余域不变。
+收藏表情新增/置顶。批次 5 完成后：#3 反向 WS 从「未实现」升为「已实现」，
+计数变为 **8 完全 / 8 部分 / 7 未实现**；HTTP API、HTTP 事件上报、`wss://` 仍未实现。
 
 **动作级覆盖**：
 - 现有 `ROUTES` 83 个层级 op / 86 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
@@ -632,7 +633,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 **前置**：批次 3 的 catalog 结构可复用。
 
-### 批次 5：连接形态与鉴权
+### 批次 5：连接形态与鉴权（已完成，2026-11-05）
 
 **能力范围**
 - HTTP API transport（`httpServers`）。
@@ -643,18 +644,38 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - 明确哪些形态是「必须」：现有部署是正向 WS；如果只做 SnowLuma 完整能力，HTTP + 正向 WS 至少要有一个，反向 WS 和 HTTP 上报可以按需。
 
 **涉及文件**
-- `crates/adapters/onebot11/src/link.rs`（拆分 transport）
-- `crates/adapters/onebot11/src/factory.rs`（manifest `transports`）
-- `crates/kernel/src/config.rs`（`Transport` 枚举与校验）
-- `crates/bridge/src/console.rs`、`console.html`
+- `crates/adapters/onebot-snowluma/src/link.rs`（拆分 transport）
+- `crates/adapters/onebot-snowluma/src/factory.rs`（manifest `transports`）
+- `crates/i18n/locales/{zh-CN,en}.json`
 - `config.example.toml`、`docs/guide/config.md`、`docs/05-adapters.md`
-- 测试：本地 HTTP / WS fixture
+- 测试：`link.rs` 的监听地址与 token 单元测试
 
 **验证方式**
 - 正向 WS、HTTP、反向 WS 各自最小集成测试。
 - token 矩阵：无 token、正确 Bearer、错误 Bearer、query token。
 - HTTP 事件上报：接收、去重、鉴权失败拒绝。
 - 断线重连不重复投递。
+
+**实际落地**
+- **反向 WS（`ws-server`）**：
+  - `factory.rs` 的 manifest `transports` 增加 `ws-server`；`create` 只在
+    `ws-server` 缺监听地址时拒绝，不再一律要求 `url`。
+  - `link.rs` 新增 `supervise_server`：绑定 `options.listen`（或 `url = "ws://host:port"`），
+    非阻塞 accept，握手完成即 `status.connected()` 并复用原有 `drive_ws`（安装发送槽、
+    探测身份、跑 pump）。一次只服务一条活动连接；客户端断开后继续等待下一条。
+  - 握手鉴权：配了 `token` 时接受 `?access_token=`（含 `%XX` 解码）或
+    `Authorization: Bearer`；不匹配返回 401，日志不打印 token。
+  - 监听/accept 失败是配置或环境问题：标 `failed` 并退出，不在原地无限重试。
+- **没有新增 op、没有新增工具位**：工具数保持 28，`platform_call` 仍是唯一平台入口；
+  本批只改连接方式，不改事件/消息解析。目录仍是 83 op，默认 20 条/页一页约 3–4 KB。
+- **按文档/实施成本判断不做（记缺口）**：
+  - HTTP API transport（`httpServers`）：需要新增 HTTP 客户端依赖与独立动作通道；
+    当前没有部署只用 HTTP，先不做。
+  - HTTP 事件上报接收端（`httpClients`）：需要入站 HTTP 服务、去重与鉴权设计，
+    文档也未给出签名/令牌细节，先不做。
+  - `wss://`：需要 TLS 依赖；现有部署用同机/内网 `ws://`，没确认前不声明支持。
+  - 多 transport 独立 token：目前只落了两条 WS 方向的 token 校验，没有 HTTP transport，
+    拆 token 字段没有实际收益。
 
 **前置**：这是「必须先解决鉴权/连接形态」的批次本身。批次 6 依赖它；如果部署只用 HTTP，批次 3/4 也要等它。
 
@@ -733,8 +754,10 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 7. **retcode 语义不完整**：文档只明确 `retcode = 0` 成功；权限不足、动作不存在、参数错误分别是什么 retcode，没有统一表。现有适配器把 1400/1401/1403/1404 做了映射（[outbound.rs](../../crates/adapters/onebot11/src/outbound.rs#L510-L520)），但 SnowLuma 是否完全一致需要实机核对。
 8. **动作不存在时的行为未知**：`platform_call` 只查本地 catalog，不会问平台。SnowLuma 对未实现动作可能返回 `retcode` 或占位成功；需要真机确认。
 9. **流式传输的 transport 限制未知**：6 个流式动作大概率依赖 HTTP，但文档没有明确说 WS 不支持；需要实测。
-10. **反向 WS 的 role 语义**：`Api` / `Event` / `Universal` 是 SnowLuma 侧配置；桥若当服务端，必须确认自己要不要按 role 分流，否则可能只收到事件或只收到动作回包。
-11. **多 transport 的 token**：HTTP 和 WS 可能各有各的 token，现有 `Connection.token` 只有一个字段；批次 5 必须决定是拆字段还是允许 `options` 覆盖。
+10. **反向 WS 的 role 语义**：`Api` / `Event` / `Universal` 是 SnowLuma 侧配置。当前实现按
+    `Universal` 处理：同一条连接既收事件也收动作回包；若 SnowLuma 只配 `Api` 或只配
+    `Event`，这条连接会缺一半能力。Adapter 没有按 role 分流，部署时必须配 `Universal`。
+11. **多 transport 的 token**：HTTP 和 WS 可能各有各的 token，现有 `Connection.token` 只有一个字段；批次 5 已落两条 WS 方向的校验，HTTP 没实现前不拆字段。
 12. **`wss://` 未成文**：如果生产需要 TLS，要么反向代理，要么加 TLS 依赖；不要在没确认前声明支持。
 
 ### 7.3 行为与安全风险

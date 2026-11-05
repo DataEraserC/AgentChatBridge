@@ -11,7 +11,7 @@
 //!   也不直接调 `ingest`。真正入库由 core 的 drain 线程统一做。
 
 use std::collections::HashMap;
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,7 @@ use std::time::Duration;
 use acb_kernel::{AdapterStatus, Connection, EventQueue, Outbound, RoomId};
 use serde_json::{Value, json};
 use tungstenite::error::Error as WsError;
+use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::{Message, WebSocket};
 
 use crate::event::{self, Parsed};
@@ -171,6 +172,77 @@ fn endpoint_of(url: &str) -> Result<String, LinkError> {
     } else {
         Ok(format!("{authority}:80"))
     }
+}
+
+/// 反向 WS 的监听地址从哪里来。
+///
+/// 优先 `options.listen`（如 `0.0.0.0:3001`）；也接受 `url = "ws://0.0.0.0:3001"`，
+/// 这样配置里不用多一个字段。两种都没有就返回 `None`，由工厂报明确错误。
+pub(crate) fn server_listen(connection: &Connection) -> Option<String> {
+    let option = connection
+        .options
+        .get("listen")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(listen) = option {
+        return Some(listen.to_owned());
+    }
+    connection.url.as_deref().and_then(|url| {
+        endpoint_of(url).ok().or_else(|| {
+            let address = url.split(['/', '?']).next()?.trim();
+            (!address.is_empty()).then(|| address.to_owned())
+        })
+    })
+}
+
+/// 服务端握手时验 token。SnowLuma 的反向 WS 常见写法是 `?access_token=`；
+/// 也接受 `Authorization: Bearer`，两种都只做常量时间语义上「直接比较」，不记录 token。
+fn server_token_ok(request: &Request, token: Option<&str>) -> bool {
+    let Some(token) = token.map(str::trim).filter(|token| !token.is_empty()) else {
+        return true;
+    };
+
+    let bearer = request
+        .headers()
+        .get(tungstenite::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim);
+    if bearer.is_some_and(|value| value == token) {
+        return true;
+    }
+
+    request
+        .uri()
+        .query()
+        .and_then(|query| {
+            query.split('&').find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                (key == "access_token").then(|| percent_decode(value))
+            })
+        })
+        .is_some_and(|value| value == token)
+}
+
+/// 只解码 `%XX`；token 一般用不到，但地址里出现编码时不能直接比较原文。
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = &value[index + 1..index + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// 一条连接喂事件时需要的一组只读上下文。
@@ -419,11 +491,26 @@ fn fail_all(waiting: &mut HashMap<String, Sender<Result<Value, LinkError>>>, rea
     }
 }
 
-/// 守护一条平台连接：连不上就等着重试，断了就重连，直到要退出。
+/// 守护一条平台连接：正向连平台，或者反向等平台连进来。
 ///
 /// 只拿连接配置快照，不拿 `Bridge`：适配器在 core 外，收发的记录走 `events`
 /// 队列，账号核对用配置里的 `account`。
 pub fn supervise(
+    slot: LinkSlot,
+    connection: Connection,
+    shutdown: Arc<AtomicBool>,
+    events: EventQueue,
+    status: AdapterStatus,
+) {
+    if connection.transport.as_str() == "ws-server" {
+        supervise_server(slot, connection, shutdown, events, status);
+    } else {
+        supervise_client(slot, connection, shutdown, events, status);
+    }
+}
+
+/// 正向 WS：桥主动连 OneBot 的服务端，断了重连。
+fn supervise_client(
     slot: LinkSlot,
     connection: Connection,
     shutdown: Arc<AtomicBool>,
@@ -446,30 +533,19 @@ pub fn supervise(
                     "{}",
                     acb_i18n::t!("adapter.onebot11.connected", id = id, url = url)
                 );
-                let (sender, actions) = mpsc::channel();
-                slot.install(sender.clone());
-
-                // 顺手问一下对面登录的是哪个号：订阅里的 send_account 要是跟它对不上，
-                // 自己说的话就会被当成别人说的，严重时会自己回自己。这种事必须当场喊出来。
-                {
-                    let sender = sender.clone();
-                    let account = account.clone();
-                    let id = id.clone();
-                    let status = status.clone();
-                    let min_version = min_version.clone();
-                    std::thread::spawn(move || {
-                        probe_identity(&sender, &account, &id, &status, &min_version)
-                    });
-                }
-
-                let ctx = PumpContext {
-                    events: &events,
-                    connection: &id,
-                    admin_qqs: &admin_qqs,
-                    status: &status,
-                };
-                let outcome = pump(ws, actions, ctx, &slot, &shutdown);
-                slot.clear();
+                let outcome = drive_ws(
+                    ws,
+                    &slot,
+                    DriveContext {
+                        connection: &id,
+                        account: &account,
+                        admin_qqs: &admin_qqs,
+                        min_version: &min_version,
+                        events: &events,
+                        status: &status,
+                    },
+                    &shutdown,
+                );
                 if shutdown.load(Ordering::Relaxed) {
                     status.disconnected("closed", "adapter shutdown");
                     break;
@@ -516,6 +592,199 @@ pub fn supervise(
             waited += Duration::from_millis(100);
         }
     }
+}
+
+/// 反向 WS：桥监听一个地址，SnowLuma 作为客户端连进来。一次只服务一条活动连接。
+///
+/// 握手时校验 token（`?access_token=` 或 `Authorization: Bearer`）；不匹配直接 401。
+/// 监听失败是配置/环境问题，标记 `failed` 后退出，不在原地无限重试。
+#[allow(clippy::result_large_err)] // tungstenite 的 ErrorResponse 是 http::Response，体量固定。
+fn supervise_server(
+    slot: LinkSlot,
+    connection: Connection,
+    shutdown: Arc<AtomicBool>,
+    events: EventQueue,
+    status: AdapterStatus,
+) {
+    let Some(listen) = server_listen(&connection) else {
+        status.failed("config", "ws-server requires options.listen");
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.adapter_error",
+                id = connection.id,
+                error = acb_i18n::t!("adapter.onebot11.ws_server_requires_listen")
+            )
+        );
+        return;
+    };
+    let listener = match TcpListener::bind(&listen) {
+        Ok(listener) => listener,
+        Err(error) => {
+            status.failed("listen", &error.to_string());
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "adapter.onebot11.ws_server_bind_failed",
+                    id = connection.id,
+                    listen = listen,
+                    error = error
+                )
+            );
+            return;
+        }
+    };
+    let _ = listener.set_nonblocking(true);
+    let id = connection.id.clone();
+    let admin_qqs = connection.admin_qqs.clone();
+    let account = connection.account.clone();
+    let min_version = version_floor(&connection.options);
+    eprintln!(
+        "{}",
+        acb_i18n::t!(
+            "adapter.onebot11.ws_server_listening",
+            id = id,
+            listen = listen
+        )
+    );
+
+    while !shutdown.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, remote)) => {
+                status.attempt();
+                let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+                let token = connection.token.clone();
+                let authorize = move |request: &Request,
+                                      response: Response|
+                      -> Result<Response, ErrorResponse> {
+                    if server_token_ok(request, token.as_deref()) {
+                        Ok(response)
+                    } else {
+                        let mut denied =
+                            tungstenite::http::Response::new(Some("unauthorized".to_owned()));
+                        *denied.status_mut() = tungstenite::http::StatusCode::UNAUTHORIZED;
+                        Err(denied)
+                    }
+                };
+                match tungstenite::accept_hdr(stream, authorize) {
+                    Ok(ws) => {
+                        let _ = ws.get_ref().set_read_timeout(Some(READ_TICK));
+                        status.connected();
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "adapter.onebot11.ws_server_connected",
+                                id = id,
+                                remote = remote
+                            )
+                        );
+                        let outcome = drive_ws(
+                            ws,
+                            &slot,
+                            DriveContext {
+                                connection: &id,
+                                account: &account,
+                                admin_qqs: &admin_qqs,
+                                min_version: &min_version,
+                                events: &events,
+                                status: &status,
+                            },
+                            &shutdown,
+                        );
+                        if shutdown.load(Ordering::Relaxed) {
+                            status.disconnected("closed", "adapter shutdown");
+                            break;
+                        }
+                        match outcome {
+                            Ok(()) => status.disconnected("closed", "connection closed"),
+                            Err(error) => {
+                                status.disconnected("unreachable", &error.to_string());
+                                eprintln!(
+                                    "{}",
+                                    acb_i18n::t!(
+                                        "adapter.onebot11.ws_server_connection_error",
+                                        id = id,
+                                        error = error
+                                    )
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        status.disconnected("auth", &error.to_string());
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "adapter.onebot11.ws_server_rejected",
+                                id = id,
+                                remote = remote,
+                                error = error
+                            )
+                        );
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                status.failed("listen", &error.to_string());
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "adapter.onebot11.ws_server_accept_failed",
+                        id = id,
+                        error = error
+                    )
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+}
+
+/// 连接建立后要带着走的一组 borrowed 上下文。
+struct DriveContext<'a> {
+    connection: &'a str,
+    account: &'a str,
+    admin_qqs: &'a [String],
+    min_version: &'a str,
+    events: &'a EventQueue,
+    status: &'a AdapterStatus,
+}
+
+/// 连接建立后的公共部分：安装发送槽、探测身份、跑 pump。
+fn drive_ws(
+    ws: Ws,
+    slot: &LinkSlot,
+    ctx: DriveContext<'_>,
+    shutdown: &AtomicBool,
+) -> Result<(), LinkError> {
+    let (sender, actions) = mpsc::channel();
+    slot.install(sender.clone());
+
+    // 顺手问一下对面登录的是哪个号：订阅里的 send_account 要是跟它对不上，
+    // 自己说的话就会被当成别人说的，严重时会自己回自己。这种事必须当场喊出来。
+    {
+        let sender = sender.clone();
+        let account = ctx.account.to_owned();
+        let connection = ctx.connection.to_owned();
+        let probe_status = (*ctx.status).clone();
+        let min_version = ctx.min_version.to_owned();
+        std::thread::spawn(move || {
+            probe_identity(&sender, &account, &connection, &probe_status, &min_version)
+        });
+    }
+
+    let pump_ctx = PumpContext {
+        events: ctx.events,
+        connection: ctx.connection,
+        admin_qqs: ctx.admin_qqs,
+        status: ctx.status,
+    };
+    let outcome = pump(ws, actions, pump_ctx, slot, shutdown);
+    slot.clear();
+    outcome
 }
 
 /// 连上之后问三件事：登录账号、协议/实现版本、账号在线状态。
@@ -1054,5 +1323,82 @@ mod tests {
         assert_eq!(config.connection("qq").expect("有").account, "999");
         assert_eq!(config.connection("qq2").expect("有").account, "888");
         assert!(config.connection("kook").is_none());
+    }
+
+    fn request(uri: &str, bearer: Option<&str>) -> Request {
+        let mut request = Request::new(());
+        *request.uri_mut() = uri.parse().expect("合法 URI");
+        if let Some(token) = bearer {
+            request.headers_mut().insert(
+                tungstenite::http::header::AUTHORIZATION,
+                tungstenite::http::HeaderValue::from_str(&format!("Bearer {token}"))
+                    .expect("合法 header"),
+            );
+        }
+        request
+    }
+
+    #[test]
+    fn ws_server_listen_prefers_options_and_falls_back_to_url() {
+        let config = Config::parse(
+            r#"
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            transport = "ws-server"
+            options = { listen = "127.0.0.1:3999" }
+            account = "10001"
+
+            [[connections]]
+            id = "qq2"
+            platform = "qq"
+            kind = "onebot11"
+            transport = "ws-server"
+            url = "ws://127.0.0.1:3998"
+            account = "10002"
+            "#,
+        )
+        .expect("配置合法");
+
+        assert_eq!(
+            server_listen(config.connection("qq").expect("有")),
+            Some("127.0.0.1:3999".to_owned())
+        );
+        assert_eq!(
+            server_listen(config.connection("qq2").expect("有")),
+            Some("127.0.0.1:3998".to_owned())
+        );
+    }
+
+    #[test]
+    fn reverse_ws_token_accepts_query_and_bearer() {
+        let token = Some("s3cret");
+        assert!(server_token_ok(
+            &request("ws://127.0.0.1:3001/ws?access_token=s3cret", None),
+            token
+        ));
+        assert!(server_token_ok(
+            &request("ws://127.0.0.1:3001/ws", Some("s3cret")),
+            token
+        ));
+        assert!(server_token_ok(
+            &request("ws://127.0.0.1:3001/ws?access_token=s3%63ret", None),
+            token
+        ));
+        assert!(!server_token_ok(
+            &request("ws://127.0.0.1:3001/ws?access_token=wrong", None),
+            token
+        ));
+        assert!(!server_token_ok(
+            &request("ws://127.0.0.1:3001/ws", None),
+            token
+        ));
+
+        // 没配 token 时不要求鉴权。
+        assert!(server_token_ok(
+            &request("ws://127.0.0.1:3001/ws", None),
+            None
+        ));
     }
 }

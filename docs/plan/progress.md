@@ -1675,6 +1675,47 @@
 - 文档：`extension-point-catalog.md` 把「计划，不实现」改为实装结果，并附
   「旧工具名 → 新入口 + op」对照表；6.1 表的旧工具名同步改成合并后的入口。
 
+## 2026-11-05 — 批次 5：连接形态与鉴权（反向 WS）
+
+- 任务编号：adapter-snowluma 批次 5
+- 做了什么：
+  - `crates/adapters/onebot-snowluma/src/factory.rs`：manifest `transports` 增加
+    `ws-server`；`create` 对 `ws-server` 只要求监听地址，不再一律要求 `url`。
+  - `crates/adapters/onebot-snowluma/src/link.rs`：
+    - `supervise` 按 `connection.transport` 分派到 `supervise_client` / `supervise_server`；
+    - `supervise_server` 用 `TcpListener` 监听 `options.listen`（或
+      `url = "ws://host:port"`），非阻塞 accept，握手完成后复用原有 `drive_ws`
+      （安装发送槽、`probe_identity`、跑 pump）；一次只服务一条活动连接；
+    - 握手鉴权：`token` 非空时接受 `?access_token=`（含 `%XX` 解码）或
+      `Authorization: Bearer`，不匹配返回 401；日志不打印 token；
+    - 监听/accept 失败标 `failed` 并退出；客户端断开后继续监听下一条。
+  - `crates/i18n/locales/{zh-CN,en}.json`：新增反向 WS 监听/接入/拒绝/错误文案。
+  - `config.example.toml`、`docs/05-adapters.md`、`docs/guide/config.md`：
+    补 `ws-server` + `options.listen` 配置说明。
+- 新增 op：**0 个**；新增工具位：**0 个**（工具数保持 28）。本批只改连接方式，
+  `platform_call` 仍是唯一平台入口。
+- 目录分页复核：op 数仍是 83，默认 20 条/页，一页约 3–4 KB（与批次 4 相同），
+  没有因为本批产生新的单页膨胀。
+- 按文档/成本判断不做：
+  - HTTP API transport（`httpServers`）：要新增 HTTP 客户端依赖与独立动作通道，当前无部署只用 HTTP。
+  - HTTP 事件上报接收端（`httpClients`）：要入站 HTTP 服务、去重与鉴权，文档未给签名细节。
+  - `wss://`：要 TLS 依赖；现有部署是内网/同机 `ws://`，未确认前不声明支持。
+  - 多 transport 独立 token：没有 HTTP transport，拆字段没有实际收益。
+- 证据：
+  - `manifest_keeps_persistent_ids_and_uses_the_snowluma_display_name`（manifest 同时声明
+    `ws-client` / `ws-server`）
+  - `ws_server_listen_prefers_options_and_falls_back_to_url`
+  - `reverse_ws_token_accepts_query_and_bearer`（正确 query / Bearer、错误 token、无 token、
+    `%XX` 解码）
+  - 既有 `probe_identity_writes_version_and_status_to_dependencies`、
+    `bot_status_is_an_account_signal_not_a_private_room`、`heartbeats_are_liveness_only_and_never_records`
+    继续通过，证明反向连接复用的探测/事件路径没退化。
+  - `cargo test --workspace`、clippy `-D warnings`、dsh/opencode 测试、`node --check` 全绿。
+- 能力状态：功能域计数 **7 完全 / 8 部分 / 8 未实现 → 8 完全 / 8 部分 / 7 未实现**；
+  #3 反向 WS 升为「已实现」，HTTP API / HTTP 事件上报 / `wss://` 仍是「未实现」。
+- 未决/风险：反向 WS 一次只服务一条活动连接；多客户端并发需要额外的路由/替换策略，
+  当前 Deployment 只有一个 SnowLuma `wsClients`，不扩大范围。
+
 
 
 ## 部署注意事项（nix-config 打包）

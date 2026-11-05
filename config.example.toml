@@ -116,6 +116,17 @@ allow_destructive = false
 # SnowLuma 兼容下限（默认 2.4.0）；低于下限只在启动日志告警，不断连。
 # options = { snowluma_min_version = "2.4.0" }
 
+# 反向 WS：让 SnowLuma 主动连桥（SnowLuma 的 wsClients）。桥监听 options.listen；
+# token 与 SnowLuma 那边配的 accessToken 一致，支持 ?access_token= 或 Bearer。
+# [[connections]]
+# id = "qq-reverse"
+# platform = "qq"
+# kind = "onebot11"
+# transport = "ws-server"
+# options = { listen = "0.0.0.0:3001" }
+# token = "change-me"
+# account = "10001"
+
 # 入站策略（ADR-0026）：决定这条连接上的记录收不收。默认全部接收。
 # 被丢掉的记录不写流水、不叫醒任何人，就像从没到过桥。
 # [connections.receive]
