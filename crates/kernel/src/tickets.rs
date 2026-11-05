@@ -697,6 +697,33 @@ impl AccessTickets {
         self.tickets.get(id)
     }
 
+    /// 本会话 live（pending + active）票据数，只读、不触发过期扫描。
+    pub fn live_counts(&self, session: &str) -> (usize, usize) {
+        let mut pending = 0;
+        let mut active = 0;
+        for ticket in self.tickets.values() {
+            if ticket.session != session {
+                continue;
+            }
+            match ticket.state {
+                TicketState::PendingApproval => pending += 1,
+                TicketState::Active => active += 1,
+                _ => {}
+            }
+        }
+        (pending, active)
+    }
+
+    /// 本会话在本轮已经占用的申请组数（单张票据算一组，批量按 batch_id 算一组）。
+    pub fn live_groups_for_turn(&self, turn: &str) -> usize {
+        self.tickets
+            .values()
+            .filter(|ticket| ticket.state.live() && ticket.request_turn == turn)
+            .map(|ticket| ticket.batch_id.as_deref().unwrap_or(ticket.id.as_str()))
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.tickets.len()

@@ -18,6 +18,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "access_request",
     // 只读查询自己发起的票据：按 id 查单张，按 batch_id 查整批。
     "access_ticket_get",
+    // 只读：回答「此刻能不能用」，不回答「世界上有什么」。
+    "capabilities",
     "ack_messages",
     "get_history",
     "fetch_records",
@@ -108,6 +110,18 @@ pub struct AccessTicketGetArgs {
     pub id: Option<String>,
     #[serde(default)]
     pub batch_id: Option<String>,
+}
+
+/// 能力自检：`scope=session` 看整体，`scope=room` 看房间，`scope=tool` 看单个工具/op。
+#[derive(Debug, Default, Deserialize)]
+pub struct CapabilitiesArgs {
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub room: Option<String>,
+    /// scope=tool 时的工具名或平台 op 名。
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// 确认这批消息处理完了。

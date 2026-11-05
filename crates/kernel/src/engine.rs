@@ -61,18 +61,20 @@ use crate::storage::{
     RecordDraft, StorageError, Store, TopicStatus, unread,
 };
 use crate::tickets::{
-    ACTIVE_TTL_MS, AccessTicket, AccessTickets, BatchReply, TicketReply, TicketRequest, TicketState,
+    ACTIVE_TTL_MS, AccessTicket, AccessTickets, BatchReply, MAX_LIVE_PER_SESSION,
+    MAX_REQUESTS_PER_TURN, PENDING_TTL_MS, TicketReply, TicketRequest, TicketState,
 };
 use crate::tools::{
-    AccessRequestArgs, AccessTicketGetArgs, AckArgs, DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT,
-    DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs, DescribePluginsArgs, EventsArgs, ExtensionsListArgs,
-    ExtensionsReadArgs, ExtensionsReloadArgs, ExtensionsWriteArgs, FeedbackArgs, FeedbackGetArgs,
-    FeedbackListArgs, FeedbackReplyArgs, FeedbackToolArgs, FetchRecordsArgs, HistoryArgs,
-    MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs, MemoryBlameArgs,
-    MemoryCommitArgs, MemoryGitToolArgs, MemoryListArgs, MemoryLogArgs, MemorySearchArgs,
-    MemoryWriteArgs, NotesArgs, NotesToolArgs, PlatformCallArgs, PlatformListArgs,
-    PlatformToolArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs, RECORD_COLUMNS,
-    SendArgs, SendToArgs, SetNoteArgs, TasksToolArgs, WaitMessageArgs, is_known,
+    AccessRequestArgs, AccessTicketGetArgs, AckArgs, CapabilitiesArgs, DEFAULT_COLUMNS,
+    DEFAULT_PAGE_LIMIT, DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs, DescribePluginsArgs, EventsArgs,
+    ExtensionsListArgs, ExtensionsReadArgs, ExtensionsReloadArgs, ExtensionsWriteArgs,
+    FeedbackArgs, FeedbackGetArgs, FeedbackListArgs, FeedbackReplyArgs, FeedbackToolArgs,
+    FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs,
+    MemoryBlameArgs, MemoryCommitArgs, MemoryGitToolArgs, MemoryListArgs, MemoryLogArgs,
+    MemorySearchArgs, MemoryWriteArgs, NotesArgs, NotesToolArgs, PlatformCallArgs,
+    PlatformListArgs, PlatformToolArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs,
+    RECORD_COLUMNS, SendArgs, SendToArgs, SetNoteArgs, TOOL_NAMES, TasksToolArgs, WaitMessageArgs,
+    is_known,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -3584,6 +3586,10 @@ impl<S: Store> Bridge<S> {
                 let args: AccessTicketGetArgs = parse(args)?;
                 self.get_access_ticket(&ctx, args)
             }
+            "capabilities" => {
+                let args: CapabilitiesArgs = parse(args)?;
+                self.capabilities(&ctx, &turn_config, &turn_session, ticket.as_str(), args)
+            }
             "ack_messages" => {
                 let args: AckArgs = parse(args)?;
                 self.ack(&turn_session, &room, &delivered, &read, args.ids)
@@ -4926,6 +4932,436 @@ impl<S: Store> Bridge<S> {
         }))
     }
 
+    /// 只读能力自检：回答「此刻能不能用」，不改变任何判定、不消费票据。
+    fn capabilities(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+        turn_id: &str,
+        args: CapabilitiesArgs,
+    ) -> Result<Value, ToolError> {
+        let scope = args.scope.as_deref().unwrap_or("session").trim();
+        match scope {
+            "session" => self.cap_session(ctx, config, session, turn_id),
+            "room" => {
+                let room = self.resolve(&args.room, &ctx.room)?;
+                self.cap_room(ctx, config, session, &room)
+            }
+            "tool" => {
+                let name = args
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        ToolError::new(
+                            ErrorCode::BadRequest,
+                            "[bad_params] capabilities scope=tool requires name",
+                        )
+                    })?;
+                self.cap_tool(ctx, config, session, name)
+            }
+            other => Err(ToolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "[bad_params] capabilities scope must be session / room / tool; got {other}"
+                ),
+            )),
+        }
+    }
+
+    fn cap_session(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+        turn_id: &str,
+    ) -> Result<Value, ToolError> {
+        let (subject, place) = self.subject_place(config, session, Some(&ctx.room));
+
+        let tools: Vec<Value> = TOOL_NAMES
+            .iter()
+            .map(|tool| {
+                let reason = self.tool_unavailable_reason(ctx, config, session, tool);
+                json!({
+                    "tool": tool,
+                    "available": reason.is_none(),
+                    "reason": reason,
+                })
+            })
+            .collect();
+        let tools_available = tools
+            .iter()
+            .filter(|tool| tool["available"] == true)
+            .count();
+
+        let subscribed: Vec<RoomId> = config
+            .session(session)
+            .map(|item| {
+                item.subscriptions
+                    .iter()
+                    .map(|subscription| subscription.room.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut connections = BTreeSet::new();
+        let mut rooms = Vec::new();
+        for room in &subscribed {
+            connections.insert(room.connection.clone());
+            let readable = self
+                .probe_room_reason(
+                    config,
+                    session,
+                    AccessAction::Read,
+                    room,
+                    &ctx.room,
+                    "get_history",
+                )
+                .is_none();
+            let sendable = self
+                .probe_room_reason(
+                    config,
+                    session,
+                    AccessAction::Send,
+                    room,
+                    &ctx.room,
+                    "send_message",
+                )
+                .is_none();
+            rooms.push(json!({
+                "room": room.to_string(),
+                "subscribed": true,
+                "readable": readable,
+                "sendable": sendable,
+            }));
+        }
+        let connection_rows: Vec<Value> = connections
+            .iter()
+            .map(|connection| {
+                let methods = self.outbound.catalog(connection);
+                let destructive_enabled = methods
+                    .iter()
+                    .filter(|spec| {
+                        spec.risk == Risk::Destructive
+                            && Self::allows_destructive(config, connection, spec.name.as_ref())
+                    })
+                    .count();
+                let destructive_blocked = methods
+                    .iter()
+                    .filter(|spec| {
+                        spec.risk == Risk::Destructive
+                            && !Self::allows_destructive(config, connection, spec.name.as_ref())
+                    })
+                    .count();
+                let critical = methods
+                    .iter()
+                    .filter(|spec| spec.risk == Risk::Critical)
+                    .count();
+                json!({
+                    "connection": connection,
+                    "catalog": !methods.is_empty(),
+                    "ops": methods.len(),
+                    "destructive_enabled": destructive_enabled,
+                    "destructive_blocked": destructive_blocked,
+                    "critical": critical,
+                    "allow_destructive": destructive_state(config, connection),
+                })
+            })
+            .collect();
+
+        let (pending, active) = self.access_tickets.live_counts(session);
+        let tickets = json!({
+            "pending": pending,
+            "active": active,
+            "live": pending + active,
+            "max_live": MAX_LIVE_PER_SESSION,
+            "turn_groups": self.access_tickets.live_groups_for_turn(turn_id),
+            "max_turn_groups": MAX_REQUESTS_PER_TURN,
+            "pending_ttl_ms": PENDING_TTL_MS,
+            "active_ttl_ms": ACTIVE_TTL_MS,
+            "ops": TICKET_OPS.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
+            "pattern": "platform_call:<op>",
+        });
+
+        let mut response = json!({
+            "scope": "session",
+            "session": session,
+            "room": ctx.room.to_string(),
+            "subject": subject.as_str(),
+            "place": place.as_str(),
+            "counts": {
+                "tools_available": tools_available,
+                "tools_total": TOOL_NAMES.len(),
+                "rooms": rooms.len(),
+                "connections": connection_rows.len(),
+                "tickets_live": pending + active,
+            },
+            "tools": tools,
+            "rooms": rooms,
+            "connections": connection_rows,
+            "tickets": tickets,
+        });
+        maybe_index_list(
+            &mut response,
+            "tools",
+            "indexed=true: tool entries reduced. Call capabilities {scope:\"tool\",name} for one tool.",
+            tool_cap_index,
+        );
+        maybe_index_list(
+            &mut response,
+            "rooms",
+            "indexed=true: room entries reduced. Call capabilities {scope:\"room\",room} for one room.",
+            room_cap_index,
+        );
+        Ok(response)
+    }
+
+    fn cap_room(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+        room: &RoomId,
+    ) -> Result<Value, ToolError> {
+        if config.connection(&room.connection).is_none() {
+            return Err(ToolError::new(
+                ErrorCode::BadRequest,
+                format!("[bad_params] unknown connection {}", room.connection),
+            ));
+        }
+        let subscribed = config.session(session).is_some_and(|item| {
+            item.subscriptions
+                .iter()
+                .any(|subscription| &subscription.room == room)
+        });
+        let read_reason = self.probe_room_reason(
+            config,
+            session,
+            AccessAction::Read,
+            room,
+            &ctx.room,
+            "get_history",
+        );
+        let send_reason = self.probe_room_reason(
+            config,
+            session,
+            AccessAction::Send,
+            room,
+            &ctx.room,
+            "send_message",
+        );
+        let connection_reason =
+            self.probe_connection_reason(config, session, &room.connection, &ctx.room);
+
+        let methods = self.outbound.catalog(&room.connection);
+        let ops: Vec<Value> = methods
+            .iter()
+            .map(|spec| {
+                cap_op_json(
+                    config,
+                    &room.connection,
+                    spec,
+                    read_reason,
+                    send_reason,
+                    connection_reason,
+                )
+            })
+            .collect();
+        let mut response = json!({
+            "scope": "room",
+            "room": room.to_string(),
+            "connection": room.connection,
+            "subscribed": subscribed,
+            "readable": read_reason.is_none(),
+            "sendable": send_reason.is_none(),
+            "reason": if read_reason.is_none() { send_reason } else { read_reason },
+            "allow_destructive": destructive_state(config, &room.connection),
+            "ops": ops,
+        });
+        maybe_index_list(
+            &mut response,
+            "ops",
+            "indexed=true: op entries reduced. Call capabilities {scope:\"tool\",name:\"<op>\"} for one op.",
+            cap_op_index,
+        );
+        Ok(response)
+    }
+
+    fn cap_tool(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+        name: &str,
+    ) -> Result<Value, ToolError> {
+        if TOOL_NAMES.contains(&name) {
+            let reason = self.tool_unavailable_reason(ctx, config, session, name);
+            return Ok(json!({
+                "scope": "tool",
+                "kind": "tool",
+                "tool": name,
+                "available": reason.is_none(),
+                "reason": reason,
+            }));
+        }
+
+        let methods = self.outbound.catalog(&ctx.room.connection);
+        let spec = match find_platform_op(&methods, name) {
+            Ok(spec) => spec,
+            Err(error) => {
+                return Ok(json!({
+                    "scope": "tool",
+                    "kind": "op",
+                    "op": name,
+                    "found": false,
+                    "reason": "unknown_op",
+                    "detail": error.message,
+                }));
+            }
+        };
+        let read_reason = self.probe_room_reason(
+            config,
+            session,
+            AccessAction::Read,
+            &ctx.room,
+            &ctx.room,
+            "platform_call",
+        );
+        let send_reason = self.probe_room_reason(
+            config,
+            session,
+            AccessAction::Send,
+            &ctx.room,
+            &ctx.room,
+            "platform_call",
+        );
+        let connection_reason =
+            self.probe_connection_reason(config, session, &ctx.room.connection, &ctx.room);
+        let mut value = cap_op_json(
+            config,
+            &ctx.room.connection,
+            spec,
+            read_reason,
+            send_reason,
+            connection_reason,
+        );
+        value["scope"] = json!("tool");
+        value["kind"] = json!("op");
+        Ok(value)
+    }
+
+    /// 单个内置工具此刻不可用的稳定原因；能用返回 `None`。
+    fn tool_unavailable_reason(
+        &mut self,
+        ctx: &TurnCtx,
+        config: &Config,
+        session: &str,
+        tool: &str,
+    ) -> Option<&'static str> {
+        if !ctx.live
+            && !matches!(
+                tool,
+                "ack_messages"
+                    | "send_message"
+                    | "report_feedback"
+                    | "feedback"
+                    | "tasks"
+                    | "capabilities"
+            )
+        {
+            return Some("no_active_round");
+        }
+        if tool.starts_with("extensions_") {
+            let admin = ctx
+                .origin_sender
+                .as_deref()
+                .is_some_and(|sender| config.is_admin(&ctx.room, sender));
+            if !admin {
+                return Some("admin_only");
+            }
+        }
+        if tool == "access_request" && config.grants.system_admin.is_none() {
+            return Some("no_approver");
+        }
+        match tool {
+            "send_message" => self.probe_room_reason(
+                config,
+                session,
+                AccessAction::Send,
+                &ctx.room,
+                &ctx.room,
+                "send_message",
+            ),
+            "get_history" | "fetch_records" | "wait_message" | "notes" | "get_platform_events" => {
+                self.probe_room_reason(
+                    config,
+                    session,
+                    AccessAction::Read,
+                    &ctx.room,
+                    &ctx.room,
+                    tool,
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn probe_room_reason(
+        &mut self,
+        config: &Config,
+        session: &str,
+        action: AccessAction,
+        room: &RoomId,
+        origin: &RoomId,
+        op: &str,
+    ) -> Option<&'static str> {
+        let sessions = [session.to_owned()];
+        let subscribed = config.session(session).is_some_and(|item| {
+            item.subscriptions
+                .iter()
+                .any(|subscription| &subscription.room == room)
+        });
+        self.check_access(
+            config,
+            &sessions,
+            action,
+            Some(room),
+            &room.connection,
+            Some(origin),
+            Some(op),
+            true,
+        )
+        .err()
+        .map(|error| match error.code {
+            ErrorCode::Internal => "access_provider_unavailable",
+            ErrorCode::RoomNotSubscribed if subscribed => "forbidden",
+            _ => "not_subscribed",
+        })
+    }
+
+    fn probe_connection_reason(
+        &mut self,
+        config: &Config,
+        session: &str,
+        connection: &str,
+        origin: &RoomId,
+    ) -> Option<&'static str> {
+        let sessions = [session.to_owned()];
+        self.check_access(
+            config,
+            &sessions,
+            AccessAction::Connection,
+            None,
+            connection,
+            Some(origin),
+            None,
+            true,
+        )
+        .err()
+        .map(access_error_code)
+    }
+
     /// 挂起动作的参数快照在申请期就校验；批准后只按快照执行，不再信模型重写。
     fn validate_ticket_params(
         &self,
@@ -5300,6 +5736,7 @@ impl<S: Store> Bridge<S> {
         connection: &str,
         origin: Option<&RoomId>,
         op: Option<&str>,
+        probe: bool,
     ) -> Result<(), ToolError> {
         let mut denied = Vec::new();
         for id in sessions {
@@ -5413,8 +5850,10 @@ impl<S: Store> Bridge<S> {
             };
 
             // 票据只放宽房间目标；连接级请求没有票据。命中即消费（用后即废）。
+            // probe 只回答「此刻能不能」，不消费票据。
             let mut ticket_used = false;
             if !allowed
+                && !probe
                 && let (Some(target_room), Some(op)) = (room, op)
                 && matches!(action, AccessAction::Read | AccessAction::Send)
                 && let Some(ticket_id) =
@@ -5540,6 +5979,7 @@ impl<S: Store> Bridge<S> {
             &room.connection,
             Some(origin),
             Some(op),
+            false,
         )
     }
 
@@ -5587,6 +6027,7 @@ impl<S: Store> Bridge<S> {
             connection,
             Some(origin),
             None,
+            false,
         )
     }
 
@@ -7842,11 +8283,7 @@ impl<S: Store> Bridge<S> {
 
     /// 这条连接的配置放不放行这个破坏性方法。查不到连接 = 不放行。
     fn allows_destructive(config: &Config, connection: &str, method: &str) -> bool {
-        config
-            .connections
-            .iter()
-            .find(|item| item.id == connection)
-            .is_some_and(|item| item.allow_destructive.allows(method))
+        connection_allows_destructive(config, connection, method)
     }
 
     /// 参数里没给房间就用本轮的房间；给了就解析。
@@ -8454,6 +8891,114 @@ fn page_catalog(response: &mut Value, total: usize, offset: usize, limit: Option
         "next_offset": (end < total).then_some(end),
         "note": "目录分页：接着取用 offset = next_offset；按 path / tags / query 缩范围也能少翻几页。",
     });
+}
+
+fn tool_cap_index(item: &Value) -> Value {
+    json!({
+        "tool": item["tool"],
+        "available": item["available"],
+        "reason": item["reason"],
+    })
+}
+
+fn room_cap_index(item: &Value) -> Value {
+    json!({
+        "room": item["room"],
+        "subscribed": item["subscribed"],
+        "readable": item["readable"],
+        "sendable": item["sendable"],
+    })
+}
+
+fn cap_op_index(item: &Value) -> Value {
+    json!({
+        "op": item["op"],
+        "risk": item["risk"],
+        "direct_executable": item["direct_executable"],
+        "ticket_required": item["ticket_required"],
+        "requestable": item["requestable"],
+        "reason": item["reason"],
+    })
+}
+
+fn access_error_code(error: ToolError) -> &'static str {
+    match error.code {
+        ErrorCode::RoomNotSubscribed => "not_subscribed",
+        ErrorCode::Internal => "access_provider_unavailable",
+        ErrorCode::ToolNotAllowed => "forbidden",
+        _ => "forbidden",
+    }
+}
+
+fn connection_allows_destructive(config: &Config, connection: &str, method: &str) -> bool {
+    config
+        .connections
+        .iter()
+        .find(|item| item.id == connection)
+        .is_some_and(|item| item.allow_destructive.allows(method))
+}
+
+fn destructive_state(config: &Config, connection: &str) -> Value {
+    match config
+        .connection(connection)
+        .map(|item| &item.allow_destructive)
+    {
+        Some(policy) => match policy {
+            crate::config::DestructivePolicy::All => json!("all"),
+            crate::config::DestructivePolicy::Only(methods) => {
+                json!({"mode": "only", "methods": methods})
+            }
+            crate::config::DestructivePolicy::None => json!("none"),
+        },
+        None => json!("none"),
+    }
+}
+
+fn cap_op_json(
+    config: &Config,
+    connection: &str,
+    spec: &MethodSpec,
+    read_reason: Option<&'static str>,
+    send_reason: Option<&'static str>,
+    connection_reason: Option<&'static str>,
+) -> Value {
+    let access_reason = if spec.scope == Scope::Connection {
+        connection_reason
+    } else if spec.effect == Effect::Read {
+        read_reason
+    } else {
+        send_reason
+    };
+    let (mut direct_executable, mut reason, ticket_required, requestable) = match spec.risk {
+        Risk::Critical => (false, Some("critical_requires_ticket"), true, true),
+        Risk::Destructive => {
+            if connection_allows_destructive(config, connection, spec.name.as_ref()) {
+                (true, None, false, false)
+            } else {
+                (false, Some("destructive_disabled"), false, false)
+            }
+        }
+        Risk::Read | Risk::Write => (true, None, false, spec.scope == Scope::Room),
+    };
+    if direct_executable {
+        if let Some(blocked) = access_reason {
+            direct_executable = false;
+            reason = Some(blocked);
+        }
+    }
+    json!({
+        "op": spec.name.as_ref(),
+        "risk": spec.risk.as_str(),
+        "effect": spec.effect.as_str(),
+        "scope": match spec.scope {
+            Scope::Room => "room",
+            Scope::Connection => "connection",
+        },
+        "direct_executable": direct_executable,
+        "ticket_required": ticket_required,
+        "requestable": requestable,
+        "reason": reason,
+    })
 }
 
 fn task_index(item: &Value) -> Value {
