@@ -25,6 +25,11 @@
           nativeBuildInputs = with pkgs; [
             pkg-config
           ];
+          # memory-steward 的测试直接 spawn `git` CLI（git init 等），沙箱里
+          # 没有就不会出现在 PATH；这是 checkPhase 的依赖，不进运行时闭包。
+          nativeCheckInputs = with pkgs; [
+            git
+          ];
           buildInputs = with pkgs; [
             openssl
             zlib
