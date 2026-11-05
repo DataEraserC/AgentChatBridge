@@ -3035,6 +3035,7 @@ mod tests {
                 "msg.tuwen_ark",
                 "msg.word_slices",
                 "system.packet_status",
+                "system.restart",
             ],
             "unverified 清单是安全边界：多标或少标都会让门槛漂移"
         );
@@ -3117,6 +3118,31 @@ mod tests {
             reason(&methods, "member.card").starts_with("write confirmed, rollback unverified"),
             "member.card 的 reason 不是半验证类：{}",
             reason(&methods, "member.card")
+        );
+    }
+
+    /// `system.restart` 的风险档仍是 Critical（重启会断连接），但平台自述不支持，
+    /// 语义没有双确证，verification 必须是 Unverified，不能落回默认 Verified。
+    #[test]
+    fn system_restart_is_critical_but_unverified() {
+        let methods = catalog();
+        let spec = methods
+            .iter()
+            .find(|method| method.name.as_ref() == "system.restart")
+            .expect("目录里有 system.restart");
+        assert_eq!(spec.risk, Risk::Critical);
+        assert!(spec.verification.is_unverified());
+        assert!(
+            spec.verification
+                .reason()
+                .unwrap_or_default()
+                .starts_with("platform self-declared unsupported"),
+            "reason 不是平台自述不支持：{:?}",
+            spec.verification.reason()
+        );
+        assert!(
+            spec.verification.source().is_none(),
+            "Unverified 不能带 Verified source"
         );
     }
 

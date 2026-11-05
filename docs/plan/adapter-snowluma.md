@@ -235,11 +235,11 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 **计数（2026-11-05，批次 9 之后）**：25 项中 2 项不适用；
 适用 23 项 = 已实现 19 + 部分 2 + 未实现 2（#2 HTTP API 与 #5 `wss://`）。
 #17 表情回应、#22 QQ 空间、#23 收藏/闪传已由批次 9 补齐；#19 的动作已全，
-但 16 个 `Unverified` op 要等实验完成才算完全实现。
+但 17 个 `Unverified` op 要等实验完成才算完全实现。
 
 **动作级覆盖**：
 - 现有 `ROUTES` 192 个层级 op / 200 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
-- 其中 **16 个 op** 带 `Verification::Unverified`（批次 8 的 4 个、审计后仍无出处的
+- 其中 **17 个 op** 带 `Verification::Unverified`（批次 8 的 4 个、审计后仍无出处的
   2 个、白名单清零的 8 个、本次实测降级的 `group.search` / `member.card` 2 个），
   按 critical 档管理；5 个平台别名挂在主 op 的 `aliases` 上，继承主 op 的
   `Verified`。
@@ -254,7 +254,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 3. `get_version_info` 已采集三层版本并写进依赖元数据（批次 1）。
 
 动作覆盖面已收口：200 个中文动作全部有 op / 别名归属，白名单为空。
-现在的主要风险转为 16 个 `Unverified` 语义与 QQ 空间等账号级写操作的实机行为。
+现在的主要风险转为 17 个 `Unverified` 语义与 QQ 空间等账号级写操作的实机行为。
 
 ---
 
@@ -914,8 +914,9 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   `Unverified`（六个 group_class 都返回空 tags，语义未确证）；白名单清零的 8 个
   平台占位/mock 仍标 `Unverified`。本次 2026-11-05 写入实验把 `group.search`
   （实测 OIDB 1288、读回无变化）与 `member.card`（回滚清空 OIDB 1007、有残留）
-  从 `Verified` 降为 `Unverified`。全表 `Unverified` 16 个（批次 8 的 4 +
-  审计后仍无出处/未确证的 2 + 白名单 8 + 本次降级 2）。
+  以及 `system.restart`（平台自述不支持）从 `Verified` 降为 `Unverified`。
+  全表 `Unverified` 17 个（批次 8 的 4 + 审计后仍无出处/未确证的 2 + 白名单 8 +
+  本次降级 3）。
 
 **证据**
 - `every_op_is_hierarchical_tagged_and_routed`：192 个 op 逐个检查层级名、risk tag、
@@ -925,7 +926,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - `action_coverage_matrix_is_complete_and_exceptions_have_reasons`：直接解析
   `snowluma-action-coverage.md`，断言 200 已暴露 / 0 未暴露；`UNEXPOSED` 为空时
   仍保留「非空则每条必须有理由」。
-- `catalog_lists_the_unverified_ops`：16 个 unverified op 的逐字清单。
+- `catalog_lists_the_unverified_ops`：17 个 unverified op 的逐字清单。
 - `unverified_reason_codes_match_the_confirmed_classes`：占位、分类标签、误名写入、
   半验证、未实现这几类 reason 的固定前缀。
 - **配置**：无新增配置项；风险仍由 `allow_destructive` + 票据审批控制。
@@ -974,13 +975,14 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 #### 已确认的占位/空实现/误名动作与代码证据
 
-以下 op 都已经是 `Unverified`。本轮把 reason 收敛成可检索的固定类别；前两条
-`group.search` / `member.card` 是本次从 `Verified` 降级的。
+以下 op 都已经是 `Unverified`。本轮把 reason 收敛成可检索的固定类别；前三条
+`group.search` / `member.card` / `system.restart` 是本次从 `Verified` 降级的。
 
 | op | 平台动作 | reason 类别 | 代码位置（声明 / 路由 / 判定） | 实测证据 |
 |---|---|---|---|---|
 | `group.search` | `set_group_search` | `misnamed write`：名字暗示查询，实际是写开关，没有分页；实测 OIDB 1288，读回无变化 | `catalog.rs:560-578` / `2168` / `2689-2695` | `snowluma-2026-11-05-write-experiments-results.md:287,291-323`；快照 `snowluma-2026-09-29-190-actions.json:1425` |
 | `member.card` | `set_group_card` | `write confirmed, rollback unverified`：写新名片可 `no_cache:true` 读回；清空回滚 OIDB 1007，残留 | `catalog.rs:689-697` / `2189` / `2682-2688` | `snowluma-2026-11-05-write-experiments-results.md:289,364-409`；快照 `snowluma-2026-09-29-190-actions.json:1310` |
+| `system.restart` | `set_restart` | `platform self-declared unsupported`：快照自述「重启（不支持）」，无成功返回语义 | `catalog.rs:1247-1253` / `2249` / `2697-2702` | 快照 `snowluma-2026-09-29-190-actions.json:1536-1539` |
 | `group.anonymous` | `set_group_anonymous` | `placeholder handler, no observable state change`：`() => okResponse()`，无读接口 | `catalog.rs:2027-2033` / `2337` / `2645-2651` | `snowluma-2026-11-05-write-experiments-results.md:8,187-195,272-273` |
 | `group.anonymous_ban` | `set_group_anonymous_ban` | `placeholder handler, no observable state change`：`() => okResponse()`，不读 `user_id`，不禁言 | `catalog.rs:2034-2039` / `2338` / `2652-2658` | `snowluma-2026-11-05-write-experiments-results.md:9,178-185,270-271` |
 | `account.model_show_set` | `_set_model_show` | `placeholder handler, no observable state change`：`async () => okResponse()` | `catalog.rs:1992-1998` / `2332` / `2659-2665` | `snowluma-2026-11-05-write-experiments-results.md:12,196-200` |
@@ -1003,7 +1005,6 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 
 | op / 动作 | 为什么只列不降 | 代码位置 | 需要什么证据 |
 |---|---|---|---|
-| `system.restart` / `set_restart` | 快照自述「重启（不支持）」，当前仍走默认 `Verified`；它是 `Critical`，闸门本来就是票据，但标签与判定口径不一致 | `catalog.rs:1247-1253` / `2249` / `2737`；快照 `1536-1539` | 实机调用记录 retcode 与是否 `ok`；若明确失败，应改 `Unverified` |
 | `account.can_send_image` / `account.can_send_record` | 快照条目的 summary 为空，返回字段没有出处；当前按快照型 `Verified` | `catalog.rs:1583-1596`；快照 `85-92` | 实机调用记录返回字段；若只回固定值，应降 `Unverified` |
 | `group.info` / `member.info` / `member.list` / `group.list` | 快照声明支持 `no_cache`，本适配器没有暴露该参数，无法满足「读回转新鲜」前提 | `catalog.rs:379-402`；快照 `660-666`、`686-693`、`696-702`、`678-683` | 先决定是否补 `no_cache` 参数，再做写后新鲜读回 |
 | 52 个快照型 `Verified` | 快照只给动作存在 + 参数表；返回语义没有实机对照。按新口径属于「参数已确证、返回语义未实机确证」 | 清单是 `catalog.rs:2353-2406` 的 `SNAPSHOT_ACTIONS`；测试在 `outbound.rs:1844-1912` | 逐条只读/写入实验；写操作必须带上 `no_cache:true` 的读回。不要批量降级，按实验逐条改 |
@@ -1039,6 +1040,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | `group.anonymous`（Write） | 房间写策略允许即可直调 | 直调拒绝；票据 + 审批 |
 | `group.anonymous_ban`（Destructive） | `allow_destructive` 打开时可直调 | `allow_destructive` 不再放行；票据 + 审批 |
 | `account.model_show_set`（Write，连接级） | 连接可读即可直调 | 直调拒绝；票据 + 审批 |
+| `system.restart`（Critical，连接级） | 本来就要求票据 + 审批；审批显示 `[CRITICAL]`，目录 `verification=verified` | **闸门不变**；审批改为 `[UNVERIFIED]` + reason，目录 `verification=unverified` |
 
 `account.model_show`、`friend.recent_contacts`、`system.packet_status`、
 `msg.word_slices`、`file.collection_create`、`account.qzone.unlike`、
