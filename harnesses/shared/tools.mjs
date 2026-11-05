@@ -153,6 +153,8 @@ scope=session 给整体处境与计数；scope=room 看某房间的读写与 op 
 scope=catalog 列长尾工具目录（名字 / 一句话用途 / 何时用 / 可用性 / 可申请）；
 scope=surface 给 harness 算本轮可见集；scope=tool 看单个工具或平台 op（name），
 工具会附完整 schema（本地工具定义），平台 op 只给目录里的参数。
+scope=surface 可加 view：visible（默认，本轮可见集）/ all（全集）/ hidden（被权限过滤掉的工具，
+每条带 why_hidden：place / scope / capability / risk / subscription）。
 遇到 forbidden / room_not_subscribed / destructive_disabled 先查这里，别盲目重试。
 「有什么」仍用 platform_call（不给 op）、plugin_tools、describe_plugins。`,
     schema: {
@@ -167,6 +169,20 @@ scope=surface 给 harness 算本轮可见集；scope=tool 看单个工具或平�
         name: {
           type: "string",
           description: "scope=tool：工具名或平台 op，如 notes / msg.send",
+        },
+        view: {
+          type: "string",
+          enum: ["visible", "all", "hidden"],
+          description:
+            "scope=surface 的投影，默认 visible；只给 view 不给 scope 时也按 surface",
+        },
+        offset: {
+          type: "number",
+          description: "view=all / hidden 的分页偏移，接着用 _page.next_offset",
+        },
+        limit: {
+          type: "number",
+          description: "view=all / hidden 的页大小，默认 20，上限 60",
         },
       },
       additionalProperties: false,

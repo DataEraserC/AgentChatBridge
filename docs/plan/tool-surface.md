@@ -95,6 +95,41 @@ harness 只把可见集里的工具注入本轮工具面：常驻工具用完整
 一个最小占位 schema（`additionalProperties: true`），描述里指向
 `capabilities scope=tool`。
 
+### 查询视图 `view`
+
+`scope=surface` 额外接受 `view=visible|all|hidden`；只给 `view` 不给 `scope`
+时也按 surface。默认 `visible`，输出与加 `view` 之前逐字节一致（测试用固定
+JSON 锁住）。
+
+- `visible`：本轮可见集，形状不变（`resident` + `catalog`，被过滤条目带
+  `direct_executable=false`）。传 `offset` / `limit` 也不改变默认输出。
+- `all`：全集 29 个工具，按 `TOOL_NAMES` 顺序给出 `layer` / `available` /
+  `purpose`；不可用的再带 `why_hidden` / `reason` / `requestable` /
+  `ticket_required`。`counts.permission_hidden` 只数被权限过滤的非驻留工具，
+  `counts.on_demand` 单列按需层。
+- `hidden`：只列被权限过滤掉的非驻留工具（按需层可执行时不进，因为它不是
+  权限过滤），每条带 `why_hidden`、`reason`、`requestable`、
+  `ticket_required`。
+
+`why_hidden` 是粗分类，具体原因仍看 `reason`：
+
+| 既有 `reason` | `why_hidden` |
+| --- | --- |
+| `not_subscribed` | `subscription` |
+| `no_active_round` | `place` |
+| `admin_only` / `no_approver` / `access_provider_unavailable` | `capability` |
+| `forbidden` 且 `requestable=true` | `risk`（票据可申请，审批放行） |
+| `forbidden` 且不可申请 | `scope` |
+
+工具层目前不会产生 `scope`：探测的访问拒绝工具都在 `TICKET_OPS` 里，
+`forbidden` 一律落到 `risk`。`place` 只对应 `no_active_round`，公开的
+`tool_call` 路径拿不到这种上下文。词表保留给 op 层与后续策略共用，不代表已经
+实现了 op 过滤。
+
+`all` / `hidden` 是排查视图，仍受 [`LIST_INDEX_BYTES`] 约束：超限先把条目降级
+成索引（`indexed=true`），再超限或调用方显式给了 `offset` / `limit` 时按
+`_page` 分页（默认 20，上限 60）。`visible` 不参与二次压缩，保持每轮成本不变。
+
 ## 2. 不变量（测试锁死）
 
 **过滤只影响「常驻可见性」，绝不缩小可申请范围。**
@@ -174,6 +209,12 @@ harness 只把可见集里的工具注入本轮工具面：常驻工具用完整
 - `crates/kernel/tests/capabilities_tool.rs`：
   `surface_splits_resident_catalog_and_hidden`、
   `surface_response_stays_within_budget`（≤ 2 KiB，且锁住瘦身字段规则）、
+  `surface_visible_view_matches_the_legacy_output`（默认 view 与旧输出逐字节一致）、
+  `hidden_view_lists_permission_filtered_tools_with_reasons`、
+  `all_view_exposes_every_tool_including_filtered_ones`、
+  `all_and_hidden_views_page_within_the_byte_budget`、
+  `hidden_tool_can_still_be_requested_and_approved`（hidden → 申请 → 批准 → 执行）、
+  `view_only_applies_to_surface`、
   `catalog_scope_is_the_long_tail_index`、
   `resident_entry_points_are_never_filtered_out`，以及 session/tool scope 的
   `requestable` / `ticket_required` 断言。

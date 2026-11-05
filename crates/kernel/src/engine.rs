@@ -72,7 +72,7 @@ use crate::tools::{
     FeedbackArgs, FeedbackGetArgs, FeedbackListArgs, FeedbackReplyArgs, FeedbackToolArgs,
     FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs,
     MemoryBlameArgs, MemoryCommitArgs, MemoryGitToolArgs, MemoryListArgs, MemoryLogArgs,
-    MemorySearchArgs, MemoryWriteArgs, NotesArgs, NotesToolArgs, PlatformCallArgs,
+    MemorySearchArgs, MemoryWriteArgs, NotesArgs, NotesToolArgs, ON_DEMAND_TOOLS, PlatformCallArgs,
     PlatformListArgs, PlatformToolArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs,
     RECORD_COLUMNS, RESIDENT_TOOLS, SendArgs, SendToArgs, SetNoteArgs, TOOL_NAMES, TasksToolArgs,
     WaitMessageArgs, catalog_entry, is_known, is_on_demand, is_resident,
@@ -5378,14 +5378,22 @@ impl<S: Store> Bridge<S> {
         turn_id: &str,
         args: CapabilitiesArgs,
     ) -> Result<Value, ToolError> {
-        let scope = args.scope.as_deref().unwrap_or("session").trim();
-        match scope {
-            "session" => self.cap_session(ctx, config, session, turn_id),
-            "room" => {
+        // 保持旧行为：scope 缺省是 session；显式给了空串仍按未知 scope 报错。
+        let scope = args.scope.as_deref().map(str::trim);
+        let view_given = args
+            .view
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        match (scope, view_given) {
+            // `view` 是 surface 的投影参数；只给 view 不给 scope 时也按 surface。
+            (Some("surface"), _) | (None, true) => self.cap_surface(ctx, config, session, &args),
+            (None, false) => self.cap_session(ctx, config, session, turn_id),
+            (Some("session"), false) => self.cap_session(ctx, config, session, turn_id),
+            (Some("room"), false) => {
                 let room = self.resolve(&args.room, &ctx.room)?;
                 self.cap_room(ctx, config, session, &room)
             }
-            "tool" => {
+            (Some("tool"), false) => {
                 let name = args
                     .name
                     .as_deref()
@@ -5399,9 +5407,14 @@ impl<S: Store> Bridge<S> {
                     })?;
                 self.cap_tool(ctx, config, session, name)
             }
-            "catalog" => self.cap_catalog(ctx, config, session),
-            "surface" => self.cap_surface(ctx, config, session),
-            other => Err(ToolError::new(
+            (Some("catalog"), false) => self.cap_catalog(ctx, config, session),
+            (Some(other), true) => Err(ToolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "[bad_params] capabilities view only applies to scope=surface; got scope={other}"
+                ),
+            )),
+            (Some(other), false) => Err(ToolError::new(
                 ErrorCode::BadRequest,
                 format!(
                     "[bad_params] capabilities scope must be session / room / tool / catalog / surface; got {other}"
@@ -5714,80 +5727,153 @@ impl<S: Store> Bridge<S> {
     /// 常驻层只给名字；可执行的长尾条目只给 `tool` + `purpose`；不可执行的条目
     /// 才带 `direct_executable=false` / `requestable` / `ticket_required` / `reason`。
     /// `when` 与更完整的索引留给 `scope=catalog`，避免每轮重复付字节。
+    ///
+    /// `view=visible`（默认）保持上面的历史形状；`all` 列全集；`hidden` 只列被
+    /// 权限过滤掉的非驻留工具并附 `why_hidden`。三个视图共用同一份
+    /// [`ToolDecision`]，判定只跑一次，投影不复制权限逻辑。
     fn cap_surface(
         &mut self,
         ctx: &TurnCtx,
         config: &Config,
         session: &str,
+        args: &CapabilitiesArgs,
     ) -> Result<Value, ToolError> {
+        let view = SurfaceView::parse(args.view.as_deref())?;
         let (subject, place) = self.subject_place(config, session, Some(&ctx.room));
-        let entries: Vec<Value> = TOOL_NAMES
+        // `visible` / `hidden` 只关心非驻留工具，保持历史探测范围不变；
+        // `all` 是全集，才连常驻层一起判定。
+        let decisions: Vec<ToolDecision> = TOOL_NAMES
             .iter()
-            .filter(|tool| !is_resident(tool))
-            .map(|tool| self.tool_surface_entry_json(ctx, config, session, tool))
+            .filter(|tool| view == SurfaceView::All || !is_resident(tool))
+            .map(|tool| {
+                let reason = self.tool_unavailable_reason(ctx, config, session, tool);
+                let requestable = tool_requestable(tool);
+                ToolDecision {
+                    tool,
+                    available: reason.is_none(),
+                    reason,
+                    why_hidden: reason.map(|reason| hidden_dimension(reason, requestable)),
+                    requestable,
+                }
+            })
             .collect();
         let resident: Vec<&str> = RESIDENT_TOOLS.to_vec();
         // 按需工具（get_history / fetch_records）即使可执行也不进默认可见集：
-        // harness 在投递溢出时自己把它们加回本轮工具面。
-        let executable = entries
+        // harness 在投递溢出时自己把它们加回本轮工具面；常驻工具单独计一层，
+        // 不混进目录层的可执行数。
+        let executable = decisions
             .iter()
-            .filter(|entry| entry["direct_executable"] != false)
-            .filter(|entry| {
-                entry["tool"]
-                    .as_str()
-                    .is_some_and(|tool| !is_on_demand(tool))
+            .filter(|decision| {
+                !is_resident(decision.tool) && decision.available && !is_on_demand(decision.tool)
             })
             .count();
-        let hidden = entries.len() - executable;
-        let catalog: Vec<Value> = entries;
-        Ok(json!({
-            "scope": "surface",
-            "session": session,
-            "room": ctx.room.to_string(),
-            "subject": subject.as_str(),
-            "place": place.as_str(),
-            "allow_destructive": destructive_state(config, &ctx.room.connection),
-            "resident": resident,
-            "catalog": catalog,
-            "counts": {
-                "tools_total": TOOL_NAMES.len(),
-                "resident": resident.len(),
-                "catalog": catalog.len(),
-                "visible": resident.len() + executable,
-                "hidden": hidden,
-            },
-        }))
-    }
+        let permission_hidden = decisions
+            .iter()
+            .filter(|decision| !is_resident(decision.tool) && !decision.available)
+            .count();
 
-    /// 面视图的瘦身条目：与目录层同一份权限判定，但只保留 harness 选工具要用的字段。
-    ///
-    /// - 可执行：`tool` + `purpose`；
-    /// - 不可执行：`tool` + `direct_executable=false` + `requestable` +
-    ///   `ticket_required` + `reason`（不带 `purpose`，因为它本轮不会被注入）。
-    fn tool_surface_entry_json(
-        &mut self,
-        ctx: &TurnCtx,
-        config: &Config,
-        session: &str,
-        tool: &str,
-    ) -> Value {
-        let reason = self.tool_unavailable_reason(ctx, config, session, tool);
-        let available = reason.is_none();
-        let requestable = tool_requestable(tool);
-        let entry = catalog_entry(tool);
-        if available {
-            return json!({
-                "tool": tool,
-                "purpose": entry.map(|entry| entry.purpose).unwrap_or(""),
-            });
+        let mut response = match view {
+            SurfaceView::Visible => {
+                let catalog: Vec<Value> = decisions.iter().map(surface_entry_json).collect();
+                json!({
+                    "scope": "surface",
+                    "session": session,
+                    "room": ctx.room.to_string(),
+                    "subject": subject.as_str(),
+                    "place": place.as_str(),
+                    "allow_destructive": destructive_state(config, &ctx.room.connection),
+                    "resident": resident,
+                    "catalog": catalog,
+                    "counts": {
+                        "tools_total": TOOL_NAMES.len(),
+                        "resident": resident.len(),
+                        "catalog": catalog.len(),
+                        "visible": resident.len() + executable,
+                        "hidden": catalog.len() - executable,
+                    },
+                })
+            }
+            SurfaceView::All => {
+                let tools: Vec<Value> = decisions.iter().map(all_entry_json).collect();
+                json!({
+                    "scope": "surface",
+                    "view": "all",
+                    "session": session,
+                    "room": ctx.room.to_string(),
+                    "subject": subject.as_str(),
+                    "place": place.as_str(),
+                    "allow_destructive": destructive_state(config, &ctx.room.connection),
+                    "resident": resident,
+                    "tools": tools,
+                    "counts": {
+                        "tools_total": TOOL_NAMES.len(),
+                        "resident": resident.len(),
+                        "catalog": TOOL_NAMES.len() - RESIDENT_TOOLS.len(),
+                        "visible": resident.len() + executable,
+                        "permission_hidden": permission_hidden,
+                        "on_demand": ON_DEMAND_TOOLS.len(),
+                    },
+                })
+            }
+            SurfaceView::Hidden => {
+                let tools: Vec<Value> = decisions
+                    .iter()
+                    .filter(|decision| !decision.available)
+                    .map(hidden_entry_json)
+                    .collect();
+                json!({
+                    "scope": "surface",
+                    "view": "hidden",
+                    "session": session,
+                    "room": ctx.room.to_string(),
+                    "subject": subject.as_str(),
+                    "place": place.as_str(),
+                    "allow_destructive": destructive_state(config, &ctx.room.connection),
+                    "tools": tools,
+                    "counts": {
+                        "tools_total": TOOL_NAMES.len(),
+                        "resident": resident.len(),
+                        "permission_hidden": tools.len(),
+                        "on_demand": ON_DEMAND_TOOLS.len(),
+                    },
+                    "note": "只列被权限过滤掉的非驻留工具；requestable / ticket_required 来自票据词表，\
+                             过滤不缩小申请范围。",
+                })
+            }
+        };
+        // `visible` 是每轮拉取的瘦身视图，历史形状不变，不做二次压缩；
+        // `all` / `hidden` 是排查用视图，按既有字节上限索引，超限再分页。
+        if view != SurfaceView::Visible {
+            let total = response["tools"]
+                .as_array()
+                .map(|tools| tools.len())
+                .unwrap_or(0);
+            let index = if view == SurfaceView::All {
+                tool_all_index
+            } else {
+                tool_hidden_index
+            };
+            maybe_index_list(
+                &mut response,
+                "tools",
+                "indexed=true: tool entries reduced. Narrow with view / offset / limit.",
+                index,
+            );
+            let bytes = serde_json::to_vec(&response)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0);
+            if bytes > LIST_INDEX_BYTES || args.offset.is_some() || args.limit.is_some() {
+                page_list(
+                    &mut response,
+                    "tools",
+                    total,
+                    args.offset.unwrap_or(0),
+                    args.limit,
+                    "工具视图分页：接着取用 offset = _page.next_offset。",
+                );
+            }
         }
-        json!({
-            "tool": tool,
-            "direct_executable": false,
-            "requestable": requestable,
-            "ticket_required": requestable,
-            "reason": reason,
-        })
+        Ok(response)
     }
 
     /// 目录层的索引形状：名字 + 用途 + 何时用；不可直调才带权限字段。
@@ -9834,6 +9920,158 @@ fn task_json(record: &TaskRecord) -> Value {
     })
 }
 
+/// `capabilities scope=surface` 的投影方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceView {
+    Visible,
+    All,
+    Hidden,
+}
+
+impl SurfaceView {
+    fn parse(value: Option<&str>) -> Result<Self, ToolError> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("visible") => Ok(Self::Visible),
+            Some("all") => Ok(Self::All),
+            Some("hidden") => Ok(Self::Hidden),
+            Some(other) => Err(ToolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "[bad_params] capabilities view must be visible / all / hidden; got {other}"
+                ),
+            )),
+        }
+    }
+}
+
+/// 工具被过滤的维度。具体原因仍由 `reason` 携带，这里只做粗分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HiddenDimension {
+    /// 当前轮次/场所不允许这个工具。
+    Place,
+    /// 超出可申请的能力范围（访问策略拒绝，且没有票据入口）。
+    Scope,
+    /// 规则未授予该能力（含 admin-only / 没有审批人）。
+    Capability,
+    /// 风险等级需要审批（票据词表里可申请，批准后放行）。
+    Risk,
+    /// 目标未订阅。
+    Subscription,
+}
+
+impl HiddenDimension {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Place => "place",
+            Self::Scope => "scope",
+            Self::Capability => "capability",
+            Self::Risk => "risk",
+            Self::Subscription => "subscription",
+        }
+    }
+}
+
+/// 本轮一个工具的去向。三个 view 都从这份结果投影，不重复跑权限判定。
+struct ToolDecision {
+    tool: &'static str,
+    available: bool,
+    reason: Option<&'static str>,
+    why_hidden: Option<HiddenDimension>,
+    requestable: bool,
+}
+
+/// 既有稳定原因 → 可见性维度。
+///
+/// 访问拒绝的工具都在票据词表里（`send_message` / `get_history` / `notes` …），
+/// 所以 `forbidden` 归到 `risk`：批准票据即可放行。`scope` 保留给不可申请、
+/// 又确实被策略拒绝的未来工具；当前工具层没有这种组合。
+fn hidden_dimension(reason: &'static str, requestable: bool) -> HiddenDimension {
+    match reason {
+        "not_subscribed" => HiddenDimension::Subscription,
+        "no_active_round" => HiddenDimension::Place,
+        "admin_only" | "no_approver" | "access_provider_unavailable" => HiddenDimension::Capability,
+        "forbidden" if requestable => HiddenDimension::Risk,
+        "forbidden" => HiddenDimension::Scope,
+        _ => HiddenDimension::Capability,
+    }
+}
+
+/// `view=visible` 的瘦身条目：与历史输出逐字一致。
+fn surface_entry_json(decision: &ToolDecision) -> Value {
+    let entry = catalog_entry(decision.tool);
+    if decision.available {
+        return json!({
+            "tool": decision.tool,
+            "purpose": entry.map(|entry| entry.purpose).unwrap_or(""),
+        });
+    }
+    json!({
+        "tool": decision.tool,
+        "direct_executable": false,
+        "requestable": decision.requestable,
+        "ticket_required": decision.requestable,
+        "reason": decision.reason,
+    })
+}
+
+/// `view=all` 的条目：全集不受本轮权限影响，但仍摊开可用性，方便排查。
+fn all_entry_json(decision: &ToolDecision) -> Value {
+    let entry = catalog_entry(decision.tool);
+    let mut value = json!({
+        "tool": decision.tool,
+        "layer": if is_resident(decision.tool) { "resident" } else { "catalog" },
+        "available": decision.available,
+        "purpose": entry.map(|entry| entry.purpose).unwrap_or("常驻高频工具"),
+    });
+    if let Some(why) = decision.why_hidden {
+        value["why_hidden"] = json!(why.as_str());
+        value["reason"] = json!(decision.reason);
+        value["requestable"] = json!(decision.requestable);
+        value["ticket_required"] = json!(decision.requestable);
+    }
+    value
+}
+
+/// `view=hidden` 的条目：只给排查真正要用的字段。
+fn hidden_entry_json(decision: &ToolDecision) -> Value {
+    let why = decision.why_hidden.unwrap_or(HiddenDimension::Capability);
+    json!({
+        "tool": decision.tool,
+        "layer": if is_resident(decision.tool) { "resident" } else { "catalog" },
+        "why_hidden": why.as_str(),
+        "reason": decision.reason,
+        "requestable": decision.requestable,
+        "ticket_required": decision.requestable,
+    })
+}
+
+/// 超限时 `view=all` 的索引形态；字段与顶点一致，只去掉体积大的用途文案。
+fn tool_all_index(item: &Value) -> Value {
+    let mut value = json!({
+        "tool": item["tool"],
+        "layer": item["layer"],
+        "available": item["available"],
+    });
+    for key in ["why_hidden", "requestable", "ticket_required", "reason"] {
+        if let Some(field) = item.get(key) {
+            value[key] = field.clone();
+        }
+    }
+    value
+}
+
+/// 超限时 `view=hidden` 的索引形态；隐藏条目本来就小，只确保不带空字段。
+fn tool_hidden_index(item: &Value) -> Value {
+    json!({
+        "tool": item["tool"],
+        "layer": item["layer"],
+        "why_hidden": item["why_hidden"],
+        "reason": item["reason"],
+        "requestable": item["requestable"],
+        "ticket_required": item["ticket_required"],
+    })
+}
+
 /// 目录/列表超过阈值时，把每条降级成索引；顶层加 `indexed` 与详情入口。
 fn maybe_index_list(response: &mut Value, key: &str, hint: &str, compact: fn(&Value) -> Value) {
     let bytes = serde_json::to_vec(response)
@@ -9869,7 +10107,26 @@ fn method_index(item: &Value) -> Value {
 ///
 /// 目录是「发现」用的，不该为了看全部 op 先付十几 KB；按 path / tags 收窄通常更省。
 fn page_catalog(response: &mut Value, total: usize, offset: usize, limit: Option<usize>) {
-    let Some(items) = response.get_mut("ops").and_then(Value::as_array_mut) else {
+    page_list(
+        response,
+        "ops",
+        total,
+        offset,
+        limit,
+        "目录分页：接着取用 offset = next_offset；按 path / tags / query 缩范围也能少翻几页。",
+    );
+}
+
+/// 通用列表分页：把 `key` 数组切成 `[offset, offset+limit)`，并挂 `_page`。
+fn page_list(
+    response: &mut Value,
+    key: &str,
+    total: usize,
+    offset: usize,
+    limit: Option<usize>,
+    note: &str,
+) {
+    let Some(items) = response.get_mut(key).and_then(Value::as_array_mut) else {
         return;
     };
     let offset = offset.min(items.len());
@@ -9888,7 +10145,7 @@ fn page_catalog(response: &mut Value, total: usize, offset: usize, limit: Option
         "returned": returned,
         "has_more": end < total,
         "next_offset": (end < total).then_some(end),
-        "note": "目录分页：接着取用 offset = next_offset；按 path / tags / query 缩范围也能少翻几页。",
+        "note": note,
     });
 }
 
