@@ -1,7 +1,7 @@
 //! 一次性访问票据：群内向管理员申请，私信批准后单次使用。
 //!
 //! 票据只放宽「能不能碰这个房间」的目标判定；它不替代
-//! `allow_destructive`，也不自动授予 `plugin` 全权。
+//! `[connections.policy.risk]`，也不自动授予 `plugin` 全权。
 //!
 //! 状态只活在本进程：重启后 pending / active 票据全部失效，不发通知、不恢复。
 //! 这是 fail closed 的取舍，见 `docs/plan/access-grants.md`。

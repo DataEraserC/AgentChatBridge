@@ -20,7 +20,7 @@ const AT: i64 = 1_793_000_000_000;
 const SURFACE_BYTE_BUDGET: usize = 2048;
 
 /// 加 `view` 之前的 surface 输出，逐字节锁住默认行为。
-const LEGACY_SURFACE: &str = r#"{"allow_destructive":"none","catalog":[{"purpose":"翻房间历史记录，补齐上下文","tool":"get_history"},{"purpose":"按水位编号精确回看记录","tool":"fetch_records"},{"purpose":"阻塞等同房间下一条消息","tool":"wait_message"},{"purpose":"房间共享笔记（list/set/del）","tool":"notes"},{"purpose":"查最近平台事件","tool":"get_platform_events"},{"purpose":"看本会话的策略 provider","tool":"describe_plugins"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_list"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_read"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_write"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_reload"},{"purpose":"查后台任务（list/get）","tool":"tasks"},{"purpose":"记录卡点反馈","tool":"report_feedback"},{"purpose":"查反馈记录（list/get）","tool":"feedback"},{"purpose":"回复反馈","tool":"feedback_reply"},{"purpose":"列插件工具","tool":"plugin_tools"},{"purpose":"调用插件工具","tool":"plugin_tool_call"},{"purpose":"读记忆文件","tool":"memory_read"},{"purpose":"写记忆文件","tool":"memory_write"},{"purpose":"列记忆目录","tool":"memory_list"},{"purpose":"搜记忆文本","tool":"memory_search"},{"purpose":"记忆 git（status/log/diff/add/commit/push）","tool":"memory_git"}],"counts":{"catalog":21,"hidden":6,"resident":8,"tools_total":29,"visible":23},"place":"group","resident":["send_message","send_message_to","list_rooms","capabilities","platform_call","access_request","access_ticket_get","ack_messages"],"room":"qq:group/123","scope":"surface","session":"main","subject":"user"}"#;
+const LEGACY_SURFACE: &str = r#"{"catalog":[{"purpose":"翻房间历史记录，补齐上下文","tool":"get_history"},{"purpose":"按水位编号精确回看记录","tool":"fetch_records"},{"purpose":"阻塞等同房间下一条消息","tool":"wait_message"},{"purpose":"房间共享笔记（list/set/del）","tool":"notes"},{"purpose":"查最近平台事件","tool":"get_platform_events"},{"purpose":"看本会话的策略 provider","tool":"describe_plugins"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_list"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_read"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_write"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_reload"},{"purpose":"查后台任务（list/get）","tool":"tasks"},{"purpose":"记录卡点反馈","tool":"report_feedback"},{"purpose":"查反馈记录（list/get）","tool":"feedback"},{"purpose":"回复反馈","tool":"feedback_reply"},{"purpose":"列插件工具","tool":"plugin_tools"},{"purpose":"调用插件工具","tool":"plugin_tool_call"},{"purpose":"读记忆文件","tool":"memory_read"},{"purpose":"写记忆文件","tool":"memory_write"},{"purpose":"列记忆目录","tool":"memory_list"},{"purpose":"搜记忆文本","tool":"memory_search"},{"purpose":"记忆 git（status/log/diff/add/commit/push）","tool":"memory_git"}],"counts":{"catalog":21,"hidden":6,"resident":8,"tools_total":29,"visible":23},"place":"group","resident":["send_message","send_message_to","list_rooms","capabilities","platform_call","access_request","access_ticket_get","ack_messages"],"risk":{"critical":"approval","destructive":"approval","destructive_exempt":[],"write":"allow"},"room":"qq:group/123","scope":"surface","session":"main","subject":"user"}"#;
 
 type Sends = Arc<Mutex<Vec<(RoomId, String)>>>;
 
@@ -485,8 +485,9 @@ fn room_scope_separates_subscription_read_and_write() {
         .expect("有 fake.kick");
     assert_eq!(kick["risk"], "destructive");
     assert_eq!(kick["direct_executable"], false);
-    assert_eq!(kick["reason"], "destructive_disabled");
-    assert_eq!(kick["requestable"], false);
+    assert_eq!(kick["reason"], "destructive_requires_ticket");
+    assert_eq!(kick["ticket_required"], true);
+    assert_eq!(kick["requestable"], true);
     assert_eq!(kick["verification"]["state"], "verified");
     let cookies = ops
         .iter()
@@ -565,8 +566,10 @@ fn tool_scope_reports_stable_reasons() {
         )
         .expect("能查");
     assert_eq!(destructive["kind"], "op");
-    assert_eq!(destructive["reason"], "destructive_disabled");
+    assert_eq!(destructive["reason"], "destructive_requires_ticket");
     assert_eq!(destructive["direct_executable"], false);
+    assert_eq!(destructive["ticket_required"], true);
+    assert_eq!(destructive["requestable"], true);
 
     let critical = bridge
         .tool_call(
@@ -652,7 +655,10 @@ fn surface_splits_resident_catalog_and_hidden() {
         value.to_string().len()
     );
     assert_eq!(value["place"], "group");
-    assert_eq!(value["allow_destructive"], "none");
+    assert_eq!(value["risk"]["write"], "allow");
+    assert_eq!(value["risk"]["destructive"], "approval");
+    assert_eq!(value["risk"]["critical"], "approval");
+    assert_eq!(value["risk"]["destructive_exempt"], json!([]));
     assert_eq!(value["counts"]["tools_total"], TOOL_NAMES.len());
     assert_eq!(value["counts"]["resident"], RESIDENT_TOOLS.len());
     assert_eq!(

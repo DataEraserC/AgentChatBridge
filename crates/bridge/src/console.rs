@@ -383,7 +383,6 @@ impl<S: Store + Send + 'static> Console<S> {
     fn config_view(&self) -> String {
         let bridge = lock(&self.bridge);
         let config = bridge.config();
-        use acb_kernel::config::DestructivePolicy;
         json!({
             "personas": config.personas.iter().map(|p| json!({
                 "id": p.id, "name": p.name, "text": p.text,
@@ -430,14 +429,11 @@ impl<S: Store + Send + 'static> Console<S> {
                 "token": c.token.as_deref().map(mask_secret),
                 "account": c.account,
                 "admin_qqs": c.admin_qqs,
-                "allow_destructive": match &c.allow_destructive {
-                    DestructivePolicy::None => {
-                        json!(acb_i18n::t!("bridge.console.destructive_none"))
-                    }
-                    DestructivePolicy::All => {
-                        json!(acb_i18n::t!("bridge.console.destructive_all"))
-                    }
-                    DestructivePolicy::Only(methods) => json!(methods),
+                "risk": {
+                    "write": c.risk.write.as_str(),
+                    "destructive": c.risk.destructive.as_str(),
+                    "critical": c.risk.critical.as_str(),
+                    "destructive_exempt": c.risk.destructive_exempt,
                 },
             })).collect::<Vec<_>>(),
             "file_relay": config.file_relay.as_ref().map(|r| json!({

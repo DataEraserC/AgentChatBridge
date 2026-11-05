@@ -808,10 +808,11 @@ pub enum Risk {
     Read,
     /// 写：发消息、撤回自己刚发的。默认可用。
     Write,
-    /// 破坏性：踢人、禁言、撤回别人的。**默认关闭**，`allow_destructive` 可放行。
+    /// 破坏性：踢人、禁言、撤回别人的。**默认票据 + 审批**，
+    /// `[connections.policy.risk]` 的 `destructive = "allow"` 或豁免名单可直调。
     Destructive,
-    /// 最高档：账号凭据、原始 SSO 包、进程运维。**默认拒绝，`allow_destructive` 不放行**；
-    /// 只能走 `access_request` 票据 + 私信审批执行。
+    /// 最高档：账号凭据、原始 SSO 包、进程运维。**固定票据 + 审批**，
+    /// 配置不能把它改成直调；只能走 `access_request` 票据 + 私信审批执行。
     Critical,
 }
 

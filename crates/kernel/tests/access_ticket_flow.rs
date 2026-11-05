@@ -456,11 +456,7 @@ fn two_requests_in_one_turn_are_aggregated_into_one_message() {
 
 #[test]
 fn batch_request_approve_by_batch_id_and_query() {
-    let text = config().replace(
-        "account = \"bot\"",
-        "account = \"bot\"\n        allow_destructive = [\"member.kick\"]",
-    );
-    let (mut bridge, sends) = bridge_with(&text);
+    let (mut bridge, sends) = bridge_with(config());
     bridge
         .ingest(message("qq:group/123", "user1", "批量申请", true))
         .expect("能记下来");
@@ -781,14 +777,14 @@ fn bot_admin_can_approve_but_ordinary_user_cannot() {
 }
 
 #[test]
-fn destructive_platform_call_is_refused_at_request_time() {
+fn destructive_access_request_creates_a_ticket_by_default() {
     let (mut bridge, sends, calls) = bridge_with_calls(config());
     bridge
         .ingest(message("qq:group/123", "user1", "踢个人", true))
         .expect("能记下来");
     let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
 
-    let error = bridge
+    let request = bridge
         .tool_call(
             &ticket,
             &sessions(),
@@ -799,18 +795,16 @@ fn destructive_platform_call_is_refused_at_request_time() {
                 "params": {"user_id": "10001"}
             }]}),
         )
-        .expect_err("destructive 未开时申请阶段就拒绝");
-    assert_eq!(error.code, ErrorCode::ToolNotAllowed);
-    assert!(
-        error.message.contains("destructive_disabled"),
-        "错误要带稳定码：{}",
-        error.message
-    );
-    assert!(
-        sends.lock().expect("没被毒死").is_empty(),
-        "申请被拒时不能产生审批私信"
-    );
+        .expect("默认 destructive=approval，申请必须生成票据");
+    assert_eq!(request["tickets"][0]["state"], "pending_approval");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("票据 id")
+        .to_owned();
     bridge.end_turn(&ticket, None).expect("收工");
+
+    let text = approval_dm(&sends);
+    assert!(text.contains(&id), "审批私信要带票据 id：{text}");
     assert!(
         calls.lock().expect("没被毒死").is_empty(),
         "申请阶段根本不该调用平台"
@@ -818,10 +812,10 @@ fn destructive_platform_call_is_refused_at_request_time() {
 }
 
 #[test]
-fn critical_is_refused_by_allow_destructive_and_runs_only_via_ticket() {
-    let text = config().replace(
-        "account = \"bot\"",
-        "account = \"bot\"\n        allow_destructive = true",
+fn critical_never_runs_directly_and_only_via_ticket() {
+    let text = format!(
+        "{}\n[connections.policy.risk]\ndestructive = \"allow\"\n",
+        config()
     );
     let (mut bridge, sends, calls) = bridge_with_calls(&text);
     bridge
@@ -859,7 +853,7 @@ fn critical_is_refused_by_allow_destructive_and_runs_only_via_ticket() {
     );
     assert!(
         calls.lock().expect("没被毒死").is_empty(),
-        "allow_destructive 不能放行 critical，平台一次都不该被调用"
+        "destructive = allow 不能放行 critical，平台一次都不该被调用"
     );
 
     let request = bridge
@@ -1028,11 +1022,7 @@ fn unverified_op_is_direct_denied_and_ticket_approval_shows_the_reason() {
 
 #[test]
 fn mixed_target_kinds_are_refused_before_a_ticket_exists() {
-    let text = config().replace(
-        "account = \"bot\"",
-        "account = \"bot\"\n        allow_destructive = true",
-    );
-    let (mut bridge, sends) = bridge_with(&text);
+    let (mut bridge, sends) = bridge_with(config());
     bridge
         .ingest(message("qq:group/123", "user1", "混合目标", true))
         .expect("能记下来");
@@ -1064,7 +1054,7 @@ fn mixed_target_kinds_are_refused_before_a_ticket_exists() {
 fn config_cannot_grant_critical_capability() {
     for capability in ["critical", "account_secret"] {
         let text = format!(
-            "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"any\"\n        capability = [\"{capability}\"]\n",
+            "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"subscribed\"\n        capability = [\"{capability}\"]\n",
             config()
         );
         let error = Config::parse(&text).expect_err("高敏能力常驻授予必须启动失败");

@@ -30,7 +30,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::config::{
-    ClockPolicy, Config, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy, WakeVerdict,
+    ClockPolicy, Config, InBandNoticeConfig, RiskAction, TurnErrorAction, WakeDecision, WakePolicy,
+    WakeVerdict,
 };
 use crate::deps::{DependencyKind, DependencyRegistry};
 use crate::grants::{
@@ -4486,7 +4487,7 @@ impl<S: Store> Bridge<S> {
         }
         let spec = find_platform_op(&methods, &args.op)?;
 
-        // critical 不接受任何常驻授权或 allow_destructive：直接调用一律拒绝，
+        // critical 不接受任何常驻授权或风险策略直调：直接调用一律拒绝，
         // 只允许由已批准的 access_request 票据在 core 内执行。unverified 同档。
         if spec.verification.is_unverified() {
             return Err(ToolError::new(
@@ -4505,9 +4506,10 @@ impl<S: Store> Bridge<S> {
             return Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
                 format!(
-                    "[forbidden] {} is a critical operation; allow_destructive does not apply. \
-                     File an access_request with op \"platform_call:{}\" and wait for private \
-                     approval before retrying",
+                    "[forbidden] {} is a critical operation; it always requires a ticket approved \
+                     in private and cannot be enabled by [connections.policy.risk]. File an \
+                     access_request with op \"platform_call:{}\" and wait for private approval \
+                     before retrying",
                     spec.name, spec.name
                 ),
             ));
@@ -4611,7 +4613,7 @@ impl<S: Store> Bridge<S> {
                     ErrorCode::ToolNotAllowed,
                     format!(
                         "[forbidden] {} is unverified and requires an approved access_request \
-                         ticket; allow_destructive and persistent grants do not apply",
+                         ticket; [connections.policy.risk] and persistent grants do not apply",
                         spec.name
                     ),
                 ));
@@ -4627,23 +4629,46 @@ impl<S: Store> Bridge<S> {
                             ErrorCode::ToolNotAllowed,
                             format!(
                                 "[forbidden] {} is a critical operation; it requires an approved \
-                                 access_request ticket and cannot be enabled by allow_destructive",
+                                 access_request ticket and cannot be enabled by \
+                                 [connections.policy.risk]",
                                 spec.name
                             ),
                         ));
                     }
                 }
                 Risk::Destructive
-                    if !Self::allows_destructive(&config, &room.connection, spec.name.as_ref()) =>
+                    if !approved.is_some_and(|ticket| {
+                        ticket.capabilities.contains(&GrantCapability::Destructive)
+                    }) && !Self::allows_destructive(
+                        &config,
+                        &room.connection,
+                        spec.name.as_ref(),
+                    ) =>
                 {
                     return Err(ToolError::new(
                         ErrorCode::ToolNotAllowed,
                         format!(
-                            "[forbidden] {} is a destructive operation and connection {} does not allow it \
-                             by default. Enable it in the [[connections]] section of config.toml with \
-                             allow_destructive = true (or list only the methods to enable, e.g. \
-                             allow_destructive = [\"{}\"])",
+                            "[forbidden] {} is a destructive operation; connection {} uses \
+                             policy.risk.destructive = \"approval\" and the method is not in \
+                             destructive_exempt. File an access_request with op \
+                             \"platform_call:{}\" and wait for private approval before retrying",
                             spec.name, room.connection, spec.name
+                        ),
+                    ));
+                }
+                Risk::Write
+                    if approved.is_none()
+                        && config
+                            .connection(&room.connection)
+                            .is_some_and(|item| item.risk.write == RiskAction::Approval) =>
+                {
+                    return Err(ToolError::new(
+                        ErrorCode::ToolNotAllowed,
+                        format!(
+                            "[forbidden] {} is a write operation; policy.risk.write is \
+                             \"approval\". File an access_request with op \"platform_call:{}\" \
+                             and wait for approval before retrying",
+                            spec.name, spec.name
                         ),
                     ));
                 }
@@ -5223,21 +5248,6 @@ impl<S: Store> Bridge<S> {
                             .to_owned(),
                     });
                 }
-                if spec.risk == Risk::Destructive
-                    && spec.verification.is_verified()
-                    && !Self::allows_destructive(&ctx.config, &room.connection, name)
-                {
-                    self.audit_ticket_denied(ctx, &target, "destructive_disabled", name);
-                    return Err(ToolError::new(
-                        ErrorCode::ToolNotAllowed,
-                        format!(
-                            "[access_request] items[{index}]: [destructive_disabled] {name} is \
-                             destructive and connection {} does not allow it; enable \
-                             allow_destructive before requesting a ticket; whole batch rejected",
-                            room.connection
-                        ),
-                    ));
-                }
             }
             if let Some(params) = &item.params
                 && params.to_string().len() > crate::tickets::MAX_SNAPSHOT_BYTES
@@ -5510,7 +5520,7 @@ impl<S: Store> Bridge<S> {
                     "destructive_enabled": destructive_enabled,
                     "destructive_blocked": destructive_blocked,
                     "critical": critical,
-                    "allow_destructive": destructive_state(config, connection),
+                    "risk": risk_policy_json(config, connection),
                 })
             })
             .collect();
@@ -5621,7 +5631,7 @@ impl<S: Store> Bridge<S> {
             "readable": read_reason.is_none(),
             "sendable": send_reason.is_none(),
             "reason": if read_reason.is_none() { send_reason } else { read_reason },
-            "allow_destructive": destructive_state(config, &room.connection),
+            "risk": risk_policy_json(config, &room.connection),
             "ops": ops,
         });
         maybe_index_list(
@@ -5781,7 +5791,7 @@ impl<S: Store> Bridge<S> {
                     "room": ctx.room.to_string(),
                     "subject": subject.as_str(),
                     "place": place.as_str(),
-                    "allow_destructive": destructive_state(config, &ctx.room.connection),
+                    "risk": risk_policy_json(config, &ctx.room.connection),
                     "resident": resident,
                     "catalog": catalog,
                     "counts": {
@@ -5802,7 +5812,7 @@ impl<S: Store> Bridge<S> {
                     "room": ctx.room.to_string(),
                     "subject": subject.as_str(),
                     "place": place.as_str(),
-                    "allow_destructive": destructive_state(config, &ctx.room.connection),
+                    "risk": risk_policy_json(config, &ctx.room.connection),
                     "resident": resident,
                     "tools": tools,
                     "counts": {
@@ -5828,7 +5838,7 @@ impl<S: Store> Bridge<S> {
                     "room": ctx.room.to_string(),
                     "subject": subject.as_str(),
                     "place": place.as_str(),
-                    "allow_destructive": destructive_state(config, &ctx.room.connection),
+                    "risk": risk_policy_json(config, &ctx.room.connection),
                     "tools": tools,
                     "counts": {
                         "tools_total": TOOL_NAMES.len(),
@@ -10208,26 +10218,33 @@ fn access_target_for_spec(config: &Config, room: &RoomId, spec: &MethodSpec) -> 
 
 fn connection_allows_destructive(config: &Config, connection: &str, method: &str) -> bool {
     config
-        .connections
-        .iter()
-        .find(|item| item.id == connection)
-        .is_some_and(|item| item.allow_destructive.allows(method))
+        .connection(connection)
+        .is_some_and(|item| match item.risk.destructive {
+            RiskAction::Allow => true,
+            // approval 下只对豁免名单里的方法直调；其余走票据 + 审批。
+            RiskAction::Approval => item
+                .risk
+                .destructive_exempt
+                .iter()
+                .any(|name| name == method),
+        })
 }
 
-fn destructive_state(config: &Config, connection: &str) -> Value {
-    match config
+fn connection_risk_policy(config: &Config, connection: &str) -> crate::config::RiskPolicy {
+    config
         .connection(connection)
-        .map(|item| &item.allow_destructive)
-    {
-        Some(policy) => match policy {
-            crate::config::DestructivePolicy::All => json!("all"),
-            crate::config::DestructivePolicy::Only(methods) => {
-                json!({"mode": "only", "methods": methods})
-            }
-            crate::config::DestructivePolicy::None => json!("none"),
-        },
-        None => json!("none"),
-    }
+        .map(|item| item.risk.clone())
+        .unwrap_or_default()
+}
+
+fn risk_policy_json(config: &Config, connection: &str) -> Value {
+    let policy = connection_risk_policy(config, connection);
+    json!({
+        "write": policy.write.as_str(),
+        "destructive": policy.destructive.as_str(),
+        "critical": policy.critical.as_str(),
+        "destructive_exempt": policy.destructive_exempt,
+    })
 }
 
 /// 这个工具是否有票据可申请的入口。
@@ -10269,10 +10286,22 @@ fn cap_op_json(
                     if connection_allows_destructive(config, connection, spec.name.as_ref()) {
                         (true, None, false, false)
                     } else {
-                        (false, Some("destructive_disabled"), false, false)
+                        (false, Some("destructive_requires_ticket"), true, true)
                     }
                 }
-                Risk::Read | Risk::Write => (true, None, false, spec.scope == Scope::Room),
+                Risk::Write => {
+                    if connection_risk_policy(config, connection).write == RiskAction::Approval {
+                        (
+                            false,
+                            Some("write_requires_ticket"),
+                            true,
+                            spec.scope == Scope::Room,
+                        )
+                    } else {
+                        (true, None, false, spec.scope == Scope::Room)
+                    }
+                }
+                Risk::Read => (true, None, false, spec.scope == Scope::Room),
             }
         };
     if direct_executable {

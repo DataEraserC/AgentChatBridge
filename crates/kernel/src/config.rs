@@ -340,37 +340,90 @@ pub struct Connection {
     /// 系统管理员的账号列表。发送者号命中其中之一，就标 `SenderRole::SystemAdmin`。
     /// 空 = 没有系统管理员。适配器判身份时先查这个，查不到再去问平台群角色。
     pub admin_qqs: Vec<String>,
-    /// 破坏性平台方法（踢人、禁言、解散群……）放不放行。默认全拒。
-    ///
-    /// 这是「AI 能做任何人也做的事」和「群消息是不可信输入」之间唯一的那道闸：
-    /// 白名单挡不住「模型合法地调一个它本来就有权调的方法」，只有默认关才挡得住。
-    pub allow_destructive: DestructivePolicy,
+    /// 破坏性等风险等级的策略。默认：write 直调，destructive / critical 票据 + 审批。
+    /// TOML 位置 `[connections.policy.risk]`，因为闸门本来就是按连接判定的。
+    pub risk: RiskPolicy,
     /// 入站策略（ADR-0026）：决定这条连接上的记录收不收。默认全部接收。
     pub receive: ReceivePolicy,
     /// 消息路由：入库前交给代码处理（命令、链接、任务）。默认空 = 全部交给 AI。
     pub routes: Vec<RoutePolicy>,
 }
 
-/// 破坏性方法的放行策略。
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum DestructivePolicy {
-    /// 一律拒绝（默认）。
+/// 风险等级的动作：直调，或票据 + 审批。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskAction {
+    /// 直调。
     #[default]
-    None,
-    /// 全部放行。
-    All,
-    /// 只放行这几个方法名。
-    Only(Vec<String>),
+    Allow,
+    /// 生成票据并等待审批后由 core 执行。
+    Approval,
 }
 
-impl DestructivePolicy {
-    /// 这个方法现在能不能调。非破坏性方法的判断不归它管。
-    pub fn allows(&self, method: &str) -> bool {
+impl RiskAction {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Self::None => false,
-            Self::All => true,
-            Self::Only(names) => names.iter().any(|name| name == method),
+            Self::Allow => "allow",
+            Self::Approval => "approval",
         }
+    }
+}
+
+/// 一条连接的风险等级策略：只回答「这一类操作默认要不要人点」。
+///
+/// 四元组（谁、在哪儿、能做什么）仍由 `[grants]` 回答；这里不重复授权判断。
+/// `destructive_exempt` 保留旧 `allow_destructive = ["method", ...]` 的按方法名
+/// 直调能力：名单里的方法跳过审批，其余 destructive 仍走票据。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RiskPolicy {
+    /// 普通写操作。默认直调。
+    pub write: RiskAction,
+    /// 破坏性操作。默认票据 + 审批。
+    pub destructive: RiskAction,
+    /// 最高风险档。只接受 `approval`。
+    pub critical: RiskAction,
+    /// destructive 直调白名单；仅在 `destructive = "approval"` 时生效。
+    pub destructive_exempt: Vec<String>,
+}
+
+impl Default for RiskPolicy {
+    fn default() -> Self {
+        Self {
+            write: RiskAction::Allow,
+            destructive: RiskAction::Approval,
+            critical: RiskAction::Approval,
+            destructive_exempt: Vec::new(),
+        }
+    }
+}
+
+impl RiskPolicy {
+    /// 解析期校验：`critical` 永远不能被配置成直调；豁免名单不能有空项或重复项。
+    pub fn normalized(mut self) -> Result<Self, String> {
+        if self.critical == RiskAction::Allow {
+            return Err(
+                "critical cannot be \"allow\"; critical operations always require a ticket \
+                 approved in private (use \"approval\")"
+                    .to_owned(),
+            );
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut exemptions = Vec::with_capacity(self.destructive_exempt.len());
+        for name in &self.destructive_exempt {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("destructive_exempt must not contain empty method names".to_owned());
+            }
+            if !seen.insert(name.to_owned()) {
+                return Err(format!(
+                    "destructive_exempt declares {name:?} more than once"
+                ));
+            }
+            exemptions.push(name.to_owned());
+        }
+        self.destructive_exempt = exemptions;
+        Ok(self)
     }
 }
 
@@ -670,8 +723,8 @@ pub struct Subscription {
 
 /// 一个会话的访问策略。
 ///
-/// **只决定「能不能碰这个房间/这条连接」**；破坏性操作仍由连接配置的
-/// `allow_destructive` 单独把关（两个维度，不能互相顶替）。
+/// **只决定「能不能碰这个房间/这条连接」**；破坏性等风险等级由每条连接的
+/// `[connections.policy.risk]` 单独决定要不要票据 + 审批（两个维度，不能互相顶替）。
 ///
 /// 不写 `provider` 时用内置 `[grants]` 评估器；写外部 provider 时由插件负责判定。
 #[derive(Debug, Clone, PartialEq)]
@@ -1188,6 +1241,12 @@ pub enum ConfigError {
     BadQueueLimit { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_grant_config", detail = detail))]
     BadGrantConfig { detail: String },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_risk_policy", connection = connection, detail = detail))]
+    BadRiskPolicy { connection: String, detail: String },
+    #[error("{}", acb_i18n::t!("kernel.config.legacy_allow_destructive", connection = connection))]
+    LegacyAllowDestructive { connection: String },
+    #[error("{}", acb_i18n::t!("kernel.config.global_policy_unsupported"))]
+    GlobalPolicyUnsupported,
     #[error("{}", acb_i18n::t!("kernel.config.bad_deps_config", field = field, value = value))]
     BadDepsConfig { field: String, value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.bad_lkg_config", field = field, value = value))]
@@ -1401,6 +1460,9 @@ impl Config {
     }
 
     fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
+        if raw.policy.is_some() {
+            return Err(ConfigError::GlobalPolicyUnsupported);
+        }
         let default_on_turn_error = parse_turn_error_actions(&raw.default_on_turn_error)?;
 
         let storage = match raw.storage {
@@ -2072,6 +2134,11 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
         return Err(ConfigError::EmptyConnectionId);
     }
 
+    // 旧开关不再有等价翻译层：出现即启动失败，指向新的连接级风险策略。
+    if raw.allow_destructive.is_some() {
+        return Err(ConfigError::LegacyAllowDestructive { connection: id });
+    }
+
     let platform = raw.platform.trim().to_owned();
     if platform.is_empty() {
         return Err(ConfigError::EmptyConnectionPlatform { connection: id });
@@ -2129,6 +2196,15 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
 
     let receive = build_receive(&id, raw.receive)?;
     let routes = build_routes(&id, raw.routes)?;
+    let risk = raw
+        .policy
+        .and_then(|policy| policy.risk)
+        .unwrap_or_default()
+        .normalized()
+        .map_err(|detail| ConfigError::BadRiskPolicy {
+            connection: id.clone(),
+            detail,
+        })?;
     Ok(Connection {
         id,
         platform,
@@ -2147,10 +2223,7 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
             .map(|qq| qq.trim().to_owned())
             .filter(|qq| !qq.is_empty())
             .collect(),
-        allow_destructive: raw
-            .allow_destructive
-            .map(RawDestructive::into_policy)
-            .unwrap_or_default(),
+        risk,
         receive,
         routes,
     })
@@ -2607,6 +2680,9 @@ struct RawConfig {
     storage: Option<RawStorage>,
     retention: Option<RawRetention>,
     queues: Option<RawQueue>,
+    /// 风险策略是连接级配置；顶层出现 `[policy]` 时启动失败，避免被静默忽略。
+    #[serde(default)]
+    policy: Option<toml::Value>,
     #[serde(default)]
     grants: Option<crate::grants::GrantsConfig>,
     #[serde(default)]
@@ -2819,15 +2895,25 @@ struct RawConnection {
     /// 系统管理员账号列表，可为空。
     #[serde(default)]
     admin_qqs: Vec<String>,
-    /// `true` 全开，或写方法名数组只开那几个。不写 = 全关。
+    /// 旧键：只在启动期给出迁移报错，不参与运行。
     #[serde(default)]
-    allow_destructive: Option<RawDestructive>,
+    allow_destructive: Option<toml::Value>,
+    /// 风险策略：`[connections.policy.risk]`。
+    #[serde(default)]
+    policy: Option<RawConnectionPolicy>,
     /// 入站策略（默认全部接收）。
     #[serde(default)]
     receive: RawReceive,
     /// 消息路由链：`[[connections.routes]]`，按顺序执行。
     #[serde(default)]
     routes: Vec<RawRoute>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConnectionPolicy {
+    #[serde(default)]
+    risk: Option<RiskPolicy>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2843,38 +2929,6 @@ struct RawReceive {
     provider: Option<String>,
     #[serde(default)]
     options: toml::value::Table,
-}
-
-/// `allow_destructive` 有两种写法：布尔，或方法名数组。
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawDestructive {
-    Bool(bool),
-    List(Vec<String>),
-}
-
-impl RawDestructive {
-    fn into_policy(self) -> DestructivePolicy {
-        match self {
-            Self::Bool(true) => DestructivePolicy::All,
-            Self::Bool(false) => DestructivePolicy::None,
-            Self::List(names) => {
-                let names: Vec<String> = names
-                    .into_iter()
-                    .map(|name| name.trim().to_owned())
-                    .filter(|name| !name.is_empty())
-                    .collect();
-                // 写了 `["*"]` 就当全开，省得列一大串。
-                if names.iter().any(|name| name == "*") {
-                    DestructivePolicy::All
-                } else if names.is_empty() {
-                    DestructivePolicy::None
-                } else {
-                    DestructivePolicy::Only(names)
-                }
-            }
-        }
-    }
 }
 
 fn default_transport() -> String {
@@ -3553,52 +3607,83 @@ mod tests {
         assert!(error.to_string().contains("file_relay.mode"), "{error}");
     }
 
-    /// 破坏性方法默认全关：AI 能做人也做的事，但那道闸默认是落下的。
+    /// 每条连接的风险策略默认：普通写直调，destructive / critical 票据 + 审批。
     #[test]
-    fn destructive_methods_are_closed_unless_the_connection_says_otherwise() {
+    fn risk_policy_defaults_per_connection() {
         let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
-        let policy = &config.connections[0].allow_destructive;
-        assert_eq!(*policy, DestructivePolicy::None);
-        assert!(!policy.allows("member.kick"));
+        let risk = &config.connections[0].risk;
+        assert_eq!(risk.write, RiskAction::Allow);
+        assert_eq!(risk.destructive, RiskAction::Approval);
+        assert_eq!(risk.critical, RiskAction::Approval);
+        assert!(risk.destructive_exempt.is_empty());
+    }
+
+    fn with_connection_risk(policy: &str) -> Result<Config, ConfigError> {
+        let text = format!(
+            "{}\n[connections.policy.risk]\n{}\n{}",
+            ONE_CONNECTION, policy, ONE_SESSION
+        );
+        Config::parse(&text)
     }
 
     #[test]
-    fn allow_destructive_accepts_true_false_and_a_method_list() {
-        let with = |extra: &str| {
-            let text = ONE_CONNECTION.replace(
-                "account = \"10001\"",
-                &format!("account = \"10001\"\n{extra}"),
-            );
-            Config::parse(&config_with(&text, ONE_SESSION))
-                .expect("能解析")
-                .connections[0]
-                .allow_destructive
-                .clone()
-        };
+    fn risk_policy_parses_allow_and_method_exemptions() {
+        let config =
+            with_connection_risk("destructive = \"allow\"").expect("destructive=allow 能解析");
+        assert_eq!(config.connections[0].risk.destructive, RiskAction::Allow);
 
-        let all = with("allow_destructive = true");
-        assert_eq!(all, DestructivePolicy::All);
-        assert!(all.allows("member.kick"));
-        assert!(all.allows("msg.recall"));
-
-        let none = with("allow_destructive = false");
-        assert!(!none.allows("member.kick"));
-
-        let some = with("allow_destructive = [\"member.kick\"]");
+        let config = with_connection_risk(
+            "destructive = \"approval\"\ndestructive_exempt = [\"group.mute\", \" msg.recall \"]",
+        )
+        .expect("豁免列表能解析");
         assert_eq!(
-            some,
-            DestructivePolicy::Only(vec!["member.kick".to_owned()])
+            config.connections[0].risk.destructive_exempt,
+            vec!["group.mute".to_owned(), "msg.recall".to_owned()],
+            "豁免名单会在解析期去掉首尾空白"
         );
-        assert!(some.allows("member.kick"));
-        assert!(!some.allows("group.mute"), "没列出来的不许");
+    }
 
-        // `["*"]` 是「全开」的简写。
-        let star = with("allow_destructive = [\"*\"]");
-        assert_eq!(star, DestructivePolicy::All);
+    /// critical 只能票据 + 审批；配成 allow 必须启动失败。
+    #[test]
+    fn critical_allow_fails_at_startup() {
+        let error = with_connection_risk("critical = \"allow\"").expect_err("必须启动失败");
+        let message = error.to_string();
+        eprintln!("critical=allow 启动报错：{message}");
+        assert!(message.contains("critical"), "{message}");
+        assert!(message.contains("approval"), "{message}");
+    }
 
-        // 空数组等于没开，不能因为「写了这一行」就放开。
-        let empty = with("allow_destructive = []");
-        assert!(!empty.allows("member.kick"));
+    /// 旧键不静默忽略也不映射：出现即启动失败，并指向连接级新位置。
+    #[test]
+    fn allow_destructive_fails_at_startup_with_a_migration_hint() {
+        for legacy in [
+            "allow_destructive = true",
+            "allow_destructive = false",
+            "allow_destructive = [\"group.mute\"]",
+        ] {
+            let connection = ONE_CONNECTION.replace(
+                "account = \"10001\"",
+                &format!("account = \"10001\"\n{legacy}"),
+            );
+            let error = Config::parse(&config_with(&connection, ONE_SESSION))
+                .expect_err("旧键必须启动失败");
+            let message = error.to_string();
+            eprintln!("allow_destructive 启动报错：{message}");
+            assert!(message.contains("allow_destructive"), "{message}");
+            assert!(message.contains("connections.policy.risk"), "{message}");
+        }
+    }
+
+    /// 顶层 [policy] 不做隐式全局策略：启动失败，指向连接级位置。
+    #[test]
+    fn top_level_policy_is_rejected_with_a_migration_hint() {
+        let text = format!(
+            "{}\n[policy.risk]\ndestructive = \"allow\"\n{}",
+            ONE_CONNECTION, ONE_SESSION
+        );
+        let error = Config::parse(&text).expect_err("顶层 policy 必须启动失败");
+        let message = error.to_string();
+        assert!(message.contains("connections.policy.risk"), "{message}");
     }
 
     /// 连接方式不再由 config 写死：manifest 在启动时决定支不支持。

@@ -2408,7 +2408,7 @@ mod tests {
     }
 
     /// 批次 3 的新 op 必须逐个显式标 risk，并有确定的路由；破坏性群管理默认被
-    /// `allow_destructive` 挡住，标签只表达「需要管理员」，不在 core 里猜身份。
+    /// `[connections.policy.risk]` 挡住，标签只表达「需要管理员」，不在 core 里猜身份。
     #[test]
     fn batch_three_ops_have_explicit_risk_and_routes() {
         let methods = catalog();

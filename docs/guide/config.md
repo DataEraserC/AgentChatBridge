@@ -86,12 +86,25 @@ url = "ws://127.0.0.1:3001"  # ws-client 必填；ws-server 用 options.listen
 token = ""                 # OneBot 的 access token，没设就空着
 account = "10001"          # 这个号自己的 QQ 号——桥靠它认出「哪句是 agent 自己说的」
 admin_qqs = []             # 这些号在记录里标成 system_admin；lua.stop_command 据此放行 /stop
-allow_destructive = false  # 见下
+
+# 风险策略（连接级）：只回答「这一类操作默认要不要人点」
+[connections.policy.risk]
+destructive = "approval"   # 默认；破坏性操作走票据 + 审批
+# destructive = "allow"    # 等价于旧的 allow_destructive = true：直调
+destructive_exempt = ["member.kick"]  # 可选：名单里的破坏性方法直调，其余仍走票据
+# write = "allow"          # 默认；写操作直调
+# critical 固定 "approval"，配成 "allow" 会启动失败
 ```
 
 - `account` 一定要填对：agent 自己发的消息不计入未读，靠的就是它。
-- `allow_destructive` 默认 `false`（踢人/禁言/撤回别人消息这些破坏性操作模型调不到）。
-  想让 agent 真能管理群就写 `true`，或者只放行几个：`allow_destructive = ["member.kick"]`。
+- **旧键 `allow_destructive` 已移除**：配置里再写（`true` / `false` / 方法名数组）会
+  直接启动失败，错误指向 `[connections.policy.risk]`，不静默映射。
+  - `allow_destructive = true` → `destructive = "allow"`
+  - `allow_destructive = ["member.kick", "group.mute"]` →
+    `destructive = "approval"` + `destructive_exempt = ["member.kick", "group.mute"]`
+  - `allow_destructive = false` → 删掉该行（新默认是票据 + 审批，不再是硬拒）
+- 默认下破坏性操作直调会被拒，但 `access_request` 仍可发起：生成票据、私信审批后由
+  core 执行。`critical` 永远不能直调，也不接受任何配置放行。
 - OneBot 连接会带 `options`；`options.snowluma_min_version` 可覆盖适配器默认的 SnowLuma
   兼容下限（默认 `2.4.0`）。低于下限只在启动日志警告，不拒绝连接：
   在 `[[connections]]` 里写 `options = { snowluma_min_version = "2.4.0" }`。
@@ -289,11 +302,11 @@ account = "10002"
 [[grants.rules]]
 subject = "system_admin"
 place = "private"
-scope = "any"
+scope = "subscribed"
 capability = ["room_read", "room_write", "connection_read"]
 ```
 
-- `scope = "any"` 只覆盖本会话可达的 kind / 目标，不是无条件全开；跨目标要显式写
+- `scope = "subscribed"` 只覆盖本会话可达的 kind / 目标，不是无条件全开；跨目标要显式写
   `scope = "room"` / `"connection"` 并给 typed target：
   `target = { kind = "room", id = "qq:group/123" }` 或
   `target = { kind = "connection", id = "qq" }`。旧字符串 target 会在启动期报错。
@@ -313,7 +326,10 @@ capability = ["room_read", "room_write", "connection_read"]
   只读 op 的票据保持 `active` 由会话在有效期内重试。执行结果以系统事件 `ticket_result`
   写回原房间，完整结果用 `access_ticket_get` 查。
   `[tickets]` 可配申请冷却与管理员消息冷却（默认 60s / 30s）。`access_ticket_get` 只能查本会话的票据。
-- 破坏性操作仍由连接的 `allow_destructive` 单独把关，授权/票据都不能顶替它。
+- 授权只管「能碰到哪里」；破坏性等风险等级由连接的 `[connections.policy.risk]` 单独
+  决定要不要票据 + 审批，授权不能顶替它。
+- `scope = "any"` 已移除（与 `subscribed` 语义相同）：配置里再写会在启动解析期报错，
+  提示改用 `subscribed`，不静默映射。
 - 外部 provider 只能落在**配置里存在的连接**上——连接本身没配登录账号，发不出去。
 
 ### 投递、发送钩子与失败通知
