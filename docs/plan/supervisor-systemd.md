@@ -34,6 +34,22 @@ systemd (acb-launcher.service, Type=notify)
 - 回滚后 `lkg.json` 仍指向刚回滚到的版本；新 launcher 发现「LKG 等于 current」时
   视为没有 LKG。这是有意的：只允许一次自动回滚，回滚后的版本再失败就进入终态。
 
+### launcher 重启后哪些状态还在
+
+- **丢弃**：`Supervisor` 的内存状态全部随进程消失——`consecutive_failures`、
+  `consecutive_holds`、`failures` 窗口、`healthy_since_ms`、`policy_errors`。
+  退避阶梯从下一轮的 `consecutive_holds=0` 重新开始。
+- **持久化**：`current.json`（下一个该起的命令）、`lkg.json`（稳定窗口提升的 LKG）、
+  `supervisor.log`（审计）、以及 steward 自己的状态文件。
+- **靠什么记住「刚回滚过」**：不是 `current.json` 里的额外标记，而是两条指针的
+  相等关系：`load_lkg()` 读到 LKG 后，`Supervisor::new` 发现
+  `lkg == current` 就把内存 `lkg` 置空。于是回滚后的版本再失败时，快照里
+  `lkg=None`，策略只能返回 `fail`；launcher 以 78 退出。测试
+  `second_failure_after_rollback_is_terminal_78` 就是构造「current=/lkg、
+  lkg=/lkg」这组关系来复现的。
+- 因此这是**单次回滚**语义：不会在多个旧版本之间来回震荡。也意味着重启 launcher
+  会重置失败计数；这是可接受的，因为终态由「有没有 LKG」决定，而不是由计数决定。
+
 ## 2. 谁在什么情况下重启/回滚
 
 | 触发 | 决策方 | 动作 | systemd 是否参与 | 退避 |
@@ -75,16 +91,30 @@ systemd (acb-launcher.service, Type=notify)
 
 ## 4. Watchdog 与 unhealthy 的先后
 
-- `WatchdogSec=120`；launcher 按 `WATCHDOG_USEC/2`（60s）发 `WATCHDOG=1`。
-- supervisor `unhealthy_secs=60`、`probe_interval_secs=5`。子进程假死/健康端点不响应时，
-  supervisor 在约 60s 做出 `rollback`，launcher 退出 75，systemd 重启 launcher。
-  **watchdog 不会先触发**。
-- watchdog 兜的是 launcher/监督循环自己挂死：这时没有进程能做决策，120s 后 systemd
-  杀 cgroup 并重启 launcher。两条路径不会互相掩盖，因为它们的观察对象不同：
-  supervisor 看子进程健康，watchdog 看 launcher 是否还活着。
-- `Type=notify` 的 `READY=1` 只表示 launcher 已启动并尝试拉起当前版本，不表示子进程
-  已健康；健康仍由 supervisor 判定。
-- `TimeoutStopSec=45` > acb 默认排空 30s，避免 stop 时提前 SIGKILL。
+**谁在发**：`acb-launcher` 自己发，不是 acb 子进程发。代码在
+`crates/launcher/src/main.rs`：
+
+- `Notifier::new()` 从 systemd 注入的 `WATCHDOG_USEC` 读取 watchdog 周期，
+  `watchdog_every = WATCHDOG_USEC / 2`。
+- `notifier.ready()` 在 `Supervisor::new` 成功拉起当前版本后发 `READY=1`。
+- 主循环每 100ms 调一次 `notifier.watchdog()`；内部按 `watchdog_every` 限频，
+  到点才真正写 `WATCHDOG=1`。`last_watchdog` 在 `Notifier::new()` 初始化，
+  所以 **`READY=1` 之后的第一帧在约 `WatchdogSec/2`**（`WatchdogSec=120` 时约 60s）。
+- 没有 `NOTIFY_SOCKET`（手动运行）时不发，也不报错。
+
+**间隔**：`WatchdogSec=120` → 每 60s 一帧，留一半余量；systemd 默认要求
+每个 `WatchdogSec` 窗口内至少一帧。
+
+**与 `unhealthy_secs` 的关系**：supervisor 的 `unhealthy_secs=60`、探针间隔 5s，
+所以子进程假死/健康端点不响应时，supervisor 先在约 60s 决策并退出 75；
+systemd 的 120s watchdog 不会先触发。watchdog 兜的是 launcher/监督循环自己挂死：
+这时没有进程能发心跳，120s 后 systemd 杀 cgroup 并重启 launcher。
+
+**失败模式**：如果 watchdog 心跳没发（例如 `NOTIFY_SOCKET` 是抽象 socket 且
+std 不支持，或 launcher 阻塞超过 120s），systemd 会以 `watchdog` 原因杀掉整个
+cgroup 并重启 launcher；此时不会走 75 回滚路径，审计里只会看到上次的
+`execute` 结果。部署时看到 `status=watchdog` 或 `Result: watchdog` 应先查
+launcher 是否卡死，而不是怀疑策略。
 
 ## 5. 部署形态
 
@@ -152,6 +182,16 @@ systemd (acb-launcher.service, Type=notify)
 ## 8. 实测记录（2026-11-05，user systemd）
 
 命令：`./deploy/verify-launcher.sh`（临时 unit，不改持久配置）。
+
+### 场景 0：watchdog 心跳
+
+```text
+WatchdogUSec=4s
+NRestarts before=0 after=0；MainPID before=2718639 after=2718639
+```
+
+`WatchdogSec=4` 小于默认 120s，launcher 自动按 `WATCHDOG_USEC/2=2s` 发帧；
+10 秒后 `NRestarts=0`、`MainPID` 不变，说明心跳确实在发，unit 没有被 watchdog 杀掉。
 
 ### 场景 1：正常重启，launcher 不退出
 

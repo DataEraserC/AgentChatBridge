@@ -78,7 +78,7 @@ start_unit() {
   systemd-run --user --unit="$unit" \
     --property=Type=notify \
     --property=NotifyAccess=main \
-    --property=WatchdogSec=120 \
+    --property=WatchdogSec="${WATCHDOG_SEC:-120}" \
     --property=Restart=on-failure \
     --property=RestartSec=1 \
     --property=RestartForceExitStatus=75 \
@@ -116,6 +116,29 @@ wait_for_file_value() {
   done
   return 1
 }
+
+echo
+echo "== 场景 0：watchdog 心跳（WatchdogSec=4，launcher 每 2s 发一帧）=="
+config_w="$work/w.toml"
+make_config "$config_w" "$lkg_good" 99
+unit_w="acb-launcher-verify-w-$stamp"
+WATCHDOG_SEC=4 start_unit "$unit_w" "$config_w"
+sleep 1
+pid_w1=$(systemctl --user show -p MainPID --value "$unit_w")
+nrestarts_w1=$(systemctl --user show -p NRestarts --value "$unit_w")
+sleep 10
+pid_w2=$(systemctl --user show -p MainPID --value "$unit_w")
+nrestarts_w2=$(systemctl --user show -p NRestarts --value "$unit_w")
+echo "WatchdogUSec=$(systemctl --user show -p WatchdogUSec --value "$unit_w")"
+echo "NRestarts before=$nrestarts_w1 after=$nrestarts_w2；MainPID before=$pid_w1 after=$pid_w2"
+if [[ "$pid_w1" != "$pid_w2" || "$nrestarts_w2" != "0" ]]; then
+  echo "FAIL: watchdog 心跳没有生效（unit 被重启）" >&2
+  status "$unit_w"
+  logs "$unit_w"
+  exit 1
+fi
+status "$unit_w"
+systemctl --user stop "$unit_w" >/dev/null 2>&1 || true
 
 echo
 echo "== 场景 1：正常重启（supervisor hold，launcher 不死）=="
