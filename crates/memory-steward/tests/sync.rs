@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use acb_memory_steward::{
-    AutoResolve, CombinedSchedule, MergeStrategy, Notifier, Scheduler, Steward, StewardConfig,
-    SyncNotice, SyncState, Target,
+    AutoResolve, CombinedSchedule, MergeStrategy, Notifier, STUCK_AFTER_SKIPS, Scheduler, Steward,
+    StewardConfig, SyncNotice, SyncState, Target,
 };
 use acb_proto::RoomId;
 
@@ -445,6 +445,53 @@ fn external_write_during_rehearsal_is_not_overwritten() {
         )),
         "并发写要通知：{notices:?}"
     );
+}
+
+#[test]
+fn repeated_skips_mark_stuck_and_reset_after_success() {
+    let root = temp("stuck");
+    let (_remote, local) = setup_remote_and_local(&root);
+    let target = target(&local);
+    let mut steward = Steward::new(
+        config(&root, 1, 0),
+        vec![target.clone()],
+        Arc::new(Recorder::default()),
+    )
+    .expect("steward");
+    assert_eq!(steward.run_once(1000).len(), 1, "首次按时间触发");
+
+    std::fs::write(local.join("dirty.md"), "dirty").expect("dirty file");
+    let mut now = 2000;
+    for expected in 1..=STUCK_AFTER_SKIPS {
+        let outcomes = steward.run_once(now);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].result, "dirty");
+        assert_eq!(
+            steward.state(&target).consecutive_skips,
+            expected,
+            "连续跳过计数要累加"
+        );
+        now += 1000;
+    }
+    let state = steward.state(&target);
+    assert!(state.stuck, "连续跳过达到阈值必须标 stuck");
+
+    let status: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("state/status.json")).expect("status file"),
+    )
+    .expect("status json");
+    assert_eq!(
+        status["targets"]["m1/s1"]["consecutive_skips"],
+        STUCK_AFTER_SKIPS
+    );
+    assert_eq!(status["targets"]["m1/s1"]["stuck"], true);
+
+    std::fs::remove_file(local.join("dirty.md")).expect("clean");
+    let outcomes = steward.run_once(now);
+    assert_eq!(outcomes[0].result, "ok");
+    let state = steward.state(&target);
+    assert_eq!(state.consecutive_skips, 0, "成功同步要清零");
+    assert!(!state.stuck, "成功同步要解除 stuck");
 }
 
 #[test]

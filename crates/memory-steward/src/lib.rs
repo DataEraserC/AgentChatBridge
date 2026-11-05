@@ -24,6 +24,8 @@ pub const DEFAULT_INTERVAL_SECS: u64 = 300;
 pub const DEFAULT_POLL_SECS: u64 = 30;
 pub const DEFAULT_GIT_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_STATE_DIR: &str = "state/memory-steward";
+/// 连续跳过多少次（dirty / concurrent_write）就在状态里标 `stuck`。
+pub const STUCK_AFTER_SKIPS: u32 = 5;
 
 /// 合并策略。`merge` 保留分叉历史；`rebase` 把本地提交重放到远端之上。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -171,6 +173,12 @@ pub struct SyncState {
     pub last_result: Option<String>,
     pub conflict_files: Vec<String>,
     pub error: Option<String>,
+    /// 连续 `dirty` / `concurrent_write` 的次数；成功同步或其他结果会清零。
+    #[serde(default)]
+    pub consecutive_skips: u32,
+    /// 连续跳过达到 [`STUCK_AFTER_SKIPS`] 时置 true；控制台据此显示告警。
+    #[serde(default)]
+    pub stuck: bool,
     /// 上次成功同步时的 HEAD；用于计算「之后又提交了几次」。
     pub last_head: Option<String>,
 }
@@ -311,6 +319,17 @@ impl Steward {
             }
 
             let (mut state, outcome) = sync_target(target, &self.config, now_ms);
+            let skipped = matches!(
+                state.last_result.as_deref(),
+                Some("dirty") | Some("concurrent_write")
+            );
+            if skipped {
+                state.consecutive_skips = old.consecutive_skips.saturating_add(1);
+                state.stuck = state.consecutive_skips >= STUCK_AFTER_SKIPS;
+            } else {
+                state.consecutive_skips = 0;
+                state.stuck = false;
+            }
             state.last_head = state.last_head.clone().or(old.last_head.clone());
             state.last_success_ms = state.last_success_ms.or(old.last_success_ms);
             self.state.targets.insert(key.clone(), state.clone());
