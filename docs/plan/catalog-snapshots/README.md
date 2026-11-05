@@ -34,3 +34,7 @@
 - **结论分类**：`verified` = 参数语义 + 返回语义都确证，可支撑 `Verified`；
   `contract_only` = 只确认可调用/返回形状，不能支撑 `Verified`；
   `unverified` / `supporting` = 不能确证或仅作旁证。
+- **判定前提（2026-11-05）**：写操作必须能用独立读接口读回真实状态变化；读回默认
+  可能命中缓存，写后必须带 `no_cache:true` 并与写前基线对比。只回 `okResponse()` /
+  `data:null` / 空数组一律不能标 `verified`。目录快照只证明动作存在与参数表，
+  不证明运行时返回语义。

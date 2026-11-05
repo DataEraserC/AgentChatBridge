@@ -3027,14 +3027,16 @@ mod tests {
                 "group.add_option",
                 "group.anonymous",
                 "group.anonymous_ban",
+                "group.search",
                 "group.tag_add",
                 "group.tag_delete",
                 "group.tag_list",
+                "member.card",
                 "msg.tuwen_ark",
                 "msg.word_slices",
                 "system.packet_status",
             ],
-            "只有 research §3 里需要实验的 op 才能标 unverified"
+            "unverified 清单是安全边界：多标或少标都会让门槛漂移"
         );
         for method in methods.iter() {
             if method.verification.is_unverified() {
@@ -3056,6 +3058,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 占位/分类标签/误名写入这几类必须有固定的 reason 前缀，审计与
+    /// 审批展示才能按类别检索，而不是混在一句「语义未确认」里。
+    #[test]
+    fn unverified_reason_codes_match_the_confirmed_classes() {
+        let methods = catalog();
+        fn reason<'a>(methods: &'a [acb_kernel::MethodSpec], name: &str) -> &'a str {
+            methods
+                .iter()
+                .find(|method| method.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("目录里没有 {name}"))
+                .verification
+                .reason()
+                .unwrap_or_default()
+        }
+        for name in [
+            "group.anonymous",
+            "group.anonymous_ban",
+            "account.model_show_set",
+            "friend.recent_contacts",
+            "system.packet_status",
+        ] {
+            assert!(
+                reason(&methods, name)
+                    .starts_with("placeholder handler, no observable state change"),
+                "{name} 的 reason 不是占位类：{}",
+                reason(&methods, name)
+            );
+        }
+        assert!(
+            reason(&methods, "account.model_show").contains("no observable state change"),
+            "account.model_show 的 reason 没写清无状态变化：{}",
+            reason(&methods, "account.model_show")
+        );
+        for name in ["group.tag_list", "group.tag_add", "group.tag_delete"] {
+            assert!(
+                reason(&methods, name)
+                    .starts_with("operates on group classification tags, not group tags"),
+                "{name} 的 reason 不是分类标签类：{}",
+                reason(&methods, name)
+            );
+        }
+        for name in ["msg.word_slices", "file.collection_create"] {
+            assert!(
+                reason(&methods, name).starts_with("platform reports not implemented"),
+                "{name} 的 reason 不是未实现类：{}",
+                reason(&methods, name)
+            );
+        }
+        assert!(
+            reason(&methods, "group.search").starts_with("misnamed write"),
+            "group.search 的 reason 不是误名写入类：{}",
+            reason(&methods, "group.search")
+        );
+        assert!(
+            reason(&methods, "member.card").starts_with("write confirmed, rollback unverified"),
+            "member.card 的 reason 不是半验证类：{}",
+            reason(&methods, "member.card")
+        );
     }
 
     #[test]

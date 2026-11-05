@@ -235,13 +235,14 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 **计数（2026-11-05，批次 9 之后）**：25 项中 2 项不适用；
 适用 23 项 = 已实现 19 + 部分 2 + 未实现 2（#2 HTTP API 与 #5 `wss://`）。
 #17 表情回应、#22 QQ 空间、#23 收藏/闪传已由批次 9 补齐；#19 的动作已全，
-但 14 个 `Unverified` op 要等实验完成才算完全实现。
+但 16 个 `Unverified` op 要等实验完成才算完全实现。
 
 **动作级覆盖**：
 - 现有 `ROUTES` 192 个层级 op / 200 个 action（[catalog.rs](../../crates/adapters/onebot-snowluma/src/catalog.rs)）。
-- 其中 **14 个 op** 带 `Verification::Unverified`（批次 8 的 3 个、审计后仍无出处的
-  3 个、白名单清零的 8 个），按 critical 档管理；5 个平台别名挂在主 op 的
-  `aliases` 上，继承主 op 的 `Verified`。
+- 其中 **16 个 op** 带 `Verification::Unverified`（批次 8 的 4 个、审计后仍无出处的
+  2 个、白名单清零的 8 个、本次实测降级的 `group.search` / `member.card` 2 个），
+  按 critical 档管理；5 个平台别名挂在主 op 的 `aliases` 上，继承主 op 的
+  `Verified`。
 - SnowLuma 中文 API 页分类合计 200，英文 219；两页不一致，不能当精确总数。
 - 逐动作「已暴露 / 未暴露 + 原因分类」见 [snowluma-action-coverage.md](snowluma-action-coverage.md)：
   已暴露 200、未暴露 0；8 个平台占位/mock 也暴露成 `Unverified`，白名单为空。
@@ -253,7 +254,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 3. `get_version_info` 已采集三层版本并写进依赖元数据（批次 1）。
 
 动作覆盖面已收口：200 个中文动作全部有 op / 别名归属，白名单为空。
-现在的主要风险转为 14 个 `Unverified` 语义与 QQ 空间等账号级写操作的实机行为。
+现在的主要风险转为 16 个 `Unverified` 语义与 QQ 空间等账号级写操作的实机行为。
 
 ---
 
@@ -911,8 +912,10 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
   `account.qzone.detail` 由 2026-11-05 只读实验改 `Verified`（有效 tid 返回
   tid/content/comment_num/comments）；`group.tag_list` 只到「契约已确认」，仍标
   `Unverified`（六个 group_class 都返回空 tags，语义未确证）；白名单清零的 8 个
-  平台占位/mock 仍标 `Unverified`。全表 `Unverified` 14 个（批次 8 的 3 +
-  审计后仍无出处/未确证的 3 + 8）。
+  平台占位/mock 仍标 `Unverified`。本次 2026-11-05 写入实验把 `group.search`
+  （实测 OIDB 1288、读回无变化）与 `member.card`（回滚清空 OIDB 1007、有残留）
+  从 `Verified` 降为 `Unverified`。全表 `Unverified` 16 个（批次 8 的 4 +
+  审计后仍无出处/未确证的 2 + 白名单 8 + 本次降级 2）。
 
 **证据**
 - `every_op_is_hierarchical_tagged_and_routed`：192 个 op 逐个检查层级名、risk tag、
@@ -922,27 +925,124 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 - `action_coverage_matrix_is_complete_and_exceptions_have_reasons`：直接解析
   `snowluma-action-coverage.md`，断言 200 已暴露 / 0 未暴露；`UNEXPOSED` 为空时
   仍保留「非空则每条必须有理由」。
-- `catalog_lists_the_unverified_ops`：14 个 unverified op 的逐字清单。
+- `catalog_lists_the_unverified_ops`：16 个 unverified op 的逐字清单。
+- `unverified_reason_codes_match_the_confirmed_classes`：占位、分类标签、误名写入、
+  半验证、未实现这几类 reason 的固定前缀。
 - **配置**：无新增配置项；风险仍由 `allow_destructive` + 票据审批控制。
 
-### `Verified` 判定标准（2026-11-05 修订）
+### `Verified` 判定标准、存放位置与 2026-11-05 降级
 
-只有**参数语义 + 返回语义都确证**才允许标 `Verified`：
+#### 判定口径
 
-- 参数语义：知道每个参数是什么意思、取值域、哪些必填；
-- 返回语义：知道成功返回哪些字段、字段含义，以及失败时的稳定错误码；
-- 有官方源码/文档条目或真机语义对照实验作为出处。
+`Verified` 只认「参数语义 + 返回语义」双确证；缺一条就是 `Unverified`：
 
-只做到「能调用、返回形状对」的，标 `Unverified`，并在 reason 或结论里写
-**「契约已确认」**；不要混用 `Verified`。典型例子：
+1. **参数语义**：知道每个参数是什么意思、取值域、必填/可选、枚举与单位映射。
+2. **返回语义**：知道成功返回哪些字段、字段含义，以及失败时的稳定错误码。
+3. **写操作必须有独立读接口读回真实状态变化（read-back）**。只回 `okResponse()`、
+   `data:null` 或空数组不构成返回语义证据；**只回 okResponse 一律 `Unverified`**。
+4. **读回必须新鲜**：平台默认读回可能走缓存。写后读回要显式 `no_cache:true`，
+   并在写前记录同一读接口的基线；否则会把写入误判为「没生效」，把回滚误判为
+   「成功」。没有 freshness 证据的 read-back 不算双确证。
+5. 只证明「动作存在、参数表正确、能调用、返回形状对」的，记 **契约已确认**，
+   仍标 `Unverified`。
+6. 平台自述 mock / 占位 / 未实现 / 不支持，或 handler 空转、参数被忽略的，
+   直接 `Unverified`。
+7. 写方向成功、回滚方向失败或未测的，记 **半验证**，不算 `Verified`。
+8. `Verified` 的 source 必须指向可复现资产：目录快照
+   `snowluma-2026-09-29-190-actions.json#<action>`，或只读实验记录里
+   `conclusion=verified` 的探针。快照只证明动作存在 + 参数表，不证明运行时语义。
 
-- `group.tag_list`：参数 `group_class` 与返回 `tags:[]` 形状确认，但
-  `group_class=0/1/2/3/5/10` 都返回空 tags，无法证明 tags 与 group_class 的
-  对应关系 → `Unverified + 契约已确认`。
-- `account.qzone.detail`：用有效 tid 返回 `tid/content/comment_num/comments`，
-  参数语义与返回语义都确证 → `Verified`。
-- 快照条目只证明「动作存在 + 参数表」，不证明运行时语义；快照型 `Verified`
-  依赖的是目录摘要与参数，不等同于真机语义实验。
+**分级（文档口径；`Verification` 仍只有两态，审批闸门不因分级改变）**
+
+| 档 | 定义 | 例子 |
+|---|---|---|
+| Verified（可直调） | 双确证 + 新鲜读回 + 失败码稳定 | `account.qzone.detail`；`group.member_permissions`（`allow_member_upload_album` true→false→true，回滚无残留） |
+| Verified but irreversible side effect | 双确证成立，但会连带改掉其它不可回滚的字段；不得称为「安全写」 | `group.add_option` 的 `add_type=3`：2→3→2 读回一致，但同一次写入把 `member_invite_policy` 从 `disabled` 改成 `require_approval`，接口拉不回来。op 级仍 `Unverified`（其余取值未测） |
+| Half verified | 只有一个方向可读回；反向清空/回滚失败或未测 | `member.card`：写新名片可读回，清空回滚 OIDB 1007，残留 |
+| Unverified | 双确证不成立，或只有 okResponse/占位/契约 | 匿名、机型、分类标签、未实现动作 |
+
+#### 验证状态实际存在哪里
+
+| 层 | 位置 | 存什么 |
+|---|---|---|
+| core 类型 | `crates/kernel/src/outbound.rs:566-650`（`Verification`）；`MethodSpec.verification` 在 `outbound.rs:678` | `Verified { source }` / `Unverified { reason, experiment }`，没有第三态 |
+| 适配器目录 | `crates/adapters/onebot-snowluma/src/catalog.rs:2591-2737`（`verification_of`） | 每个 op 的最终判定；快照/实验 source 由 `SNAPSHOT_ACTIONS` / `EXPERIMENT_VERIFIED` 生成 |
+| 外部 wire | `crates/adapter-api/src/lib.rs` 的 `WireVerification`；`crates/kernel/src/wire.rs:196-220` 转换 | 外置适配器必须显式给 `verified.source` 或 `unverified.reason+experiment`，缺字段启动期拒绝 |
+| 目录快照 | `docs/plan/catalog-snapshots/snowluma-2026-09-29-190-actions.json` | `Verified` 的出处处，不存状态本身 |
+| 工具面 | `engine.rs:10835-10864`（`platform_call` 清单/详情）；`engine.rs:10247`（capabilities op）；`engine.rs:10091` 的 `method_index` 只保留 `verified: true/false` | 模型看到 `verification.state/reason(/experiment)`；索引降级时只剩布尔位 |
+| 审批面 | `engine.rs:5216`、`engine.rs:9671-9707`；`tickets.rs:89-94,116` | 票据记录 `unverified` op + reason，审批私信标 `[UNVERIFIED]` 并列 reason |
+
+#### 已确认的占位/空实现/误名动作与代码证据
+
+以下 op 都已经是 `Unverified`。本轮把 reason 收敛成可检索的固定类别；前两条
+`group.search` / `member.card` 是本次从 `Verified` 降级的。
+
+| op | 平台动作 | reason 类别 | 代码位置（声明 / 路由 / 判定） | 实测证据 |
+|---|---|---|---|---|
+| `group.search` | `set_group_search` | `misnamed write`：名字暗示查询，实际是写开关，没有分页；实测 OIDB 1288，读回无变化 | `catalog.rs:560-578` / `2168` / `2689-2695` | `snowluma-2026-11-05-write-experiments-results.md:287,291-323`；快照 `snowluma-2026-09-29-190-actions.json:1425` |
+| `member.card` | `set_group_card` | `write confirmed, rollback unverified`：写新名片可 `no_cache:true` 读回；清空回滚 OIDB 1007，残留 | `catalog.rs:689-697` / `2189` / `2682-2688` | `snowluma-2026-11-05-write-experiments-results.md:289,364-409`；快照 `snowluma-2026-09-29-190-actions.json:1310` |
+| `group.anonymous` | `set_group_anonymous` | `placeholder handler, no observable state change`：`() => okResponse()`，无读接口 | `catalog.rs:2027-2033` / `2337` / `2645-2651` | `snowluma-2026-11-05-write-experiments-results.md:8,187-195,272-273` |
+| `group.anonymous_ban` | `set_group_anonymous_ban` | `placeholder handler, no observable state change`：`() => okResponse()`，不读 `user_id`，不禁言 | `catalog.rs:2034-2039` / `2338` / `2652-2658` | `snowluma-2026-11-05-write-experiments-results.md:9,178-185,270-271` |
+| `account.model_show_set` | `_set_model_show` | `placeholder handler, no observable state change`：`async () => okResponse()` | `catalog.rs:1992-1998` / `2332` / `2659-2665` | `snowluma-2026-11-05-write-experiments-results.md:12,196-200` |
+| `account.model_show` | `_get_model_show` | `compatibility mock, no observable state change`：回显入参 `model`，固定 `need_pay:false` | `catalog.rs:1985-1991` / `2331` / `2666-2671` | 只读实验 probe 10；本文「2026-11-05 只读真机实验」表 |
+| `friend.recent_contacts` | `get_recent_contact` | `placeholder handler, no observable state change`：固定返回 `[]` | `catalog.rs:2013-2019` / `2335` / `2672-2676` | 只读实验 probe 11 |
+| `system.packet_status` | `nc_get_packet_status` | `placeholder handler, no observable state change`：固定返回 `null` | `catalog.rs:2020-2026` / `2336` / `2672-2676` | 只读实验 probe 12 |
+| `msg.word_slices` | `.get_word_slices` | `platform reports not implemented`：retcode 100 | `catalog.rs:1999-2005` / `2333` / `2677-2681` | 只读实验 probe 13-14 |
+| `file.collection_create` | `create_collection` | `platform reports not implemented`：retcode 100 | `catalog.rs:2006-2012` / `2334` / `2677-2681` | 只读实验 probe 15 |
+| `group.tag_list` | `get_group_tags` | `operates on group classification tags, not group tags`：OIDB 38524，只有 `groupClass`，无 `group_id`；六个分类都返回空 | `catalog.rs:517-523` / `2164` / `2612-2619` | `snowluma-2026-11-05-write-experiments-results.md:209-225`；只读 probe 4-9 |
+| `group.tag_add` | `add_group_tag` | `operates on group classification tags, not group tags`：OIDB 38525，只有 `groupClass + name` | `catalog.rs:525-535` / `2165` / `2620-2626` | `snowluma-2026-11-05-write-experiments-results.md:131-163,209-225` |
+| `group.tag_delete` | `delete_group_tag` | `operates on group classification tags, not group tags`：OIDB 38526，只有 `groupClass + name` | `catalog.rs:536-544` / `2166` / `2620-2626` | `snowluma-2026-11-05-write-experiments-results.md:165-176,209-225` |
+| `account.qzone.unlike` | `unlike_qzone` | `endpoint self-declared unverified`：`tid=0` 返回 ok/null，不证明状态变化 | `catalog.rs:1938-1946` / `2326` / `2632-2638` | 只读实验 probe 3 |
+| `group.add_option` | `set_group_add_option` | 部分确证：只有 `add_type=3` 有读回；副作用不可回滚 | `catalog.rs:546-558` / `2167` / `2604-2609` | `snowluma-2026-11-05-write-experiments-results.md:7,67-129`；见「Verified but irreversible side effect」档 |
+
+**名称/行为矛盾点（以代码和实测为准）**：`member.card` 的平台 action 名在代码与
+快照里是 `set_group_card`，不是 `set_member_card`；快照摘要写「空字符串清除」，
+但实测清空返回 OIDB 1007。代码只决定调用名，实际清除语义以实测失败为准。
+
+#### 待实测（本提交不改状态）
+
+| op / 动作 | 为什么只列不降 | 代码位置 | 需要什么证据 |
+|---|---|---|---|
+| `system.restart` / `set_restart` | 快照自述「重启（不支持）」，当前仍走默认 `Verified`；它是 `Critical`，闸门本来就是票据，但标签与判定口径不一致 | `catalog.rs:1247-1253` / `2249` / `2737`；快照 `1536-1539` | 实机调用记录 retcode 与是否 `ok`；若明确失败，应改 `Unverified` |
+| `account.can_send_image` / `account.can_send_record` | 快照条目的 summary 为空，返回字段没有出处；当前按快照型 `Verified` | `catalog.rs:1583-1596`；快照 `85-92` | 实机调用记录返回字段；若只回固定值，应降 `Unverified` |
+| `group.info` / `member.info` / `member.list` / `group.list` | 快照声明支持 `no_cache`，本适配器没有暴露该参数，无法满足「读回转新鲜」前提 | `catalog.rs:379-402`；快照 `660-666`、`686-693`、`696-702`、`678-683` | 先决定是否补 `no_cache` 参数，再做写后新鲜读回 |
+| 52 个快照型 `Verified` | 快照只给动作存在 + 参数表；返回语义没有实机对照。按新口径属于「参数已确证、返回语义未实机确证」 | 清单是 `catalog.rs:2353-2406` 的 `SNAPSHOT_ACTIONS`；测试在 `outbound.rs:1844-1912` | 逐条只读/写入实验；写操作必须带上 `no_cache:true` 的读回。不要批量降级，按实验逐条改 |
+
+#### 降级后的实际行为后果（未改闸门逻辑）
+
+`platform_call` 的判定顺序是**先看 verification，再看 risk**：
+
+- 直接调用 `Unverified` op 一律 `ToolNotAllowed`，`allow_destructive` 和常驻
+  grants 都不放行（`engine.rs:4489-4514`）。
+- 只能先 `access_request` 申请 `platform_call:<op>`；票据能力集自动加
+  `critical`（`engine.rs:6147-6152`），批准私信显示 `[UNVERIFIED]` 和 reason
+  （`engine.rs:9671-9707`）。未验证 op 不再要求房间读写能力
+  （`engine.rs:6168-6175`），审批本身放行。
+- 批准后执行仍要求票据带 `critical`（`engine.rs:4606-4618`）；结果写入票据，
+  房间只收到 `ticket_result` 指针，详情用 `access_ticket_get` 查。
+- `capabilities` / 目录显示 `direct_executable=false`、
+  `reason=unverified_requires_ticket`、`ticket_required=true`
+  （`engine.rs:10262-10265`）；索引降级只保留 `verified:false`
+  （`engine.rs:10091`）。
+- 工具数量不变：仍为 `TOOL_NAMES` 的 29 个（`tools.rs:14`，测试
+  `capabilities_tool.rs:405`）。
+
+按动作看**变化前后**：
+
+| op | 降级前（`Verified`） | 降级后（`Unverified`） |
+|---|---|---|
+| `group.search`（Write） | 房间写策略允许即可直调；读回无变化，agent 可能以为这是查询 | 直调拒绝；必须票据 + 审批，且审批会看到「误名写入、实测失败」 |
+| `member.card`（Write） | 房间写策略允许即可直调；回滚失败会留下群名片 | 直调拒绝；必须票据 + 审批，审批会看到「回滚未验证/有残留」 |
+| `group.tag_add`（Write） | 房间写策略允许即可直调 | 直调拒绝；票据 + 审批 |
+| `group.tag_delete`（Destructive） | `allow_destructive` 打开时可直调 | `allow_destructive` 不再放行；票据 + 审批 |
+| `group.tag_list`（Read） | 房间读策略允许即可直调 | 只读也要票据 + 审批 |
+| `group.anonymous`（Write） | 房间写策略允许即可直调 | 直调拒绝；票据 + 审批 |
+| `group.anonymous_ban`（Destructive） | `allow_destructive` 打开时可直调 | `allow_destructive` 不再放行；票据 + 审批 |
+| `account.model_show_set`（Write，连接级） | 连接可读即可直调 | 直调拒绝；票据 + 审批 |
+
+`account.model_show`、`friend.recent_contacts`、`system.packet_status`、
+`msg.word_slices`、`file.collection_create`、`account.qzone.unlike`、
+`group.add_option` 在本次提交前就是 `Unverified`，本轮只改 reason，**行为不变**。
 
 ### 「静默成功」清单（2026-11-05）
 
