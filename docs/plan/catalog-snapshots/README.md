@@ -31,3 +31,6 @@
   tool_call 入口；只读探针直接打同一实例的 OneBot HTTP API，使用桥配置里的
   同一 token。写入/破坏性动作未执行。
 - **脱敏**：QQ 空间正文只记 `content_chars`，不落原文；列表只记 tid。
+- **结论分类**：`verified` = 参数语义 + 返回语义都确证，可支撑 `Verified`；
+  `contract_only` = 只确认可调用/返回形状，不能支撑 `Verified`；
+  `unverified` / `supporting` = 不能确证或仅作旁证。

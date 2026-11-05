@@ -3029,6 +3029,7 @@ mod tests {
                 "group.anonymous_ban",
                 "group.tag_add",
                 "group.tag_delete",
+                "group.tag_list",
                 "msg.tuwen_ark",
                 "msg.word_slices",
                 "system.packet_status",

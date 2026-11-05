@@ -8,11 +8,12 @@
 - 未暴露：**0 个**。8 个平台占位/未实现动作也按用户口径暴露成 `Unverified`
   （协议上有合法调用，只是没有可观察语义）；白名单为空，测试仍要求「非空则每条
   必须有理由」。
-- 批次 9 审计后 `Unverified` 从 59 降到 **13**：批次 8 的 3 个
-  （`group.tag_add` / `group.tag_delete` / `group.add_option`）、审计后仍无出处的
-  2 个（`account.qzone.unlike` / `msg.tuwen_ark`）、白名单清零新增的 8 个。
-  其余 52 个按 SnowLuma 动作目录的摘要+参数改 `Verified`；另有
-  `group.tag_list` / `account.qzone.detail` 由 2026-11-05 只读实验改 `Verified`。
+- 批次 9 审计后 `Unverified` 从 59 降到 **14**：批次 8 的 3 个
+  （`group.tag_add` / `group.tag_delete` / `group.add_option`）、审计后仍无出处
+  或语义未确证的 3 个（`account.qzone.unlike` / `msg.tuwen_ark` /
+  `group.tag_list`）、白名单清零新增的 8 个。其余 52 个按 SnowLuma 动作目录的
+  摘要+参数改 `Verified`；`account.qzone.detail` 由 2026-11-05 只读实验改
+  `Verified`；`group.tag_list` 只到「契约已确认」，仍 `Unverified`。
 - 风险分级逐条按动作：rkey / 文件集下载 / 闪传下载地址为 `Critical`；删除、取消、
   匿名禁言、QQ 空间代表账号对外发布为 `Destructive`；资料/在线状态/群待办为
   `Write`；纯查询为 `Read`。
@@ -164,7 +165,7 @@
 | `add_group_tag` | 已暴露 | `group.tag_add`（Unverified：分类语义待实验） |
 | `delete_group_tag` | 已暴露 | `group.tag_delete`（Unverified：分类语义待实验） |
 | `get_group_admin_settings` | 已暴露 | `group.admin_settings` |
-| `get_group_tags` | 已暴露 | `group.tag_list`（Verified：2026-11-05 只读实验） |
+| `get_group_tags` | 已暴露 | `group.tag_list`（Unverified + 契约已确认：六个 group_class 都返回空 tags，语义未确证） |
 | `set_group_add_option` | 已暴露 | `group.add_option`（Unverified：add_type 0/1-3 待实验） |
 | `set_group_admin` | 已暴露 | `member.admin` |
 | `set_group_anonymous` | 已暴露 | `group.anonymous`（Unverified） |
@@ -306,10 +307,10 @@
   `nc_get_packet_status` / `set_group_anonymous` / `set_group_anonymous_ban`）
   协议上都有合法调用，按用户口径暴露成 `Unverified`；没有「技术上无法调用」的
   动作可留在白名单里。测试仍保留 `UNEXPOSED` 常量：非空时每条必须有理由。
-- 带 `Unverified` 的 13 个 op 分两类：5 个是真没出处/目录自述待核实/写操作未执行，
-  8 个是平台 mock/占位（协议可调用但无语义）。它们在 catalog 里可申请、可审批、
-  可执行，只是直调被拒且审批私信会显示 `[UNVERIFIED]`；实验完成后把标记改成
-  `Verified`。
+- 带 `Unverified` 的 14 个 op 分两类：6 个是真没出处/目录自述待核实/语义未确证/
+  写操作未执行，8 个是平台 mock/占位（协议可调用但无语义）。它们在 catalog 里
+  可申请、可审批、可执行，只是直调被拒且审批私信会显示 `[UNVERIFIED]`；
+  实验完成后把标记改成 `Verified`。
 - 审计结论逐条写在 `adapter-snowluma.md` 的「批次 9 审计表」，包括每条查的是
   SnowLuma 动作目录的哪个条目、参数是否对齐、为什么保留 `Unverified`。
 - QQ 空间写操作至少 `Destructive`：`account.qzone.send` / `comment` / `like` /

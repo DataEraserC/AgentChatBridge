@@ -2405,8 +2405,11 @@ pub const SNAPSHOT_ACTIONS: &[(&str, &str)] = &[
     ("group.info_ex", "get_group_info_ex"),
 ];
 
-/// 只读真机实验确证的两个批次 8/9 op。
-pub const EXPERIMENT_VERIFIED: &[&str] = &["group.tag_list", "account.qzone.detail"];
+/// 只读真机实验确证（参数语义 + 返回语义都确证）的 op。
+///
+/// `group.tag_list` 不在这里：六次不同 `group_class` 都返回空 tags，
+/// 只能算「契约已确认」，不能算 `Verified`。
+pub const EXPERIMENT_VERIFIED: &[&str] = &["account.qzone.detail"];
 
 /// 别名 op →（主 op、对应平台动作）。
 ///
@@ -2604,9 +2607,15 @@ fn verification_of(method: &str) -> Verification {
             "research §3.1：先 get_group_admin_settings 记录基线，对 v={0,1,2,3,4,5,55} 逐个 \
              set_group_add_option 并回读 + QQ 客户端截图；再试 6/100 观察平台是否拒绝",
         ),
+        "group.tag_list" => Verification::unverified(
+            "2026-11-05 只读实验确认了参数 group_class 与返回 tags:[] 的形状，但 \
+             group_class=0/1/2/3/5/10 六次调用都返回空 tags，无法证明 tags 与 \
+             group_class 有对应关系；只算「契约已确认」，语义未确证",
+            "research §3.3：在已知带不同分类标签的测试群上，对至少两个非空 \
+             group_class 调用 get_group_tags，确认返回 tags 随 group_class 变化且与群号无关",
+        ),
         "group.tag_add" | "group.tag_delete" => Verification::unverified(
-            "写标签的语义（影响群资料还是全局分类目录）尚未实机确认；只读的 \
-             group.tag_list 已由 2026-11-05 实验确证",
+            "写标签的语义（影响群资料还是全局分类目录）尚未实机确认",
             "research §3.3：选两个不同分类的测试群，加/删一个测试标签后检查两群资料与标签\
              目录，最后清理",
         ),
