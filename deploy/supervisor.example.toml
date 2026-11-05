@@ -18,6 +18,14 @@ state_dir = "state/supervisor"
 probe_interval_secs = 5
 # 连续健康这么久才把当前版本提升为 LKG；回滚成功后也要重新等满这个窗口。
 stable_window_secs = 60
+# on_stable（默认）= 稳定窗口满后把当前版本写成 lkg.json；
+# never = 永不写 lkg.json，已有文件保持原样。破坏性测试/canary 期间用它，
+# 避免坏版本被提升成「好版本」。
+# lkg_update = "on_stable"
+# lkg（默认）= 策略产出 Rollback 时真的回退到 LKG；
+# none = 不回退：降级为放弃，不写 current.json、不退出 75，直接以 78 退出。
+# 与 lkg_update 正交：只做 canary 就只关 lkg_update，保留回退能力。
+# rollback = "lkg"
 # internal（默认）= supervisor 停旧进程并自己起 LKG；
 # external = 把 LKG 写进 current.json 后以 75 退出，交给 systemd 拉起 launcher
 # （acb-launcher 会强制 external，不需要在这里写）。

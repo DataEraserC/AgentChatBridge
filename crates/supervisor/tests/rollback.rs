@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acb_supervisor::{
-    BuiltinPolicy, Clock, CommandSpec, Config, EXIT_GIVE_UP, EXIT_ROLLBACK, ExitInfo, Parts,
-    Policy, PolicySettings, Probe, RollbackMode, Runner, Sleeper, Supervisor, load_current,
+    BuiltinPolicy, Clock, CommandSpec, Config, EXIT_GIVE_UP, EXIT_ROLLBACK, ExitInfo, LkgUpdate,
+    Parts, Policy, PolicySettings, Probe, RollbackMode, RollbackPolicy, Runner, Sleeper, Supervisor,
+    load_config, load_current,
 };
 use acb_supervisor_policy::{Decision, DecisionKind, PolicyConfig, Snapshot};
 use serde_json::Value;
@@ -203,6 +204,8 @@ fn config(dir: &std::path::Path, lkg: Option<&str>) -> Config {
         state_dir: dir.to_string_lossy().into_owned(),
         probe_interval_secs: 1,
         stable_window_secs: 60,
+        lkg_update: LkgUpdate::OnStable,
+        rollback: RollbackPolicy::Lkg,
         rollback_mode: RollbackMode::Internal,
         policy: PolicySettings::default(),
     }
@@ -681,4 +684,124 @@ fn stable_window_promotes_current_to_lkg() {
             .any(|event| event["event"] == "lkg_promoted"),
         "LKG 提升要留审计"
     );
+}
+
+#[test]
+fn lkg_update_never_keeps_the_existing_lkg_file_untouched() {
+    let dir = temp_dir("lkg-never");
+    let lkg_path = dir.join("lkg.json");
+    let before = br#"{"command":{"program":"/old","args":[]},"promoted_at_ms":1}"#.to_vec();
+    std::fs::write(&lkg_path, &before).expect("seed lkg");
+
+    let clock = Arc::new(AtomicI64::new(0));
+    let runner = SharedRunner::new();
+    let probe = SharedProbe::new(vec![true]);
+    let sleeper = SharedSleeper::default();
+    let policy: Arc<dyn Policy> = Arc::new(FakePolicy::hold());
+    let mut config = config(&dir, None);
+    config.health_url = Some("http://127.0.0.1:1/healthz".to_owned());
+    config.lkg_update = LkgUpdate::Never;
+    config.stable_window_secs = 60;
+    let mut supervisor = supervisor(
+        config,
+        Arc::clone(&clock),
+        runner.clone(),
+        probe,
+        sleeper,
+        Arc::clone(&policy),
+    );
+
+    supervisor.tick();
+    clock.store(61_000, Ordering::Relaxed);
+    supervisor.tick();
+
+    assert_eq!(
+        std::fs::read(&lkg_path).expect("lkg file"),
+        before,
+        "lkg_update=never 不能重写已有 lkg.json"
+    );
+    assert_eq!(
+        supervisor.lkg().map(|spec| spec.program.as_str()),
+        Some("/old"),
+        "内存里的 LKG 也必须保持原值"
+    );
+    assert!(
+        !audit_events(&supervisor)
+            .iter()
+            .any(|event| event["event"] == "lkg_promoted"),
+        "never 下不应出现提升审计"
+    );
+}
+
+#[test]
+fn rollback_none_degrades_to_78_without_touching_current_pointer() {
+    let dir = temp_dir("rollback-none");
+    let clock = Arc::new(AtomicI64::new(0));
+    let runner = SharedRunner::new();
+    let probe = SharedProbe::new(vec![true]);
+    let sleeper = SharedSleeper::default();
+    let policy: Arc<dyn Policy> = Arc::new(FakePolicy::hold());
+    let mut config = config(&dir, Some("/lkg"));
+    config.rollback_mode = RollbackMode::External;
+    config.rollback = RollbackPolicy::None;
+    config.policy.options.consecutive_failures = 1;
+    config.policy.options.startup_grace_secs = 0;
+    config.policy.options.window_failures = 0;
+    config.policy.options.unhealthy_secs = 0;
+    config.policy.options.unhealthy_probes = 0;
+    let mut supervisor = supervisor(
+        config,
+        Arc::clone(&clock),
+        runner.clone(),
+        probe,
+        sleeper,
+        Arc::clone(&policy),
+    );
+
+    runner.set_exited(1);
+    supervisor.tick();
+
+    assert!(supervisor.stopped(), "rollback=none 必须停止监督");
+    assert_eq!(supervisor.exit_code(), Some(EXIT_GIVE_UP), "放弃退出码是 78");
+    assert!(supervisor.failed().is_some(), "要记录放弃原因");
+    assert_eq!(supervisor.current().program, "/current", "不能切到 LKG");
+    assert!(
+        load_current(&dir).is_none(),
+        "rollback=none 不能写 current.json"
+    );
+    assert_eq!(runner.starts().len(), 1, "不能启动 LKG");
+    assert_eq!(runner.stops(), 0, "子进程已退出，无需再停");
+    let events = audit_events(&supervisor);
+    assert!(
+        find_event(&events, "execute")
+            .iter()
+            .any(|event| event["result"] == "rollback_disabled"),
+        "审计要写降级结果：{events:?}"
+    );
+}
+
+#[test]
+fn unknown_lkg_switch_values_are_rejected_with_the_allowed_ones() {
+    let dir = temp_dir("bad-switches");
+    let path = dir.join("supervisor.toml");
+    std::fs::write(
+        &path,
+        "[supervisor]\nprogram = \"/current\"\nlkg_update = \"sometimes\"\n",
+    )
+    .expect("config");
+
+    let error = load_config(&path).expect_err("unknown lkg_update must fail");
+    assert!(error.contains("unknown variant `sometimes`"), "{error}");
+    assert!(error.contains("on_stable"), "{error}");
+    assert!(error.contains("never"), "{error}");
+
+    std::fs::write(
+        &path,
+        "[supervisor]\nprogram = \"/current\"\nrollback = \"sometimes\"\n",
+    )
+    .expect("config");
+    let error = load_config(&path).expect_err("unknown rollback must fail");
+    assert!(error.contains("unknown variant `sometimes`"), "{error}");
+    assert!(error.contains("lkg"), "{error}");
+    assert!(error.contains("none"), "{error}");
 }
