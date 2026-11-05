@@ -115,6 +115,14 @@ admin_qqs = []   # 这些 QQ 号会被标成系统管理员（记录里的 sende
 allow_destructive = false
 # SnowLuma 兼容下限（默认 2.4.0）；低于下限只在启动日志告警，不断连。
 # options = { snowluma_min_version = "2.4.0" }
+#
+# 可选 HTTP 事件上报（SnowLuma 的 httpClients）：桥额外监听一个 HTTP 端点接收事件，
+# 动作仍走上面的 WS。token 同时是 HMAC-SHA1 密钥；SnowLuma 侧 accessToken 必须一致。
+# 请求必须带 X-Signature: sha1=<HMAC-SHA1(token, 原始 body)>，否则 401。
+# options = { http_listen = "0.0.0.0:3002" }
+#
+# wss:// 部署前提：适配器只接受 ws://。需要 TLS 时用反向代理（nginx/stunnel）终止
+# TLS，再把 ws:// 转发到桥监听的地址；SnowLuma 的 wsServers 本身不提供 TLS。
 
 # 反向 WS：让 SnowLuma 主动连桥（SnowLuma 的 wsClients）。桥监听 options.listen；
 # token 与 SnowLuma 那边配的 accessToken 一致，支持 ?access_token= 或 Bearer。

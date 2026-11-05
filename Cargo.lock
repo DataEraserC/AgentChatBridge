@@ -42,6 +42,7 @@ dependencies = [
  "acb-kernel",
  "acb-proto",
  "serde_json",
+ "sha1",
  "thiserror",
  "tungstenite",
 ]

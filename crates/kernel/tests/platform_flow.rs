@@ -70,6 +70,7 @@ fn spec(
         targets: targets.to_vec().into(),
         effect,
         record,
+        verification: acb_kernel::Verification::verified("platform test fixture"),
     }
 }
 

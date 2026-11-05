@@ -3,28 +3,30 @@
 状态：**对照完成（2026-11-05）**。输入为 SnowLuma 中文 API 索引的 200 个唯一动作
 （页面分类合计 200，英文页 219；以中文索引的实际条目为基准）。
 
-- 已暴露：**121 个**（`ROUTES` 118 个 op / 121 个 action，按群/私聊分动作的 op 会映射到两条）。
-- 未暴露：**79 个**，其中外部约束 **16 个**、未排期 **63 个**。
+- 已暴露：**130 个**（`ROUTES` 127 个 op / 130 个 action，按群/私聊分动作的 op 会映射到两条）。
+- 未暴露：**70 个**，其中外部约束 **8 个**、未排期 **62 个**。
+- 其中 4 个新 op 带 `Unverified` 标记（`group.tag_*` / `group.add_option`），
+  只能走票据 + 审批；其余新 op 均为 `Verified` 并写出处。
 - 未排期的原因分四类：下一批（QQ 空间 / 收藏闪传）、别名/等价 op 已存在、账号资料/在线状态类、其它普通能力。
-- 目标：后续批次把这 63 个未排期项清零后，只剩 16 个外部约束项。
+- 目标：后续批次把这 62 个未排期项清零后，只剩 8 个外部约束项。
 
 ## 分类汇总
 
 | 分类 | 动作数 | 已暴露 | 未暴露（外部约束） | 未暴露（未排期） |
 |---|---|---|---|---|
-| 扩展 | 115 | 59 | 8 | 48 |
-| 群管理 | 21 | 14 | 7 | 0 |
+| 扩展 | 115 | 62 | 6 | 47 |
+| 群管理 | 21 | 19 | 2 | 0 |
 | 信息 | 5 | 3 | 0 | 2 |
 | 群相册 | 9 | 9 | 0 | 0 |
 | 流式接口 | 6 | 6 | 0 | 0 |
 | 空间 | 10 | 0 | 0 | 10 |
-| 群文件 | 12 | 10 | 1 | 1 |
+| 群文件 | 12 | 11 | 0 | 1 |
 | 好友 | 3 | 3 | 0 | 0 |
 | 消息 | 6 | 5 | 0 | 1 |
 | 系统表情 | 4 | 3 | 0 | 1 |
 | 群信息 | 7 | 7 | 0 | 0 |
 | 请求 | 2 | 2 | 0 | 0 |
-| **合计** | **200** | **121** | **16** | **63** |
+| **合计** | **200** | **130** | **8** | **62** |
 
 ## 逐动作
 
@@ -40,7 +42,7 @@
 | `_send_group_notice` | 已暴露 | `group.notice.send` |
 | `_set_model_show` | 未暴露 | 外部约束：平台标注为占位 |
 | `.get_word_slices` | 未暴露 | 外部约束：平台标注未实现 |
-| `add_custom_face` | 未暴露 | 未排期（收藏表情） |
+| `add_custom_face` | 已暴露 | `face.custom_add`（两段式：先加收藏，再用 emoji_id 调 `msg.face`） |
 | `bot_exit` | 已暴露 | `system.bot_exit` |
 | `cancel_group_todo` | 未暴露 | 未排期（群待办） |
 | `check_url_safely` | 已暴露 | `system.check_url` |
@@ -99,7 +101,7 @@
 | `get_record` | 已暴露 | `msg.voice` |
 | `get_rkey` | 未暴露 | 未排期（下载 rkey，后续按 critical 评估） |
 | `get_rkey_server` | 未暴露 | 未排期（下载 rkey，后续按 critical 评估） |
-| `get_share_link` | 未暴露 | 外部约束：只收 fileset_id，文件分享语义未成文 |
+| `get_share_link` | 已暴露 | `file.share_link`（只收 fileset_id） |
 | `get_unidirectional_friend_list` | 已暴露 | `friend.one_way` |
 | `group_poke` | 已暴露 | `msg.poke` |
 | `list_filesets` | 未暴露 | 未排期：收藏/闪传下一批 |
@@ -143,7 +145,7 @@
 | `set_self_longnick` | 未暴露 | 未排期（账号资料） |
 | `share_group_ex` | 未暴露 | 未排期（Ark/卡片载荷） |
 | `share_peer` | 未暴露 | 未排期（Ark/卡片载荷） |
-| `trans_group_file` | 未暴露 | 外部约束：没有目标参数，转存语义未成文 |
+| `trans_group_file` | 已暴露 | `group.file.trans`（临时群文件转同群永久存储，无目标群参数） |
 | `translate_en2zh` | 未暴露 | 未排期（翻译） |
 | `upload_forward_msg` | 已暴露 | `msg.forward_upload` |
 | `upload_foward_msg` | 已暴露 | `msg.forward_upload_alias` |
@@ -152,11 +154,11 @@
 
 | 动作 | 状态 | op / 原因 |
 |---|---|---|
-| `add_group_tag` | 未暴露 | 外部约束：群分类 group_class 映射未成文 |
-| `delete_group_tag` | 未暴露 | 外部约束：群分类 group_class 映射未成文 |
+| `add_group_tag` | 已暴露 | `group.tag_add`（Unverified：分类语义待实验） |
+| `delete_group_tag` | 已暴露 | `group.tag_delete`（Unverified：分类语义待实验） |
 | `get_group_admin_settings` | 已暴露 | `group.admin_settings` |
-| `get_group_tags` | 未暴露 | 外部约束：群分类 group_class 映射未成文 |
-| `set_group_add_option` | 未暴露 | 外部约束：add_type 取值语义未成文 |
+| `get_group_tags` | 已暴露 | `group.tag_list`（Unverified：分类语义待实验） |
+| `set_group_add_option` | 已暴露 | `group.add_option`（Unverified：add_type 0/1-3 待实验） |
 | `set_group_admin` | 已暴露 | `member.admin` |
 | `set_group_anonymous` | 未暴露 | 外部约束：平台标注未实现（返回 ok） |
 | `set_group_anonymous_ban` | 未暴露 | 外部约束：平台标注未实现（返回 ok） |
@@ -170,7 +172,7 @@
 | `set_group_name` | 已暴露 | `group.name` |
 | `set_group_new_member_history_visibility` | 已暴露 | `group.history_visibility` |
 | `set_group_portrait` | 已暴露 | `group.avatar` |
-| `set_group_search` | 未暴露 | 外部约束：两个指纹开关取值未成文 |
+| `set_group_search` | 已暴露 | `group.search`（open/close 枚举） |
 | `set_group_special_title` | 已暴露 | `member.title` |
 | `set_group_whole_ban` | 已暴露 | `group.mute_all` |
 
@@ -237,7 +239,7 @@
 | `get_private_file_url` | 已暴露 | `file.private_url` |
 | `move_group_file` | 已暴露 | `group.file.move` |
 | `rename_group_file` | 已暴露 | `group.file.rename` |
-| `rename_group_file_folder` | 未暴露 | 外部约束：文件夹与父目录名称优先级未成文 |
+| `rename_group_file_folder` | 已暴露 | `group.file.folder_rename`（new_folder_name 优先，name 回退） |
 | `upload_group_file` | 已暴露 | `group.file.upload` |
 | `upload_private_file` | 未暴露 | 未排期（私聊文件上传） |
 
@@ -291,5 +293,11 @@
 ## 清零口径
 
 - 未排期的别名项可以由现有 op 的路由别名补齐，成本低，但仍算独立 action。
-- 账号资料/在线状态、群待办、收藏表情、单条转发、Ark 卡片：只是未排期，不是文档缺失。
+- 账号资料/在线状态、群待办、单条转发、Ark 卡片：只是未排期，不是文档缺失。
+- 收藏表情的 `move_custom_face_to_front` 与闪传文件集的其余动作仍是未排期；
+  `add_custom_face` / `get_share_link` / `trans_group_file` 已按调研出处落地。
 - 外部约束项要等 SnowLuma 补文档或实现；不能靠猜参数把 op 写进 catalog。
+  本批已把 8 个外部约束项（群分类 3、加群选项、群搜索、文件夹改名、分享链接、转存）
+  按出处落地，剩下的 8 个仍是平台占位/未实现。
+- 带 `Unverified` 的 op 不是「没实现」：它们在 catalog 里可申请、可审批、可执行，
+  只是直调被拒且审批私信会显示 `[UNVERIFIED]`；实验完成后把标记改成 `Verified`。

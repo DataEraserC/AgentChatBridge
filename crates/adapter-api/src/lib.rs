@@ -377,6 +377,14 @@ pub struct WireTargetSpec {
     pub role: String,
 }
 
+/// 一个平台方法声明的可信度。
+#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WireVerification {
+    Verified { source: String },
+    Unverified { reason: String, experiment: String },
+}
+
 /// 一个平台方法的 wire 形状。
 #[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
 pub struct WireMethodSpec {
@@ -397,6 +405,7 @@ pub struct WireMethodSpec {
     pub effect: String,
     #[serde(default = "default_record")]
     pub record: String,
+    pub verification: WireVerification,
 }
 
 /// 一次发送/调用顺带产生的流水记录。
@@ -664,6 +673,9 @@ mod tests {
                 targets: vec![],
                 effect: "read".into(),
                 record: "none".into(),
+                verification: WireVerification::Verified {
+                    source: "fixture docs".into(),
+                },
             }],
             info: WireAdapterInfo {
                 events: vec!["poke".into()],

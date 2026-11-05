@@ -563,6 +563,92 @@ impl TargetSpec {
     }
 }
 
+/// 一个平台方法声明的可信度。
+///
+/// `Verified` 必须有出处；`Unverified` 必须写清为什么不确定、怎么实验。
+/// 未验证的 op 按 critical 档管理：直调拒绝，只能走票据 + 审批。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verification {
+    Verified {
+        source: Cow<'static, str>,
+    },
+    Unverified {
+        reason: Cow<'static, str>,
+        experiment: Cow<'static, str>,
+    },
+}
+
+impl Verification {
+    pub const fn verified(source: &'static str) -> Self {
+        Self::Verified {
+            source: Cow::Borrowed(source),
+        }
+    }
+
+    pub const fn unverified(reason: &'static str, experiment: &'static str) -> Self {
+        Self::Unverified {
+            reason: Cow::Borrowed(reason),
+            experiment: Cow::Borrowed(experiment),
+        }
+    }
+
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Self::Verified { .. })
+    }
+
+    pub fn is_unverified(&self) -> bool {
+        !self.is_verified()
+    }
+
+    pub fn state(&self) -> &'static str {
+        if self.is_verified() {
+            "verified"
+        } else {
+            "unverified"
+        }
+    }
+
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            Self::Verified { source } => Some(source),
+            Self::Unverified { .. } => None,
+        }
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Verified { .. } => None,
+            Self::Unverified { reason, .. } => Some(reason),
+        }
+    }
+
+    pub fn experiment(&self) -> Option<&str> {
+        match self {
+            Self::Verified { .. } => None,
+            Self::Unverified { experiment, .. } => Some(experiment),
+        }
+    }
+
+    /// 目录与 capabilities 用的 JSON。`brief` 不带实验步骤，省上下文。
+    pub fn to_json(&self, brief: bool) -> serde_json::Value {
+        match self {
+            Self::Verified { source } => serde_json::json!({
+                "state": "verified",
+                "source": source,
+            }),
+            Self::Unverified { reason, .. } if brief => serde_json::json!({
+                "state": "unverified",
+                "reason": reason,
+            }),
+            Self::Unverified { reason, experiment } => serde_json::json!({
+                "state": "unverified",
+                "reason": reason,
+                "experiment": experiment,
+            }),
+        }
+    }
+}
+
 /// 一个平台方法的声明。适配器自己给，core 只认这个形状。
 ///
 /// 字段都是 `Cow`：内置适配器用静态借用，动态/外置适配器可以构造自己的目录。
@@ -585,6 +671,8 @@ pub struct MethodSpec {
     pub effect: Effect,
     /// 调用成功后要不要写流水，以及写消息还是事件。
     pub record: RecordMode,
+    /// 这个声明从哪来、可信到什么程度。构造期必填。
+    pub verification: Verification,
 }
 
 impl MethodSpec {
@@ -1052,6 +1140,7 @@ mod tests {
         targets: Cow::Borrowed(&[]),
         effect: Effect::Read,
         record: RecordMode::None,
+        verification: Verification::verified("kernel test fixture"),
     }];
 
     impl Outbound for Platformy {
@@ -1121,6 +1210,7 @@ mod tests {
             targets: Cow::Borrowed(&[]),
             effect: Effect::Read,
             record: RecordMode::None,
+            verification: Verification::verified("kernel test fixture"),
         };
         assert_eq!(spec.group(), "member");
         assert_eq!(spec.path(), "member");
@@ -1142,6 +1232,7 @@ mod tests {
                 targets: Cow::Borrowed(&[]),
                 effect: Effect::Send,
                 record: RecordMode::Message,
+                verification: Verification::verified("kernel test fixture"),
             },
             MethodSpec {
                 name: Cow::Borrowed("member.info"),
@@ -1153,6 +1244,7 @@ mod tests {
                 targets: Cow::Borrowed(&[]),
                 effect: Effect::Read,
                 record: RecordMode::None,
+                verification: Verification::verified("kernel test fixture"),
             },
         ];
 

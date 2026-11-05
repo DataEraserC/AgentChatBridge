@@ -7,7 +7,8 @@ use std::io::{BufRead, Write};
 
 use acb_adapter_api::{
     AdapterMessage, CoreMessage, WireAdapterInfo, WireError, WireMethodSpec, WireOutgoingKind,
-    WireOutgoingRecord, WireParamSpec, WireRecord, WireResult, decode_line, encode_line,
+    WireOutgoingRecord, WireParamSpec, WireRecord, WireResult, WireVerification, decode_line,
+    encode_line,
 };
 use acb_proto::{Element, RecordKind, RoomId, Sender};
 use serde_json::{Value, json};
@@ -173,6 +174,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             targets: Vec::new(),
             effect: "read".into(),
             record: "none".into(),
+            verification: verified(),
         },
         WireMethodSpec {
             name: "fixture.send".into(),
@@ -184,6 +186,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             targets: Vec::new(),
             effect: "send".into(),
             record: "message".into(),
+            verification: verified(),
         },
         WireMethodSpec {
             name: "fixture.fail".into(),
@@ -195,6 +198,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             targets: Vec::new(),
             effect: "read".into(),
             record: "none".into(),
+            verification: verified(),
         },
         WireMethodSpec {
             name: "fixture.exit".into(),
@@ -206,8 +210,15 @@ fn catalog() -> Vec<WireMethodSpec> {
             targets: Vec::new(),
             effect: "write".into(),
             record: "none".into(),
+            verification: verified(),
         },
     ]
+}
+
+fn verified() -> WireVerification {
+    WireVerification::Verified {
+        source: "process fixture".into(),
+    }
 }
 
 fn write_message<W: Write>(stdout: &mut W, message: &AdapterMessage) -> std::io::Result<()> {

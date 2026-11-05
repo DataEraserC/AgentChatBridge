@@ -7,7 +7,7 @@ use acb_kernel::{
     AccessAction, AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Bridge, CallError,
     CallOutcome, Capability, Config, Effect, Element, ExtensionPoint, MemoryStore, MethodSpec,
     Outbound, OutboundError, PLUGIN_API_VERSION, PluginManager, ProviderDescriptor, ProviderId,
-    RecordDraft, RecordMode, Risk, RoomId, Scope, Sender, Sent, TOOL_NAMES,
+    RecordDraft, RecordMode, Risk, RoomId, Scope, Sender, Sent, TOOL_NAMES, Verification,
 };
 use serde_json::{Value, json};
 
@@ -56,6 +56,7 @@ fn catalog() -> Arc<[MethodSpec]> {
             targets: Vec::new().into(),
             effect: Effect::Read,
             record: RecordMode::None,
+            verification: Verification::verified("capabilities test fake"),
         });
     }
     methods.push(MethodSpec {
@@ -68,6 +69,7 @@ fn catalog() -> Arc<[MethodSpec]> {
         targets: Vec::new().into(),
         effect: Effect::Write,
         record: RecordMode::None,
+        verification: Verification::verified("capabilities test fake"),
     });
     methods.push(MethodSpec {
         name: "account.cookies".into(),
@@ -79,6 +81,19 @@ fn catalog() -> Arc<[MethodSpec]> {
         targets: Vec::new().into(),
         effect: Effect::Read,
         record: RecordMode::None,
+        verification: Verification::verified("capabilities test fake"),
+    });
+    methods.push(MethodSpec {
+        name: "fake.unverified".into(),
+        summary: "假 unverified op".into(),
+        tags: Vec::new().into(),
+        risk: Risk::Write,
+        scope: Scope::Room,
+        params: Vec::new().into(),
+        targets: Vec::new().into(),
+        effect: Effect::Write,
+        record: RecordMode::None,
+        verification: Verification::unverified("只有单一来源", "跑一次实验"),
     });
     methods.into()
 }
@@ -287,8 +302,8 @@ fn room_scope_separates_subscription_read_and_write() {
     assert_eq!(subscribed["reason"], "forbidden");
 
     let ops = subscribed["ops"].as_array().expect("ops 是数组");
-    assert_eq!(ops.len(), 118);
-    assert_eq!(subscribed["indexed"], true, "118 个 op 必须索引降级");
+    assert_eq!(ops.len(), 119);
+    assert_eq!(subscribed["indexed"], true, "119 个 op 必须索引降级");
     assert!(ops[0].get("example").is_none(), "索引形态不带 example");
     let kick = ops
         .iter()
@@ -298,6 +313,7 @@ fn room_scope_separates_subscription_read_and_write() {
     assert_eq!(kick["direct_executable"], false);
     assert_eq!(kick["reason"], "destructive_disabled");
     assert_eq!(kick["requestable"], false);
+    assert_eq!(kick["verification"]["state"], "verified");
     let cookies = ops
         .iter()
         .find(|op| op["op"] == "account.cookies")
@@ -306,6 +322,15 @@ fn room_scope_separates_subscription_read_and_write() {
     assert_eq!(cookies["ticket_required"], true);
     assert_eq!(cookies["reason"], "critical_requires_ticket");
     assert_eq!(cookies["requestable"], true);
+    let unverified = ops
+        .iter()
+        .find(|op| op["op"] == "fake.unverified")
+        .expect("有 fake.unverified");
+    assert_eq!(unverified["direct_executable"], false);
+    assert_eq!(unverified["ticket_required"], true);
+    assert_eq!(unverified["reason"], "unverified_requires_ticket");
+    assert_eq!(unverified["verification"]["state"], "unverified");
+    assert_eq!(unverified["verification"]["reason"], "只有单一来源");
 
     let outside = bridge
         .tool_call(

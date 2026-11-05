@@ -11,14 +11,16 @@
 //!   也不直接调 `ingest`。真正入库由 core 的 drain 线程统一做。
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use acb_kernel::{AdapterStatus, Connection, EventQueue, Outbound, RoomId};
 use serde_json::{Value, json};
+use sha1::{Digest, Sha1};
 use tungstenite::error::Error as WsError;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::{Message, WebSocket};
@@ -251,6 +253,7 @@ struct PumpContext<'a> {
     connection: &'a str,
     admin_qqs: &'a [String],
     status: &'a AdapterStatus,
+    dedup: &'a Arc<Mutex<EventDedup>>,
 }
 
 /// 昵称补查线程要带着走的一组 owned 上下文。
@@ -259,6 +262,62 @@ struct PokeContext {
     connection: String,
     admin_qqs: Vec<String>,
     status: AdapterStatus,
+    dedup: Arc<Mutex<EventDedup>>,
+}
+
+/// 一条下载流的累计状态。只记元信息与分块数量，不把 chunk 的 base64 攒进内存。
+#[derive(Debug, Default)]
+struct StreamAcc {
+    info: Option<Value>,
+    chunks: usize,
+    bytes: u64,
+}
+
+/// SnowLuma 的 HTTP 上报没有事件 ID、不重试、不去重；WS 与 HTTP 是并列通道，
+/// 同一条事件可能两边都到。这里按原始事件 JSON 的哈希做短期去重。
+const DEDUP_CAPACITY: usize = 4096;
+const DEDUP_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Default)]
+struct EventDedup {
+    seen: HashMap<String, Instant>,
+}
+
+impl EventDedup {
+    fn duplicate(&mut self, value: &Value) -> bool {
+        let Some(key) = event_dedup_key(value) else {
+            return false;
+        };
+        let now = Instant::now();
+        self.seen
+            .retain(|_, at| now.duration_since(*at) <= DEDUP_TTL);
+        if let Some(at) = self.seen.get_mut(&key) {
+            *at = now;
+            return true;
+        }
+        if self.seen.len() >= DEDUP_CAPACITY {
+            self.seen.clear();
+        }
+        self.seen.insert(key, now);
+        false
+    }
+}
+
+/// 心跳每次都该刷新健康状态，不参与去重。
+fn event_dedup_key(value: &Value) -> Option<String> {
+    let post = value.get("post_type").and_then(Value::as_str)?;
+    if post == "meta_event" {
+        return None;
+    }
+    let raw = serde_json::to_string(value).ok()?;
+    let mut hasher = Sha1::new();
+    hasher.update(raw.as_bytes());
+    let digest = hasher.finalize();
+    Some(format!("{post}-{}", hex(digest.as_slice())))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// 一条连接的主循环：写动作、喂事件、读回包。连不上或断了就返回。
@@ -270,6 +329,7 @@ fn pump(
     shutdown: &AtomicBool,
 ) -> Result<(), LinkError> {
     let mut waiting: HashMap<String, Sender<Result<Value, LinkError>>> = HashMap::new();
+    let mut streams: HashMap<String, StreamAcc> = HashMap::new();
 
     while !shutdown.load(Ordering::Relaxed) {
         // 1. 把排队的动作写出去。写和读在同一个线程，必须严格串行。
@@ -296,7 +356,7 @@ fn pump(
         // 2. 读一帧。事件由 handle_text 丢进 core 的入站队列。
         match ws.read() {
             Ok(Message::Text(text)) => {
-                handle_text(text.as_str(), &ctx, slot, &mut waiting);
+                handle_text(text.as_str(), &ctx, slot, &mut waiting, &mut streams);
             }
             // tungstenite 收到 ping 会自动回 pong，这里只兜一手。
             Ok(Message::Ping(payload)) => {
@@ -320,6 +380,7 @@ fn pump(
         &mut waiting,
         &acb_i18n::t!("adapter.onebot11.bridge_shutdown"),
     );
+    streams.clear();
     Ok(())
 }
 
@@ -332,11 +393,25 @@ fn is_timeout(error: &std::io::Error) -> bool {
     )
 }
 
+/// 下载流帧的数据类型。上传的单请求确认不带 `data_type`，会走普通 echo 路径。
+fn stream_frame_kind(value: &Value) -> Option<&str> {
+    let kind = value
+        .get("data")
+        .and_then(|data| data.get("data_type"))
+        .and_then(Value::as_str)?;
+    matches!(
+        kind,
+        "file_info" | "file_chunk" | "data_chunk" | "file_complete" | "data_complete" | "error"
+    )
+    .then_some(kind)
+}
+
 fn handle_text(
     text: &str,
     ctx: &PumpContext<'_>,
     slot: &LinkSlot,
     waiting: &mut HashMap<String, Sender<Result<Value, LinkError>>>,
+    streams: &mut HashMap<String, StreamAcc>,
 ) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         eprintln!(
@@ -349,11 +424,83 @@ fn handle_text(
         return;
     };
 
+    // 下载流是多帧：file_info → file_chunk* → file_complete，全部带同一个 echo。
+    // 先把这些帧累计起来，终帧才把结果交回等动作的人；chunk 的 base64 不进内存。
+    if let Some(kind) = stream_frame_kind(&value).map(str::to_owned) {
+        let Some(echo) = value.get("echo").and_then(Value::as_str).map(str::to_owned) else {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "adapter.onebot11.stream_frame_no_echo",
+                    connection = ctx.connection
+                )
+            );
+            return;
+        };
+        let data = value.get("data").cloned().unwrap_or(Value::Null);
+        let acc = streams.entry(echo.clone()).or_default();
+        match kind.as_str() {
+            "file_info" => acc.info = Some(data.clone()),
+            "file_chunk" | "data_chunk" => {
+                acc.chunks = acc.chunks.saturating_add(1);
+                let size = data
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .or_else(|| {
+                        data.get("data")
+                            .and_then(Value::as_str)
+                            .map(|chunk| chunk.len() as u64)
+                    })
+                    .unwrap_or_default();
+                acc.bytes = acc.bytes.saturating_add(size);
+            }
+            _ => {}
+        }
+        let terminal = matches!(kind.as_str(), "file_complete" | "data_complete" | "error");
+        if !terminal {
+            return;
+        }
+        let Some(reply) = waiting.remove(&echo) else {
+            streams.remove(&echo);
+            return;
+        };
+        let response = if kind == "error" {
+            value
+        } else {
+            json!({
+                "status": "ok",
+                "retcode": 0,
+                "stream": "stream-action",
+                "echo": echo,
+                "data": {
+                    "type": "stream_summary",
+                    "file_info": acc.info,
+                    "chunks": acc.chunks,
+                    "bytes": acc.bytes,
+                    "complete": data,
+                }
+            })
+        };
+        streams.remove(&echo);
+        let _ = reply.send(Ok(response));
+        return;
+    }
+
     // 有 echo 就是动作的回包，交给等它的那个人。
     if let Some(echo) = value.get("echo").and_then(Value::as_str) {
         if let Some(reply) = waiting.remove(echo) {
             let _ = reply.send(Ok(value));
         }
+        return;
+    }
+
+    // WS 与 HTTP 上报可能把同一条事件各送一次；短期哈希去重挡住重复入库。
+    if ctx
+        .dedup
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .duplicate(&value)
+    {
         return;
     }
 
@@ -368,6 +515,7 @@ fn handle_text(
                 connection: ctx.connection.to_owned(),
                 admin_qqs: ctx.admin_qqs.to_vec(),
                 status: ctx.status.clone(),
+                dedup: ctx.dedup.clone(),
             },
             group,
             user,
@@ -473,6 +621,7 @@ fn spawn_poke_lookup(raw: Value, slot: LinkSlot, ctx: PokeContext, group: String
             connection: &ctx.connection,
             admin_qqs: &ctx.admin_qqs,
             status: &ctx.status,
+            dedup: &ctx.dedup,
         };
         submit_event(&pump_ctx, &enriched);
     });
@@ -502,10 +651,12 @@ pub fn supervise(
     events: EventQueue,
     status: AdapterStatus,
 ) {
+    let dedup = Arc::new(Mutex::new(EventDedup::default()));
+    spawn_http_events(&connection, &shutdown, &events, &status, &dedup);
     if connection.transport.as_str() == "ws-server" {
-        supervise_server(slot, connection, shutdown, events, status);
+        supervise_server(slot, connection, shutdown, events, status, dedup);
     } else {
-        supervise_client(slot, connection, shutdown, events, status);
+        supervise_client(slot, connection, shutdown, events, status, dedup);
     }
 }
 
@@ -516,6 +667,7 @@ fn supervise_client(
     shutdown: Arc<AtomicBool>,
     events: EventQueue,
     status: AdapterStatus,
+    dedup: Arc<Mutex<EventDedup>>,
 ) {
     let url = connection.url.clone().unwrap_or_default();
     let token = connection.token.clone();
@@ -543,6 +695,7 @@ fn supervise_client(
                         min_version: &min_version,
                         events: &events,
                         status: &status,
+                        dedup: &dedup,
                     },
                     &shutdown,
                 );
@@ -594,6 +747,328 @@ fn supervise_client(
     }
 }
 
+/// HTTP 事件上报的请求体上限。事件是一小段 JSON，1 MiB 已经非常宽。
+const HTTP_MAX_BODY: usize = 1024 * 1024;
+const HTTP_MAX_HEADERS: usize = 16 * 1024;
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// `httpClients` 上报线程的上下文。事件走同一个 `EventQueue`，与 WS 共用去重表。
+struct HttpEventContext {
+    events: EventQueue,
+    connection: String,
+    admin_qqs: Vec<String>,
+    status: AdapterStatus,
+    dedup: Arc<Mutex<EventDedup>>,
+    token: String,
+}
+
+/// 可选 HTTP 事件上报（SnowLuma 的 `httpClients`）。
+///
+/// 只负责收事件，动作仍走 WS/HTTP API 的既有通道。签名按 OneBot 11 规范：
+/// `X-Signature: sha1=HMAC-SHA1(accessToken, raw body)`。
+fn spawn_http_events(
+    connection: &Connection,
+    shutdown: &Arc<AtomicBool>,
+    events: &EventQueue,
+    status: &AdapterStatus,
+    dedup: &Arc<Mutex<EventDedup>>,
+) {
+    let Some(listen) = connection
+        .options
+        .get("http_listen")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(token) = connection
+        .token
+        .clone()
+        .filter(|token| !token.trim().is_empty())
+    else {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.http_listen_requires_token",
+                id = connection.id
+            )
+        );
+        return;
+    };
+    let ctx = HttpEventContext {
+        events: events.clone(),
+        connection: connection.id.clone(),
+        admin_qqs: connection.admin_qqs.clone(),
+        status: status.clone(),
+        dedup: dedup.clone(),
+        token,
+    };
+    let shutdown = shutdown.clone();
+    std::thread::spawn(move || run_http_listener(&listen, &ctx, &shutdown));
+}
+
+fn run_http_listener(listen: &str, ctx: &HttpEventContext, shutdown: &AtomicBool) {
+    let listener = match TcpListener::bind(listen) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "adapter.onebot11.http_events_listen_failed",
+                    connection = ctx.connection,
+                    listen = listen,
+                    error = error
+                )
+            );
+            return;
+        }
+    };
+    if let Err(error) = listener.set_nonblocking(true) {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.http_events_listen_failed",
+                connection = ctx.connection,
+                listen = listen,
+                error = error
+            )
+        );
+        return;
+    }
+    eprintln!(
+        "{}",
+        acb_i18n::t!(
+            "adapter.onebot11.http_events_listening",
+            connection = ctx.connection,
+            listen = listen
+        )
+    );
+    while !shutdown.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _peer)) => handle_http_event(stream, ctx),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "adapter.onebot11.http_events_listen_failed",
+                        connection = ctx.connection,
+                        listen = listen,
+                        error = error
+                    )
+                );
+                break;
+            }
+        }
+    }
+}
+
+fn handle_http_event(mut stream: TcpStream, ctx: &HttpEventContext) {
+    let _ = stream.set_read_timeout(Some(HTTP_READ_TIMEOUT));
+    let (method, headers, body) = match read_http_request(&mut stream) {
+        Ok(request) => request,
+        Err(status) => {
+            respond(&mut stream, status);
+            return;
+        }
+    };
+    if method != "POST" {
+        respond(&mut stream, 405);
+        return;
+    }
+    let signature = headers
+        .get("x-signature")
+        .and_then(|value| strip_signature_prefix(value));
+    let Some(signature) = signature.and_then(hex_decode) else {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.http_events_auth_failed",
+                connection = ctx.connection,
+                reason = "missing X-Signature"
+            )
+        );
+        respond(&mut stream, 401);
+        return;
+    };
+    let expected = hmac_sha1(ctx.token.as_bytes(), &body);
+    if !constant_time_eq(&expected, &signature) {
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "adapter.onebot11.http_events_auth_failed",
+                connection = ctx.connection,
+                reason = "bad HMAC-SHA1"
+            )
+        );
+        respond(&mut stream, 401);
+        return;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+        respond(&mut stream, 400);
+        return;
+    };
+    if ctx
+        .dedup
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .duplicate(&value)
+    {
+        respond(&mut stream, 204);
+        return;
+    }
+    let pump_ctx = PumpContext {
+        events: &ctx.events,
+        connection: &ctx.connection,
+        admin_qqs: &ctx.admin_qqs,
+        status: &ctx.status,
+        dedup: &ctx.dedup,
+    };
+    submit_event(&pump_ctx, &value);
+    respond(&mut stream, 204);
+}
+
+/// 解析后的 HTTP 请求：方法、头、原始 body。
+type HttpRequest = (String, HashMap<String, String>, Vec<u8>);
+
+fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, u16> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = stream.read(&mut chunk).map_err(|_| 400u16)?;
+        if read == 0 {
+            return Err(400);
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+        if buffer.len() > HTTP_MAX_HEADERS {
+            return Err(431);
+        }
+    }
+    let split = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or(400u16)?;
+    let head = String::from_utf8_lossy(&buffer[..split]).into_owned();
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    let method = request_line
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    let mut headers = HashMap::new();
+    for line in lines {
+        if let Some((key, value)) = line.split_once(':') {
+            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_owned());
+        }
+    }
+    let length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if length > HTTP_MAX_BODY {
+        return Err(413);
+    }
+    let mut body = buffer[split + 4..].to_vec();
+    while body.len() < length {
+        let read = stream.read(&mut chunk).map_err(|_| 400u16)?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read]);
+        if body.len() > HTTP_MAX_BODY {
+            return Err(413);
+        }
+    }
+    body.truncate(length.min(body.len()));
+    Ok((method, headers, body))
+}
+
+fn respond(stream: &mut TcpStream, status: u16) {
+    let reason = match status {
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
+        _ => "Error",
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+}
+
+fn strip_signature_prefix(value: &str) -> Option<&str> {
+    let (prefix, rest) = value.split_once('=')?;
+    if prefix.eq_ignore_ascii_case("sha1") {
+        Some(rest.trim())
+    } else {
+        None
+    }
+}
+
+fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim();
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    for pair in text.as_bytes().chunks(2) {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        bytes.push(u8::try_from(high * 16 + low).ok()?);
+    }
+    Some(bytes)
+}
+
+/// HMAC-SHA1（RFC 2104）。SnowLuma 的 `accessToken` 在这里是 HMAC 密钥，不是 Bearer。
+fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; 20] {
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        let digest = Sha1::digest(key);
+        block[..20].copy_from_slice(digest.as_slice());
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_pad = [0x36u8; 64];
+    let mut outer_pad = [0x5cu8; 64];
+    for index in 0..64 {
+        inner_pad[index] ^= block[index];
+        outer_pad[index] ^= block[index];
+    }
+    let mut inner = Sha1::new();
+    inner.update(inner_pad);
+    inner.update(data);
+    let inner = inner.finalize();
+    let mut outer = Sha1::new();
+    outer.update(outer_pad);
+    outer.update(inner);
+    let digest = outer.finalize();
+    let mut out = [0u8; 20];
+    out.copy_from_slice(digest.as_slice());
+    out
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 /// 反向 WS：桥监听一个地址，SnowLuma 作为客户端连进来。一次只服务一条活动连接。
 ///
 /// 握手时校验 token（`?access_token=` 或 `Authorization: Bearer`）；不匹配直接 401。
@@ -605,6 +1080,7 @@ fn supervise_server(
     shutdown: Arc<AtomicBool>,
     events: EventQueue,
     status: AdapterStatus,
+    dedup: Arc<Mutex<EventDedup>>,
 ) {
     let Some(listen) = server_listen(&connection) else {
         status.failed("config", "ws-server requires options.listen");
@@ -688,6 +1164,7 @@ fn supervise_server(
                                 min_version: &min_version,
                                 events: &events,
                                 status: &status,
+                                dedup: &dedup,
                             },
                             &shutdown,
                         );
@@ -751,6 +1228,7 @@ struct DriveContext<'a> {
     min_version: &'a str,
     events: &'a EventQueue,
     status: &'a AdapterStatus,
+    dedup: &'a Arc<Mutex<EventDedup>>,
 }
 
 /// 连接建立后的公共部分：安装发送槽、探测身份、跑 pump。
@@ -781,6 +1259,7 @@ fn drive_ws(
         connection: ctx.connection,
         admin_qqs: ctx.admin_qqs,
         status: ctx.status,
+        dedup: ctx.dedup,
     };
     let outcome = pump(ws, actions, pump_ctx, slot, shutdown);
     slot.clear();
@@ -1400,5 +1879,117 @@ mod tests {
             &request("ws://127.0.0.1:3001/ws", None),
             None
         ));
+    }
+
+    #[test]
+    fn hmac_sha1_matches_the_rfc2202_vector() {
+        // RFC 2202 test case 1.
+        let mac = hmac_sha1(b"Jefe", b"what do ya want for nothing?");
+        assert_eq!(hex(&mac), "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
+        assert!(constant_time_eq(&mac, &mac));
+        assert!(!constant_time_eq(&mac, &[0u8; 20]));
+        assert_eq!(hex_decode("00FF").expect("合法 hex"), vec![0, 255]);
+        assert!(hex_decode("xyz").is_none());
+        assert_eq!(strip_signature_prefix("sha1=abc"), Some("abc"));
+        assert_eq!(strip_signature_prefix("SHA1=abc"), Some("abc"));
+        assert_eq!(strip_signature_prefix("Bearer abc"), None);
+    }
+
+    #[test]
+    fn event_dedup_drops_repeats_but_not_heartbeats() {
+        let mut dedup = EventDedup::default();
+        let event = json!({
+            "post_type": "message",
+            "message_type": "group",
+            "self_id": 999,
+            "group_id": 456,
+            "user_id": 10001,
+            "message_id": 1,
+            "time": 1_793_000_000,
+            "message": [{"type": "text", "data": {"text": "hi"}}]
+        });
+        assert!(!dedup.duplicate(&event), "第一次不算重复");
+        assert!(dedup.duplicate(&event), "完全相同的第二次要丢掉");
+
+        let heartbeat = json!({
+            "post_type": "meta_event",
+            "meta_event_type": "heartbeat",
+            "self_id": 999,
+            "time": 1_793_000_000,
+        });
+        assert!(!dedup.duplicate(&heartbeat));
+        assert!(!dedup.duplicate(&heartbeat), "心跳永远不该被去重");
+    }
+
+    #[test]
+    fn download_stream_frames_are_accumulated_until_complete() {
+        let config = Config::parse(
+            r#"
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            url = "ws://127.0.0.1:3001"
+            account = "10001"
+            "#,
+        )
+        .expect("配置合法");
+        let status = AdapterStatus::new("qq", acb_kernel::DependencyRegistry::from_config(&config));
+        let (events, _receiver) = EventQueue::channel();
+        let dedup = Arc::new(Mutex::new(EventDedup::default()));
+        let admin_qqs: Vec<String> = Vec::new();
+        let ctx = PumpContext {
+            events: &events,
+            connection: "qq",
+            admin_qqs: &admin_qqs,
+            status: &status,
+            dedup: &dedup,
+        };
+        let slot = LinkSlot::new();
+        let mut waiting = HashMap::new();
+        let (sender, receiver) = mpsc::channel();
+        waiting.insert("e1".to_owned(), sender);
+        let mut streams = HashMap::new();
+
+        handle_text(
+            r#"{"echo":"e1","data":{"data_type":"file_info","file_name":"a.bin","file_size":30}}"#,
+            &ctx,
+            &slot,
+            &mut waiting,
+            &mut streams,
+        );
+        assert!(receiver.try_recv().is_err(), "首帧不能提前交结果");
+        handle_text(
+            r#"{"echo":"e1","data":{"data_type":"file_chunk","size":10}}"#,
+            &ctx,
+            &slot,
+            &mut waiting,
+            &mut streams,
+        );
+        handle_text(
+            r#"{"echo":"e1","data":{"data_type":"file_chunk","size":20}}"#,
+            &ctx,
+            &slot,
+            &mut waiting,
+            &mut streams,
+        );
+        assert!(receiver.try_recv().is_err(), "chunk 阶段不能提前交结果");
+        handle_text(
+            r#"{"echo":"e1","data":{"data_type":"file_complete","total_bytes":30}}"#,
+            &ctx,
+            &slot,
+            &mut waiting,
+            &mut streams,
+        );
+        let response = receiver
+            .try_recv()
+            .expect("终帧要回结果")
+            .expect("不是连接错误");
+        assert_eq!(response["data"]["type"], "stream_summary");
+        assert_eq!(response["data"]["file_info"]["file_name"], "a.bin");
+        assert_eq!(response["data"]["chunks"], 2);
+        assert_eq!(response["data"]["bytes"], 30);
+        assert!(waiting.is_empty(), "终帧之后不该继续挂着");
+        assert!(streams.is_empty(), "终帧之后流状态要清掉");
     }
 }

@@ -26,6 +26,9 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// agent 会重发，群里就出现两条。45 秒留在 harness 的 60 秒工具超时以内。
 pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// 平台侧 `download_file` 默认超时是 60 秒（`SNOWLUMA_DOWNLOAD_FILE_TIMEOUT_MS`）。
+pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// 批量踢人的一次上限。SnowLuma 没有文档化上限；core 不替模型无限制搬运名单。
 const MAX_BATCH_KICK: usize = 20;
 
@@ -35,9 +38,9 @@ const MAX_EMOJI_ID_LEN: usize = 256;
 /// OCR 的图片地址/缓存 id 上限：只收标识，不替模型搬运图片内容。
 const MAX_OCR_SOURCE_LEN: usize = 2048;
 
-/// 下载类动作的 ACB 侧默认/最大大小：平台文档没有大小上限，core 不替它兜底。
+/// 下载类动作的 ACB 侧默认/最大大小。平台上限是 1 GiB；默认仍保守，调用方可显式抬高。
 const DEFAULT_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_DOWNLOAD_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DOWNLOAD_URL_LEN: usize = 4096;
 const MAX_DOWNLOAD_NAME_LEN: usize = 255;
 
@@ -67,6 +70,7 @@ pub struct OneBotSnowLumaOutbound {
     connection: String,
     timeout: Duration,
     upload_timeout: Duration,
+    download_timeout: Duration,
     seq: u64,
 }
 
@@ -77,6 +81,7 @@ impl OneBotSnowLumaOutbound {
             connection: connection.into(),
             timeout: SEND_TIMEOUT,
             upload_timeout: UPLOAD_TIMEOUT,
+            download_timeout: DOWNLOAD_TIMEOUT,
             seq: 0,
         }
     }
@@ -85,6 +90,7 @@ impl OneBotSnowLumaOutbound {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self.upload_timeout = timeout;
+        self.download_timeout = timeout;
         self
     }
 
@@ -187,11 +193,25 @@ impl Outbound for OneBotSnowLumaOutbound {
             })?;
 
         let action = action_of_route(route, room)?;
-        validate_call_params(route.method, params)?;
-        let payload = call_payload(route, room, params)?;
-        let response = self.dispatch(action, payload, self.upload_timeout)?;
+        let mut params = params.clone();
+        normalize_call_params(route.method, &mut params)?;
+        validate_call_params(route.method, &params)?;
+        let payload = call_payload(route, room, &params)?;
+        let timeout = if matches!(
+            method,
+            "file.download"
+                | "stream.download_image"
+                | "stream.download_record"
+                | "stream.download_file"
+                | "stream.test_download"
+        ) {
+            self.download_timeout
+        } else {
+            self.upload_timeout
+        };
+        let response = self.dispatch(action, payload, timeout)?;
         let value = parse_call_response(method, response)?;
-        let record = outgoing_record(method, params, &value);
+        let record = outgoing_record(method, &params, &value);
         Ok(CallOutcome { value, record })
     }
 }
@@ -351,6 +371,136 @@ fn call_payload(route: &Route, room: &RoomId, params: &Value) -> Result<Value, C
     Ok(Value::Object(payload))
 }
 
+/// 把适配器暴露的友好参数翻译成平台参数，并在本地拒绝明显歧义的写法。
+///
+/// core 只校验必填/类型/枚举；这一层负责 `55 → 5`、`open/close → 0/1`、
+/// 文件夹改名别名优先级这类平台细节。
+fn normalize_call_params(method: &str, params: &mut Value) -> Result<(), CallError> {
+    let Some(map) = params.as_object_mut() else {
+        return Ok(());
+    };
+    match method {
+        "group.add_option" => {
+            let add_type = map
+                .get("add_type")
+                .and_then(Value::as_u64)
+                .filter(|value| *value == 55 || *value <= 5)
+                .ok_or_else(|| {
+                    CallError::BadParams(acb_i18n::t!("adapter.onebot11.add_type_invalid"))
+                })?;
+            let normalized = if add_type == 55 { 5 } else { add_type };
+            map.insert("add_type".to_owned(), json!(normalized));
+            match normalized {
+                4 => {
+                    if optional_text(map, "question").is_none()
+                        || optional_text(map, "answer").is_none()
+                    {
+                        return Err(CallError::BadParams(acb_i18n::t!(
+                            "adapter.onebot11.add_option_question_required"
+                        )));
+                    }
+                }
+                5 => {
+                    if optional_text(map, "question").is_none() {
+                        return Err(CallError::BadParams(acb_i18n::t!(
+                            "adapter.onebot11.add_option_question_required"
+                        )));
+                    }
+                    map.remove("answer");
+                }
+                _ => {
+                    // 0-3 不写 question/answer；平台只认 4/5 的这两个字段。
+                    map.remove("question");
+                    map.remove("answer");
+                }
+            }
+        }
+        "group.search" => {
+            let name = switch_value(map, "name_search")?;
+            let code = switch_value(map, "code_search")?;
+            if name.is_none() && code.is_none() {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.search_switch_required"
+                )));
+            }
+            if let Some(value) = name {
+                map.insert("no_finger_open".to_owned(), json!(value));
+            }
+            if let Some(value) = code {
+                map.insert("no_code_finger_open".to_owned(), json!(value));
+            }
+            map.remove("name_search");
+            map.remove("code_search");
+        }
+        "group.file.folder_rename" => {
+            let _ = required_text(map, "folder_id")?;
+            let name = optional_text(map, "new_folder_name")
+                .or_else(|| optional_text(map, "name"))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    CallError::BadParams(acb_i18n::t!("adapter.onebot11.folder_name_required"))
+                })?;
+            map.insert("new_folder_name".to_owned(), json!(name));
+            // 平台把 name 当别名；归一化成唯一的 new_folder_name，避免两个值打架。
+            map.remove("name");
+        }
+        "group.tag_list" | "group.tag_add" | "group.tag_delete" => {
+            let valid = map
+                .get("group_class")
+                .and_then(Value::as_u64)
+                .is_some_and(|value| value <= u32::MAX as u64);
+            if !valid {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.group_class_invalid"
+                )));
+            }
+            if method != "group.tag_list" {
+                let _ = required_text(map, "name")?;
+            }
+        }
+        "face.custom_add" => {
+            let file = required_text(map, "file")?;
+            if file.chars().count() > MAX_DOWNLOAD_URL_LEN {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.value_too_long",
+                    field = "file",
+                    max = MAX_DOWNLOAD_URL_LEN
+                )));
+            }
+            let lower = file.to_ascii_lowercase();
+            let known = lower.starts_with("file://")
+                || lower.starts_with("http://")
+                || lower.starts_with("https://")
+                || lower.starts_with("base64://")
+                || (lower.starts_with("data:") && lower.contains(";base64,"));
+            // 裸路径是合法输入；只有带 scheme 但不在白名单里的才本地拒绝。
+            if !known && lower.contains("://") {
+                return Err(CallError::BadParams(acb_i18n::t!(
+                    "adapter.onebot11.custom_face_source_invalid"
+                )));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// `open`/`close` → 0/1；空值/缺省返回 None。
+fn switch_value(map: &serde_json::Map<String, Value>, key: &str) -> Result<Option<u8>, CallError> {
+    let Some(value) = optional_text(map, key) else {
+        return Ok(None);
+    };
+    match value {
+        "open" => Ok(Some(0)),
+        "close" => Ok(Some(1)),
+        other => Err(CallError::BadParams(acb_i18n::t!(
+            "adapter.onebot11.search_switch_invalid",
+            field = key,
+            value = other
+        ))),
+    }
+}
+
 /// 平台参数里的「形状对了但值不安全」这一层。
 ///
 /// core 只校验必填、类型和枚举；数组长度、二选一这种约束在这里补。
@@ -437,6 +587,15 @@ fn validate_call_params(method: &str, params: &Value) -> Result<(), CallError> {
         "group.file.rename" => {
             required_text(map, "file_id")?;
             required_text(map, "new_name")?;
+        }
+        "group.file.folder_rename" => {
+            required_text(map, "folder_id")?;
+        }
+        "group.file.trans" => {
+            required_text(map, "file_id")?;
+        }
+        "file.share_link" => {
+            required_text(map, "fileset_id")?;
         }
         "file.private_url" => {
             let positive = map
@@ -1440,10 +1599,15 @@ mod tests {
                     | "group.ignored_requests"
                     | "file.private_url"
                     | "file.info"
+                    | "file.share_link"
+                    | "group.tag_list"
+                    | "group.tag_add"
+                    | "group.tag_delete"
                     | "face.custom_list"
                     | "face.custom_detail"
                     | "face.custom_delete"
                     | "face.custom_modify"
+                    | "face.custom_add"
                     | "face.system_list"
                     | "face.system_search"
                     | "face.entity"
@@ -1552,7 +1716,7 @@ mod tests {
     #[test]
     fn every_op_is_hierarchical_tagged_and_routed() {
         let methods = catalog();
-        assert_eq!(methods.len(), 118, "critical/媒体批次后应有 118 个层级 op");
+        assert_eq!(methods.len(), 127, "批次 8 后应有 127 个层级 op");
         assert!(!methods.is_empty());
         for method in methods.iter() {
             let name = method.name.as_ref();
@@ -2505,6 +2669,130 @@ mod tests {
                     Scope::Room,
                     "{} 声明了房间/成员目标，必须同时声明 room scope",
                     spec.name
+                );
+            }
+        }
+    }
+
+    /// 批次 8 的参数归一化：平台细节不能漏给模型，也不能让模型猜默认值。
+    #[test]
+    fn batch8_params_are_normalized_before_the_platform() {
+        let mut add = json!({"add_type": 55, "question": "Q", "answer": "A"});
+        normalize_call_params("group.add_option", &mut add).expect("55 是合法别名");
+        assert_eq!(add["add_type"], 5, "55 必须归一化为 5");
+        assert!(add.get("answer").is_none(), "5 不写 answer");
+        assert!(add.get("question").is_some());
+
+        assert!(
+            normalize_call_params("group.add_option", &mut json!({"add_type": 6})).is_err(),
+            "0-5/55 之外拒绝"
+        );
+        assert!(
+            normalize_call_params(
+                "group.add_option",
+                &mut json!({"add_type": 4, "question": "Q"})
+            )
+            .is_err(),
+            "add_type=4 要求 question+answer"
+        );
+
+        let mut search = json!({"name_search": "close", "code_search": "open"});
+        normalize_call_params("group.search", &mut search).expect("open/close 合法");
+        assert_eq!(search["no_finger_open"], 1);
+        assert_eq!(search["no_code_finger_open"], 0);
+        assert!(search.get("name_search").is_none(), "友好字段不发给平台");
+        assert!(
+            normalize_call_params("group.search", &mut json!({})).is_err(),
+            "两个开关都不给要本地拒绝"
+        );
+
+        let mut rename = json!({"folder_id": "f1", "name": "B"});
+        normalize_call_params("group.file.folder_rename", &mut rename).expect("name 是别名");
+        assert_eq!(rename["new_folder_name"], "B");
+        assert!(rename.get("name").is_none(), "别名归一化后要移除");
+
+        let mut rename = json!({"folder_id": "f1", "name": "B", "new_folder_name": "A"});
+        normalize_call_params("group.file.folder_rename", &mut rename).expect("两个都给");
+        assert_eq!(rename["new_folder_name"], "A", "new_folder_name 优先");
+        assert!(
+            normalize_call_params("group.file.folder_rename", &mut json!({"folder_id": "f1"}))
+                .is_err(),
+            "两个名称都不给要拒绝"
+        );
+
+        assert!(
+            normalize_call_params("group.tag_list", &mut json!({"group_class": -1})).is_err(),
+            "group_class 不能是负数"
+        );
+        assert!(normalize_call_params("group.tag_list", &mut json!({"group_class": 7})).is_ok());
+        assert!(validate_call_params("file.share_link", &json!({"fileset_id": " "})).is_err());
+        assert!(validate_call_params("group.file.trans", &json!({"file_id": ""})).is_err());
+
+        assert!(
+            normalize_call_params("face.custom_add", &mut json!({"file": "ftp://x/a.png"}))
+                .is_err(),
+            "未知 scheme 拒绝"
+        );
+        for source in [
+            "/tmp/a.png",
+            "file:///tmp/a.png",
+            "https://x/a.png",
+            "base64://AAAA",
+            "data:image/png;base64,AAAA",
+        ] {
+            assert!(
+                normalize_call_params("face.custom_add", &mut json!({"file": source})).is_ok(),
+                "{source} 应被接受"
+            );
+        }
+
+        assert!(
+            validate_call_params(
+                "file.download",
+                &json!({"base64": "AAAA", "max_bytes": MAX_DOWNLOAD_BYTES + 1})
+            )
+            .is_err(),
+            "超过平台 1 GiB 上限要拒绝"
+        );
+    }
+
+    /// unverified 的 op 清单是安全边界：多标或少标都会让门槛漂移。
+    #[test]
+    fn catalog_lists_the_unverified_ops() {
+        let methods = catalog();
+        let mut unverified: Vec<&str> = methods
+            .iter()
+            .filter(|method| method.verification.is_unverified())
+            .map(|method| method.name.as_ref())
+            .collect();
+        unverified.sort_unstable();
+        assert_eq!(
+            unverified,
+            [
+                "group.add_option",
+                "group.tag_add",
+                "group.tag_delete",
+                "group.tag_list",
+            ],
+            "只有 research §3 里需要实验的 op 才能标 unverified"
+        );
+        for method in methods.iter() {
+            if method.verification.is_unverified() {
+                assert!(
+                    method.verification.reason().is_some(),
+                    "{} 缺少 reason",
+                    method.name
+                );
+                assert!(
+                    method.verification.experiment().is_some(),
+                    "{} 缺少 experiment",
+                    method.name
+                );
+            } else {
+                assert!(
+                    method.verification.source().is_some(),
+                    "{} 缺少 source",
+                    method.name
                 );
             }
         }

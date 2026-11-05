@@ -13,14 +13,14 @@ use std::sync::Arc;
 
 use acb_adapter_api::{
     WireConnection, WireError, WireManifest, WireMethodSpec, WireOutgoingKind, WireOutgoingRecord,
-    WireParamSpec, WirePluginMetadata, WireRecord, WireTargetSpec,
+    WireParamSpec, WirePluginMetadata, WireRecord, WireTargetSpec, WireVerification,
 };
 
 use crate::adapter::{AdapterCapability, AdapterManifest};
 use crate::config::Connection;
 use crate::outbound::{
     CallError, Effect, MethodSpec, OutboundError, OutgoingKind, OutgoingRecord, ParamSpec,
-    ParamType, PlatformTag, RecordMode, Risk, Scope, TargetRole, TargetSpec,
+    ParamType, PlatformTag, RecordMode, Risk, Scope, TargetRole, TargetSpec, Verification,
 };
 use crate::plugin_meta::{PluginEffect, PluginMetadata};
 use crate::storage::RecordDraft;
@@ -186,6 +186,32 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        let verification = match spec.verification {
+            WireVerification::Verified { source } => {
+                let source = source.trim();
+                if source.is_empty() {
+                    return Err(acb_i18n::t!("kernel.wire.verification_source_empty"));
+                }
+                Verification::Verified {
+                    source: Cow::Owned(source.to_owned()),
+                }
+            }
+            WireVerification::Unverified { reason, experiment } => {
+                let reason = reason.trim();
+                let experiment = experiment.trim();
+                if reason.is_empty() || experiment.is_empty() {
+                    return Err(acb_i18n::t!(
+                        "kernel.wire.verification_incomplete",
+                        name = name
+                    ));
+                }
+                Verification::Unverified {
+                    reason: Cow::Owned(reason.to_owned()),
+                    experiment: Cow::Owned(experiment.to_owned()),
+                }
+            }
+        };
+
         Ok(MethodSpec {
             name: Cow::Owned(name.to_owned()),
             summary: Cow::Owned(spec.summary),
@@ -196,6 +222,7 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
             targets: targets.into(),
             effect,
             record,
+            verification,
         })
     }
 }
@@ -398,6 +425,9 @@ mod tests {
             }],
             effect: "send".into(),
             record: "message".into(),
+            verification: WireVerification::Verified {
+                source: "demo adapter docs".into(),
+            },
         }
     }
 
@@ -413,6 +443,26 @@ mod tests {
         assert_eq!(method.params[0].sample(), serde_json::json!("hi"));
         assert_eq!(method.targets[0].role, TargetRole::Room);
         assert!(method.has_tag(crate::outbound::tags::SEND));
+        assert_eq!(method.verification.state(), "verified");
+        assert_eq!(method.verification.source(), Some("demo adapter docs"));
+    }
+
+    #[test]
+    fn unverified_wire_declaration_requires_reason_and_experiment() {
+        let mut method = wire_method();
+        method.verification = WireVerification::Unverified {
+            reason: "  ".into(),
+            experiment: "run the probe".into(),
+        };
+        assert!(MethodSpec::try_from(method).is_err());
+
+        let mut method = wire_method();
+        method.verification = WireVerification::Unverified {
+            reason: "semantics unproven".into(),
+            experiment: "run the probe".into(),
+        };
+        let converted = MethodSpec::try_from(method).expect("完整声明能转换");
+        assert!(converted.verification.is_unverified());
     }
 
     #[test]

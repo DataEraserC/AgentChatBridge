@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use acb_kernel::{
     Bridge, CallError, CallOutcome, Config, Effect, Element, ErrorCode, Ingest, MemoryStore,
     MethodSpec, Outbound, OutboundError, ParamSpec, RecordDraft, RecordKind, RecordMode, Risk,
-    RoomId, Scope, Sender, Sent, TargetSpec, TurnReason,
+    RoomId, Scope, Sender, Sent, TargetSpec, TurnReason, Verification,
 };
 use serde_json::{Value, json};
 
@@ -34,6 +34,7 @@ fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
             targets: vec![TargetSpec::room("group_id", "group")].into(),
             effect: Effect::Write,
             record: RecordMode::None,
+            verification: Verification::verified("access ticket test fake"),
         },
         MethodSpec {
             name: "account.cookies".into(),
@@ -50,6 +51,22 @@ fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
             targets: Vec::new().into(),
             effect: Effect::Read,
             record: RecordMode::None,
+            verification: Verification::verified("access ticket test fake"),
+        },
+        MethodSpec {
+            name: "group.unverified".into(),
+            summary: "未验证的群设置".into(),
+            tags: Vec::new().into(),
+            risk: Risk::Write,
+            scope: Scope::Room,
+            params: Vec::new().into(),
+            targets: Vec::new().into(),
+            effect: Effect::Write,
+            record: RecordMode::None,
+            verification: Verification::unverified(
+                "add_type 语义只有单一来源",
+                "按 research §3.1 逐个回读",
+            ),
         },
     ])
 }
@@ -885,6 +902,88 @@ fn critical_is_refused_by_allow_destructive_and_runs_only_via_ticket() {
         .iter()
         .any(|(_, elements)| text_of(elements).contains("SECRET-COOKIE"));
     assert!(!leaked, "critical 结果不能进入投递正文");
+}
+
+#[test]
+fn unverified_op_is_direct_denied_and_ticket_approval_shows_the_reason() {
+    let (mut bridge, sends, calls) = bridge_with_calls(config());
+    bridge
+        .ingest(message("qq:group/123", "user1", "想改群设置", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let direct = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"op": "group.unverified"}),
+        )
+        .expect_err("unverified 不能直接调");
+    assert_eq!(direct.code, ErrorCode::ToolNotAllowed);
+    assert!(direct.message.contains("unverified"), "{}", direct.message);
+    assert!(
+        calls.lock().expect("没被毒死").is_empty(),
+        "被拒的直调不能碰平台"
+    );
+
+    let request = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["platform_call:group.unverified"]
+            }]}),
+        )
+        .expect("unverified 可以走票据");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("票据 id")
+        .to_owned();
+    bridge.end_turn(&ticket, None).expect("收工");
+
+    let approval = approval_dm(&sends);
+    assert!(approval.contains("[CRITICAL]"), "{approval}");
+    assert!(approval.contains("[UNVERIFIED]"), "{approval}");
+    assert!(
+        approval.contains("未验证：") && approval.contains("add_type 语义"),
+        "审批私信要带 reason 摘要：{approval}"
+    );
+    assert!(
+        approval.contains("critical"),
+        "未验证按 critical 档写能力集：{approval}"
+    );
+    let nonce = field(&approval, "nonce=");
+
+    bridge
+        .ingest(message(
+            "qq:private/admin",
+            "admin",
+            &format!("/approve {id} {nonce}"),
+            false,
+        ))
+        .expect("管理员命令能入库");
+    assert_eq!(
+        calls.lock().expect("没被毒死").as_slice(),
+        ["group.unverified"],
+        "批准后 core 才执行未验证 op"
+    );
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有唤醒");
+    let after = delivery.ticket;
+    let queried = bridge
+        .tool_call(&after, &sessions(), "access_ticket_get", json!({"id": id}))
+        .expect("查询执行结果");
+    assert_eq!(queried["state"], "used");
+    assert_eq!(queried["unverified"][0]["op"], "group.unverified");
+    assert!(
+        queried["unverified"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("add_type")),
+        "{queried}"
+    );
 }
 
 #[test]
