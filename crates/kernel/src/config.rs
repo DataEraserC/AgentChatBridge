@@ -3185,7 +3185,7 @@ mod tests {
     }
 
     /// 连接方式不再由 config 写死：manifest 在启动时决定支不支持。
-    /// `ws-server` 能解析，但 onebot11 的 manifest 只有 `ws-client`，注册表会拒绝。
+    /// `ws-server` 能解析；onebot11 的 manifest 现在声明了 `ws-client` / `ws-server`。
     #[test]
     fn transport_is_parsed_and_checked_by_the_adapter_manifest() {
         let text = ONE_CONNECTION.replace(

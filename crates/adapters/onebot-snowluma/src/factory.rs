@@ -13,7 +13,7 @@ use acb_kernel::{
 
 use crate::{LinkSlot, OneBotSnowLumaOutbound, supervise};
 
-static TRANSPORTS: &[Cow<'static, str>] = &[Cow::Borrowed("ws-client")];
+static TRANSPORTS: &[Cow<'static, str>] = &[Cow::Borrowed("ws-client"), Cow::Borrowed("ws-server")];
 static CAPABILITIES: &[AdapterCapability] = &[
     AdapterCapability::ReceiveEvents,
     AdapterCapability::Send,
@@ -85,7 +85,14 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
         connection: &Connection,
         _events: EventQueue,
     ) -> Result<AdapterInstance, AdapterError> {
-        if connection.url.is_none() {
+        if connection.transport.as_str() == "ws-server" {
+            if crate::link::server_listen(connection).is_none() {
+                return Err(AdapterError::Create(
+                    connection.id.clone(),
+                    acb_i18n::t!("adapter.onebot11.ws_server_requires_listen"),
+                ));
+            }
+        } else if connection.url.is_none() {
             return Err(AdapterError::Create(
                 connection.id.clone(),
                 acb_i18n::t!("adapter.onebot11.url_required"),
@@ -120,5 +127,10 @@ mod tests {
         assert_eq!(MANIFEST.kind.as_ref(), "onebot11");
         assert_eq!(MANIFEST.platform.as_ref(), "qq");
         assert_eq!(MANIFEST.metadata.title.as_deref(), Some("OneBot SnowLuma"));
+        assert!(
+            MANIFEST.transports.iter().any(|item| item == "ws-server"),
+            "反向 WS 必须在 manifest 里声明"
+        );
+        assert!(MANIFEST.transports.iter().any(|item| item == "ws-client"));
     }
 }

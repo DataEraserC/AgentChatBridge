@@ -30,9 +30,9 @@
 id = "qq"              # 连接名：房间前缀、订阅引用都用它
 platform = "qq"        # 属于哪个平台
 kind = "onebot11"      # 规范值；onebot-snowluma 是等价别名
-transport = "ws-client" # 连接方向：桥主动去连（ws-server 还没实现）
-url = "ws://127.0.0.1:3001"   # ws-client 必填；process 不用
-options = { ... }      # 适配器专属配置；OneBot SnowLuma 目前不需要
+transport = "ws-client" # 连接方向：ws-client 桥主动去连；ws-server 桥监听、平台连入
+url = "ws://127.0.0.1:3001"   # ws-client 必填；ws-server 用 options.listen
+options = { ... }      # 适配器专属配置；SnowLuma 的 snowluma_min_version / ws-server 的 listen 放这里
 token = "..."          # OneBot 实现开了 access_token 就填
 account = "10001"      # 这个号登录的是谁，必填
 ```
@@ -51,11 +51,15 @@ account = "10001"      # 这个号登录的是谁，必填
 
 ## OneBot SnowLuma 走哪种连接
 
-用**正向 WebSocket**（`transport = "ws-client"`）：桥作为客户端，连到 OneBot 实现
-（NapCat / Lagrange / go-cqhttp 等）开出来的 WS 服务端。
+两种都支持：
 
-来源：实现默认，可推翻。理由只有一个：反向 WS 要桥自带一个 WS 服务端，多一层监听和鉴权，
-正向只要一个地址就能跑。真需要反向，加一个 `transport` 取值即可，配置形状不用变。
+- **正向 WebSocket**（`transport = "ws-client"`）：桥作为客户端，连到 OneBot 实现
+  （NapCat / Lagrange / go-cqhttp 等）开出来的 WS 服务端。
+- **反向 WebSocket**（`transport = "ws-server"`）：桥监听 `options.listen`（如
+  `"0.0.0.0:3001"`），SnowLuma 的 `wsClients` 主动连进来。配了 `token` 时，
+  握手必须带 `?access_token=` 或 `Authorization: Bearer`，不匹配返回 401。
+
+来源：实现默认，可推翻。正向只要一个地址就能跑；反向适合平台侧不方便主动连出的部署。
 
 ### OneBot 侧必须设的一项
 
