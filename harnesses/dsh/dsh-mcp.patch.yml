@@ -63,11 +63,11 @@
   config:
     default: acb-dsh
 
-# 两个 agent preset（新增条目，必须用 insert:，不能平铺成顶层 - id:——顶层是「覆盖已存在
+# 四个 agent preset（新增条目，必须用 insert:，不能平铺成顶层 - id:——顶层是「覆盖已存在
 # 条目」，会报 entry not found）。每个 preset 只挂它自己的那个 MCP（streamable-http 连对应
-# driver 进程 3101/3102），模型在某个 session 里只看到那一套工具。
+# driver 进程 3101/3102/3103/3104），模型在某个 session 里只看到那一套工具。
 - insert:
-    # 会话一（acb 的 dsh 会话）：只挂它自己的 MCP，连 3101 那个 driver 进程。
+    # 会话一（acb 的 dsh-qas 会话，原 dsh）：只挂它自己的 MCP，连 3101 那个 driver 进程。
     - id: preset-acb-dsh
       name: "@deepseek-ai/dsh-agent-preset"
       config:
@@ -80,7 +80,33 @@
               serverName: acb
               url: http://127.0.0.1:3101/mcp
 
-    # 会话二（acb 的 dsh-group2 会话）：只挂它自己的 MCP，连 3102 那个 driver 进程。
+    # 会话二（acb 的 dsh-dev 会话）：只挂它自己的 MCP，连 3103 那个 driver 进程。
+    - id: preset-acb-dsh-dev
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: acb-dsh-dev
+        plugins:
+          - id: mcp-acb-dsh-dev
+            name: "@deepseek-ai/dsh-mcp-client"
+            config:
+              transport: streamable-http
+              serverName: acb
+              url: http://127.0.0.1:3103/mcp
+
+    # 会话三（acb 的 dsh-snowluma-test 会话）：只挂它自己的 MCP，连 3104 那个 driver 进程。
+    - id: preset-acb-dsh-snowluma-test
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: acb-dsh-snowluma-test
+        plugins:
+          - id: mcp-acb-dsh-snowluma-test
+            name: "@deepseek-ai/dsh-mcp-client"
+            config:
+              transport: streamable-http
+              serverName: acb
+              url: http://127.0.0.1:3104/mcp
+
+    # 会话四（acb 的 dsh-group2 会话）：只挂它自己的 MCP，连 3102 那个 driver 进程。
     - id: preset-acb-dsh-group2
       name: "@deepseek-ai/dsh-agent-preset"
       config:

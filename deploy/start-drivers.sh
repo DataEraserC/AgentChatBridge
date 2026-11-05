@@ -68,7 +68,9 @@ session_token() {
 # preset 名必须和 harnesses/dsh/dsh-mcp.patch.yml 里注册的一致，否则 dsh 会报
 # Unknown agent preset，连 session resume 都失败。
 SESSIONS=(
-  "dsh:3101:acb-dsh"
+  "dsh-qas:3101:acb-dsh"
+  "dsh-dev:3103:acb-dsh-dev"
+  "dsh-snowluma-test:3104:acb-dsh-snowluma-test"
   "dsh-group2:3102:acb-dsh-group2"
 )
 
