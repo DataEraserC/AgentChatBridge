@@ -248,9 +248,9 @@ fn seed_is_idempotent_and_sets_first_current() {
     );
 
     let second = run_acb(&env, &["profile", "seed", second_payload.to_str().unwrap()]);
-    assert!(second.status.success(), "{}", stderr(&second));
+    assert_eq!(second.status.code(), Some(0), "{}", stderr(&second));
     assert!(
-        stdout(&second).contains("seed skipped"),
+        stdout(&second).contains("seed skipped: profile already has 1 generation(s)"),
         "{}",
         stdout(&second)
     );
@@ -258,6 +258,169 @@ fn seed_is_idempotent_and_sets_first_current() {
         .expect("generations")
         .count();
     assert_eq!(generations, 1, "seed must not add a second generation");
+}
+
+fn seed_and_expect_repair(
+    profile: &Path,
+    config: &Path,
+    surviving_id: &str,
+    repair_payload: &Path,
+    reason: &str,
+) -> String {
+    let env = profile_env(profile, config);
+    let seeded = run_acb(&env, &["profile", "seed", repair_payload.to_str().unwrap()]);
+    assert!(seeded.status.success(), "{}", stderr(&seeded));
+    let text = stdout(&seeded);
+    let prefix = "seed repaired current -> ";
+    let repaired = text
+        .trim()
+        .strip_prefix(prefix)
+        .expect("repair output")
+        .split_whitespace()
+        .next()
+        .expect("repaired id")
+        .to_string();
+    assert!(text.contains(reason), "missing repair reason: {text}");
+    assert_eq!(
+        read_link(profile),
+        PathBuf::from("generations").join(&repaired).join("root")
+    );
+    assert!(
+        profile.join("current/bin/acb-bridge").is_file(),
+        "repaired current has no bin/acb-bridge"
+    );
+    assert!(
+        generation_dir(profile, surviving_id).exists(),
+        "repair must not delete the surviving generation"
+    );
+    repaired
+}
+
+#[test]
+fn seed_repairs_missing_current() {
+    let temp = TempDir::new("seed-repair-missing");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let existing = add(&profile, &config, &payload(temp.path(), "old"), "old");
+    let repaired = seed_and_expect_repair(
+        &profile,
+        &config,
+        &existing,
+        &payload(temp.path(), "repair"),
+        "current symlink missing",
+    );
+    assert_ne!(existing, repaired);
+    assert_eq!(
+        fs::read_dir(profile.join("generations"))
+            .expect("generations")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn seed_repairs_current_pointing_to_missing_generation() {
+    let temp = TempDir::new("seed-repair-dangling");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let surviving = add(
+        &profile,
+        &config,
+        &payload(temp.path(), "surviving"),
+        "surviving",
+    );
+    let existing = add(&profile, &config, &payload(temp.path(), "old"), "old");
+    let env = profile_env(&profile, &config);
+    let switched = run_acb(&env, &["profile", "switch", &existing]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+    fs::remove_dir_all(generation_dir(&profile, &existing)).expect("drop generation");
+
+    let repaired = seed_and_expect_repair(
+        &profile,
+        &config,
+        &surviving,
+        &payload(temp.path(), "repair"),
+        "current target missing",
+    );
+    assert!(generation_dir(&profile, &repaired).exists());
+}
+
+#[test]
+fn seed_repairs_when_bridge_binary_is_missing() {
+    let temp = TempDir::new("seed-repair-no-bridge");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let existing_payload = payload(temp.path(), "old");
+    let existing = add(&profile, &config, &existing_payload, "old");
+    let env = profile_env(&profile, &config);
+    let switched = run_acb(&env, &["profile", "switch", &existing]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+    fs::remove_file(existing_payload.join("bin/acb-bridge")).expect("drop bridge binary");
+
+    let repaired = seed_and_expect_repair(
+        &profile,
+        &config,
+        &existing,
+        &payload(temp.path(), "repair"),
+        "current target missing bin/acb-bridge",
+    );
+    assert_ne!(existing, repaired);
+}
+
+#[test]
+fn seed_fails_actionably_when_current_cannot_be_repaired() {
+    let temp = TempDir::new("seed-repair-fail");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let existing_payload = payload(temp.path(), "old");
+    let existing = add(&profile, &config, &existing_payload, "old");
+    let env = profile_env(&profile, &config);
+    let switched = run_acb(&env, &["profile", "switch", &existing]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+    fs::remove_file(existing_payload.join("bin/acb-bridge")).expect("drop bridge binary");
+
+    let missing_payload = run_acb(&env, &["profile", "seed"]);
+    assert_eq!(
+        missing_payload.status.code(),
+        Some(2),
+        "{}",
+        stderr(&missing_payload)
+    );
+    let text = stderr(&missing_payload);
+    assert!(text.contains("profile current is not usable"), "{text}");
+    assert!(text.contains("acbctl profile add"), "{text}");
+    assert!(text.contains("acbctl profile switch"), "{text}");
+    assert!(
+        !stdout(&missing_payload).contains("seed skipped"),
+        "seed must not silently skip a broken current"
+    );
+
+    let invalid_payload = temp.path().join("not-a-payload");
+    let bad = run_acb(
+        &env,
+        &["profile", "seed", invalid_payload.to_str().unwrap()],
+    );
+    assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
+    let text = stderr(&bad);
+    assert!(text.contains("seed cannot repair it"), "{text}");
+    assert!(text.contains("acbctl profile add"), "{text}");
+    assert!(text.contains("acbctl profile switch"), "{text}");
+    assert_eq!(
+        read_link(&profile),
+        PathBuf::from("generations").join(&existing).join("root"),
+        "failed repair must not change current"
+    );
+    assert_eq!(
+        fs::read_dir(profile.join("generations"))
+            .expect("generations")
+            .count(),
+        1,
+        "failed repair must not create a generation"
+    );
 }
 
 #[test]
