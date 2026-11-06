@@ -10,7 +10,7 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use acb_supervisor::{CommandSpec, load_config, load_current};
+use acb_supervisor::{CommandSpec, GenerationRef, load_config, load_current};
 use serde::{Deserialize, Serialize};
 
 use crate::fsutil::{now_ms, pid_alive, send_sigterm, sha256_hex, write_atomic};
@@ -53,6 +53,7 @@ struct Prepared {
     state_dir: PathBuf,
     config_sha: String,
     selected: CommandSpec,
+    generation: Option<GenerationRef>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -87,11 +88,14 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
     install_signal_handlers();
     let mut failures: VecDeque<Instant> = VecDeque::new();
     loop {
-        let selected = if prepared.mode == Mode::Launcher {
+        let mut selected = if prepared.mode == Mode::Launcher {
             load_current(&prepared.state_dir).unwrap_or_else(|| prepared.selected.clone())
         } else {
             prepared.selected.clone()
         };
+        if selected.generation.is_none() {
+            selected.generation = prepared.generation.clone();
+        }
 
         let mut child = spawn_child(&prepared)?;
         if let Err(error) = write_run_record(&prepared, child.id(), &selected) {
@@ -212,8 +216,9 @@ fn parse_mode(value: &str) -> Result<Mode, String> {
 }
 
 fn prepare(arguments: Arguments) -> Result<Prepared, String> {
-    let bin_dir = env_path("ACB_UNIT_BIN_DIR")
-        .ok_or_else(|| "missing required variable: ACB_UNIT_BIN_DIR".to_string())?;
+    let fallback_bin = env_path("ACB_UNIT_BIN_DIR");
+    let bin_dir = crate::profile::resolve_bin_dir(fallback_bin.as_deref())?;
+    let generation = crate::profile::active_meta()?.map(|meta| meta.generation_ref());
 
     match arguments.mode {
         Mode::Launcher => {
@@ -265,7 +270,9 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
                 selected: CommandSpec {
                     program: config.program,
                     args: config.args,
+                    generation: config.generation.or(generation.clone()),
                 },
+                generation,
             })
         }
         Mode::Direct => {
@@ -290,19 +297,43 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
                 selected: CommandSpec {
                     program: bridge.to_string_lossy().into_owned(),
                     args: vec!["--config".to_string(), config_string],
+                    generation: generation.clone(),
                 },
+                generation,
             })
         }
     }
 }
 
 fn render_supervisor_config(state_dir: &Path) -> Result<String, String> {
-    let mut values = crate::unit::values_from_env()?;
+    let mut values = crate::unit::resolved_values()?;
     values.insert(
         "RUN_STATE_DIR".to_string(),
         state_dir.to_string_lossy().into_owned(),
     );
+    let generation_section = match crate::profile::active_meta()? {
+        Some(meta) => {
+            let mut section = format!(
+                "\n[supervisor.generation]\nid = \"{}\"\npath = \"{}\"\n",
+                toml_escape(&meta.id),
+                toml_escape(&meta.source.path)
+            );
+            if let Some(config) = &meta.config {
+                section.push_str(&format!(
+                    "config_sha256 = \"{}\"\n",
+                    toml_escape(&config.sha256)
+                ));
+            }
+            section
+        }
+        None => String::new(),
+    };
+    values.insert("GENERATION_SECTION".to_string(), generation_section);
     crate::unit::substitute("supervisor.toml", SUPERVISOR_TEMPLATE, &values)
+}
+
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn default_state_dir() -> Result<PathBuf, String> {
