@@ -54,6 +54,7 @@ struct Prepared {
     config_sha: String,
     selected: CommandSpec,
     generation: Option<GenerationRef>,
+    repo_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -218,6 +219,8 @@ fn parse_mode(value: &str) -> Result<Mode, String> {
 fn prepare(arguments: Arguments) -> Result<Prepared, String> {
     let fallback_bin = env_path("ACB_UNIT_BIN_DIR");
     let bin_dir = crate::profile::resolve_bin_dir(fallback_bin.as_deref())?;
+    let fallback_repo = env_path("ACB_UNIT_REPO_DIR");
+    let repo_dir = crate::profile::resolve_repo_dir_optional(fallback_repo.as_deref())?;
     let generation = crate::profile::active_meta()?.map(|meta| meta.generation_ref());
 
     match arguments.mode {
@@ -273,6 +276,7 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
                     generation: config.generation.or(generation.clone()),
                 },
                 generation,
+                repo_dir,
             })
         }
         Mode::Direct => {
@@ -300,6 +304,7 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
                     generation: generation.clone(),
                 },
                 generation,
+                repo_dir,
             })
         }
     }
@@ -358,6 +363,9 @@ fn spawn_child(prepared: &Prepared) -> Result<Child, String> {
         .stderr(Stdio::inherit())
         .env_remove("NOTIFY_SOCKET")
         .env_remove("WATCHDOG_USEC");
+    if let Some(repo_dir) = &prepared.repo_dir {
+        command.env("ACB_UNIT_REPO_DIR", repo_dir.to_string_lossy().into_owned());
+    }
     command.spawn().map_err(|error| {
         format!(
             "cannot start {} ({}): {error}",

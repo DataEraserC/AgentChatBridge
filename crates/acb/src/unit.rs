@@ -42,7 +42,6 @@ const TEMPLATES: &[(&str, &str)] = &[
 ];
 
 const REQUIRED_KEYS: &[&str] = &[
-    "ACB_UNIT_REPO_DIR",
     "ACB_UNIT_LOG_DIR",
     "ACB_UNIT_PROFILE_DIR",
     "ACB_UNIT_CONFIG_FILE",
@@ -53,6 +52,7 @@ const REQUIRED_KEYS: &[&str] = &[
 const PORT_KEYS: &[&str] = &["ACB_UNIT_CONSOLE_PORT", "ACB_UNIT_OPENCODE_PORT"];
 
 const OPTIONAL_KEYS: &[&str] = &[
+    "ACB_UNIT_REPO_DIR",
     "ACB_UNIT_BIN_DIR",
     "ACB_UNIT_CONSOLE_PORT",
     "ACB_UNIT_OPENCODE_PORT",
@@ -301,7 +301,10 @@ pub fn doctor_command(args: &[String]) -> Result<ExitCode, String> {
 
     match crate::profile::status() {
         crate::profile::Status::Missing { root } => {
-            println!("warn: profile not used (no current at {})", root.display());
+            println!(
+                "warn: profile not used; using fallback ACB_UNIT_REPO_DIR/ACB_UNIT_BIN_DIR paths (no current at {})",
+                root.display()
+            );
         }
         crate::profile::Status::Active { id, bin, .. } => {
             println!("profile: current {id} ({})", bin.display());
@@ -473,14 +476,20 @@ fn render_all() -> Result<Vec<RenderedUnit>, String> {
         .collect()
 }
 
-/// 先收集 ACB_UNIT_*，再把 BIN_DIR 换成 profile/current/bin（可用时）。
+/// 先收集 ACB_UNIT_*，再把 BIN_DIR / REPO_DIR 换成 profile/current 下的路径（可用时）。
 pub(crate) fn resolved_values() -> Result<BTreeMap<String, String>, String> {
     let mut values = values_from_env()?;
-    let fallback = values.get("ACB_UNIT_BIN_DIR").map(PathBuf::from);
-    let bin_dir = crate::profile::resolve_bin_dir(fallback.as_deref())?;
+    let fallback_bin = values.get("ACB_UNIT_BIN_DIR").map(PathBuf::from);
+    let bin_dir = crate::profile::resolve_bin_dir(fallback_bin.as_deref())?;
+    let fallback_repo = values.get("ACB_UNIT_REPO_DIR").map(PathBuf::from);
+    let repo_dir = crate::profile::resolve_repo_dir(fallback_repo.as_deref())?;
     values.insert(
         "ACB_UNIT_BIN_DIR".to_string(),
         bin_dir.to_string_lossy().into_owned(),
+    );
+    values.insert(
+        "ACB_UNIT_REPO_DIR".to_string(),
+        repo_dir.to_string_lossy().into_owned(),
     );
     Ok(values)
 }
