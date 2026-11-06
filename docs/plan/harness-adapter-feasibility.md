@@ -239,8 +239,8 @@ ACB 现有两套接入的权威说明在 [`docs/06-harness-adapters.md`](../06-h
 四件事都有公开、可验证的接法；本地 CLI 的 `--help`、`--version`、`mcp list` 已经跑通。端到端模型轮次没有在本机跑（需要登录/额度），所以「可直接做」的剩余风险是**认证与厂商 CLI 行为**，不是扩展面缺失。缺 full TUI bundle 是上游 WorkBuddy 发行物的取舍，不是 Nix 打包问题；适配器用 headless bundle 即可，不需要修包。
 
 **实现状态（2026-11-06）**：`harnesses/workbuddy/` 已完成进程外驱动 + MCP 工具面。
-`node --test harnesses/workbuddy/test/*.test.mjs` 17 个用例覆盖完整一轮、ticket、
-resume 重试、result error、MCP 未连接、超时和 reset。另用真实
+`node --test harnesses/workbuddy/test/*.test.mjs` 18 个用例覆盖完整一轮、ticket、
+第二轮 `-r` 复用、resume 重试、result error、MCP 未连接、超时和 reset。另用真实
 `codebuddy-headless.js`（未登录）验证了 `--mcp-config` 的 MCP 连接与工具名、auth 错误
 形状、resume 缺失形状；真实模型回话与额度仍待登录。
 
@@ -285,6 +285,7 @@ resume 重试、result error、MCP 未连接、超时和 reset。另用真实
 |---|---|---|
 | `--mcp-config '{"mcpServers":{"acb":{"type":"http","url":"http://127.0.0.1:<port>/mcp"}}}'` + `--strict-mcp-config` | `system/init` 的 `mcp_servers` 是 `[{name:"acb",status:"connected"}]`，`tools` 里有 `mcp__acb__send_message` | MCP 配置形状和工具命名确认；ticket 仍由同进程 MCP server 持有 |
 | 未登录 `-p` | `assistant` 文本 `Authentication required. Please use /login command…`；`result` 是 `subtype:"error_during_execution"`、`is_error:true`、`errors:["Authentication required…"]`；**进程 exit 0** | 不能只看 exit code；适配器先看 `result.is_error` / `errors`，再判 `model/auth_failed` |
+| `-r` 指向已存在的会话 | init 直接用该 `session_id` 继续，后续照常走 auth 错误 | resume 成功路径可用；第二轮会复用同一 CLI 会话 |
 | `-r` 指向不存在的会话 | 只发 `{"type":"error","error":"No conversation found with session ID: …"}`，没有 `result`，exit 0 | 适配器必须把 `type:"error"` 且无 result 的情况判失败，并识别为 resume 缺失后改用 `--session-id` |
 | `--allowedTools` 后直接跟 prompt | prompt 被当成 allowedTools 的可变参数吞掉，CLI 没有真正拿到提问 | 适配器把 prompt 放在 `--session-id`/`-r` 之后，避免被可变参数吞 |
 | `--tools ""` | init 的 `tools` 仍有 `Bash`/`Edit`/`Read`/`WebFetch` 等内置工具 | `--tools ""` 不能关内置工具；适配器默认不传，并在 system prompt 里禁止用 shell/HTTP 绕桥 |

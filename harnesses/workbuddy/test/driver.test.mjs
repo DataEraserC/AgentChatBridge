@@ -225,6 +225,39 @@ test("MCP 没连上：CLI 即使 result 成功，这一轮也判失败", async (
   await run
 })
 
+test("第二轮复用同一 CLI 会话（-r），不再新建", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const link = await connectedLink(bridge)
+  const cli = makeCli("ok")
+  const driver = new TurnDriver({ cli, log: () => {} })
+  const mcp = await startMcp(driver, link)
+  driver.mcpUrl = mcp.url
+
+  t.after(async () => {
+    link.close()
+    mcp.server.stop()
+    await bridge.stop()
+  })
+
+  link.ticket = TICKET
+  const first = driver.run(delivery(), link)
+  await answerToolCall(bridge)
+  await first
+  await nextFrameOfType(bridge, "turn_end")
+
+  link.ticket = "main-2"
+  const second = driver.run(delivery({ ticket: "main-2" }), link)
+  await waitFor(() => cli.runs.length === 2, "第二轮 CLI 没起")
+  await answerToolCall(bridge)
+  const turnEnd = await nextFrameOfType(bridge, "turn_end")
+  assert.equal(turnEnd.ticket, "main-2")
+  assert.equal(turnEnd.error, undefined)
+  await second
+
+  assert.equal(cli.runs[1].resume, true)
+  assert.equal(cli.runs[1].sessionId, cli.runs[0].sessionId)
+})
+
 test("resume 失败：丢掉旧映射，用 --session-id 重试成功", async (t) => {
   const bridge = await new FakeBridge().start()
   const link = await connectedLink(bridge)
