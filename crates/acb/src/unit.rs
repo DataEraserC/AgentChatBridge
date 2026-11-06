@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -294,7 +294,7 @@ fn render_all() -> Result<Vec<RenderedUnit>, String> {
         .collect()
 }
 
-fn values_from_env() -> Result<BTreeMap<String, String>, String> {
+pub(crate) fn values_from_env() -> Result<BTreeMap<String, String>, String> {
     let mut values = BTreeMap::new();
 
     for (key, value) in std::env::vars() {
@@ -364,7 +364,7 @@ fn validate_port(key: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn substitute(
+pub(crate) fn substitute(
     template_name: &str,
     template: &str,
     values: &BTreeMap<String, String>,
@@ -427,39 +427,15 @@ fn write_if_changed(path: &Path, content: &str) -> Result<WriteStatus, String> {
     match fs::read_to_string(path) {
         Ok(existing) if existing == content => Ok(WriteStatus::Unchanged),
         Ok(_) => {
-            write_atomic(path, content)?;
+            crate::fsutil::write_atomic(path, content.as_bytes())?;
             Ok(WriteStatus::Updated)
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            write_atomic(path, content)?;
+            crate::fsutil::write_atomic(path, content.as_bytes())?;
             Ok(WriteStatus::Created)
         }
         Err(error) => Err(format!("read {}: {error}", path.display())),
     }
-}
-
-fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("no parent directory for {}", path.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("invalid file name: {}", path.display()))?;
-    let temp = parent.join(format!(".{file_name}.acb-tmp-{}", std::process::id()));
-
-    let result = (|| -> std::io::Result<()> {
-        let mut file = fs::File::create(&temp)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, path)
-    })();
-
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result.map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
@@ -494,12 +470,12 @@ fn write_manifest_if_changed(root: &Path, manifest: &Manifest) -> Result<(), Str
     match fs::read_to_string(&path) {
         Ok(existing) if existing == text => Ok(()),
         Ok(_) => {
-            write_atomic(&path, &text)?;
+            crate::fsutil::write_atomic(&path, text.as_bytes())?;
             println!("wrote {MANIFEST_NAME}");
             Ok(())
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            write_atomic(&path, &text)?;
+            crate::fsutil::write_atomic(&path, text.as_bytes())?;
             println!("wrote {MANIFEST_NAME}");
             Ok(())
         }

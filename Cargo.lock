@@ -6,9 +6,11 @@ version = 4
 name = "acb"
 version = "0.1.0"
 dependencies = [
+ "acb-supervisor",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

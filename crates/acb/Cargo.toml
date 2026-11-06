@@ -11,8 +11,10 @@ name = "acbctl"
 path = "src/main.rs"
 
 [dependencies]
+acb-supervisor = { path = "../supervisor" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
