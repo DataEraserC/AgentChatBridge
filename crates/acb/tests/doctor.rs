@@ -177,7 +177,7 @@ fn doctor_reports_clean_state() {
         stdout(&output)
     );
     assert!(
-        stdout(&output).contains("warn: profile not used"),
+        stdout(&output).contains("using fallback"),
         "{}",
         stdout(&output)
     );
