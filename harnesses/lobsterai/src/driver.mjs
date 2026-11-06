@@ -486,9 +486,10 @@ export function classifyFailureText(text) {
 }
 
 // 作为主模块运行时直接跑；被测试 import 时不动。
-import { fileURLToPath } from "node:url"
+// 用 realpath 比较，兼容 profile/current 软链启动（argv[1] 是软链路径）。
+import { isMainModule } from "../../shared/main-module.mjs"
 
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
+const isMain = isMainModule(import.meta.url)
 if (isMain) {
   main().catch((error) => {
     log("error", t("lobsterai.driver_start_failed", { error: error?.stack ?? error }))
