@@ -201,7 +201,8 @@ fn config() -> String {
         members = ["bob"]
 
         [[grants.rules]]
-        subject = "user"
+                id = "fixture-grant-10"
+                subject = "user"
         place = "group"
         scope = "connection"
         target = { kind = "connection", id = "qq" }

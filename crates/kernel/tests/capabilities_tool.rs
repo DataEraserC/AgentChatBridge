@@ -221,7 +221,8 @@ fn config() -> &'static str {
         account = "admin"
 
         [[grants.rules]]
-        subject = "user"
+                id = "fixture-grant-18"
+                subject = "user"
         place = "group"
         scope = "connection"
         target = { kind = "connection", id = "qq" }
@@ -285,7 +286,8 @@ fn deny_read_config() -> &'static str {
         approval_route = ["qq:private/admin"]
 
         [[grants.rules]]
-        subject = "user"
+                id = "fixture-grant-19"
+                subject = "user"
         place = "group"
         scope = "connection"
         target = { kind = "connection", id = "qq" }

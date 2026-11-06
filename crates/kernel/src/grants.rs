@@ -353,6 +353,8 @@ impl GrantCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantRule {
+    /// 稳定标识；Decision 与审计用它追溯来源。
+    pub id: String,
     pub subject: GrantSubject,
     pub place: Place,
     pub scope: GrantScope,
@@ -409,6 +411,9 @@ pub struct SystemAdminGrant {
 pub struct GrantsConfig {
     #[serde(default)]
     pub rules: Vec<GrantRule>,
+    /// 显式拒绝；只做减法，和 allow 规则顺序无关。
+    #[serde(default)]
+    pub deny: Vec<GrantRule>,
     #[serde(default)]
     pub bot_admin: Option<BotAdminGrant>,
     #[serde(default)]
@@ -446,24 +451,43 @@ impl GrantsConfig {
                 }
             }
         }
-        for (index, rule) in self.rules.iter().enumerate() {
+        let mut ids = std::collections::BTreeSet::new();
+        for (label, index, rule) in self
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| ("rules", index, rule))
+            .chain(
+                self.deny
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rule)| ("deny", index, rule)),
+            )
+        {
+            let id = rule.id.trim();
+            if id.is_empty() {
+                return Err(format!("grants.{label}[{index}] id must not be empty"));
+            }
+            if !ids.insert(id.to_owned()) {
+                return Err(format!("duplicate grant rule id {id}"));
+            }
             if rule.capability.is_empty() {
                 return Err(format!(
-                    "grants.rules[{index}] capability must not be empty"
+                    "grants.{label}[{index}] capability must not be empty"
                 ));
             }
             let mut seen = std::collections::BTreeSet::new();
             for capability in &rule.capability {
                 if matches!(*capability, GrantCapability::AccountSecret) {
                     return Err(format!(
-                        "grants.rules[{index}] capability {} cannot be granted by config; \
+                        "grants.{label}[{index}] capability {} cannot be granted by config; \
                          it requires an access_request ticket approved in private",
                         capability.as_str()
                     ));
                 }
                 if !seen.insert(*capability) {
                     return Err(format!(
-                        "grants.rules[{index}] capability declared twice: {capability:?}"
+                        "grants.{label}[{index}] capability declared twice: {capability:?}"
                     ));
                 }
             }
@@ -471,39 +495,41 @@ impl GrantsConfig {
                 GrantScope::Subscribed => {
                     if rule.target.is_some() {
                         return Err(format!(
-                            "grants.rules[{index}] target is only allowed for scope room/connection"
+                            "grants.{label}[{index}] target is only allowed for scope room/connection"
                         ));
                     }
                 }
                 GrantScope::Room => {
                     let Some(target) = rule.target.as_ref() else {
-                        return Err(format!("grants.rules[{index}] scope room requires target"));
+                        return Err(format!(
+                            "grants.{label}[{index}] scope room requires target"
+                        ));
                     };
                     if target.kind != AccessTargetKind::Room || target.id.trim().is_empty() {
                         return Err(format!(
-                            "grants.rules[{index}] scope room target must be kind = \"room\" with a room id"
+                            "grants.{label}[{index}] scope room target must be kind = \"room\" with a room id"
                         ));
                     }
                     RoomId::parse(target.id.trim()).map_err(|error| {
-                        format!("grants.rules[{index}] target is not a room: {error}")
+                        format!("grants.{label}[{index}] target is not a room: {error}")
                     })?;
                 }
                 GrantScope::Connection => {
                     let Some(target) = rule.target.as_ref() else {
                         return Err(format!(
-                            "grants.rules[{index}] scope connection requires target"
+                            "grants.{label}[{index}] scope connection requires target"
                         ));
                     };
                     if target.kind != AccessTargetKind::Connection || target.id.trim().is_empty() {
                         return Err(format!(
-                            "grants.rules[{index}] scope connection target must be kind = \"connection\" with a connection id"
+                            "grants.{label}[{index}] scope connection target must be kind = \"connection\" with a connection id"
                         ));
                     }
                 }
                 GrantScope::PlatformOp => {
                     let Some(target) = rule.target.as_ref() else {
                         return Err(format!(
-                            "grants.rules[{index}] scope platform_op requires target"
+                            "grants.{label}[{index}] scope platform_op requires target"
                         ));
                     };
                     if target.kind != AccessTargetKind::PlatformOp
@@ -514,7 +540,7 @@ impl GrantsConfig {
                             .is_none_or(|sub| sub.trim().is_empty())
                     {
                         return Err(format!(
-                            "grants.rules[{index}] scope platform_op target must be \
+                            "grants.{label}[{index}] scope platform_op target must be \
                              {{ kind = \"platform_op\", id = \"<method>\", sub = \"<connection>\" }}"
                         ));
                     }
@@ -623,14 +649,23 @@ pub struct GrantQuery<'a> {
     pub subscriptions: &'a [RoomId],
     /// 当前评估的平台方法名；只有 `platform_call` 的能力检查会填。
     pub platform_op: Option<&'a str>,
+    /// 判定所依据的策略版本；Decision 必须带回同一个值。
+    pub policy_version: i64,
+    /// 这一轮冻结的策略快照；Policy 实现只读它，不读全局可变状态。
+    pub grants: &'a GrantsConfig,
 }
 
 /// 评估结果。豁免（basis 非 `base:`）与任何拒绝都要写审计；普通 base allow 不写。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantDecision {
     pub allow: bool,
+    /// 命中来源列表，逗号分隔：`base:...` / `floor:...` / `rule:<id>` / `deny:<id>`。
     pub basis: String,
     pub reason: String,
+    /// 主来源 id；必须非空，便于审计追溯。
+    pub rule_id: String,
+    /// 判定所依据的策略版本。
+    pub policy_version: i64,
 }
 
 /// 审计行里 target 的最大字符数；房间/连接 id 再长也只截到这里。
@@ -643,7 +678,9 @@ impl GrantDecision {
     }
 
     pub fn audited(&self) -> bool {
-        !self.basis.starts_with("base:")
+        self.basis
+            .split(',')
+            .any(|source| !source.starts_with("base:"))
     }
 
     /// 一行结构化审计。target 超长时截断，避免日志被超长 id 撑爆。
@@ -668,20 +705,42 @@ impl GrantDecision {
         )
     }
 
-    fn allow(basis: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub(crate) fn allow(basis: impl Into<String>, reason: impl Into<String>) -> Self {
+        let basis = basis.into();
         Self {
             allow: true,
-            basis: basis.into(),
+            rule_id: basis
+                .split(',')
+                .find(|source| !source.starts_with("base:"))
+                .unwrap_or(&basis)
+                .to_owned(),
+            basis,
             reason: reason.into(),
+            policy_version: 0,
         }
     }
 
-    fn deny(basis: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub(crate) fn deny(basis: impl Into<String>, reason: impl Into<String>) -> Self {
+        let basis = basis.into();
         Self {
             allow: false,
-            basis: basis.into(),
+            rule_id: basis
+                .split(',')
+                .find(|source| !source.starts_with("base:"))
+                .unwrap_or(&basis)
+                .to_owned(),
+            basis,
             reason: reason.into(),
+            policy_version: 0,
         }
+    }
+
+    pub(crate) fn at_version(mut self, policy_version: i64) -> Self {
+        self.policy_version = policy_version;
+        if self.rule_id.is_empty() {
+            self.rule_id = self.basis.clone();
+        }
+        self
     }
 }
 
@@ -707,91 +766,7 @@ impl fmt::Display for GrantDecision {
     }
 }
 
-/// 房间/连接访问评估。调用方已经排除了外部 provider。
-pub fn evaluate_access(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDecision {
-    evaluate_rules(grants, query).unwrap_or_else(|| base_access(query))
-}
-
-/// 平台动作的额外能力检查（`platform` / `destructive` / `critical`）。
-/// 返回 `None` = 没有任何规则命中，沿用已通过的基础访问；基础访问只授 read/write，
-/// 调用方据此把 destructive / critical 落回票据。
-pub fn evaluate_platform(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Option<GrantDecision> {
-    evaluate_rules(grants, query)
-}
-
-/// 票据申请能力的评估。默认口径：
-/// - `system_admin` / `bot_admin` 在私信或控制台可以申请任意目标；
-/// - 其它主体只能申请本会话已订阅的目标（`base:subscription`）；
-/// - 显式规则可以放开跨目标（`scope = room` / `connection` 写 typed target）；
-///   `scope = subscribed` 只覆盖本会话可达目标，不跨范围。
-pub fn evaluate_access_request(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDecision {
-    if let Some(decision) = evaluate_rules(grants, query) {
-        return decision;
-    }
-    match (query.subject, query.place) {
-        (GrantSubject::SystemAdmin | GrantSubject::BotAdmin, Place::Room(RoomScope::Direct))
-        | (GrantSubject::SystemAdmin | GrantSubject::BotAdmin, Place::Console) => {
-            GrantDecision::allow(
-                "base:admin_private",
-                "admin may request tickets for any target from private/console",
-            )
-        }
-        _ => base_access(query),
-    }
-}
-
-/// 插件工具能力检查。普通主体沿用基础放行；管理员主体若配置了匹配规则，
-/// 规则里的 capability 决定是否允许 `plugin`。
-pub fn evaluate_tool(grants: &GrantsConfig, query: &GrantQuery<'_>) -> GrantDecision {
-    if matches!(
-        query.subject,
-        GrantSubject::SystemAdmin | GrantSubject::BotAdmin
-    ) {
-        if let Some(decision) = evaluate_rules(grants, query) {
-            return decision;
-        }
-        return GrantDecision::deny(
-            "admin:no_plugin_grant",
-            "admin subject has no matching plugin grant",
-        );
-    }
-    GrantDecision::allow("base:plugin", "ordinary subject uses scope check")
-}
-
-fn evaluate_rules(grants: &GrantsConfig, query: &GrantQuery<'_>) -> Option<GrantDecision> {
-    let mut denied: Option<(usize, String)> = None;
-    for (index, rule) in grants.rules.iter().enumerate() {
-        if rule.subject != query.subject || rule.place != query.place {
-            continue;
-        }
-        if !scope_matches(rule, query) {
-            continue;
-        }
-        if rule.capability.contains(&query.capability) {
-            return Some(GrantDecision::allow(
-                format!("rule:{index}"),
-                format!(
-                    "{} {} {}",
-                    query.subject.as_str(),
-                    query.place.as_str(),
-                    rule.scope_name()
-                ),
-            ));
-        }
-        denied = Some((
-            index,
-            format!(
-                "rule:{index} does not grant {:?} for {} {}",
-                query.capability,
-                query.subject.as_str(),
-                query.place.as_str()
-            ),
-        ));
-    }
-    denied.map(|(index, reason)| GrantDecision::deny(format!("rule:{index}"), reason))
-}
-
-fn base_access(query: &GrantQuery<'_>) -> GrantDecision {
+pub(crate) fn base_access(query: &GrantQuery<'_>) -> GrantDecision {
     if target_is_reachable(query.target, query.subscriptions) {
         GrantDecision::allow(
             "base:subscription",
@@ -836,7 +811,7 @@ fn target_is_reachable(target: &AccessTarget, subscriptions: &[RoomId]) -> bool 
     }
 }
 
-fn scope_matches(rule: &GrantRule, query: &GrantQuery<'_>) -> bool {
+pub(crate) fn scope_matches(rule: &GrantRule, query: &GrantQuery<'_>) -> bool {
     let target = query.target;
     let subscriptions = query.subscriptions;
     match rule.scope {
@@ -867,20 +842,32 @@ fn scope_matches(rule: &GrantRule, query: &GrantQuery<'_>) -> bool {
     }
 }
 
-impl GrantRule {
-    fn scope_name(&self) -> &'static str {
-        match self.scope {
-            GrantScope::Subscribed => "subscribed",
-            GrantScope::Room => "room",
-            GrantScope::Connection => "connection",
-            GrantScope::PlatformOp => "platform_op",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::{CorePolicy, Policy};
+
+    fn decide_policy(
+        grants: &GrantsConfig,
+        subject: GrantSubject,
+        place: Place,
+        capability: GrantCapability,
+        target: &AccessTarget,
+        subscriptions: &[RoomId],
+    ) -> GrantDecision {
+        CorePolicy::new()
+            .decide(&GrantQuery {
+                subject,
+                place,
+                capability,
+                target,
+                subscriptions,
+                platform_op: None,
+                policy_version: 7,
+                grants,
+            })
+            .expect("CorePolicy 不应失败")
+    }
 
     #[test]
     fn access_request_defaults_to_subscriptions_except_admin_private() {
@@ -888,16 +875,13 @@ mod tests {
         let target = RoomId::parse("qq:group/999").expect("房间");
         let subscriptions = Vec::new();
         let decide = |subject, place, subscriptions: &[RoomId]| {
-            evaluate_access_request(
+            decide_policy(
                 &grants,
-                &GrantQuery {
-                    subject,
-                    place,
-                    capability: GrantCapability::AccessRequest,
-                    target: &AccessTarget::room(&target),
-                    subscriptions,
-                    platform_op: None,
-                },
+                subject,
+                place,
+                GrantCapability::AccessRequest,
+                &AccessTarget::room(&target),
+                subscriptions,
             )
         };
         assert!(
@@ -976,6 +960,7 @@ mod tests {
     #[test]
     fn scope_any_is_rejected_with_a_migration_hint() {
         let text = r#"
+            id = "test-scope-any"
             subject = "user"
             place = "group"
             scope = "any"
@@ -997,17 +982,7 @@ mod tests {
         target: &AccessTarget,
         subscriptions: &[RoomId],
     ) -> GrantDecision {
-        evaluate_access(
-            grants,
-            &GrantQuery {
-                subject,
-                place,
-                capability,
-                target,
-                subscriptions,
-                platform_op: None,
-            },
-        )
+        decide_policy(grants, subject, place, capability, target, subscriptions)
     }
 
     fn eval_tool(
@@ -1017,16 +992,13 @@ mod tests {
         target: &AccessTarget,
         subscriptions: &[RoomId],
     ) -> GrantDecision {
-        evaluate_tool(
+        decide_policy(
             grants,
-            &GrantQuery {
-                subject,
-                place,
-                capability: GrantCapability::Plugin,
-                target,
-                subscriptions,
-                platform_op: None,
-            },
+            subject,
+            place,
+            GrantCapability::Plugin,
+            target,
+            subscriptions,
         )
     }
 
@@ -1037,11 +1009,17 @@ mod tests {
         target: Option<&str>,
         capability: &[GrantCapability],
     ) -> GrantRule {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = format!(
+            "test-rule-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let target = target.map(|text| match scope {
             GrantScope::Connection => AccessTarget::connection(text),
             _ => AccessTarget::room(&RoomId::parse(text).expect("房间")),
         });
         GrantRule {
+            id,
             subject,
             place,
             scope,
@@ -1053,6 +1031,7 @@ mod tests {
     fn config(rules: Vec<GrantRule>) -> GrantsConfig {
         GrantsConfig {
             rules,
+            deny: Vec::new(),
             bot_admin: None,
             system_admin: None,
             rooms: Default::default(),
@@ -1153,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn rule_grants_only_listed_capability_and_audits() {
+    fn partial_match_does_not_deny_floor() {
         let inside = RoomId::parse("qq:group/1").expect("房间");
         let grants = config(vec![rule(
             GrantSubject::BotAdmin,
@@ -1171,9 +1150,11 @@ mod tests {
             std::slice::from_ref(&inside),
         );
         assert!(decision.allow);
-        assert_eq!(decision.basis, "rule:0");
+        assert!(decision.basis.starts_with("base:subscription"));
+        assert!(decision.basis.contains("rule:"));
         assert!(decision.audited());
 
+        // 这就是 rule:6 事故的回归：规则匹配但没列出 RoomRead，不能把 floor 压掉。
         let decision = eval_access(
             &grants,
             GrantSubject::BotAdmin,
@@ -1182,8 +1163,9 @@ mod tests {
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
-        assert!(!decision.allow, "同一规则缺能力要拒绝");
-        assert_eq!(decision.basis, "rule:0");
+        assert!(decision.allow, "部分匹配不得构成 deny");
+        assert_eq!(decision.basis, "base:subscription");
+        assert!(!decision.audited(), "纯 floor allow 不审计");
     }
 
     #[test]
@@ -1196,6 +1178,7 @@ mod tests {
                 None,
                 &[GrantCapability::RoomWrite, GrantCapability::Plugin],
             )],
+            deny: Vec::new(),
             bot_admin: Some(BotAdminGrant {
                 accounts: vec![GrantAccount {
                     connection: "qq".to_owned(),
@@ -1263,10 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn rule_array_order_first_matching_allow_wins_not_deny_priority() {
-        // 固定当前真实行为：rules 按数组顺序扫描，第一个授予所查 capability 的
-        // 规则立即 allow；后面的匹配规则即使形成 deny 候选，也不会覆盖它。
-        // 这不是 “deny 优先”，而是 “数组顺序首个授予生效”。
+    fn rule_order_is_irrelevant_and_partial_matches_do_not_deny() {
         let inside = RoomId::parse("qq:group/1").expect("房间");
         let place = Place::Room(RoomScope::MultiParty);
         let grants = config(vec![
@@ -1293,10 +1273,100 @@ mod tests {
             &AccessTarget::room(&inside),
             std::slice::from_ref(&inside),
         );
+        assert!(decision.allow, "并集语义：RoomRead 仍被授予");
+        assert!(decision.basis.contains("rule:"));
         assert!(
-            decision.allow,
-            "数组顺序首个授予规则生效；后面的 deny 候选不能覆盖它"
+            !decision.basis.contains("deny:"),
+            "缺能力的匹配规则不得构成 deny: {}",
+            decision.basis
         );
-        assert_eq!(decision.basis, "rule:0");
+    }
+
+    #[test]
+    fn explicit_deny_subtracts_floor_and_wins() {
+        let inside = RoomId::parse("qq:group/1").expect("房间");
+        let place = Place::Room(RoomScope::MultiParty);
+        let mut grants = config(vec![rule(
+            GrantSubject::User,
+            place,
+            GrantScope::Subscribed,
+            None,
+            &[GrantCapability::RoomRead],
+        )]);
+        grants.deny.push(rule(
+            GrantSubject::User,
+            place,
+            GrantScope::Subscribed,
+            None,
+            &[GrantCapability::RoomRead],
+        ));
+        let decision = eval_access(
+            &grants,
+            GrantSubject::User,
+            place,
+            GrantCapability::RoomRead,
+            &AccessTarget::room(&inside),
+            std::slice::from_ref(&inside),
+        );
+        assert!(!decision.allow, "显式 deny 必须减掉 floor 和 rule");
+        assert!(decision.basis.contains("deny:"), "{}", decision.basis);
+        assert!(decision.audited());
+    }
+
+    #[test]
+    fn decision_carries_rule_id_and_policy_version() {
+        let inside = RoomId::parse("qq:group/1").expect("房间");
+        let place = Place::Room(RoomScope::MultiParty);
+        let grants = config(vec![rule(
+            GrantSubject::User,
+            place,
+            GrantScope::Subscribed,
+            None,
+            &[GrantCapability::RoomRead],
+        )]);
+        let decision = eval_access(
+            &grants,
+            GrantSubject::User,
+            place,
+            GrantCapability::RoomRead,
+            &AccessTarget::room(&inside),
+            std::slice::from_ref(&inside),
+        );
+        assert!(
+            decision.rule_id.starts_with("rule:"),
+            "{}",
+            decision.rule_id
+        );
+        assert_eq!(decision.policy_version, 7);
+    }
+
+    #[test]
+    fn grant_rule_id_is_required_and_unique() {
+        let missing = r#"
+            subject = "user"
+            place = "group"
+            scope = "subscribed"
+            capability = ["room_read"]
+        "#;
+        let error = toml::from_str::<GrantRule>(missing).expect_err("规则必须带 id");
+        assert!(error.to_string().contains("id"), "{error}");
+
+        let duplicate = r#"
+            [[rules]]
+            id = "same"
+            subject = "user"
+            place = "group"
+            scope = "subscribed"
+            capability = ["room_read"]
+            [[deny]]
+            id = "same"
+            subject = "user"
+            place = "group"
+            scope = "subscribed"
+            capability = ["room_write"]
+        "#;
+        let grants: GrantsConfig = toml::from_str(duplicate).expect("应能解析");
+        let error = grants.validate().expect_err("重复 id 必须拒绝");
+        assert!(error.contains("duplicate grant rule id"), "{error}");
     }
 }

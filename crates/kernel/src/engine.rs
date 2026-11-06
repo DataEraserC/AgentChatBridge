@@ -56,6 +56,7 @@ use crate::plugin::{
     WakeContext, default_delivery_plan, provider_is_external,
 };
 use crate::plugin_meta::{PluginLifecycle, PluginSource};
+use crate::policy::{CorePolicy, Policy, PolicyError};
 use crate::render;
 use crate::storage::{
     Cursor, FEEDBACK_CAP, Feedback, FeedbackReply, MIN_KEPT, Note, NoteKey, NoteKind, PrunePlan,
@@ -520,6 +521,8 @@ struct Subscriber {
 /// 桥的核心：配置 + 存储 + 出站，加上调度状态。
 pub struct Bridge<S: Store> {
     config: Config,
+    /// 唯一判定入口。默认是内置 `CorePolicy`；后续可替换为插件实现。
+    policy: Arc<dyn Policy>,
     store: S,
     outbound: Outbounds,
     /// 扩展宿主（ADR-0026）。Phase 1 只承载 wake provider。
@@ -796,8 +799,10 @@ impl<S: Store> Bridge<S> {
             .map(|cfg| crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base));
         // 启动时把房间政策落一条审计：某群何时被放开必须可查。
         audit_grants_config(None, &config.grants);
+        let policy: Arc<dyn Policy> = Arc::new(CorePolicy::new());
         Self {
             config,
+            policy,
             store,
             outbound,
             plugins,
@@ -1928,6 +1933,8 @@ impl<S: Store> Bridge<S> {
             .set_provider_timeout_ms(config.provider_calls.timeout_ms);
         let previous = self.config.grants.clone();
         self.config = config;
+        // P1 默认实现无状态；策略快照随 GrantQuery 进来，轮次内冻结。
+        self.policy = Arc::new(CorePolicy::new());
         audit_grants_config(Some(&previous), &self.config.grants);
         self.config_version += 1;
     }
@@ -4544,33 +4551,20 @@ impl<S: Store> Bridge<S> {
                     target: &target,
                     subscriptions: &subscriptions,
                     platform_op: Some(spec.name.as_ref()),
+                    policy_version: self.config_version as i64,
+                    grants: &ctx.config.grants,
                 };
-                match grants::evaluate_platform(&ctx.config.grants, &query) {
-                    Some(decision) => {
-                        if decision.should_audit() {
-                            self.audit_grant(
-                                &ctx.session,
-                                subject,
-                                place,
-                                capability,
-                                &target,
-                                &decision,
-                            );
-                        }
-                        if !decision.allow {
-                            return Err(ToolError::new(
-                                ErrorCode::ToolNotAllowed,
-                                format!("[forbidden] {}", decision.reason),
-                            ));
-                        }
-                    }
-                    // base:subscription 只授 read/write；高敏能力没有显式授予
-                    // 时不直调，改走票据。
-                    None if matches!(
+                let decision = policy_decision(self.policy.as_ref(), &query);
+                if decision.should_audit() {
+                    self.audit_grant(&ctx.session, subject, place, capability, &target, &decision);
+                }
+                if !decision.allow {
+                    let high_risk = matches!(
                         capability,
                         GrantCapability::Destructive | GrantCapability::Critical
-                    ) =>
-                    {
+                    );
+                    let explicit_deny = decision.basis.starts_with("deny:");
+                    if high_risk && !explicit_deny {
                         return Err(ToolError::new(
                             ErrorCode::ToolNotAllowed,
                             format!(
@@ -4581,7 +4575,10 @@ impl<S: Store> Bridge<S> {
                             ),
                         ));
                     }
-                    None => {}
+                    return Err(ToolError::new(
+                        ErrorCode::ToolNotAllowed,
+                        format!("[forbidden] {}", decision.reason),
+                    ));
                 }
             }
         }
@@ -4937,8 +4934,10 @@ impl<S: Store> Bridge<S> {
             target: &plugin_target,
             subscriptions: &subscriptions,
             platform_op: None,
+            policy_version: self.config_version as i64,
+            grants: &ctx.config.grants,
         };
-        let decision = grants::evaluate_tool(&ctx.config.grants, &query);
+        let decision = policy_decision(self.policy.as_ref(), &query);
         if decision.should_audit() {
             self.audit_grant(
                 &ctx.session,
@@ -5155,17 +5154,17 @@ impl<S: Store> Bridge<S> {
             let target = self
                 .ticket_access_target(&ctx.config, &room, &ops)
                 .map_err(|error| batch_item_error(index, &error.message))?;
-            let decision = crate::grants::evaluate_access_request(
-                &ctx.config.grants,
-                &crate::grants::GrantQuery {
-                    subject: principal,
-                    place,
-                    capability: GrantCapability::AccessRequest,
-                    target: &target,
-                    subscriptions: &subscriptions,
-                    platform_op: None,
-                },
-            );
+            let query = crate::grants::GrantQuery {
+                subject: principal,
+                place,
+                capability: GrantCapability::AccessRequest,
+                target: &target,
+                subscriptions: &subscriptions,
+                platform_op: None,
+                policy_version: self.config_version as i64,
+                grants: &ctx.config.grants,
+            };
+            let decision = policy_decision(self.policy.as_ref(), &query);
             if !decision.allow {
                 self.audit_ticket_denied(ctx, &target, "access_request_denied", &decision.reason);
                 return Err(ToolError::new(
@@ -5551,7 +5550,7 @@ impl<S: Store> Bridge<S> {
         let ops: Vec<Value> = methods
             .iter()
             .map(|spec| {
-                let granted = high_risk_grant(config, session, subject, place, room, spec);
+                let granted = self.high_risk_grant(config, session, subject, place, room, spec);
                 cap_op_json(spec, read_reason, send_reason, connection_reason, granted)
             })
             .collect();
@@ -5626,7 +5625,7 @@ impl<S: Store> Bridge<S> {
             read_reason,
             send_reason,
             connection_reason,
-            high_risk_grant(config, session, subject, place, &ctx.room, spec),
+            self.high_risk_grant(config, session, subject, place, &ctx.room, spec),
         );
         value["scope"] = json!("tool");
         value["kind"] = json!("op");
@@ -6661,8 +6660,10 @@ impl<S: Store> Bridge<S> {
                     target: &target,
                     subscriptions: &subscriptions,
                     platform_op: None,
+                    policy_version: self.config_version as i64,
+                    grants: &config.grants,
                 };
-                let decision = grants::evaluate_access(&config.grants, &query);
+                let decision = policy_decision(self.policy.as_ref(), &query);
                 (decision.allow, decision.basis.clone(), Some(decision))
             } else {
                 let provider = match self
@@ -6770,6 +6771,8 @@ impl<S: Store> Bridge<S> {
                     allow: false,
                     basis: basis.clone(),
                     reason: "external access provider denied".to_owned(),
+                    rule_id: basis.clone(),
+                    policy_version: self.config_version as i64,
                 };
                 self.audit_grant(id, subject, place, capability, &target, &denial);
             }
@@ -10116,6 +10119,25 @@ fn cap_op_index(item: &Value) -> Value {
     })
 }
 
+/// 判定失败一律 deny；错误原因进 basis，便于审计。
+fn policy_decision(policy: &dyn Policy, query: &grants::GrantQuery<'_>) -> GrantDecision {
+    let decision = policy.decide(query).unwrap_or_else(|error: PolicyError| {
+        GrantDecision::deny(
+            format!("policy:error:{error:?}"),
+            "policy provider failed; fail-closed",
+        )
+        .at_version(query.policy_version)
+    });
+    if decision.rule_id.trim().is_empty() || decision.policy_version != query.policy_version {
+        return GrantDecision::deny(
+            "policy:invalid_decision",
+            "policy decision is missing a traceable rule_id or carries a stale policy_version",
+        )
+        .at_version(query.policy_version);
+    }
+    decision
+}
+
 fn access_error_code(error: ToolError) -> &'static str {
     match error.code {
         ErrorCode::RoomNotSubscribed => "not_subscribed",
@@ -10153,48 +10175,49 @@ fn access_target_for_spec(config: &Config, room: &RoomId, spec: &MethodSpec) -> 
 
 /// 展示用：这条高危 op 在当前主体/场所/目标下是否被规则显式授予。
 /// `None` = 非高危（走默认 read/write 基础访问）；`Some(true/false)` = 规则是否放行。
-fn high_risk_grant(
-    config: &Config,
-    session: &str,
-    subject: GrantSubject,
-    place: Place,
-    room: &RoomId,
-    spec: &MethodSpec,
-) -> Option<bool> {
-    let capability = platform_capability(spec);
-    if !matches!(
-        capability,
-        GrantCapability::Destructive | GrantCapability::Critical
-    ) {
-        return None;
+impl<S: Store> Bridge<S> {
+    fn high_risk_grant(
+        &self,
+        config: &Config,
+        session: &str,
+        subject: GrantSubject,
+        place: Place,
+        room: &RoomId,
+        spec: &MethodSpec,
+    ) -> Option<bool> {
+        let capability = platform_capability(spec);
+        if !matches!(
+            capability,
+            GrantCapability::Destructive | GrantCapability::Critical
+        ) {
+            return None;
+        }
+        let session_cfg = config.session(session)?;
+        if !matches!(
+            session_cfg.access.provider.to_string().as_str(),
+            GRANTS_ACCESS_PROVIDER | DEFAULT_ACCESS_PROVIDER
+        ) {
+            // 外部 provider 自己决定；展示层按保守口径标成票据路径。
+            return Some(false);
+        }
+        let subscriptions: Vec<RoomId> = session_cfg
+            .subscriptions
+            .iter()
+            .map(|subscription| subscription.room.clone())
+            .collect();
+        let target = access_target_for_spec(config, room, spec);
+        let query = grants::GrantQuery {
+            subject,
+            place,
+            capability,
+            target: &target,
+            subscriptions: &subscriptions,
+            platform_op: Some(spec.name.as_ref()),
+            policy_version: self.config_version as i64,
+            grants: &config.grants,
+        };
+        Some(policy_decision(self.policy.as_ref(), &query).allow)
     }
-    let session_cfg = config.session(session)?;
-    if !matches!(
-        session_cfg.access.provider.to_string().as_str(),
-        GRANTS_ACCESS_PROVIDER | DEFAULT_ACCESS_PROVIDER
-    ) {
-        // 外部 provider 自己决定；展示层按保守口径标成票据路径。
-        return Some(false);
-    }
-    let subscriptions: Vec<RoomId> = session_cfg
-        .subscriptions
-        .iter()
-        .map(|subscription| subscription.room.clone())
-        .collect();
-    let target = access_target_for_spec(config, room, spec);
-    let query = grants::GrantQuery {
-        subject,
-        place,
-        capability,
-        target: &target,
-        subscriptions: &subscriptions,
-        platform_op: Some(spec.name.as_ref()),
-    };
-    Some(
-        grants::evaluate_platform(&config.grants, &query)
-            .map(|decision| decision.allow)
-            .unwrap_or(false),
-    )
 }
 
 /// 这个工具是否有票据可申请的入口。

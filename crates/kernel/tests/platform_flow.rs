@@ -944,6 +944,7 @@ fn destructive_method_runs_when_rule_grants_it() {
     let (mut bridge, calls) = setup_with_grants(
         r#"
 [[grants.rules]]
+id = "fixture-grant-20"
 subject = "user"
 place = "group"
 scope = "connection"
@@ -972,6 +973,7 @@ fn destructive_platform_op_rule_only_opens_the_named_method() {
     let (mut bridge, calls) = setup_with_grants(
         r#"
 [[grants.rules]]
+id = "fixture-grant-21"
 subject = "user"
 place = "group"
 scope = "platform_op"
