@@ -167,8 +167,9 @@ export function readConfig(env = process.env) {
     endpoint: env.ACB_ENDPOINT?.trim() || "127.0.0.1:7700",
     token: env.ACB_TOKEN?.trim() || "",
     harness: env.ACB_HARNESS?.trim() || "lobsterai",
-    // MCP 用 streamable-http；生产上给固定端口，openclaw.user.json 里要写同一个 URL。
-    mcpPort: env.ACB_MCP_PORT ? Number(env.ACB_MCP_PORT) : 0,
+    // MCP 用 streamable-http。OpenClaw 的 mcp.servers 是提前写进 openclaw.user.json 的，
+    // 所以这里给固定默认端口 7717；改端口时两边要一起改。
+    mcpPort: env.ACB_MCP_PORT ? Number(env.ACB_MCP_PORT) : 7717,
     stateDir,
     configPath,
     quotaProvider: quota.provider,
