@@ -631,7 +631,8 @@ OpenClaw 2026.8.1；模型链路是 `lobsterai-server` → 本地 token proxy �
 
 ### 文件
 
-- `harnesses/lobsterai/src/config.mjs` — state 目录、gateway 地址/token、额度链路校验。
+- `harnesses/lobsterai/src/config.mjs` — state 目录、gateway 地址/token、额度链路校验；
+  MCP 默认端口 7717，必须与 `openclaw.user.json` 里的 URL 一致。
 - `harnesses/lobsterai/src/openclaw-gateway.mjs` — OpenClaw gateway WS 客户端
   （connect/challenge、req/res/event、`chat.send`、`agent.wait`、`chat.abort`）。
 - `harnesses/lobsterai/src/driver.mjs` — 单进程三件事：BridgeLink + MCP server + gateway 驱动。
