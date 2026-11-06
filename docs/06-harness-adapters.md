@@ -1,7 +1,9 @@
 # 06 · harness 适配器
 
 > 状态：opencode v2 插件、dsh 驱动都已真机跑通（2026-10-31 / 11-02 复验）；opencode 当前
-> 用 `opencode2 serve` 常驻（见下面「常驻部署」）。早期 2.0.22 的插件加载问题记在文末，
+> 用 `opencode2 serve` 常驻（见下面「常驻部署」）。WorkBuddy 与 LobsterAI 的**协议层**
+> 已实现并通过本地 mock（2026-11-06）：WorkBuddy 另用真实 headless CLI 做了未登录探测，
+> 真实登录/额度下的整轮仍未验证；Trae 本轮明确放弃。早期 2.0.22 的插件加载问题记在文末，
 > 作为历史记录保留。
 > 原则：桥不懂 harness 的内脏，harness 也不懂平台细节。适配器是那个翻译。
 
@@ -54,10 +56,11 @@ API 才退到进程外驱动或 MCP。这条判断写进了 [ADR-0013](adr/0013-
 |---------|--------|----------|------|
 | opencode | 插件（v2：`export default { id, setup(ctx) }`；工具用 `ctx.tool.transform` 注册，模型经 `execute` 调 `tools.X`） | 进程内：`ctx.session.prompt` 排话 + `ctx.session.wait` 等它说完 | 插件型，见 `harnesses/opencode/plugin/`；真机整轮已验（私聊 + 群）；2026-10-31 在 opencode2 2.0.22 上复验：插件加载正常、模型一次答全 25 个工具名 |
 | DSH | MCP（`dsh-mcp-client`，工具名 `mcp__acb__*`） | 进程外：驱动器调 webui HTTP/WS API（`session/prompt` + `session/follow` 等 `turn/end`） | 进程外 + MCP，见 `harnesses/dsh/`；协议层真机已验，模型真回话待配模型 |
-| WorkBuddy | 待核实 | 待核实 | 未看 |
-| Trae | 待核实 | 待核实 | 未看 |
+| WorkBuddy | CLI（headless bundle；`--mcp-config` + `--strict-mcp-config`） | 进程外：每轮 spawn `codebuddy-headless.js -p … --output-format stream-json`，`result` 事件/进程退出即结束 | 进程外 + MCP，见 `harnesses/workbuddy/`；协议层已验（17 个用例 + 真实 CLI 未登录探测），模型真回话待登录 |
+| LobsterAI | MCP（OpenClaw `mcp.servers`，streamable-http） | 进程外：WS 连 LobsterAI 内置 gateway，`chat.send` + `agent.wait` | 进程外 + MCP，见 `harnesses/lobsterai/`；假 gateway 协议层已验（16 个用例），真实 app/gateway 待启动 |
+| Trae | — | — | 本轮放弃（可行性文档 3.8 的 spike 已经证明稳定 API 没有轮次完成信号） |
 | Codex | 无插件；有 `codex exec` 这类无头入口 | 进程外：每轮起一次 | 大概率进程外 + MCP 补工具面 |
-| OpenClaw | 待核实 | 待核实 | 未看 |
+| OpenClaw | 由 LobsterAI 适配器覆盖（`mcp.servers`） | 进程外：`chat.send` + `agent.wait` | 不单独做通用 OpenClaw；本轮只做 LobsterAI 自己的 gateway/state |
 
 ## opencode 这一份怎么用
 
@@ -182,6 +185,12 @@ node --test harnesses/opencode/test/plugin.test.mjs
 node harnesses/opencode/probe.mjs --token <接入令牌>
 
 # 4. 真链路：真 opencode + 真桥 + 真 QQ，模型真的回话（已验，见下）
+
+# 5. LobsterAI 协议层：假桥 + 假 gateway（16 个）
+node --test harnesses/lobsterai/test/*.test.mjs
+
+# 6. WorkBuddy 协议层：假桥 + 假 headless CLI（17 个）
+node --test harnesses/workbuddy/test/*.test.mjs
 ```
 
 第 3 步里 `probe.mjs` 会把投递的内容打出来、回一句话、确认水位。它和插件用的是同一个
@@ -541,3 +550,122 @@ dsh 的模型适配器（trae / deepseek-v4.1-flash）有三种写法：标准 J
   配好模型 + 把驱动器挂成 MCP，这一步要动 dsh 的 profile/nix 配置，放下一轮。
 - **MCP 工具面真被 dsh 加载**：MCP server 的协议（initialize/tools/list/tools/call）
   单测验过，但还没让真 dsh 的 `dsh-mcp-client` 拉起它跑一次。
+
+## WorkBuddy 这一份（2026-11-06）
+
+**形态：进程外 + MCP。** 每轮 spawn 一次 CLI，进程退出（或最终 `result` 事件）就是这一轮
+结束；工具面是适配器自己起的 streamable-http MCP server，CLI 用 `--mcp-config` 连它，
+`--strict-mcp-config` 保证只连这一个。
+
+```
+桥(acb) ──turn_start/tool_call──> WorkBuddy 驱动器(harnesses/workbuddy/src/driver.mjs)
+                                    ├─ acb 客户端：BridgeLink（复用 acb-wire.mjs）
+                                    ├─ MCP streamable-http server（桥工具）
+                                    └─ 每轮 spawn:
+                                       node cli/dist/codebuddy-headless.js
+                                         -p --output-format stream-json
+                                         --mcp-config {"mcpServers":{"acb":{"type":"http","url":...}}}
+                                         --strict-mcp-config --settings {...}
+                                         --allowedTools ... --session-id/-r ...
+```
+
+### 文件
+
+- `harnesses/workbuddy/src/config.mjs` — CLI 发现、headless 入口守卫、会话 id 规则、默认预批准工具。
+- `harnesses/workbuddy/src/codebuddy-client.mjs` — spawn CLI、解析 stream-json、超时/打断、resume 缺失识别。
+- `harnesses/workbuddy/src/driver.mjs` — 单进程三件事：BridgeLink + MCP server + CLI 驱动。
+- `harnesses/workbuddy/workbuddy.env.example`、`mcp-config.example.json`、`acb-config.example.toml` — 可抄的配置样例。
+
+### 硬约束：只用 headless bundle
+
+上游 WorkBuddy 发行物只有 `cli/dist/codebuddy-headless.js` / `codebuddy-lite-wb.mjs`，
+没有 `dist/codebuddy.js`。配置阶段会拒绝非 headless 入口：
+
+- `codebuddy-headless.js` 直接放行；
+- `bin/codebuddy` 必须显式 `CODEBUDDY_FORCE_HEADLESS_BUNDLE=1` 才放行；
+- GUI 的 `bin/workbuddy`、`codebuddy.js` 全量 TUI 一律拒绝。
+
+不填 `ACB_WB_CLI` 时，从 PATH 里的 `workbuddy` 真实路径推导
+`…/opt/WorkBuddy/resources/app.asar.unpacked/cli/dist/codebuddy-headless.js`（Nix 布局已实测
+能推导到本机 5.6.2.40046327 的 bundle）。
+
+### 2026-11-06 用真实 CLI（未登录）探到的形状
+
+| 探测 | 结果 |
+|---|---|
+| `--mcp-config` + `--strict-mcp-config` | init 返回 `mcp_servers:[{name:"acb",status:"connected"}]`，工具表里有 `mcp__acb__send_message`；`type:"http"` 这个写法是对的 |
+| 未登录跑 `-p` | `assistant` 输出 `Authentication required. Please use /login command…`；`result` 是 `subtype:"error_during_execution"`、`is_error:true`、`errors:["Authentication required…"]`，**exit code 仍是 0**。适配器按 result 判失败并归到 `model/auth_failed` |
+| `-r` 指向不存在的会话 | 只发一帧 `{"type":"error","error":"No conversation found with session ID: …"}`，没有 `result`，exit 0。适配器识别为 resume 缺失，改用 `--session-id` 重建 |
+| `--tools ""` | **没有**移除内置工具：init 的 `tools` 里仍有 Bash/Edit/Read/WebFetch 等。适配器默认不传 `--tools`，并在 system prompt 里明确要求不要用 shell/HTTP 绕桥 |
+
+### 验过的
+
+- `node --test harnesses/workbuddy/test/*.test.mjs`：17 个用例，覆盖完整一轮
+  （`turn_start` → spawn → MCP `send_message` → `result` → `turn_end`）、ticket 校验、
+  resume 失败重试、result error、MCP 未连接、超时杀进程、reset 换代次。
+- 真实 `codebuddy-headless.js` 的未登录探测：MCP 连接、工具名、auth 错误形状、resume 缺失
+  形状都按上面的结果被适配器识别。
+
+### 还没验的（需要登录/额度）
+
+- 已登录模型真的回话、真的调用 `mcp__acb__send_message`，以及额度扣减。
+- `--permission-mode` / `--allowedTools` 在真实 MCP 工具调用下是否完全不弹权限。
+- CLI 的会话持久化目录（`~/.codebuddy/`）与 GUI（`~/.workbuddy/`）的实际隔离行为。
+- `--serve` / `--acp` 常驻模式（本轮不做，每轮 spawn 足够）。
+- 内置工具与 MCP 工具同时存在时模型的工具选择偏好；`--tools` 的可用写法。
+
+## LobsterAI 这一份（2026-11-06）
+
+**形态：进程外 + MCP，但轮次必须走 LobsterAI 自己的 gateway。** LobsterAI 内置
+OpenClaw 2026.8.1；模型链路是 `lobsterai-server` → 本地 token proxy →
+`lobsterai-server.youdao.com`。裸 OpenClaw（默认 `~/.openclaw`）不走这条链路，也就不
+消耗 LobsterAI 额度，所以适配器在配置阶段就拒绝它。
+
+```
+桥(acb) ──turn_start/tool_call──> LobsterAI 驱动器(harnesses/lobsterai/src/driver.mjs)
+                                    ├─ acb 客户端：BridgeLink
+                                    ├─ MCP streamable-http server（OpenClaw agent 连它）
+                                    └─ WS → LobsterAI 内置 gateway:
+                                       chat.send → agent.wait（lifecycle end/error）
+```
+
+### 文件
+
+- `harnesses/lobsterai/src/config.mjs` — state 目录、gateway 地址/token、额度链路校验。
+- `harnesses/lobsterai/src/openclaw-gateway.mjs` — OpenClaw gateway WS 客户端
+  （connect/challenge、req/res/event、`chat.send`、`agent.wait`、`chat.abort`）。
+- `harnesses/lobsterai/src/driver.mjs` — 单进程三件事：BridgeLink + MCP server + gateway 驱动。
+- `harnesses/lobsterai/openclaw.user.json.example` — 在 OpenClaw 用户覆盖层注册 `mcp.servers.acb`。
+- `harnesses/lobsterai/lobsterai.env.example`、`acb-config.example.toml` — 环境变量与桥配置样例。
+
+### 硬约束：不退化到裸 OpenClaw
+
+- state 目录必须是 `<userData>/openclaw/state`（可用 `ACB_LA_STATE_DIR` / `ACB_LA_USER_DATA`
+  覆盖）；不存在直接报错。
+- 显式拒绝 `~/.openclaw`：它是裸 OpenClaw 的默认 home。
+- 读 `<stateDir>/openclaw.json`，必须找到 `lobsterai-server` provider（或指向 loopback
+  且带 proxy 标记的 provider），或 `lobster-model-routing` 插件里的
+  `${LOBSTER_PROXY_TOKEN}`；否则报「拒绝退化成裸 OpenClaw」。
+- gateway 地址/token 显式给（`ACB_LA_GATEWAY_URL` / `ACB_LA_GATEWAY_TOKEN`），否则读
+  `<stateDir>/gateway-port.json` 和 `gateway-token`；两样都缺就报错，不猜默认端口。
+
+### 验过的
+
+- `node --test harnesses/lobsterai/test/*.test.mjs`：16 个用例，覆盖完整一轮
+  （假 gateway 接 `chat.send` → 假模型经 MCP 调 `send_message` → 假桥回 `tool_result` →
+  `agent.wait` ok → `turn_end`）、无票时 MCP 调用被拒、chat.send 拒绝、run error
+  （rate_limited 分类）、gateway 中途断开、超时 `chat.abort`、reset 换代次。
+- 配置路径：state 目录缺失、裸 `~/.openclaw`、quota 链路缺失、缺 `gateway-port.json`、
+  缺 `gateway-token`、显式地址/token 覆盖。
+
+### 还没验的（需要真实 app + 登录/额度）
+
+- 本机 `~/.config/LobsterAI` 为空、app 未运行，没有 `openclaw.json` / `gateway-token` /
+  `gateway-port.json`，所以连真实 gateway 都还没握过手。
+- 真实 gateway 的 `connect` 鉴权：token 是否够用、是否需要 device pairing、scope 是否
+  满足 `chat.send` / `agent.wait`。
+- 一次真实模型调用是否真的消耗 LobsterAI 额度（机制已核对，扣费未对账）。
+- `openclaw.user.json` 的 `mcp.servers.acb` 在应用下一次 sync 后是否保留。
+- 真实 `chat.send` → `agent.wait` 的完成信号、`sessions.messages.subscribe` 的流式事件。
+- 应用生命周期（gateway 重启、token 轮换）与 IM 双通道（LobsterAI 自带 QQ/微信/飞书）。
+- **未验证项不要把 mock 通过当成端到端通过。**
