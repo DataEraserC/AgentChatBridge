@@ -102,7 +102,7 @@ test("完整一轮：turn_start → CLI → MCP 工具 → result → turn_end",
   await run
 
   assert.equal(cli.runs.length, 1)
-  assert.equal(cli.runs[0].sessionId, "acb-main")
+  assert.equal(cli.runs[0].sessionId, "acb-workbuddy-1-main")
   assert.equal(cli.runs[0].resume, false)
   const args = cli.runs[0].args
   assert.ok(args.includes("--output-format"))
@@ -343,7 +343,7 @@ test("reset 后下一轮用新 id 且不是 resume", async (t) => {
   await second
   await nextFrameOfType(bridge, "turn_end")
   assert.equal(cli.runs[1].resume, false)
-  assert.match(cli.runs[1].sessionId, /^acb-main-r\w+$/)
+  assert.match(cli.runs[1].sessionId, /^acb-workbuddy-1-main-r\w+$/)
 })
 
 function postMcp(url, body) {

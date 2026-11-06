@@ -62,10 +62,14 @@ async function main() {
     cliPath: config.cliPath,
     log,
     cwd: config.cwd,
+    home: config.home,
+    configDir: config.configDir,
+    dataRoot: config.dataRoot,
   })
   const driver = new TurnDriver({
     cli,
     log,
+    instance: config.instance,
     allowedTools: config.allowedTools,
     settings: config.settings,
     permissionMode: config.permissionMode,
@@ -111,11 +115,23 @@ async function main() {
     onCall,
     log: () => {},
   })
-  const port = await mcpHttp.start({ port: config.mcpPort })
+  let port
+  try {
+    port = await mcpHttp.start({ port: config.mcpPort })
+  } catch (error) {
+    log("error", t("workbuddy.mcp_listen_failed", {
+      port: config.mcpPort || "auto",
+      error: error?.message ?? error,
+    }))
+    process.exit(2)
+  }
   driver.mcpUrl = `http://127.0.0.1:${port}/mcp`
   log("info", t("shared.mcp_http_ready", { host: "127.0.0.1", port }))
   log("info", t("workbuddy.driver_ready", {
     endpoint: config.endpoint,
+    instance: config.instance,
+    harness: config.harness,
+    stateDir: config.stateDir,
     cli: config.cliPath,
     mcpUrl: driver.mcpUrl,
   }))
@@ -146,6 +162,7 @@ class TurnDriver {
   constructor({
     cli,
     log,
+    instance = "workbuddy-1",
     allowedTools = [],
     settings = "",
     permissionMode = "",
@@ -155,6 +172,7 @@ class TurnDriver {
   }) {
     this.cli = cli
     this.log = log
+    this.instance = instance
     this.allowedTools = allowedTools
     this.settings = settings
     this.permissionMode = permissionMode
@@ -381,7 +399,7 @@ class TurnDriver {
     const created = this.sessions.get(acbSession)
     if (created) return { id: created, resume: true }
     const generation = this.generations.get(acbSession)
-    return { id: sessionIdFor(acbSession, generation), resume: false }
+    return { id: sessionIdFor(acbSession, this.instance, generation), resume: false }
   }
 
   #composePrompt(delivery, sessionId) {
@@ -408,7 +426,7 @@ class TurnDriver {
       command: "report_map",
       result: {
         session_id: sessionId,
-        meta: { cli: "codebuddy-headless" },
+        meta: { cli: "codebuddy-headless", instance: this.instance },
       },
     })
   }

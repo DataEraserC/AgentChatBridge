@@ -9,7 +9,9 @@
 // 模式由 FAKE_CODEBUDDY_MODE 控制：ok / resume-missing / result-error /
 // no-result / mcp-failed / hang。
 
+import fs from "node:fs"
 import http from "node:http"
+import path from "node:path"
 
 const argv = process.argv.slice(2)
 const mode = process.env.FAKE_CODEBUDDY_MODE || "ok"
@@ -27,6 +29,23 @@ const prompt = argv.length > 0 ? argv[argv.length - 1] : ""
 
 function emit(event) {
   process.stdout.write(`${JSON.stringify(event)}\n`)
+}
+
+// 给多实例测试留痕：HOME / CODEBUDDY_CONFIG_DIR 是隔离是否生效的直接证据。
+if (process.env.FAKE_CODEBUDDY_MARKER) {
+  const marker = process.env.FAKE_CODEBUDDY_MARKER
+  try {
+    fs.mkdirSync(path.dirname(marker), { recursive: true })
+    fs.writeFileSync(marker, JSON.stringify({
+      home: process.env.HOME ?? "",
+      configDir: process.env.CODEBUDDY_CONFIG_DIR ?? "",
+      dataRoot: process.env.CODEBUDDY_DATA_ROOT ?? "",
+      sessionId,
+      resume: Boolean(resume),
+    }))
+  } catch {
+    // 写不了标记不影响 CLI 本身的流程。
+  }
 }
 
 function fail(message) {
