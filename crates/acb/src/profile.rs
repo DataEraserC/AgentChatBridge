@@ -390,12 +390,18 @@ fn gc_command(args: &[String]) -> Result<ExitCode, String> {
 
 fn seed_command(args: &[String]) -> Result<ExitCode, String> {
     let (positional, options) = parse_options(args, &["profile-dir"])?;
-    if positional.len() != 1 {
-        return Err("usage: acbctl profile seed <store-path>".to_string());
+    if positional.len() > 1 {
+        return Err("usage: acbctl profile seed [<store-path>] [--profile-dir DIR]".to_string());
     }
     let root = profile_root(&options);
     let existing = load_generations(&root)?;
     if !existing.is_empty() {
+        if let CurrentState::NeedsRepair(detail) = current_state(&root)? {
+            let Some(payload) = positional.first() else {
+                return Err(repair_error(&detail, "no payload argument provided"));
+            };
+            return repair_seed(&root, Path::new(payload), &detail);
+        }
         println!(
             "seed skipped: profile already has {} generation(s)",
             existing.len()
@@ -403,11 +409,78 @@ fn seed_command(args: &[String]) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    let Some(payload) = positional.first() else {
+        return Err("usage: acbctl profile seed <store-path> [--profile-dir DIR]".to_string());
+    };
     let config = config_identity(None)?;
-    let meta = add_generation(&root, Path::new(&positional[0]), None, config, None)?;
+    let meta = add_generation(&root, Path::new(payload), None, config, None)?;
     atomic_switch(&root, &meta.id)?;
     println!("seeded {} and switched current", meta.id);
     Ok(ExitCode::SUCCESS)
+}
+
+/// `current` 是否可用于启动：软链存在、目标 root 存在、且 `bin/acb-bridge` 存在。
+enum CurrentState {
+    Healthy,
+    NeedsRepair(String),
+}
+
+fn current_state(root: &Path) -> Result<CurrentState, String> {
+    let current = root.join("current");
+    match fs::symlink_metadata(&current) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CurrentState::NeedsRepair(format!(
+                "current symlink missing: {}",
+                current.display()
+            )));
+        }
+        Err(error) => return Err(format!("read {}: {error}", current.display())),
+        Ok(metadata) if !metadata.file_type().is_symlink() => {
+            return Ok(CurrentState::NeedsRepair(format!(
+                "current is not a symlink: {}",
+                current.display()
+            )));
+        }
+        Ok(_) => {}
+    }
+    let target = fs::read_link(&current)
+        .map_err(|error| format!("read link {}: {error}", current.display()))?;
+    let resolved = if target.is_absolute() {
+        target
+    } else {
+        root.join(&target)
+    };
+    if !resolved.is_dir() {
+        return Ok(CurrentState::NeedsRepair(format!(
+            "current target missing: {}",
+            resolved.display()
+        )));
+    }
+    let bridge = resolved.join("bin/acb-bridge");
+    if !bridge.is_file() {
+        return Ok(CurrentState::NeedsRepair(format!(
+            "current target missing bin/acb-bridge: {}",
+            bridge.display()
+        )));
+    }
+    Ok(CurrentState::Healthy)
+}
+
+fn repair_seed(root: &Path, payload: &Path, detail: &str) -> Result<ExitCode, String> {
+    let config = config_identity(None)?;
+    let meta = add_generation(root, payload, None, config, None)
+        .map_err(|error| repair_error(detail, &error))?;
+    atomic_switch(root, &meta.id)?;
+    println!("seed repaired current -> {} (was: {detail})", meta.id);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn repair_error(detail: &str, cause: &str) -> String {
+    format!(
+        "profile current is not usable: {detail}\n\
+         seed cannot repair it: {cause}\n\
+         fix manually: acbctl profile add <payload> [--label LABEL], then acbctl profile switch <id>"
+    )
 }
 
 fn add_generation(
@@ -792,6 +865,6 @@ fn print_help() {
   acbctl profile add <path> [--label LABEL] [--config PATH] [--version VERSION] [--profile-dir DIR]
   acbctl profile switch <gen-or-label> [--profile-dir DIR]
   acbctl profile gc      [--keep N] [--profile-dir DIR]
-  acbctl profile seed <path> [--profile-dir DIR]"
+  acbctl profile seed [<path>] [--profile-dir DIR]"
     );
 }

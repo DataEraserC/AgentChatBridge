@@ -57,7 +57,7 @@ acbctl profile current [--profile-dir DIR]
 acbctl profile add <path> [--label LABEL] [--config PATH] [--version VERSION] [--profile-dir DIR]
 acbctl profile switch <gen-or-label> [--profile-dir DIR]
 acbctl profile gc      [--keep N] [--profile-dir DIR]
-acbctl profile seed <path> [--profile-dir DIR]
+acbctl profile seed [<path>] [--profile-dir DIR]
 ```
 
 - `list`：退出 0；按 `created_at_ms` 倒序列出，`*` 标记 current。
@@ -76,8 +76,12 @@ acbctl profile seed <path> [--profile-dir DIR]
 - `gc`：默认 `--keep 5`；保留最新 N 个 generation + current + 兄弟目录
   `../state/supervisor/lkg.json` 记录的 generation。其余删除 generation 目录（只删
   `root` 软链，不动产物）。`lkg.json` 存在但解析失败时直接报错，不盲删。
-- `seed`：仅在 generations 为空时 `add` + `switch`；已有 generation 时直接跳过，
-  重复调用无副作用。nix-config 只需调用一次。
+- `seed`：generations 为空时 `add` + `switch`，nix-config 只需调用一次。
+  generations 非空时先校验 `current`：软链缺失、目标 root 不存在、或目标缺
+  `bin/acb-bridge` 都视为损坏。损坏且提供了合法 payload 时重建一代并 switch，
+  打印 `seed repaired current -> <id> (was: <原因>)`；损坏但未提供/无法使用 payload 时
+  非零退出并提示手工 `profile add` + `profile switch`，不再静默跳过。`current` 正常时
+  行为不变：打印 `seed skipped: profile already has N generation(s)`，退出 0。
 
 ## 4. 与现有契约衔接
 
