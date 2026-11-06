@@ -45,7 +45,6 @@ const REQUIRED_KEYS: &[&str] = &[
     "ACB_UNIT_REPO_DIR",
     "ACB_UNIT_LOG_DIR",
     "ACB_UNIT_PROFILE_DIR",
-    "ACB_UNIT_BIN_DIR",
     "ACB_UNIT_CONFIG_FILE",
     "ACB_UNIT_ENV_FILE",
     "ACB_UNIT_OPENCODE_DIR",
@@ -54,6 +53,7 @@ const REQUIRED_KEYS: &[&str] = &[
 const PORT_KEYS: &[&str] = &["ACB_UNIT_CONSOLE_PORT", "ACB_UNIT_OPENCODE_PORT"];
 
 const OPTIONAL_KEYS: &[&str] = &[
+    "ACB_UNIT_BIN_DIR",
     "ACB_UNIT_CONSOLE_PORT",
     "ACB_UNIT_OPENCODE_PORT",
     "ACB_UNIT_AUTOSTART",
@@ -299,6 +299,22 @@ pub fn doctor_command(args: &[String]) -> Result<ExitCode, String> {
         }
     }
 
+    match crate::profile::status() {
+        crate::profile::Status::Missing { root } => {
+            println!("warn: profile not used (no current at {})", root.display());
+        }
+        crate::profile::Status::Active { id, bin, .. } => {
+            println!("profile: current {id} ({})", bin.display());
+        }
+        crate::profile::Status::Broken { root, detail } => {
+            println!(
+                "drift: profile current broken at {}: {detail}",
+                root.display()
+            );
+            drift = true;
+        }
+    }
+
     if drift {
         Ok(ExitCode::from(1))
     } else {
@@ -447,7 +463,7 @@ fn non_empty_value(arg: &str, flag: &str) -> Result<String, String> {
 }
 
 fn render_all() -> Result<Vec<RenderedUnit>, String> {
-    let values = values_from_env()?;
+    let values = resolved_values()?;
     TEMPLATES
         .iter()
         .map(|(name, template)| {
@@ -455,6 +471,18 @@ fn render_all() -> Result<Vec<RenderedUnit>, String> {
             Ok(RenderedUnit { name, content })
         })
         .collect()
+}
+
+/// 先收集 ACB_UNIT_*，再把 BIN_DIR 换成 profile/current/bin（可用时）。
+pub(crate) fn resolved_values() -> Result<BTreeMap<String, String>, String> {
+    let mut values = values_from_env()?;
+    let fallback = values.get("ACB_UNIT_BIN_DIR").map(PathBuf::from);
+    let bin_dir = crate::profile::resolve_bin_dir(fallback.as_deref())?;
+    values.insert(
+        "ACB_UNIT_BIN_DIR".to_string(),
+        bin_dir.to_string_lossy().into_owned(),
+    );
+    Ok(values)
 }
 
 pub(crate) fn values_from_env() -> Result<BTreeMap<String, String>, String> {

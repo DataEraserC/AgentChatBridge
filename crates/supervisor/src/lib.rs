@@ -74,12 +74,23 @@ pub enum RollbackPolicy {
     None,
 }
 
+/// 产物 generation 的引用。LKG 记录它，避免只记二进制路径而丢掉配置身份。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerationRef {
+    pub id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_sha256: Option<String>,
+}
+
 /// 一条可执行的命令。LKG 指针保存的就是这个形状。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GenerationRef>,
 }
 
 impl CommandSpec {
@@ -87,6 +98,7 @@ impl CommandSpec {
         Self {
             program: program.into(),
             args: Vec::new(),
+            generation: None,
         }
     }
 
@@ -157,6 +169,9 @@ pub struct Config {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// 当前版本所属的产物 generation；LKG 提升时会随 command 一起写入。
+    #[serde(default)]
+    pub generation: Option<GenerationRef>,
     /// 部署时已知的 LKG。状态文件里没有指针时才用它。
     #[serde(default)]
     pub lkg: Option<CommandSpec>,
@@ -471,6 +486,7 @@ impl Supervisor {
         let current = CommandSpec {
             program: config.program.clone(),
             args: config.args.clone(),
+            generation: config.generation.clone(),
         };
         let mut lkg = load_lkg(&state_dir).or_else(|| config.lkg.clone());
         if lkg.as_ref() == Some(&current) {

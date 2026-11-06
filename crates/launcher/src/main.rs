@@ -46,6 +46,7 @@ fn main() -> ExitCode {
     let configured = CommandSpec {
         program: config.program.clone(),
         args: config.args.clone(),
+        generation: config.generation.clone(),
     };
     let current = match load_current(&state_dir) {
         Some(current) => {
