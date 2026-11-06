@@ -1,5 +1,8 @@
-//! ACB 运维 CLI。PoC 阶段只实现 `acbctl unit`。
+//! ACB 运维 CLI：`acbctl unit` / `run` / `status`。
 
+mod fsutil;
+mod run;
+mod status;
 mod unit;
 
 use std::process::ExitCode;
@@ -49,6 +52,8 @@ fn run() -> Result<ExitCode, String> {
                 }
             }
         }
+        "run" => run::command(&args.collect::<Vec<_>>()),
+        "status" => status::command(&args.collect::<Vec<_>>()),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -63,6 +68,8 @@ Usage:
   acbctl unit render --diff --root DIR
   acbctl unit install --root DIR
   acbctl unit uninstall --root DIR
+  acbctl run --mode=launcher|direct [--config PATH] [--state-dir DIR]
+  acbctl status --mode=run [--state-dir DIR] [--config PATH] [--health-url URL]
   acbctl unit --help
 
 Values are read only from whitelisted ACB_UNIT_* environment variables.",
