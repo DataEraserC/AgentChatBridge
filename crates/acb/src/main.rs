@@ -41,6 +41,7 @@ fn run() -> Result<ExitCode, String> {
                 Some("render") => unit::render_command(&rest[1..]),
                 Some("install") => unit::install_command(&rest[1..]),
                 Some("uninstall") => unit::uninstall_command(&rest[1..]),
+                Some("doctor") => unit::doctor_command(&rest[1..]),
                 Some("-h" | "--help" | "help") => {
                     print_unit_help();
                     Ok(ExitCode::SUCCESS)
@@ -68,6 +69,7 @@ Usage:
   acbctl unit render --diff --root DIR
   acbctl unit install --root DIR
   acbctl unit uninstall --root DIR
+  acbctl unit doctor --root DIR
   acbctl run --mode=launcher|direct [--config PATH] [--state-dir DIR]
   acbctl status --mode=run [--state-dir DIR] [--config PATH] [--health-url URL]
   acbctl unit --help
@@ -84,6 +86,7 @@ fn print_unit_help() {
   acbctl unit render --output-dir DIR
   acbctl unit render --diff --root DIR
   acbctl unit install --root DIR
-  acbctl unit uninstall --root DIR"
+  acbctl unit uninstall --root DIR
+  acbctl unit doctor --root DIR"
     );
 }
