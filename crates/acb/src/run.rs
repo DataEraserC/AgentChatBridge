@@ -94,8 +94,21 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
         };
 
         let mut child = spawn_child(&prepared)?;
-        write_run_record(&prepared, child.id(), &selected)?;
-        let outcome = wait_child(&mut child)?;
+        if let Err(error) = write_run_record(&prepared, child.id(), &selected) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(run_json_path(&prepared.state_dir));
+            return Err(error);
+        }
+        let outcome = match wait_child(&mut child) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(run_json_path(&prepared.state_dir));
+                return Err(error);
+            }
+        };
         let _ = fs::remove_file(run_json_path(&prepared.state_dir));
 
         match outcome {
@@ -399,7 +412,12 @@ fn wait_child(child: &mut Child) -> Result<Outcome, String> {
 
 fn forward_shutdown(child: &mut Child) -> Result<(), String> {
     let pid = child.id();
-    send_sigterm(pid)?;
+    if let Err(error) = send_sigterm(pid) {
+        eprintln!("acbctl run: {error}; killing child directly");
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(());
+    }
     let deadline = Instant::now() + SHUTDOWN_GRACE;
     loop {
         match child.try_wait() {
