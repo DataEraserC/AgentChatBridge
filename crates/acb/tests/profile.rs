@@ -90,6 +90,7 @@ fn run_acb(env: &[(&str, String)], args: &[&str]) -> Output {
         }
     }
     command.env_remove("ACB_PROFILE_DIR");
+    command.env_remove("ACB_PROFILE_STRATEGY");
     for (key, value) in env {
         command.env(key, value);
     }
@@ -119,7 +120,15 @@ fn add(profile: &Path, config: &Path, source: &Path, label: &str) -> String {
     let env = profile_env(profile, config);
     let output = run_acb(
         &env,
-        &["profile", "add", source.to_str().unwrap(), "--label", label],
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--label",
+            label,
+            "--strategy",
+            "copy",
+        ],
     );
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
@@ -152,7 +161,21 @@ fn add_list_switch_and_gc() {
     assert_eq!(meta["schema"], 1);
     assert_eq!(meta["label"], "first");
     assert_eq!(meta["source"]["kind"], "path");
+    assert_eq!(meta["payload"]["strategy"], "copy");
+    assert!(
+        meta["payload"]["snapshot"]["files"].as_u64().unwrap() > 0,
+        "{meta}"
+    );
     assert!(meta["config"]["sha256"].as_str().unwrap().len() == 64);
+    let snapshot_root = generation_dir(&profile, &first).join("root");
+    assert!(
+        !fs::symlink_metadata(&snapshot_root)
+            .expect("snapshot root")
+            .file_type()
+            .is_symlink(),
+        "copy strategy must not leave a symlink"
+    );
+    assert!(snapshot_root.join("bin/acb-bridge").is_file());
 
     let env = profile_env(&profile, &config);
     let listed = run_acb(&env, &["profile", "list"]);
@@ -232,7 +255,16 @@ fn seed_is_idempotent_and_sets_first_current() {
     let second_payload = payload(temp.path(), "seed-second");
     let env = profile_env(&profile, &config);
 
-    let first = run_acb(&env, &["profile", "seed", first_payload.to_str().unwrap()]);
+    let first = run_acb(
+        &env,
+        &[
+            "profile",
+            "seed",
+            first_payload.to_str().unwrap(),
+            "--strategy",
+            "copy",
+        ],
+    );
     assert!(first.status.success(), "{}", stderr(&first));
     let seeded_id = stdout(&first)
         .trim()
@@ -247,8 +279,34 @@ fn seed_is_idempotent_and_sets_first_current() {
         PathBuf::from("generations").join(&seeded_id).join("root")
     );
 
-    let second = run_acb(&env, &["profile", "seed", second_payload.to_str().unwrap()]);
+    // 安装器只在首次安装时写一次 LKG；后续 runtime 提升/回退归 launcher + supervisor。
+    let lkg_path = temp.path().join("state/supervisor/lkg.json");
+    let lkg_text = fs::read_to_string(&lkg_path).expect("initial lkg.json");
+    let lkg: serde_json::Value = serde_json::from_str(&lkg_text).expect("parse lkg.json");
+    assert_eq!(lkg["command"]["generation"]["id"], seeded_id);
+    let pinned = generation_dir(&profile, &seeded_id).join("root/bin/acb-bridge");
+    assert_eq!(
+        lkg["command"]["program"],
+        pinned.to_string_lossy().into_owned()
+    );
+    assert_eq!(lkg["command"]["args"][0], "--config");
+
+    let second = run_acb(
+        &env,
+        &[
+            "profile",
+            "seed",
+            second_payload.to_str().unwrap(),
+            "--strategy",
+            "copy",
+        ],
+    );
     assert_eq!(second.status.code(), Some(0), "{}", stderr(&second));
+    assert_eq!(
+        fs::read_to_string(&lkg_path).expect("lkg.json after skipped seed"),
+        lkg_text,
+        "seed must not rewrite the runtime LKG pointer"
+    );
     assert!(
         stdout(&second).contains("seed skipped: profile already has 1 generation(s)"),
         "{}",
@@ -268,7 +326,16 @@ fn seed_and_expect_repair(
     reason: &str,
 ) -> String {
     let env = profile_env(profile, config);
-    let seeded = run_acb(&env, &["profile", "seed", repair_payload.to_str().unwrap()]);
+    let seeded = run_acb(
+        &env,
+        &[
+            "profile",
+            "seed",
+            repair_payload.to_str().unwrap(),
+            "--strategy",
+            "copy",
+        ],
+    );
     assert!(seeded.status.success(), "{}", stderr(&seeded));
     let text = stdout(&seeded);
     let prefix = "seed repaired current -> ";
@@ -358,7 +425,7 @@ fn seed_repairs_when_bridge_binary_is_missing() {
     let env = profile_env(&profile, &config);
     let switched = run_acb(&env, &["profile", "switch", &existing]);
     assert!(switched.status.success(), "{}", stderr(&switched));
-    fs::remove_file(existing_payload.join("bin/acb-bridge")).expect("drop bridge binary");
+    fs::remove_file(profile.join("current/bin/acb-bridge")).expect("drop bridge binary");
 
     let repaired = seed_and_expect_repair(
         &profile,
@@ -381,7 +448,7 @@ fn seed_fails_actionably_when_current_cannot_be_repaired() {
     let env = profile_env(&profile, &config);
     let switched = run_acb(&env, &["profile", "switch", &existing]);
     assert!(switched.status.success(), "{}", stderr(&switched));
-    fs::remove_file(existing_payload.join("bin/acb-bridge")).expect("drop bridge binary");
+    fs::remove_file(profile.join("current/bin/acb-bridge")).expect("drop bridge binary");
 
     let missing_payload = run_acb(&env, &["profile", "seed"]);
     assert_eq!(
@@ -402,7 +469,13 @@ fn seed_fails_actionably_when_current_cannot_be_repaired() {
     let invalid_payload = temp.path().join("not-a-payload");
     let bad = run_acb(
         &env,
-        &["profile", "seed", invalid_payload.to_str().unwrap()],
+        &[
+            "profile",
+            "seed",
+            invalid_payload.to_str().unwrap(),
+            "--strategy",
+            "copy",
+        ],
     );
     assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
     let text = stderr(&bad);
@@ -665,12 +738,9 @@ fn run_renders_supervisor_generation_section_from_profile() {
         .expect("load rendered supervisor.toml");
     let generation = supervisor.generation.expect("generation section");
     assert_eq!(generation.id, id);
-    assert_eq!(
-        generation.path,
-        fs::canonicalize(&profile_payload)
-            .expect("canonical payload")
-            .to_string_lossy()
-    );
+    let snapshot_root = generation_dir(&profile, &id).join("root");
+    assert_eq!(generation.path, snapshot_root.to_string_lossy());
+    assert!(snapshot_root.join("bin/acb-bridge").is_file());
     assert_eq!(generation.config_sha256.as_deref(), Some(config_sha));
 }
 
@@ -702,4 +772,242 @@ fn unit_values(repo: &Path, bin: &Path, config: &Path) -> Vec<(&'static str, Str
         ("ACB_UNIT_OPENCODE_PORT", "4097".to_string()),
         ("ACB_UNIT_AUTOSTART", "0".to_string()),
     ]
+}
+
+#[test]
+fn strategy_must_be_explicit_and_unsupported_modes_fail() {
+    let temp = TempDir::new("strategy-required");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "strategy");
+    let env = profile_env(&profile, &config);
+
+    let missing = run_acb(&env, &["profile", "add", source.to_str().unwrap()]);
+    assert_eq!(missing.status.code(), Some(2), "{}", stderr(&missing));
+    assert!(
+        stderr(&missing).contains("profile strategy is required"),
+        "{}",
+        stderr(&missing)
+    );
+
+    let bogus = run_acb(
+        &env,
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--strategy",
+            "magic",
+        ],
+    );
+    assert_eq!(bogus.status.code(), Some(2), "{}", stderr(&bogus));
+    assert!(
+        stderr(&bogus).contains("unsupported profile strategy: magic"),
+        "{}",
+        stderr(&bogus)
+    );
+
+    let store = run_acb(
+        &env,
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--strategy",
+            "store",
+        ],
+    );
+    assert_eq!(store.status.code(), Some(2), "{}", stderr(&store));
+    assert!(
+        stderr(&store).contains("store strategy requires the payload under /nix/store"),
+        "{}",
+        stderr(&store)
+    );
+
+    let seed = run_acb(&env, &["profile", "seed", source.to_str().unwrap()]);
+    assert_eq!(seed.status.code(), Some(2), "{}", stderr(&seed));
+    assert!(
+        stderr(&seed).contains("profile strategy is required"),
+        "{}",
+        stderr(&seed)
+    );
+}
+
+#[test]
+fn copy_snapshot_detaches_from_mutated_source() {
+    let temp = TempDir::new("detach");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "detach");
+    let id = add(&profile, &config, &source, "detach");
+    let snapshot = generation_dir(&profile, &id).join("root");
+    let original = fs::read_to_string(snapshot.join("harnesses/shared/tools.mjs")).expect("tools");
+    let original_bridge = fs::read_to_string(snapshot.join("bin/acb-bridge")).expect("bridge");
+
+    // 源目录在 add 之后被下一次构建改掉：快照必须保持原字节。
+    fs::write(
+        source.join("harnesses/shared/tools.mjs"),
+        "export const TOOLS = [\"mutated\"]\n",
+    )
+    .expect("mutate harness");
+    fs::write(source.join("bin/acb-bridge"), "#!/bin/sh\nexit 9\n").expect("mutate bridge");
+    assert_eq!(
+        fs::read_to_string(snapshot.join("harnesses/shared/tools.mjs")).expect("snapshot tools"),
+        original
+    );
+    assert_eq!(
+        fs::read_to_string(snapshot.join("bin/acb-bridge")).expect("snapshot bridge"),
+        original_bridge
+    );
+
+    let env = profile_env(&profile, &config);
+    let switched = run_acb(&env, &["profile", "switch", &id]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+    let current = run_acb(&env, &["profile", "current"]);
+    assert!(current.status.success(), "{}", stderr(&current));
+    assert!(
+        stdout(&current).contains("payload: copy snapshot"),
+        "{}",
+        stdout(&current)
+    );
+
+    // 快照自身完好（退出 0），同时能报告源目录已经漂移。
+    let verify = run_acb(&env, &["profile", "verify"]);
+    assert!(verify.status.success(), "{}", stderr(&verify));
+    let text = stdout(&verify);
+    assert!(text.contains("verify: snapshot ok"), "{text}");
+    assert!(text.contains("source differs"), "{text}");
+    assert!(text.contains("2 changed"), "{text}");
+}
+
+#[test]
+fn verify_detects_snapshot_corruption() {
+    let temp = TempDir::new("verify-corrupt");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let id = add(&profile, &config, &payload(temp.path(), "corrupt"), "corrupt");
+    let snapshot = generation_dir(&profile, &id).join("root");
+    fs::write(
+        snapshot.join("harnesses/shared/tools.mjs"),
+        "export const TOOLS = [\"tampered\"]\n",
+    )
+    .expect("tamper harness");
+    fs::remove_file(snapshot.join("bin/acb-bridge")).expect("drop bridge");
+
+    let env = profile_env(&profile, &config);
+    let verify = run_acb(&env, &["profile", "verify", &id]);
+    assert_eq!(verify.status.code(), Some(1), "{}", stderr(&verify));
+    let text = stdout(&verify);
+    assert!(
+        text.contains("snapshot damaged: 1 changed, 1 missing, 0 extra"),
+        "{text}"
+    );
+    assert!(
+        text.contains("snapshot changed harnesses/shared/tools.mjs"),
+        "{text}"
+    );
+    assert!(text.contains("snapshot missing bin/acb-bridge"), "{text}");
+    assert!(text.contains("source unchanged"), "{text}");
+}
+
+fn make_legacy_generation(profile: &Path, id: &str, source: &Path) {
+    let generation = generation_dir(profile, id);
+    fs::create_dir_all(&generation).expect("legacy generation dir");
+    let canonical = fs::canonicalize(source).expect("canonical legacy source");
+    let meta = serde_json::json!({
+        "schema": 1,
+        "id": id,
+        "created_at_ms": 1,
+        "source": {"kind": "path", "path": canonical.to_string_lossy()},
+    });
+    fs::write(
+        generation.join("meta.json"),
+        serde_json::to_string_pretty(&meta).expect("serialize legacy meta"),
+    )
+    .expect("legacy meta");
+    std::os::unix::fs::symlink(&canonical, generation.join("root")).expect("legacy root symlink");
+}
+
+#[test]
+fn legacy_generation_still_switches_and_migrates_to_copy() {
+    let temp = TempDir::new("legacy");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "legacy");
+    fs::create_dir_all(&profile).expect("profile");
+    make_legacy_generation(&profile, "gen-legacy", &source);
+    let env = profile_env(&profile, &config);
+
+    // 旧代（无 payload 字段）必须照常可切、可运行。
+    let switched = run_acb(&env, &["profile", "switch", "gen-legacy"]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+    assert_eq!(
+        read_link(&profile),
+        PathBuf::from("generations/gen-legacy/root")
+    );
+    assert!(profile.join("current/bin/acb-bridge").is_file());
+    let current = run_acb(&env, &["profile", "current"]);
+    assert!(current.status.success(), "{}", stderr(&current));
+    assert!(
+        stdout(&current).contains("payload: - (legacy symlink)"),
+        "{}",
+        stdout(&current)
+    );
+    let verify_legacy = run_acb(&env, &["profile", "verify"]);
+    assert!(verify_legacy.status.success(), "{}", stderr(&verify_legacy));
+    assert!(
+        stdout(&verify_legacy).contains("legacy symlink generation"),
+        "{}",
+        stdout(&verify_legacy)
+    );
+
+    // 显式迁移：原地转 copy，id/current 不变。
+    let migrate = run_acb(&env, &["profile", "migrate", "--to", "copy"]);
+    assert!(migrate.status.success(), "{}", stderr(&migrate));
+    assert!(
+        stdout(&migrate).contains("migrated gen-legacy -> copy"),
+        "{}",
+        stdout(&migrate)
+    );
+    assert_eq!(
+        read_link(&profile),
+        PathBuf::from("generations/gen-legacy/root"),
+        "migrate must not move current"
+    );
+    let migrated_root = generation_dir(&profile, "gen-legacy").join("root");
+    assert!(
+        !fs::symlink_metadata(&migrated_root)
+            .expect("migrated root")
+            .file_type()
+            .is_symlink()
+    );
+    let meta: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(generation_dir(&profile, "gen-legacy").join("meta.json")).expect("meta"),
+    )
+    .expect("parse migrated meta");
+    assert_eq!(meta["payload"]["strategy"], "copy");
+    assert!(meta["payload"]["snapshot"]["files"].as_u64().unwrap() > 0);
+
+    fs::write(
+        source.join("harnesses/shared/tools.mjs"),
+        "export const TOOLS = [\"after-migrate\"]\n",
+    )
+    .expect("mutate migrated source");
+    let verify = run_acb(&env, &["profile", "verify", "gen-legacy"]);
+    assert!(verify.status.success(), "{}", stderr(&verify));
+    let text = stdout(&verify);
+    assert!(text.contains("verify: snapshot ok"), "{text}");
+    assert!(text.contains("source differs"), "{text}");
+
+    let back = run_acb(&env, &["profile", "migrate", "--to", "store"]);
+    assert_eq!(back.status.code(), Some(2), "{}", stderr(&back));
+    assert!(
+        stderr(&back).contains("only copy is supported"),
+        "{}",
+        stderr(&back)
+    );
 }
