@@ -5,15 +5,21 @@
 //   bin/codebuddy 在非无头命令上会 MODULE_NOT_FOUND。所以适配器只认 headless
 //   bundle，或者显式设置 CODEBUDDY_FORCE_HEADLESS_BUNDLE=1 后再用 launcher。
 //
-// 配置只做三件事：找 CLI、算会话 id 规则、准备每轮 CLI 参数。不读 GUI 的
+// 配置只做三件事：找 CLI、算实例/会话 id 规则、准备每轮 CLI 参数。不读 GUI 的
 // workbuddy.db（那是私有面），也不碰 ~/.workbuddy 的内部实现。
+//
+// 多实例：每个实例一个独立进程，用不同 ACB_WB_INSTANCE / ACB_HARNESS，
+// 各自独立 state 目录（同时作为子进程 HOME 和 CODEBUDDY_CONFIG_DIR 的根）、
+// 独立 MCP 端口、独立会话 id 前缀。实例间不共享登录态和会话记录。
 
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { TOOLS } from "../../shared/tools.mjs"
 import { t } from "../../shared/i18n.mjs"
 
 const HEADLESS_BUNDLE = "codebuddy-headless.js"
+export const DEFAULT_INSTANCE = "workbuddy-1"
 
 /** 在 PATH 里找可执行文件；找不到返回 null。 */
 function which(name, searchPath = "") {
@@ -94,15 +100,51 @@ export function resolveCliPath(env = process.env) {
   }))
 }
 
+/** 实例标识只允许字母/数字/连字符/下划线；空值退回默认实例。 */
+export function sanitizeInstance(value) {
+  const raw = String(value ?? "").trim() || DEFAULT_INSTANCE
+  const clean = raw
+    .replace(/[^A-Za-z0-9_-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[^A-Za-z0-9]+/, "")
+  return clean || DEFAULT_INSTANCE
+}
+
+/**
+ * 实例的默认 state 目录。它同时作为子进程的 HOME 和 CODEBUDDY_CONFIG_DIR 的根，
+ * 所以两个实例不会共用 ~/.codebuddy 的登录态/会话记录。
+ */
+export function defaultStateDir(instance = DEFAULT_INSTANCE, env = process.env) {
+  const name = sanitizeInstance(instance)
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Application Support", "acb", "workbuddy", name)
+  }
+  if (process.platform === "win32") {
+    const base = env.LOCALAPPDATA?.trim() || path.join(os.homedir(), "AppData", "Local")
+    return path.join(base, "acb", "workbuddy", name)
+  }
+  const base = env.XDG_STATE_HOME?.trim() || path.join(os.homedir(), ".local", "state")
+  return path.join(base, "acb", "workbuddy", name)
+}
+
+export function resolveStateDir(env = process.env) {
+  const explicit = env.ACB_WB_STATE_DIR?.trim()
+  if (explicit) return path.resolve(explicit)
+  return defaultStateDir(env.ACB_WB_INSTANCE, env)
+}
+
 /**
  * ACB 会话 id → WorkBuddy 的 --session-id。
- * CLI 允许字母/数字/连字符/下划线/冒号，但这里不用冒号：ACB 房间串里本来就有
- * 冒号，统一换成连字符更干净。重置后加代次后缀，避免和旧会话撞 id。
+ *
+ * 前缀带实例名，保证两个实例的 `-r` 不会续接到对方的会话；重置后加代次后缀，
+ * 避免和旧会话撞 id。CLI 允许字母/数字/连字符/下划线/冒号，但这里不用冒号：
+ * ACB 房间串里本来就有冒号，统一换成连字符更干净。
  */
-export function sessionIdFor(acbSession, generation = "") {
-  let raw = `acb-${String(acbSession ?? "")}`.replace(/[^A-Za-z0-9_-]/g, "-")
+export function sessionIdFor(acbSession, instance = DEFAULT_INSTANCE, generation = "") {
+  const prefix = sanitizeInstance(instance)
+  let raw = `acb-${prefix}-${String(acbSession ?? "")}`.replace(/[^A-Za-z0-9_-]/g, "-")
   raw = raw.replace(/-+/g, "-").replace(/^[^A-Za-z0-9]+/, "")
-  if (!raw) raw = "acb"
+  if (!raw) raw = `acb-${prefix}`
   raw = raw.slice(0, 120)
   return generation ? `${raw}-r${generation}` : raw
 }
@@ -114,23 +156,73 @@ function splitTools(value) {
     .filter(Boolean)
 }
 
+/**
+ * 把允许清单展开成裸名 + `mcp__acb__` 前缀名。CLI 实际暴露的是前缀名，
+ * `--allowedTools` 必须拿到前缀名才真正预批准；裸名保留给内置工具/旧版本。
+ */
+function expandAllowedTools(names) {
+  const out = []
+  const seen = new Set()
+  for (const item of names) {
+    const value = String(item ?? "").trim()
+    if (!value) continue
+    const prefixed = value.startsWith("mcp__") ? value : `mcp__acb__${value}`
+    const bare = value.startsWith("mcp__") ? "" : value
+    for (const name of [bare, prefixed]) {
+      if (!name || seen.has(name)) continue
+      seen.add(name)
+      out.push(name)
+    }
+  }
+  return out
+}
+
 /** 默认预批准全部桥工具：裸名和 MCP 前缀名都给，避免 CLI 在非交互模式下卡权限。 */
 function defaultAllowedTools() {
-  return TOOLS.flatMap((tool) => [tool.name, `mcp__acb__${tool.name}`])
+  return expandAllowedTools(TOOLS.map((tool) => tool.name))
+}
+
+function parsePort(value, fallback = 0) {
+  if (value === undefined || value === null || String(value).trim() === "") return fallback
+  const port = Number(value)
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(t("workbuddy.mcp_port_invalid", { value: String(value) }))
+  }
+  return port
 }
 
 /** 读完整配置。 */
 export function readConfig(env = process.env) {
+  // 实例优先；只设 ACB_HARNESS 的老配置把 harness 名当作实例名，保持单实例可用。
+  const instance = sanitizeInstance(env.ACB_WB_INSTANCE || env.ACB_HARNESS)
+  const harness = env.ACB_HARNESS?.trim() || instance
+  if (env.ACB_HARNESS?.trim() && env.ACB_WB_INSTANCE?.trim() && env.ACB_HARNESS.trim() !== env.ACB_WB_INSTANCE.trim()) {
+    // 两个实例如果共用 harness id，桥的串行键会撞在一起；直接拒绝。
+    throw new Error(t("workbuddy.harness_instance_mismatch", {
+      harness: env.ACB_HARNESS.trim(),
+      instance: env.ACB_WB_INSTANCE.trim(),
+    }))
+  }
+  const stateDir = resolveStateDir(env)
   const allowedOverride = env.ACB_WB_ALLOWED_TOOLS?.trim()
   return {
     endpoint: env.ACB_ENDPOINT?.trim() || "127.0.0.1:7700",
     token: env.ACB_TOKEN?.trim() || "",
-    harness: env.ACB_HARNESS?.trim() || "workbuddy",
-    // MCP 每轮由适配器自己起；端口 0 = 系统分配，CLI 通过 --mcp-config 拿 URL。
-    mcpPort: env.ACB_MCP_PORT ? Number(env.ACB_MCP_PORT) : 0,
+    harness,
+    instance,
+    // 实例的 state 根；子进程的 HOME / CODEBUDDY_CONFIG_DIR / CODEBUDDY_DATA_ROOT
+    // 都落在这里，保证登录态和会话记录不跨实例共享。
+    stateDir,
+    home: stateDir,
+    configDir: path.join(stateDir, ".codebuddy"),
+    dataRoot: path.join(stateDir, "data"),
+    // MCP 每轮由适配器自己起；端口 0 = 系统分配。多实例建议显式给不同端口。
+    mcpPort: parsePort(env.ACB_MCP_PORT, 0),
     cliPath: resolveCliPath(env),
     // CLI 的模型由它自己的配置决定；这里只把「预批准」和「设置」透传过去。
-    allowedTools: allowedOverride ? splitTools(allowedOverride) : defaultAllowedTools(),
+    allowedTools: allowedOverride
+      ? expandAllowedTools(splitTools(allowedOverride))
+      : defaultAllowedTools(),
     settings: env.ACB_WB_SETTINGS?.trim() || '{"enableAllProjectMcpServers":true}',
     // 默认不指定权限模式：--allowedTools 已经预批准桥工具，不需要 bypassPermissions。
     permissionMode: env.ACB_WB_PERMISSION_MODE?.trim() || "",

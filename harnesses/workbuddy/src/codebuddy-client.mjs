@@ -10,6 +10,7 @@
 // （test/driver.test.mjs 用一个假的 headless CLI 验它）。
 
 import { spawn } from "node:child_process"
+import fs from "node:fs"
 import readline from "node:readline"
 import { t } from "../../shared/i18n.mjs"
 
@@ -39,13 +40,27 @@ export function isResumeMissing(error) {
 
 /** 一个 WorkBuddy CLI 入口（每次 runTurn 拉起一个子进程）。 */
 export class CodebuddyClient {
-  constructor({ cliPath, nodePath = process.execPath, log = () => {}, baseEnv = process.env, cwd = process.cwd() }) {
+  constructor({
+    cliPath,
+    nodePath = process.execPath,
+    log = () => {},
+    baseEnv = process.env,
+    cwd = process.cwd(),
+    // 多实例隔离：HOME / CODEBUDDY_CONFIG_DIR / CODEBUDDY_DATA_ROOT 全部指向
+    // 实例自己的 state 目录，登录态和会话记录不会串到另一个实例。
+    home = "",
+    configDir = "",
+    dataRoot = "",
+  }) {
     if (!cliPath) throw new Error(t("workbuddy.cli_missing", { path: "" }))
     this.cliPath = cliPath
     this.nodePath = nodePath
     this.log = log
     this.baseEnv = baseEnv
     this.cwd = cwd
+    this.home = home
+    this.configDir = configDir
+    this.dataRoot = dataRoot
     this.child = null
     this.runState = null
     /** 最近几轮实际用的参数；测试和排障用。 */
@@ -93,8 +108,26 @@ export class CodebuddyClient {
     this.runs.push({ sessionId, resume, args })
     const runState = { aborted: false, timedOut: false }
     this.runState = runState
+    for (const dir of [this.home, this.configDir, this.dataRoot]) {
+      if (!dir) continue
+      try {
+        fs.mkdirSync(dir, { recursive: true })
+      } catch (error) {
+        throw new Error(t("workbuddy.state_dir_failed", {
+          path: dir,
+          error: error?.message ?? error,
+        }))
+      }
+    }
     const env = {
       ...this.baseEnv,
+      // 多实例：HOME 隔离登录态与会话记录；CODEBUDDY_CONFIG_DIR 是 CLI 自己
+      // 用来放 settings/jobs/MCP 配置的目录（默认 ~/.codebuddy）。
+      ...(this.home ? { HOME: this.home, USERPROFILE: this.home } : {}),
+      ...(this.configDir
+        ? { CODEBUDDY_CONFIG_DIR: this.configDir, WORKBUDDY_CONFIG_DIR: this.configDir }
+        : {}),
+      ...(this.dataRoot ? { CODEBUDDY_DATA_ROOT: this.dataRoot } : {}),
       // 强制走 headless bundle：即使入口是 codebuddy launcher，也不会去
       // require 上游发行物里不存在的 dist/codebuddy.js。
       CODEBUDDY_FORCE_HEADLESS_BUNDLE: "1",
