@@ -1,0 +1,10 @@
+{
+  "name": "acb-lobsterai",
+  "private": true,
+  "type": "module",
+  "description": "acb 的 LobsterAI 适配器：桥推来的轮次走 LobsterAI 内置 gateway，工具走 MCP",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "probe": "node src/driver.mjs"
+  }
+}
