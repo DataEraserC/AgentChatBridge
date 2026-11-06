@@ -48,6 +48,32 @@ fn payload(root: &Path, name: &str) -> PathBuf {
     fs::create_dir_all(dir.join("harnesses")).expect("harnesses");
     fs::create_dir_all(dir.join("deploy/units/systemd")).expect("templates");
     fs::create_dir_all(dir.join("deploy/run")).expect("run templates");
+    fs::create_dir_all(dir.join("harnesses/dsh/src")).expect("dsh harness");
+    fs::create_dir_all(dir.join("harnesses/opencode/plugin")).expect("opencode plugin");
+    fs::create_dir_all(dir.join("harnesses/shared")).expect("shared harness");
+    for file in [
+        "harnesses/dsh/src/driver.mjs",
+        "harnesses/dsh/dsh-mcp.patch.yml",
+        "harnesses/opencode/plugin/index.js",
+        "harnesses/opencode/plugin/acb-wire.mjs",
+        "harnesses/shared/tools.mjs",
+    ] {
+        fs::write(
+            dir.join(file),
+            "// profile test fixture; relative imports rely on the full harnesses tree\n",
+        )
+        .expect("harness file");
+    }
+    fs::write(
+        dir.join("harnesses/opencode/plugin/index.js"),
+        "import { TOOLS } from \"../../shared/tools.mjs\"\n",
+    )
+    .expect("opencode plugin");
+    fs::write(
+        dir.join("harnesses/shared/tools.mjs"),
+        "export const TOOLS = []\n",
+    )
+    .expect("shared tools");
     for script in ["start-dsh.sh", "start-drivers.sh", "opencode-serve.sh"] {
         write_executable(
             &dir.join("deploy").join(script),
@@ -262,6 +288,10 @@ fn render_falls_back_without_profile() {
         "{text}"
     );
     assert!(
+        text.contains(&format!("{}/deploy/start-dsh.sh", repo.display())),
+        "{text}"
+    );
+    assert!(
         !text.contains(&format!("{}/current/bin", profile.display())),
         "{text}"
     );
@@ -289,13 +319,58 @@ fn render_prefers_profile_current_bin() {
     let output = run_acb(&env, &["unit", "render", "--print"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
+    let current = format!("{}/current", profile.display());
     assert!(
-        text.contains(&format!("{}/current/bin/acb-bridge", profile.display())),
+        text.contains(&format!("{current}/bin/acb-bridge")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("{current}/deploy/start-dsh.sh")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("{current}/deploy/start-drivers.sh")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("{current}/deploy/opencode-serve.sh")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("WorkingDirectory={current}")),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&format!("{}/deploy/start-dsh.sh", repo.display())),
         "{text}"
     );
     assert!(
         !text.contains(&format!("{}/acb-bridge", fallback_bin.display())),
         "{text}"
+    );
+
+    // 插件按原仓库结构放在 profile/current/harnesses 下，相对 import 目标必须存在。
+    let plugin = profile.join("current/harnesses/opencode/plugin/index.js");
+    let shared = profile.join("current/harnesses/shared/tools.mjs");
+    assert!(plugin.is_file(), "plugin missing: {}", plugin.display());
+    assert!(
+        shared.is_file(),
+        "shared tools missing: {}",
+        shared.display()
+    );
+    let plugin_text = fs::read_to_string(&plugin).expect("plugin content");
+    assert!(
+        plugin_text.contains("../../shared/tools.mjs"),
+        "{plugin_text}"
+    );
+    let imported = plugin
+        .parent()
+        .expect("plugin parent")
+        .join("../../shared/tools.mjs");
+    assert!(
+        imported.is_file(),
+        "plugin relative import target missing: {}",
+        imported.display()
     );
 }
 
@@ -317,11 +392,13 @@ fn run_prefers_profile_current_bin() {
     .expect("supervisor config");
     let profile_payload = payload(temp.path(), "run-profile-payload");
     let marker = temp.path().join("launcher-started");
+    let repo_marker = temp.path().join("launcher-repo");
     write_executable(
         &profile_payload.join("bin/acb-launcher"),
         &format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\necho started > {}\nexit 0\n",
-            marker.to_string_lossy()
+            "#!/usr/bin/env bash\nset -euo pipefail\necho started > {}\necho \"${{ACB_UNIT_REPO_DIR:-none}}\" > {}\nexit 0\n",
+            marker.to_string_lossy(),
+            repo_marker.to_string_lossy()
         ),
     );
     let id = add(&profile, &config, &profile_payload, "main");
@@ -350,6 +427,10 @@ fn run_prefers_profile_current_bin() {
     );
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(marker.exists(), "profile launcher was not spawned");
+    assert_eq!(
+        fs::read_to_string(&repo_marker).expect("repo marker"),
+        format!("{}/current\n", profile.display())
+    );
 }
 
 #[test]
