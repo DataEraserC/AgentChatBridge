@@ -11,6 +11,7 @@ name = "acbctl"
 path = "src/main.rs"
 
 [dependencies]
+acb-kernel = { path = "../kernel" }
 acb-supervisor = { path = "../supervisor" }
 serde = { workspace = true }
 serde_json = { workspace = true }
