@@ -1,5 +1,9 @@
 # 桥这一侧的配置片段：当前把 LobsterAI 的槽位临时用 workbuddy-1 顶上。
 # 完整可运行配置见仓库根的 config.example.toml；这里只列相关部分。
+#
+# GUI 侧不要直接启动 app：WorkBuddy 用 `multi-instance workbuddy 1`（第二实例
+# 用 `multi-instance workbuddy 2`），首次为空 profile，要在实例里重新登录。
+# 切换 LobsterAI 时 GUI 用 `multi-instance lobsterai 1`。
 
 [[harnesses]]
 id = "workbuddy-1"
@@ -41,7 +45,9 @@ path = ["group", "123456789"]
 
 # 切回 LobsterAI：
 #   1. 把上面 [[sessions]] 的 harness 改成 "lobsterai"；
-#   2. 启动 LobsterAI 驱动器（ACB_TOKEN 不变，state 指回 LobsterAI 的
-#      <userData>/openclaw/state）；
+#   2. GUI 侧用 `multi-instance lobsterai 1` 启动并在实例里登录；等它生成
+#      openclaw/state 后，再启动 LobsterAI 驱动器（ACB_TOKEN 不变，
+#      ACB_LA_STATE_DIR 指回 ~/.config/LobsterAI/openclaw/state 或该实例里
+#      等价的 openclaw/state，ACB_MCP_PORT=7717，不能指 ~/.openclaw）；
 #   3. 不需要改代码。ACB 会话 id / 订阅 / 水位保留，harness 侧会话映射
 #      由新 driver 重新 report_map；旧 WorkBuddy 的 -r 映射不再使用。

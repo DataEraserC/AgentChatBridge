@@ -1,5 +1,11 @@
 # 桥这一侧的配置片段：一个 harness + 一个会话。
 # 完整可运行配置见仓库根的 config.example.toml；这里只列 LobsterAI 相关的部分。
+#
+# GUI 侧不要直接启动 app：用 `multi-instance lobsterai 1`，首次为空 profile，
+# 要在实例里重新登录并等它生成 openclaw/state。
+# driver 侧 ACB_LA_STATE_DIR 必须是 ~/.config/LobsterAI/openclaw/state（或该实例里
+# 等价的 openclaw/state），ACB_MCP_PORT=7717，不能指 ~/.openclaw。
+# 当前 LobsterAI 待登录后启用，槽位暂由 workbuddy-1 顶替（见 workbuddy 的样例）。
 
 [[harnesses]]
 id = "lobsterai"

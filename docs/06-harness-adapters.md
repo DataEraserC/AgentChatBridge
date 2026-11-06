@@ -624,6 +624,25 @@ dsh 的模型适配器（trae / deepseek-v4.1-flash）有三种写法：标准 J
 `<XDG_STATE_HOME 或 ~/.local/state>/acb/workbuddy/<instance>`，所以两个实例天然不同目录。
 `ACB_MCP_PORT` 不填则由系统分配（端口各自独立，但排障时 URL 会变；生产建议固定）。
 
+**GUI 侧启动方式：不要直接启动 app，走 multi-instance wrapper。**
+
+```bash
+multi-instance workbuddy 1   # instance 2 用 multi-instance workbuddy 2
+```
+
+- 入口是 `/run/current-system/sw/bin/multi-instance`，签名
+  `multi-instance <app> <instance> [args...]`，两个位置参数都必填；
+  可用 app 含 `codebuddy workbuddy workbuddy-ai lobsterai trae trae-cn zcode zcode-cn codearts`。
+- 它用 bwrap 把实例状态目录 bind-mount 到 `$HOME` 下固定路径，真实 `~/.codebuddy`、
+  `~/.config/LobsterAI` 不会被写入。instance 1 的 GUI 状态目录是
+  `~/.local/state/multi-instance/workbuddy/1`（instance 2 换成 `/2`）。
+- 首次启动是**空 profile**，必须在实例窗口里重新登录 WorkBuddy；不登录时 CLI 的
+  `result` 仍是 auth 错误（见上面的探测表）。
+- driver 的 `ACB_WB_STATE_DIR` 默认 `~/.local/state/acb/workbuddy/<instance>`，和 GUI
+  实例目录是**两套**。不推荐把它指到 GUI 实例目录共用登录态：同一个 `.codebuddy`
+  双写有锁/DB 竞争风险。确需复用，按受控步骤来：先在实例里登录、退出 GUI，再让单个
+  driver 独占指向该目录试一次；出问题立刻退回独立目录。
+
 **instance 1 的具体配置**（完整版见
 [`instance-1.env.example`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/harnesses/workbuddy/instance-1.env.example)）：
 
@@ -644,14 +663,20 @@ instance 2 只改四项：`ACB_HARNESS=workbuddy-2`、`ACB_WB_INSTANCE=workbuddy
 
 1. 桥配置里把 `[[sessions]]` 的 `harness` 从 `lobsterai` 改成 `workbuddy-1`，
    并加一条 `[[harnesses]] id = "workbuddy-1"`；`token` 保持不变。
-2. 启动 WorkBuddy driver，环境变量按上面的 instance 1 配置。
-3. 切回 LobsterAI 时，把 `harness` 改回 `lobsterai`，启动 LobsterAI driver（state 指回
-   `<userData>/openclaw/state`）。ACB 会话 id / 订阅 / 水位保留；harness 侧会话映射由新
-   driver 重新 `report_map`，旧 WorkBuddy 的 `-r` 映射不再使用。
+2. GUI 侧用 `multi-instance workbuddy 1` 启动 instance 1，并在实例窗口里登录；
+   driver 侧按上面的 instance 1 环境变量启动。
+3. 切回 LobsterAI 时，把 `harness` 改回 `lobsterai`，GUI 侧用
+   `multi-instance lobsterai 1` 启动并登录，driver 的 `ACB_LA_STATE_DIR` 指回
+   `~/.config/LobsterAI/openclaw/state`（不是 `~/.openclaw`）。ACB 会话 id / 订阅 /
+   水位保留；harness 侧会话映射由新 driver 重新 `report_map`，旧 WorkBuddy 的
+   `-r` 映射不再使用。
 
 **已知限制**：CLI 的会话/配置根是 `CODEBUDDY_CONFIG_DIR`（默认 `~/.codebuddy`），
 适配器同时把 `HOME` 指到实例 state 根。如果某个 CLI 版本把登录 token 放进操作系统钥匙串
 而不是这个目录，`HOME` 隔离不会分开登录态；这一条要等真实登录后验证。
+GUI 侧经 multi-instance wrapper 启动后，状态落在
+`~/.local/state/multi-instance/workbuddy/<instance>`，与 driver 默认 state 根隔离；
+两边不是同一次登录，也就没有共享会话记录。
 
 ### 内置工具关不掉：三个候选方案（只做取舍，不实施）
 
@@ -707,10 +732,23 @@ OpenClaw 2026.8.1；模型链路是 `lobsterai-server` → 本地 token proxy �
 - `harnesses/lobsterai/openclaw.user.json.example` — 在 OpenClaw 用户覆盖层注册 `mcp.servers.acb`。
 - `harnesses/lobsterai/lobsterai.env.example`、`acb-config.example.toml` — 环境变量与桥配置样例。
 
-### 硬约束：不退化到裸 OpenClaw
+### 启动方式与硬约束：不退化到裸 OpenClaw
 
-- state 目录必须是 `<userData>/openclaw/state`（可用 `ACB_LA_STATE_DIR` / `ACB_LA_USER_DATA`
-  覆盖）；不存在直接报错。
+GUI 侧不要直接启动 app，走 multi-instance wrapper：
+
+```bash
+multi-instance lobsterai 1
+```
+
+wrapper 用 bwrap 把实例状态挂到 `$HOME` 下固定路径，真实 `~/.config/LobsterAI` 不会被
+写入。首次是空 profile，必须在实例窗口里登录 LobsterAI，并等它生成 `openclaw/state`
+（`openclaw.json`、`gateway-port.json`、`gateway-token`）；app 没运行/没登录时 driver
+没有 gateway 可连，直接报错。当前 LobsterAI 仍是搁置状态，槽位由 workbuddy-1 顶替。
+
+- state 目录必须是 `<userData>/openclaw/state`（Linux 即
+  `~/.config/LobsterAI/openclaw/state`，可用 `ACB_LA_STATE_DIR` / `ACB_LA_USER_DATA`
+  覆盖）；不存在直接报错。如果 multi-instance 把状态挂到别的实例根，就指到该实例里
+  等价的 `openclaw/state` 路径。
 - 显式拒绝 `~/.openclaw`：它是裸 OpenClaw 的默认 home。
 - 读 `<stateDir>/openclaw.json`，必须找到 `lobsterai-server` provider（或指向 loopback
   且带 proxy 标记的 provider），或 `lobster-model-routing` 插件里的
@@ -730,7 +768,8 @@ OpenClaw 2026.8.1；模型链路是 `lobsterai-server` → 本地 token proxy �
 ### 还没验的（需要真实 app + 登录/额度）
 
 - 本机 `~/.config/LobsterAI` 为空、app 未运行，没有 `openclaw.json` / `gateway-token` /
-  `gateway-port.json`，所以连真实 gateway 都还没握过手。
+  `gateway-port.json`，所以连真实 gateway 都还没握过手；也还没验过
+  `multi-instance lobsterai 1` 实例里的首次登录和 state 生成。
 - 真实 gateway 的 `connect` 鉴权：token 是否够用、是否需要 device pairing、scope 是否
   满足 `chat.send` / `agent.wait`。
 - 一次真实模型调用是否真的消耗 LobsterAI 额度（机制已核对，扣费未对账）。

@@ -185,7 +185,7 @@ ACB 现有两套接入的权威说明在 [`docs/06-harness-adapters.md`](../06-h
 - 安装位置：`/run/current-system/sw/bin/workbuddy` → `/nix/store/2056lvy4j6n0hv6bwyl9h8fff1nxw5rm-workbuddy-5.6.2.40046327/bin/workbuddy`；应用在 `.../opt/WorkBuddy/`。
 - 应用版本：**5.6.2.40046327**；官方 Changelog 有 5.6.2（<https://www.codebuddy.ai/docs/workbuddy/Changelog>）。
 - 内置 CLI：`.../resources/app.asar.unpacked/cli/dist/codebuddy-headless.js`，`--version` 报 **2.147.0**；CLI 文档在 <https://www.workbuddy.ai/docs/cli/cli-reference>。
-- 状态目录：GUI `~/.workbuddy/`（`workbuddy.db`、`plugins/`、`settings.json`、`mcp-tool-list.json`、`logs/`）；CLI `~/.codebuddy/`（`local_storage/`、`sessions/` 等）。
+- 状态目录：GUI 默认用 `~/.workbuddy/`（`workbuddy.db`、`plugins/`、`settings.json`、`mcp-tool-list.json`、`logs/`）；CLI 默认用 `~/.codebuddy/`（`local_storage/`、`sessions/` 等）。**本项目不直接启动 app**：GUI 走 `multi-instance workbuddy 1`，实例 1 状态在 `~/.local/state/multi-instance/workbuddy/1`，真实 `~/.workbuddy` / `~/.codebuddy` 不会被写入；首次为空 profile，要在实例里重新登录。
 - **waypipe 说明**：nix-config 里没有 WorkBuddy 专用的 waypipe 代码；`waypipe` 只出现在通用远程桌面模块（`modules/nixos/desktop/networking/remote-desktop.nix`）和 `hosts/wsl-work/packages.nix`。它是远程显示 Wayland 应用的工具，不是 WorkBuddy 的扩展点。WorkBuddy 的 Nix 包装是 GTK/Electron wrapper（`makeCWrapper` 设置 `GIO_EXTRA_MODULES`、`GDK_PIXBUF_MODULE_FILE` 等），没有额外注入点。
 
 ### 4.2 扩展面清单
@@ -319,6 +319,21 @@ node --test harnesses/workbuddy/test/*.test.mjs
 `instance-2.env.example`（7719）；桥侧样例在 `acb-config.example.toml` 里演示
 「用 workbuddy-1 顶替 lobsterai 槽位」和切回方式（只改 `harnesses`/`harness`，不改代码）。
 
+**GUI 侧启动方式**：不要直接启动 app，走 multi-instance wrapper：
+
+```bash
+multi-instance workbuddy 1   # instance 2 用 multi-instance workbuddy 2
+```
+
+- 入口 `/run/current-system/sw/bin/multi-instance`，签名
+  `multi-instance <app> <instance> [args...]`，两个位置参数都必填；可用 app 含
+  `codebuddy workbuddy workbuddy-ai lobsterai trae trae-cn zcode zcode-cn codearts`。
+- bwrap 把实例状态目录 bind-mount 到 `$HOME` 下固定路径；instance 1 的 GUI 状态目录是
+  `~/.local/state/multi-instance/workbuddy/1`。首次为空 profile，必须在实例里重新登录。
+- driver 的 `ACB_WB_STATE_DIR` 默认 `~/.local/state/acb/workbuddy/<instance>`，与 GUI
+  实例目录是两套。不推荐指到 GUI 目录共用登录态（同一个 `.codebuddy` 双写有锁/DB 竞争
+  风险）；确需复用按受控步骤：先在实例里登录、退出 GUI，再让单个 driver 独占试一次。
+
 **已验证（假 CLI）**：两个实例并行一轮，MCP URL 不同、state/HOME 不同、会话 id 前缀不同，
 第二轮各自 `-r` 不串；见 `harnesses/workbuddy/test/multi-instance.test.mjs`。
 
@@ -352,6 +367,8 @@ node --test harnesses/workbuddy/test/*.test.mjs
 - 内置运行时：`resources/cfmind/package.json` 是 **OpenClaw 2026.8.1**（`name: "openclaw"`，repository `openclaw/openclaw`）；`node openclaw.mjs --version` → `OpenClaw 2026.8.1 (512bddc)`。
 - Electron 版本文件：`resources/app/version` → `43.6.0`（这是 Electron，不是产品版本）。
 - 状态目录：`~/.config/LobsterAI`（userData；本机目前为空，应用未运行）；`~/lobsterai/project`（默认工作目录）；恢复库 `~/lobsterai/recovery-20261022/lobsterai.sqlite`。
+- **启动方式**：GUI 走 `multi-instance lobsterai 1`，**不要直接启动 app**。wrapper 用 bwrap 把实例状态挂到 `$HOME` 下固定路径，真实 `~/.config/LobsterAI` 不会被写入；首次为空 profile，必须在实例里登录 LobsterAI 并等它生成 `openclaw/state`（`openclaw.json`、`gateway-port.json`、`gateway-token`）。
+- driver 的 `ACB_LA_STATE_DIR` 必须是 `~/.config/LobsterAI/openclaw/state`（或该 multi-instance 实例里等价的 `openclaw/state`），不能指 `~/.openclaw`；MCP 端口固定 `7717`。
 - 架构（官方 README）：Electron renderer + Main process（Cowork 会话、权限、SQLite、skills、MCP、IM、scheduler）+ **内置 OpenClaw gateway**；OpenClaw 是 agent runtime，LobsterAI 生成它的配置并把事件转成 Cowork 消息流。
 
 ### 5.2 扩展面清单
@@ -420,8 +437,10 @@ OpenClaw gateway WS 客户端。`node --test harnesses/lobsterai/test/*.test.mjs
 握手、额度和模型回话仍未见（见第 7 节）。
 
 **当前处置（2026-11-06）**：**LobsterAI 暂时搁置，代码保留、不回退**；桥上槽位由
-WorkBuddy instance 1 顶替。LobsterAI 登录并生成 state 后，把桥配置的
-`[[sessions]] harness` 切回 `lobsterai` 即可启用，不需要改代码。
+WorkBuddy instance 1 顶替。启用步骤：GUI 侧 `multi-instance lobsterai 1` 启动并在实例里
+登录，driver 侧 `ACB_LA_STATE_DIR=~/.config/LobsterAI/openclaw/state`、`ACB_MCP_PORT=7717`
+（或该实例里等价的 `openclaw/state`），然后把桥配置的 `[[sessions]] harness` 切回
+`lobsterai`；不需要改代码。
 
 ### 5.6 主要风险
 
