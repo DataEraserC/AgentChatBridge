@@ -1,7 +1,8 @@
 //! `acbctl unit doctor` 黑盒测试。
 
+mod common;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,21 +35,11 @@ impl Drop for TempDir {
     }
 }
 
-fn write_executable(path: &Path, content: &str) {
-    fs::write(path, content).expect("write executable");
-    let mut permissions = fs::metadata(path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("chmod executable");
-}
-
 fn base_values(root: &Path, bin: &Path, repo: &Path) -> Vec<(&'static str, String)> {
     fs::create_dir_all(repo.join("deploy")).expect("repo deploy");
     fs::create_dir_all(repo.join("state/opencode")).expect("opencode dir");
     for script in ["start-dsh.sh", "start-drivers.sh", "opencode-serve.sh"] {
-        write_executable(
-            &repo.join("deploy").join(script),
-            "#!/usr/bin/env bash\nexit 0\n",
-        );
+        common::write_script(&repo.join("deploy").join(script), "exit 0\n");
     }
     fs::write(repo.join("config.toml"), "[endpoint]\n").expect("config");
     fs::write(repo.join("deploy/acb.env"), "").expect("env file");
@@ -110,14 +101,13 @@ fn install(root: &Path, values: &[(&str, String)]) -> Output {
 
 fn systemctl_shim(dir: &Path, fragment_base: &str) -> PathBuf {
     let path = dir.join("systemctl");
-    write_executable(
+    common::write_script(
         &path,
         &format!(
-            r#"#!/usr/bin/env bash
-set -euo pipefail
+            r#"set -euo pipefail
 unit="${{!#}}"
 echo "FragmentPath={fragment_base}/$unit"
-"#,
+"#
         ),
     );
     path
@@ -160,7 +150,7 @@ fn doctor_reports_clean_state() {
     let shim = temp.path().join("shim");
     fs::create_dir_all(&bin).expect("bin");
     fs::create_dir_all(&shim).expect("shim");
-    write_executable(&bin.join("acb-bridge"), "#!/usr/bin/env bash\nexit 0\n");
+    common::write_script(&bin.join("acb-bridge"), "exit 0\n");
     let values = base_values(temp.path(), &bin, &repo);
 
     let installed = install(&root, &values);
@@ -192,7 +182,7 @@ fn doctor_reports_sha256_drift() {
     let shim_dir = temp.path().join("shim");
     fs::create_dir_all(&bin).expect("bin");
     fs::create_dir_all(&shim_dir).expect("shim");
-    write_executable(&bin.join("acb-bridge"), "#!/usr/bin/env bash\nexit 0\n");
+    common::write_script(&bin.join("acb-bridge"), "exit 0\n");
     let values = base_values(temp.path(), &bin, &repo);
 
     let installed = install(&root, &values);
@@ -227,7 +217,7 @@ fn doctor_reports_fragment_path_outside_user_dir() {
     let shim_dir = temp.path().join("shim");
     fs::create_dir_all(&bin).expect("bin");
     fs::create_dir_all(&shim_dir).expect("shim");
-    write_executable(&bin.join("acb-bridge"), "#!/usr/bin/env bash\nexit 0\n");
+    common::write_script(&bin.join("acb-bridge"), "exit 0\n");
     let values = base_values(temp.path(), &bin, &repo);
 
     let installed = install(&root, &values);
@@ -278,15 +268,15 @@ fn doctor_systemctl_failure_is_internal_error() {
     let shim_dir = temp.path().join("shim");
     fs::create_dir_all(&bin).expect("bin");
     fs::create_dir_all(&shim_dir).expect("shim");
-    write_executable(&bin.join("acb-bridge"), "#!/usr/bin/env bash\nexit 0\n");
+    common::write_script(&bin.join("acb-bridge"), "exit 0\n");
     let values = base_values(temp.path(), &bin, &repo);
 
     let installed = install(&root, &values);
     assert!(installed.status.success(), "{}", stderr(&installed));
 
-    write_executable(
+    common::write_script(
         &shim_dir.join("systemctl"),
-        "#!/usr/bin/env bash\necho 'systemctl failed' >&2\nexit 1\n",
+        "echo 'systemctl failed' >&2\nexit 1\n",
     );
     let home = temp.path().join("home");
     let high = shim_dir.join("systemctl");

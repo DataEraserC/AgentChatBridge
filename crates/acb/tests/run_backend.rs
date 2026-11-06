@@ -1,7 +1,8 @@
 //! `acbctl run` / `status --mode=run` 黑盒测试。
 
+mod common;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,13 +34,6 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
-}
-
-fn write_executable(path: &Path, content: &str) {
-    fs::write(path, content).expect("write script");
-    let mut permissions = fs::metadata(path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("chmod script");
 }
 
 fn run_acb(values: &[(&str, &str)], extra_env: &[(&str, &str)], args: &[&str]) -> Output {
@@ -109,11 +103,10 @@ fn launcher_75_reloads_pointer_then_78_exits_with_reason() {
     let env_marker = temp.path().join("child-env");
 
     let launcher = bin.join("acb-launcher");
-    write_executable(
+    common::write_script(
         &launcher,
         &format!(
-            r#"#!/usr/bin/env bash
-set -euo pipefail
+            r#"set -euo pipefail
 echo "notify=${{NOTIFY_SOCKET:-none}} watchdog=${{WATCHDOG_USEC:-none}}" > {env_marker}
 count={count}
 n=$(cat "$count" 2>/dev/null || echo 0)
@@ -180,11 +173,10 @@ fn rate_limit_stops_after_three_failures() {
     let config = launcher_config(temp.path(), &state);
     let count = temp.path().join("spawn-count");
 
-    write_executable(
+    common::write_script(
         &bin.join("acb-launcher"),
         &format!(
-            r#"#!/usr/bin/env bash
-set -euo pipefail
+            r#"set -euo pipefail
 count={count}
 n=$(cat "$count" 2>/dev/null || echo 0)
 n=$((n + 1))
@@ -229,11 +221,10 @@ fn sigterm_forwards_to_child_and_reaps() {
     let marker = temp.path().join("child-term");
     let child_pid_file = temp.path().join("child-pid");
 
-    write_executable(
+    common::write_script(
         &bin.join("acb-launcher"),
         &format!(
-            r#"#!/usr/bin/env bash
-set -euo pipefail
+            r#"set -euo pipefail
 echo $$ > {pid_file}
 trap 'echo term > {marker}; exit 0' TERM INT
 while :; do sleep 0.05; done
@@ -329,9 +320,9 @@ fn status_run_ignores_failing_systemctl_shim() {
     )
     .expect("lkg.json");
 
-    write_executable(
+    common::write_script(
         &shim.join("systemctl"),
-        "#!/usr/bin/env bash\necho 'systemctl must not be called' >&2\nexit 42\n",
+        "echo 'systemctl must not be called' >&2\nexit 42\n",
     );
     let path = format!(
         "{}:{}",
@@ -409,10 +400,10 @@ fn launcher_mode_renders_supervisor_toml_from_acb_unit_values() {
     fs::create_dir_all(&repo).expect("repo");
     fs::write(&config_file, "[endpoint]\n").expect("config");
 
-    write_executable(&bin.join("acb-bridge"), "#!/usr/bin/env bash\nexit 0\n");
-    write_executable(
+    common::write_script(&bin.join("acb-bridge"), "exit 0\n");
+    common::write_script(
         &bin.join("acb-launcher"),
-        "#!/usr/bin/env bash\necho 'fake launcher: clean' >&2\nexit 0\n",
+        "echo 'fake launcher: clean' >&2\nexit 0\n",
     );
 
     let log_dir = repo.join("logs");
@@ -463,12 +454,9 @@ fn direct_mode_spawns_bridge() {
     fs::write(&config, "[endpoint]\n").expect("config");
     let marker = temp.path().join("bridge-started");
 
-    write_executable(
+    common::write_script(
         &bin.join("acb-bridge"),
-        &format!(
-            "#!/usr/bin/env bash\necho started > {}\nexit 0\n",
-            shell_path(&marker)
-        ),
+        &format!("echo started > {}\nexit 0\n", shell_path(&marker)),
     );
 
     let output = run_acb(
