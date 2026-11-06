@@ -1,5 +1,7 @@
 //! ACB unit PoC 的黑盒测试：只通过 `acb` 二进制和临时目录验证行为。
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -113,6 +115,34 @@ fn install(root: &Path, values: &[(String, String)]) -> Output {
         &[],
         &["unit", "install", "--root", root_arg.as_str()],
     )
+}
+
+#[test]
+fn shell_path_defaults_to_system_bash_and_is_configurable() {
+    let temp = TempDir::new("shell");
+    let values = base_values(temp.path());
+    let default = run_acb(&values, &[], &["unit", "render", "--print"]);
+    assert!(default.status.success(), "{}", stderr(&default));
+    let text = stdout(&default);
+    assert!(
+        text.contains("ExecStart=/run/current-system/sw/bin/bash "),
+        "{text}"
+    );
+
+    let shell = common::bash_path();
+    let shell_text = shell.to_string_lossy();
+    let custom = run_acb(
+        &values,
+        &[("ACB_UNIT_SHELL", shell_text.as_ref())],
+        &["unit", "render", "--print"],
+    );
+    assert!(custom.status.success(), "{}", stderr(&custom));
+    let text = stdout(&custom);
+    assert!(text.contains(&format!("ExecStart={shell_text} ")), "{text}");
+    assert!(
+        !text.contains("ExecStart=/run/current-system/sw/bin/bash "),
+        "custom shell should replace the default: {text}"
+    );
 }
 
 fn stdout(output: &Output) -> String {

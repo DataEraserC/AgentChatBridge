@@ -13,7 +13,7 @@ Type=simple
 WorkingDirectory=@ACB_UNIT_REPO_DIR@
 Environment=PATH=@ACB_UNIT_PROFILE_DIR@/bin:/run/current-system/sw/bin:/run/wrappers/bin
 EnvironmentFile=-@ACB_UNIT_ENV_FILE@
-ExecStart=/run/current-system/sw/bin/bash @ACB_UNIT_REPO_DIR@/deploy/start-dsh.sh
+ExecStart=@ACB_UNIT_SHELL@ @ACB_UNIT_REPO_DIR@/deploy/start-dsh.sh
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

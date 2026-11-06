@@ -28,6 +28,7 @@ pub fn bash_path() -> PathBuf {
     .clone()
 }
 
+#[allow(dead_code)]
 pub fn write_script(path: &Path, body: &str) {
     let bash = bash_path();
     let content = format!("#!{}\n{}", bash.display(), body.trim_start_matches('\n'));

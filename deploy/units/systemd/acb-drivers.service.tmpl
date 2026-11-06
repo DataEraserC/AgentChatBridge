@@ -12,7 +12,7 @@ StartLimitAction=none
 Type=simple
 WorkingDirectory=@ACB_UNIT_REPO_DIR@/deploy
 Environment=PATH=@ACB_UNIT_PROFILE_DIR@/bin:/run/current-system/sw/bin:/run/wrappers/bin
-ExecStart=/run/current-system/sw/bin/bash @ACB_UNIT_REPO_DIR@/deploy/start-drivers.sh
+ExecStart=@ACB_UNIT_SHELL@ @ACB_UNIT_REPO_DIR@/deploy/start-drivers.sh
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

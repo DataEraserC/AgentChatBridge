@@ -24,6 +24,7 @@ set +a
 : "${ACB_UNIT_LOG_DIR:=$REPO/state/logs}"
 : "${ACB_UNIT_PROFILE_DIR:=/etc/profiles/per-user/$(id -un)}"
 : "${ACB_UNIT_BIN_DIR:=$REPO/result/bin}"
+: "${ACB_UNIT_SHELL:=/run/current-system/sw/bin/bash}"
 : "${ACB_UNIT_CONFIG_FILE:=$REPO/config.toml}"
 : "${ACB_UNIT_ENV_FILE:=$REPO/deploy/acb.env}"
 : "${ACB_UNIT_OPENCODE_DIR:=$REPO/state/opencode-1093015329}"
@@ -36,6 +37,7 @@ UNIT_KEYS=(
   ACB_UNIT_LOG_DIR
   ACB_UNIT_PROFILE_DIR
   ACB_UNIT_BIN_DIR
+  ACB_UNIT_SHELL
   ACB_UNIT_CONFIG_FILE
   ACB_UNIT_ENV_FILE
   ACB_UNIT_OPENCODE_DIR
