@@ -1,7 +1,8 @@
 //! `acbctl profile` 黑盒测试：add/list/switch/gc/seed、原子切换、render/run 解析。
 
+mod common;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,13 +34,6 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
-}
-
-fn write_executable(path: &Path, content: &str) {
-    fs::write(path, content).expect("write executable");
-    let mut permissions = fs::metadata(path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("chmod executable");
 }
 
 fn payload(root: &Path, name: &str) -> PathBuf {
@@ -75,10 +69,7 @@ fn payload(root: &Path, name: &str) -> PathBuf {
     )
     .expect("shared tools");
     for script in ["start-dsh.sh", "start-drivers.sh", "opencode-serve.sh"] {
-        write_executable(
-            &dir.join("deploy").join(script),
-            "#!/usr/bin/env bash\nexit 0\n",
-        );
+        common::write_script(&dir.join("deploy").join(script), "exit 0\n");
     }
     fs::write(
         dir.join("deploy/run/supervisor.toml.tmpl"),
@@ -86,7 +77,7 @@ fn payload(root: &Path, name: &str) -> PathBuf {
     )
     .expect("run template");
     for bin in ["acb-bridge", "acb-launcher", "acbctl"] {
-        write_executable(&dir.join("bin").join(bin), "#!/usr/bin/env bash\nexit 0\n");
+        common::write_script(&dir.join("bin").join(bin), "exit 0\n");
     }
     dir
 }
@@ -393,10 +384,10 @@ fn run_prefers_profile_current_bin() {
     let profile_payload = payload(temp.path(), "run-profile-payload");
     let marker = temp.path().join("launcher-started");
     let repo_marker = temp.path().join("launcher-repo");
-    write_executable(
+    common::write_script(
         &profile_payload.join("bin/acb-launcher"),
         &format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\necho started > {}\necho \"${{ACB_UNIT_REPO_DIR:-none}}\" > {}\nexit 0\n",
+            "set -euo pipefail\necho started > {}\necho \"${{ACB_UNIT_REPO_DIR:-none}}\" > {}\nexit 0\n",
             marker.to_string_lossy(),
             repo_marker.to_string_lossy()
         ),
