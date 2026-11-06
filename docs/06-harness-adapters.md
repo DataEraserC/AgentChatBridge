@@ -56,7 +56,7 @@ API 才退到进程外驱动或 MCP。这条判断写进了 [ADR-0013](adr/0013-
 |---------|--------|----------|------|
 | opencode | 插件（v2：`export default { id, setup(ctx) }`；工具用 `ctx.tool.transform` 注册，模型经 `execute` 调 `tools.X`） | 进程内：`ctx.session.prompt` 排话 + `ctx.session.wait` 等它说完 | 插件型，见 `harnesses/opencode/plugin/`；真机整轮已验（私聊 + 群）；2026-10-31 在 opencode2 2.0.22 上复验：插件加载正常、模型一次答全 25 个工具名 |
 | DSH | MCP（`dsh-mcp-client`，工具名 `mcp__acb__*`） | 进程外：驱动器调 webui HTTP/WS API（`session/prompt` + `session/follow` 等 `turn/end`） | 进程外 + MCP，见 `harnesses/dsh/`；协议层真机已验，模型真回话待配模型 |
-| WorkBuddy | CLI（headless bundle；`--mcp-config` + `--strict-mcp-config`） | 进程外：每轮 spawn `codebuddy-headless.js -p … --output-format stream-json`，`result` 事件/进程退出即结束 | 进程外 + MCP，见 `harnesses/workbuddy/`；协议层已验（17 个用例 + 真实 CLI 未登录探测），模型真回话待登录 |
+| WorkBuddy | CLI（headless bundle；`--mcp-config` + `--strict-mcp-config`） | 进程外：每轮 spawn `codebuddy-headless.js -p … --output-format stream-json`，`result` 事件/进程退出即结束 | 进程外 + MCP，见 `harnesses/workbuddy/`；协议层已验（18 个用例 + 真实 CLI 未登录探测），模型真回话待登录 |
 | LobsterAI | MCP（OpenClaw `mcp.servers`，streamable-http） | 进程外：WS 连 LobsterAI 内置 gateway，`chat.send` + `agent.wait` | 进程外 + MCP，见 `harnesses/lobsterai/`；假 gateway 协议层已验（16 个用例），真实 app/gateway 待启动 |
 | Trae | — | — | 本轮放弃（可行性文档 3.8 的 spike 已经证明稳定 API 没有轮次完成信号） |
 | Codex | 无插件；有 `codex exec` 这类无头入口 | 进程外：每轮起一次 | 大概率进程外 + MCP 补工具面 |
@@ -189,7 +189,7 @@ node harnesses/opencode/probe.mjs --token <接入令牌>
 # 5. LobsterAI 协议层：假桥 + 假 gateway（16 个）
 node --test harnesses/lobsterai/test/*.test.mjs
 
-# 6. WorkBuddy 协议层：假桥 + 假 headless CLI（17 个）
+# 6. WorkBuddy 协议层：假桥 + 假 headless CLI（18 个）
 node --test harnesses/workbuddy/test/*.test.mjs
 ```
 
@@ -600,9 +600,9 @@ dsh 的模型适配器（trae / deepseek-v4.1-flash）有三种写法：标准 J
 
 ### 验过的
 
-- `node --test harnesses/workbuddy/test/*.test.mjs`：17 个用例，覆盖完整一轮
+- `node --test harnesses/workbuddy/test/*.test.mjs`：18 个用例，覆盖完整一轮
   （`turn_start` → spawn → MCP `send_message` → `result` → `turn_end`）、ticket 校验、
-  resume 失败重试、result error、MCP 未连接、超时杀进程、reset 换代次。
+  第二轮 `-r` 复用、resume 失败重试、result error、MCP 未连接、超时杀进程、reset 换代次。
 - 真实 `codebuddy-headless.js` 的未登录探测：MCP 连接、工具名、auth 错误形状、resume 缺失
   形状都按上面的结果被适配器识别。
 
