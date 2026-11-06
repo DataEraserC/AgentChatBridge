@@ -5,8 +5,7 @@ use std::path::Path;
 
 #[test]
 fn deploy_examples_do_not_embed_units_or_export_non_whitelist_values() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/deploy");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/deploy");
     let mut checked = 0;
     for entry in fs::read_dir(&dir).expect("read examples/deploy") {
         let entry = entry.expect("dir entry");
