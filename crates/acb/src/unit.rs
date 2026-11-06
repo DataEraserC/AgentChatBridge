@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +80,8 @@ enum RenderMode {
 struct Manifest {
     version: u32,
     files: BTreeSet<String>,
+    #[serde(default)]
+    hashes: BTreeMap<String, String>,
 }
 
 enum WriteStatus {
@@ -151,9 +153,14 @@ pub fn install_command(args: &[String]) -> Result<ExitCode, String> {
 
     let previous = read_manifest(&root)?;
     let mut current = BTreeSet::new();
+    let mut hashes = BTreeMap::new();
 
     for unit in &units {
         current.insert(unit.name.to_string());
+        hashes.insert(
+            unit.name.to_string(),
+            crate::fsutil::sha256_hex(unit.content.as_bytes()),
+        );
         let target = root.join(unit.name);
         let status = write_if_changed(&target, &unit.content)?;
         println!("{} {}", status.as_str(), unit.name);
@@ -168,6 +175,7 @@ pub fn install_command(args: &[String]) -> Result<ExitCode, String> {
     let manifest = Manifest {
         version: MANIFEST_VERSION,
         files: current,
+        hashes,
     };
     write_manifest_if_changed(&root, &manifest)?;
     print_reload_hint();
@@ -196,6 +204,161 @@ pub fn uninstall_command(args: &[String]) -> Result<ExitCode, String> {
     println!("removed {MANIFEST_NAME}");
     print_reload_hint();
     Ok(ExitCode::SUCCESS)
+}
+
+/// 只读已装文件和 manifest 元数据；不读 env 文件内容。
+pub fn doctor_command(args: &[String]) -> Result<ExitCode, String> {
+    if is_help(args) {
+        print_doctor_help();
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let root = parse_root_arg(args, "doctor")?;
+    let Some(manifest) = read_manifest(&root)? else {
+        println!(
+            "drift: manifest not found: {}",
+            root.join(MANIFEST_NAME).display()
+        );
+        return Ok(ExitCode::from(1));
+    };
+
+    let mut drift = false;
+    for name in &manifest.files {
+        let path = root.join(name);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                println!("drift: {name}: installed file missing");
+                drift = true;
+                continue;
+            }
+            Err(error) => return Err(format!("read {}: {error}", path.display())),
+        };
+
+        match manifest.hashes.get(name) {
+            Some(expected) => {
+                let actual = crate::fsutil::sha256_hex(text.as_bytes());
+                if &actual != expected {
+                    println!(
+                        "drift: {name}: sha256 mismatch (manifest {expected}, installed {actual})"
+                    );
+                    drift = true;
+                }
+            }
+            None => {
+                println!("drift: {name}: manifest has no sha256 record");
+                drift = true;
+            }
+        }
+
+        for line in text.lines() {
+            if let Some(program) = exec_start_program(line) {
+                check_exec_start_program(name, &program, &mut drift);
+            }
+        }
+    }
+
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| "HOME is not set; cannot resolve ~/.config/systemd/user".to_string())?;
+    let user_unit_dir = PathBuf::from(home).join(".config/systemd/user");
+
+    for name in &manifest.files {
+        let output = Command::new("systemctl")
+            .args(["--user", "show", "-p", "FragmentPath", name])
+            .output()
+            .map_err(|error| format!("run systemctl --user show {name}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "systemctl --user show {name} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let fragment = stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("FragmentPath="));
+        match fragment {
+            Some("") => {
+                println!("drift: {name}: empty FragmentPath (unit not loaded)");
+                drift = true;
+            }
+            Some(path) => {
+                let fragment_path = Path::new(path);
+                if !fragment_path.starts_with(&user_unit_dir) {
+                    println!(
+                        "drift: {name}: FragmentPath {path} is outside {}",
+                        user_unit_dir.display()
+                    );
+                    drift = true;
+                }
+            }
+            None => {
+                println!("drift: {name}: systemctl output missing FragmentPath");
+                drift = true;
+            }
+        }
+    }
+
+    if drift {
+        Ok(ExitCode::from(1))
+    } else {
+        println!("ok: {} units verified", manifest.files.len());
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+fn exec_start_program(line: &str) -> Option<String> {
+    let value = line.trim_start().strip_prefix("ExecStart=")?;
+    let mut rest = value.trim();
+    while let Some(first) = rest.chars().next() {
+        if matches!(first, '-' | '@' | '+' | '!') {
+            rest = &rest[first.len_utf8()..];
+        } else {
+            break;
+        }
+    }
+    let token = rest.split_whitespace().next()?;
+    let token = token.trim_matches(|character| character == '"' || character == '\'');
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+fn check_exec_start_program(unit: &str, program: &str, drift: &mut bool) {
+    let path = Path::new(program);
+    if !path.is_absolute() {
+        println!("drift: {unit}: ExecStart program is not absolute: {program}");
+        *drift = true;
+        return;
+    }
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() && is_executable(metadata.permissions()) => {}
+        Ok(metadata) if !metadata.is_file() => {
+            println!("drift: {unit}: ExecStart program is not a file: {program}");
+            *drift = true;
+        }
+        Ok(_) => {
+            println!("drift: {unit}: ExecStart program is not executable: {program}");
+            *drift = true;
+        }
+        Err(error) => {
+            println!("drift: {unit}: ExecStart program missing: {program} ({error})");
+            *drift = true;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(permissions: fs::Permissions) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    permissions.mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_permissions: fs::Permissions) -> bool {
+    true
 }
 
 fn parse_render_args(args: &[String]) -> Result<RenderMode, String> {
@@ -456,6 +619,9 @@ fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
             for name in &manifest.files {
                 validate_unit_name(name)?;
             }
+            for name in manifest.hashes.keys() {
+                validate_unit_name(name)?;
+            }
             Ok(Some(manifest))
         }
     }
@@ -552,4 +718,8 @@ fn print_install_help() {
 
 fn print_uninstall_help() {
     println!("Usage: acbctl unit uninstall --root DIR");
+}
+
+fn print_doctor_help() {
+    println!("Usage: acbctl unit doctor --root DIR");
 }
