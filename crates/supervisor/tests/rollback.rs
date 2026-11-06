@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acb_supervisor::{
-    BuiltinPolicy, Clock, CommandSpec, Config, EXIT_GIVE_UP, EXIT_ROLLBACK, ExitInfo, LkgUpdate,
-    Parts, Policy, PolicySettings, Probe, RollbackMode, RollbackPolicy, Runner, Sleeper, Supervisor,
-    load_config, load_current,
+    BuiltinPolicy, Clock, CommandSpec, Config, EXIT_GIVE_UP, EXIT_ROLLBACK, ExitInfo,
+    GenerationRef, LkgUpdate, Parts, Policy, PolicySettings, Probe, RollbackMode, RollbackPolicy,
+    Runner, Sleeper, Supervisor, load_config, load_current,
 };
 use acb_supervisor_policy::{Decision, DecisionKind, PolicyConfig, Snapshot};
 use serde_json::Value;
@@ -199,6 +199,7 @@ fn config(dir: &std::path::Path, lkg: Option<&str>) -> Config {
     Config {
         program: "/current".to_owned(),
         args: Vec::new(),
+        generation: None,
         lkg: lkg.map(CommandSpec::new),
         health_url: None,
         state_dir: dir.to_string_lossy().into_owned(),
@@ -661,6 +662,11 @@ fn stable_window_promotes_current_to_lkg() {
     let mut config = config(&dir, None);
     config.health_url = Some("http://127.0.0.1:1/healthz".to_owned());
     config.stable_window_secs = 60;
+    config.generation = Some(GenerationRef {
+        id: "gen-1".to_owned(),
+        path: "/nix/store/generation-1".to_owned(),
+        config_sha256: Some("abc123".to_owned()),
+    });
     let mut supervisor = supervisor(
         config,
         Arc::clone(&clock),
@@ -677,6 +683,19 @@ fn stable_window_promotes_current_to_lkg() {
     assert_eq!(
         supervisor.lkg().map(|spec| spec.program.as_str()),
         Some("/current")
+    );
+    let lkg = supervisor.lkg().expect("lkg");
+    let generation = lkg.generation.as_ref().expect("generation ref");
+    assert_eq!(generation.id, "gen-1");
+    assert_eq!(generation.path, "/nix/store/generation-1");
+    assert_eq!(generation.config_sha256.as_deref(), Some("abc123"));
+    let lkg_json: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("lkg.json")).expect("lkg file"))
+            .expect("parse lkg");
+    assert_eq!(lkg_json["command"]["generation"]["id"], "gen-1");
+    assert_eq!(
+        lkg_json["command"]["generation"]["config_sha256"],
+        "abc123"
     );
     assert!(
         audit_events(&supervisor)

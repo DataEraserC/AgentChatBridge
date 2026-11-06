@@ -89,6 +89,7 @@ fn run_acb(values: &[(&str, String)], extra_env: &[(&str, String)], args: &[&str
             command.env_remove(key);
         }
     }
+    command.env_remove("ACB_PROFILE_DIR");
     for (key, value) in values {
         command.env(key, value);
     }
@@ -133,6 +134,10 @@ fn run_doctor(root: &Path, shim: &Path, home: &Path) -> Output {
         &[
             ("PATH", path),
             ("HOME", home.to_string_lossy().into_owned()),
+            (
+                "ACB_PROFILE_DIR",
+                home.join("profile-absent").to_string_lossy().into_owned(),
+            ),
         ],
         &["unit", "doctor", "--root", root.to_str().unwrap()],
     )
@@ -168,6 +173,11 @@ fn doctor_reports_clean_state() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
         stdout(&output).contains("ok: 5 units verified"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains("warn: profile not used"),
         "{}",
         stdout(&output)
     );

@@ -49,6 +49,7 @@ fn run_acb(values: &[(&str, &str)], extra_env: &[(&str, &str)], args: &[&str]) -
             command.env_remove(key);
         }
     }
+    command.env_remove("ACB_PROFILE_DIR");
     for (key, value) in values {
         command.env(key, value);
     }
@@ -248,6 +249,7 @@ while :; do sleep 0.05; done
             parent.env_remove(key);
         }
     }
+    parent.env_remove("ACB_PROFILE_DIR");
     parent
         .env("ACB_UNIT_BIN_DIR", &bin)
         .args([

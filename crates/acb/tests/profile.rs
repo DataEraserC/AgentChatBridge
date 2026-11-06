@@ -1,0 +1,470 @@
+//! `acbctl profile` 黑盒测试：add/list/switch/gc/seed、原子切换、render/run 解析。
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new(label: &str) -> Self {
+        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "acbctl-profile-{label}-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create temp dir");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn write_executable(path: &Path, content: &str) {
+    fs::write(path, content).expect("write executable");
+    let mut permissions = fs::metadata(path).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("chmod executable");
+}
+
+fn payload(root: &Path, name: &str) -> PathBuf {
+    let dir = root.join(format!("payload-{name}"));
+    fs::create_dir_all(dir.join("bin")).expect("bin");
+    fs::create_dir_all(dir.join("harnesses")).expect("harnesses");
+    fs::create_dir_all(dir.join("deploy/units/systemd")).expect("templates");
+    fs::create_dir_all(dir.join("deploy/run")).expect("run templates");
+    for script in ["start-dsh.sh", "start-drivers.sh", "opencode-serve.sh"] {
+        write_executable(
+            &dir.join("deploy").join(script),
+            "#!/usr/bin/env bash\nexit 0\n",
+        );
+    }
+    fs::write(
+        dir.join("deploy/run/supervisor.toml.tmpl"),
+        "[supervisor]\nprogram = \"@ACB_UNIT_BIN_DIR@/acb-bridge\"\n",
+    )
+    .expect("run template");
+    for bin in ["acb-bridge", "acb-launcher", "acbctl"] {
+        write_executable(&dir.join("bin").join(bin), "#!/usr/bin/env bash\nexit 0\n");
+    }
+    dir
+}
+
+fn run_acb(env: &[(&str, String)], args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_acbctl"));
+    for (key, _) in std::env::vars() {
+        if key.starts_with("ACB_UNIT_") {
+            command.env_remove(key);
+        }
+    }
+    command.env_remove("ACB_PROFILE_DIR");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.args(args);
+    command.output().expect("spawn acbctl")
+}
+
+fn profile_env(profile: &Path, config: &Path) -> Vec<(&'static str, String)> {
+    vec![
+        ("ACB_PROFILE_DIR", profile.to_string_lossy().into_owned()),
+        (
+            "ACB_UNIT_CONFIG_FILE",
+            config.to_string_lossy().into_owned(),
+        ),
+    ]
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn add(profile: &Path, config: &Path, source: &Path, label: &str) -> String {
+    let env = profile_env(profile, config);
+    let output = run_acb(
+        &env,
+        &["profile", "add", source.to_str().unwrap(), "--label", label],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    text.trim()
+        .strip_prefix("added ")
+        .expect("add output")
+        .to_string()
+}
+
+fn generation_dir(profile: &Path, id: &str) -> PathBuf {
+    profile.join("generations").join(id)
+}
+
+fn read_link(profile: &Path) -> PathBuf {
+    fs::read_link(profile.join("current")).expect("current symlink")
+}
+
+#[test]
+fn add_list_switch_and_gc() {
+    let temp = TempDir::new("core");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+
+    let first = add(&profile, &config, &payload(temp.path(), "first"), "first");
+    let meta: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(generation_dir(&profile, &first).join("meta.json")).expect("meta"),
+    )
+    .expect("parse meta");
+    assert_eq!(meta["schema"], 1);
+    assert_eq!(meta["label"], "first");
+    assert_eq!(meta["source"]["kind"], "path");
+    assert!(meta["config"]["sha256"].as_str().unwrap().len() == 64);
+
+    let env = profile_env(&profile, &config);
+    let listed = run_acb(&env, &["profile", "list"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    assert!(
+        stdout(&listed).contains("label=first"),
+        "{}",
+        stdout(&listed)
+    );
+    assert!(
+        stdout(&listed).contains("source=path:"),
+        "{}",
+        stdout(&listed)
+    );
+
+    let current = run_acb(&env, &["profile", "current"]);
+    assert_eq!(current.status.code(), Some(1), "{}", stderr(&current));
+
+    let switched = run_acb(&env, &["profile", "switch", "first"]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+    assert_eq!(
+        read_link(&profile),
+        PathBuf::from("generations").join(&first).join("root")
+    );
+    let current = run_acb(&env, &["profile", "current"]);
+    assert!(current.status.success(), "{}", stderr(&current));
+    assert!(stdout(&current).contains(&format!("id: {first}")));
+
+    // 三个 generation，切到最老的 first，gc 保留最新 1 个 + current。
+    std::thread::sleep(Duration::from_millis(20));
+    let second = add(&profile, &config, &payload(temp.path(), "second"), "second");
+    std::thread::sleep(Duration::from_millis(20));
+    let third = add(&profile, &config, &payload(temp.path(), "third"), "third");
+
+    let gc = run_acb(&env, &["profile", "gc", "--keep", "1"]);
+    assert!(gc.status.success(), "{}", stderr(&gc));
+    assert!(
+        !generation_dir(&profile, &second).exists(),
+        "middle generation should be removed"
+    );
+    assert!(
+        generation_dir(&profile, &first).exists(),
+        "current must be kept"
+    );
+    assert!(
+        generation_dir(&profile, &third).exists(),
+        "newest must be kept"
+    );
+    assert!(stdout(&gc).contains(&format!("removed {second}")));
+}
+
+#[test]
+fn failed_switch_keeps_old_current() {
+    let temp = TempDir::new("switch-fail");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let first = add(&profile, &config, &payload(temp.path(), "first"), "first");
+    let env = profile_env(&profile, &config);
+    let switched = run_acb(&env, &["profile", "switch", "first"]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+    let old = read_link(&profile);
+
+    let failed = run_acb(&env, &["profile", "switch", "missing-generation"]);
+    assert!(!failed.status.success());
+    assert_eq!(read_link(&profile), old);
+    assert!(generation_dir(&profile, &first).exists());
+}
+
+#[test]
+fn seed_is_idempotent_and_sets_first_current() {
+    let temp = TempDir::new("seed");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let first_payload = payload(temp.path(), "seed-first");
+    let second_payload = payload(temp.path(), "seed-second");
+    let env = profile_env(&profile, &config);
+
+    let first = run_acb(&env, &["profile", "seed", first_payload.to_str().unwrap()]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    let seeded_id = stdout(&first)
+        .trim()
+        .strip_prefix("seeded ")
+        .expect("seed output")
+        .split_whitespace()
+        .next()
+        .expect("seed id")
+        .to_string();
+    assert_eq!(
+        read_link(&profile),
+        PathBuf::from("generations").join(&seeded_id).join("root")
+    );
+
+    let second = run_acb(&env, &["profile", "seed", second_payload.to_str().unwrap()]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert!(
+        stdout(&second).contains("seed skipped"),
+        "{}",
+        stdout(&second)
+    );
+    let generations = fs::read_dir(profile.join("generations"))
+        .expect("generations")
+        .count();
+    assert_eq!(generations, 1, "seed must not add a second generation");
+}
+
+#[test]
+fn render_falls_back_without_profile() {
+    let temp = TempDir::new("render-fallback");
+    let profile = temp.path().join("profile-absent");
+    let fallback_bin = temp.path().join("fallback-bin");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&fallback_bin).expect("fallback bin");
+    fs::create_dir_all(&repo).expect("repo");
+
+    let mut env = unit_values(&repo, &fallback_bin, &temp.path().join("config.toml"));
+    env.push(("ACB_PROFILE_DIR", profile.to_string_lossy().into_owned()));
+    let output = run_acb(&env, &["unit", "render", "--print"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains(&format!("{}/acb-bridge", fallback_bin.display())),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&format!("{}/current/bin", profile.display())),
+        "{text}"
+    );
+}
+
+#[test]
+fn render_prefers_profile_current_bin() {
+    let temp = TempDir::new("render-profile");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let profile_payload = payload(temp.path(), "profile-payload");
+    let fallback_bin = temp.path().join("fallback-bin");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&fallback_bin).expect("fallback bin");
+    fs::create_dir_all(&repo).expect("repo");
+    let id = add(&profile, &config, &profile_payload, "main");
+    let env = profile_env(&profile, &config);
+    let switched = run_acb(&env, &["profile", "switch", &id]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+
+    let env = unit_values(&repo, &fallback_bin, &config);
+    let mut env = env;
+    env.push(("ACB_PROFILE_DIR", profile.to_string_lossy().into_owned()));
+    let output = run_acb(&env, &["unit", "render", "--print"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains(&format!("{}/current/bin/acb-bridge", profile.display())),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&format!("{}/acb-bridge", fallback_bin.display())),
+        "{text}"
+    );
+}
+
+#[test]
+fn run_prefers_profile_current_bin() {
+    let temp = TempDir::new("run-profile");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    let supervisor = temp.path().join("supervisor.toml");
+    let state = temp.path().join("state");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    fs::write(
+        &supervisor,
+        format!(
+            "[supervisor]\nprogram = \"/fake/bridge\"\nstate_dir = \"{}\"\n",
+            state.display()
+        ),
+    )
+    .expect("supervisor config");
+    let profile_payload = payload(temp.path(), "run-profile-payload");
+    let marker = temp.path().join("launcher-started");
+    write_executable(
+        &profile_payload.join("bin/acb-launcher"),
+        &format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\necho started > {}\nexit 0\n",
+            marker.to_string_lossy()
+        ),
+    );
+    let id = add(&profile, &config, &profile_payload, "main");
+    let env = profile_env(&profile, &config);
+    let switched = run_acb(&env, &["profile", "switch", &id]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+
+    // 故意把回退 BIN_DIR 指向不存在的路径；profile 活跃时必须用 current/bin。
+    let env = vec![
+        ("ACB_PROFILE_DIR", profile.to_string_lossy().into_owned()),
+        (
+            "ACB_UNIT_BIN_DIR",
+            temp.path().join("wrong-bin").to_string_lossy().into_owned(),
+        ),
+    ];
+    let output = run_acb(
+        &env,
+        &[
+            "run",
+            "--mode=launcher",
+            "--config",
+            supervisor.to_str().unwrap(),
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(marker.exists(), "profile launcher was not spawned");
+}
+
+#[test]
+fn gc_keeps_current_and_lkg_generation() {
+    let temp = TempDir::new("gc-lkg");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let first = add(&profile, &config, &payload(temp.path(), "first"), "first");
+    std::thread::sleep(Duration::from_millis(20));
+    let second = add(&profile, &config, &payload(temp.path(), "second"), "second");
+    std::thread::sleep(Duration::from_millis(20));
+    let third = add(&profile, &config, &payload(temp.path(), "third"), "third");
+    let env = profile_env(&profile, &config);
+    let switched = run_acb(&env, &["profile", "switch", &first]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+
+    let state = temp.path().join("state/supervisor");
+    fs::create_dir_all(&state).expect("state");
+    fs::write(
+        state.join("lkg.json"),
+        format!(
+            r#"{{"command":{{"program":"/fake","args":[],"generation":{{"id":"{second}","path":"/fake/root","config_sha256":"abc"}}}},"promoted_at_ms":1}}"#
+        ),
+    )
+    .expect("lkg.json");
+
+    let gc = run_acb(&env, &["profile", "gc", "--keep", "0"]);
+    assert!(gc.status.success(), "{}", stderr(&gc));
+    assert!(
+        generation_dir(&profile, &first).exists(),
+        "current must be kept"
+    );
+    assert!(
+        generation_dir(&profile, &second).exists(),
+        "lkg must be kept"
+    );
+    assert!(
+        !generation_dir(&profile, &third).exists(),
+        "other must be removed"
+    );
+}
+
+#[test]
+fn run_renders_supervisor_generation_section_from_profile() {
+    let temp = TempDir::new("run-generation");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    let state = temp.path().join("state");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let profile_payload = payload(temp.path(), "generation");
+    let id = add(&profile, &config, &profile_payload, "main");
+    let profile_env_values = profile_env(&profile, &config);
+    let switched = run_acb(&profile_env_values, &["profile", "switch", &id]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+    let meta: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(generation_dir(&profile, &id).join("meta.json")).expect("meta"),
+    )
+    .expect("parse meta");
+    let config_sha = meta["config"]["sha256"].as_str().expect("config sha");
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let mut env = unit_values(&repo, &temp.path().join("fallback-bin"), &config);
+    env.push(("ACB_PROFILE_DIR", profile.to_string_lossy().into_owned()));
+    let output = run_acb(
+        &env,
+        &[
+            "run",
+            "--mode=launcher",
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let supervisor = acb_supervisor::load_config(&state.join("supervisor.toml"))
+        .expect("load rendered supervisor.toml");
+    let generation = supervisor.generation.expect("generation section");
+    assert_eq!(generation.id, id);
+    assert_eq!(
+        generation.path,
+        fs::canonicalize(&profile_payload)
+            .expect("canonical payload")
+            .to_string_lossy()
+    );
+    assert_eq!(generation.config_sha256.as_deref(), Some(config_sha));
+}
+
+fn unit_values(repo: &Path, bin: &Path, config: &Path) -> Vec<(&'static str, String)> {
+    vec![
+        ("ACB_UNIT_REPO_DIR", repo.to_string_lossy().into_owned()),
+        (
+            "ACB_UNIT_LOG_DIR",
+            repo.join("logs").to_string_lossy().into_owned(),
+        ),
+        (
+            "ACB_UNIT_PROFILE_DIR",
+            "/etc/profiles/per-user/test".to_string(),
+        ),
+        ("ACB_UNIT_BIN_DIR", bin.to_string_lossy().into_owned()),
+        (
+            "ACB_UNIT_CONFIG_FILE",
+            config.to_string_lossy().into_owned(),
+        ),
+        (
+            "ACB_UNIT_ENV_FILE",
+            repo.join("deploy/acb.env").to_string_lossy().into_owned(),
+        ),
+        (
+            "ACB_UNIT_OPENCODE_DIR",
+            repo.join("state/opencode").to_string_lossy().into_owned(),
+        ),
+        ("ACB_UNIT_CONSOLE_PORT", "3100".to_string()),
+        ("ACB_UNIT_OPENCODE_PORT", "4097".to_string()),
+        ("ACB_UNIT_AUTOSTART", "0".to_string()),
+    ]
+}
