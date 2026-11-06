@@ -1,8 +1,9 @@
 # Harness 适配器可行性：Trae / WorkBuddy / LobsterAI
 
 > 状态：定稿（2026-11-06，含三条补充调查）；同日追加实现状态：**WorkBuddy** 与
-> **LobsterAI** 的适配器协议层已落地，**Trae 本轮不做**。协议层通过不等于端到端通过，
-> 未验证项见第 7 节。
+> **LobsterAI** 的适配器协议层已落地，**Trae 本轮不做**。**LobsterAI 因 app 未运行/未登录
+> 暂时搁置（代码保留），当前以 WorkBuddy instance 1 顶替它的槽位。** 协议层通过不等于
+> 端到端通过，未验证项见第 7 节。
 > 证据等级：**已验证** = 本机命令输出、仓库/安装包文件内容或官方文档直接支持；**推断** = 由已验证事实推导、尚未端到端跑通；**未验证** = 只有间接线索或没有证据。
 > 范围：只判断「能否为 ACB 写 harness 适配器」，不判断 ACB 的平台侧（QQ/KOOK 等）适配器。
 
@@ -11,8 +12,8 @@
 | 产品 | 结论分级 | 一句话 | 主要卡点 | 粗估工作量 |
 |---|---|---|---|---|
 | **Trae** | **需要额外桥梁（高风险）；本轮不做** | VSIX/扩展宿主已验证可用；工具面和 prompt 注入有公开接法，但稳定 API 没有轮次完成信号 | 扩展 API 缺 `ChatSession`/轮次事件；私有 socket/DB 需逆向 | 工具面约 0.3× dsh；完整适配约 2–4× dsh，且不确定性高 |
-| **WorkBuddy** | **可直接做；协议层已实现** | CLI 四件事齐全：`-p` + `stream-json` + `--mcp-config` + `--append-system-prompt` + 会话续接 | 厂商 CLI 版本漂移、登录/权限、GUI 与 CLI 会话分离；缺 full bundle 是上游 WorkBuddy 发行物，不是 Nix 裁剪 | 约 1× dsh；约 1.5–2× opencode |
-| **LobsterAI** | **可直接做；协议层已实现（假 gateway）** | 内置 OpenClaw 运行时，gateway/CLI/MCP/ACP/agents 全部开放，且有 `openclaw.user.json` 覆盖层 | 应用状态目录/网关 token 的发现、应用生命周期、锁定 OpenClaw 版本；额度必须走 LobsterAI gateway/token proxy，裸 OpenClaw 不走 | 约 1.2–1.5× dsh；约 2× opencode |
+| **WorkBuddy** | **可直接做；协议层已实现；支持多实例** | CLI 四件事齐全：`-p` + `stream-json` + `--mcp-config` + `--append-system-prompt` + 会话续接；实例用独立 HOME/state/端口/会话前缀隔离 | 厂商 CLI 版本漂移、登录/权限、GUI 与 CLI 会话分离；缺 full bundle 是上游 WorkBuddy 发行物，不是 Nix 裁剪 | 约 1× dsh；约 1.5–2× opencode |
+| **LobsterAI** | **可直接做；协议层已实现（假 gateway）；app 未登录暂时搁置** | 内置 OpenClaw 运行时，gateway/CLI/MCP/ACP/agents 全部开放，且有 `openclaw.user.json` 覆盖层 | 应用状态目录/网关 token 的发现、应用生命周期、锁定 OpenClaw 版本；额度必须走 LobsterAI gateway/token proxy，裸 OpenClaw 不走 | 约 1.2–1.5× dsh；约 2× opencode |
 
 **一句话选型**：要最快闭环先做 WorkBuddy；要用 LobsterAI 免费额度/长期复用先做 LobsterAI（必须接 app 的 gateway/token proxy，不是裸 OpenClaw）；Trae 本轮不做。
 
@@ -238,11 +239,13 @@ ACB 现有两套接入的权威说明在 [`docs/06-harness-adapters.md`](../06-h
 
 四件事都有公开、可验证的接法；本地 CLI 的 `--help`、`--version`、`mcp list` 已经跑通。端到端模型轮次没有在本机跑（需要登录/额度），所以「可直接做」的剩余风险是**认证与厂商 CLI 行为**，不是扩展面缺失。缺 full TUI bundle 是上游 WorkBuddy 发行物的取舍，不是 Nix 打包问题；适配器用 headless bundle 即可，不需要修包。
 
-**实现状态（2026-11-06）**：`harnesses/workbuddy/` 已完成进程外驱动 + MCP 工具面。
-`node --test harnesses/workbuddy/test/*.test.mjs` 18 个用例覆盖完整一轮、ticket、
-第二轮 `-r` 复用、resume 重试、result error、MCP 未连接、超时和 reset。另用真实
-`codebuddy-headless.js`（未登录）验证了 `--mcp-config` 的 MCP 连接与工具名、auth 错误
-形状、resume 缺失形状；真实模型回话与额度仍待登录。
+**实现状态（2026-11-06）**：`harnesses/workbuddy/` 已完成进程外驱动 + MCP 工具面 +
+多实例。`node --test harnesses/workbuddy/test/*.test.mjs` 22 个用例覆盖完整一轮、ticket、
+第二轮 `-r` 复用、resume 重试、result error、MCP 未连接、超时、reset，以及两个实例并行
+（MCP 端口、state/HOME、会话 id 前缀互不共享）。另用真实 `codebuddy-headless.js`（未登录）
+验证了 `--mcp-config` 的 MCP 连接与工具名、auth 错误形状、resume 成功/缺失形状，并确认
+`HOME` + `CODEBUDDY_CONFIG_DIR` 指向实例目录时 CLI 的 `local_storage`/`user-state` 落在
+实例目录内；真实模型回话与额度仍待登录。
 
 ### 4.6 主要风险
 
@@ -299,6 +302,41 @@ ACB 现有两套接入的权威说明在 [`docs/06-harness-adapters.md`](../06-h
 ```bash
 node --test harnesses/workbuddy/test/*.test.mjs
 ```
+
+### 4.10 多实例与内置工具风险（2026-11-06）
+
+**多实例映射**：
+
+| 维度 | 配置 | 效果 |
+|---|---|---|
+| 实例标识 | `ACB_WB_INSTANCE=workbuddy-1` | 会话 id 前缀 `acb-workbuddy-1-…` |
+| 桥 harness | `ACB_HARNESS=workbuddy-1` | 桥串行键；与实例名不一致时配置阶段拒绝 |
+| state 根 | `ACB_WB_STATE_DIR=.../workbuddy-1` | 子进程 `HOME`/`USERPROFILE`、`CODEBUDDY_CONFIG_DIR`、`CODEBUDDY_DATA_ROOT` 全指向它 |
+| MCP 端口 | `ACB_MCP_PORT=7718` | 回调 URL `http://127.0.0.1:7718/mcp`，实例间不共用 |
+| 会话 id | `acb-<instance>-<acb-session>` | `-r` 只续本实例自己的会话 |
+
+具体样例：`harnesses/workbuddy/instance-1.env.example`（7718）与
+`instance-2.env.example`（7719）；桥侧样例在 `acb-config.example.toml` 里演示
+「用 workbuddy-1 顶替 lobsterai 槽位」和切回方式（只改 `harnesses`/`harness`，不改代码）。
+
+**已验证（假 CLI）**：两个实例并行一轮，MCP URL 不同、state/HOME 不同、会话 id 前缀不同，
+第二轮各自 `-r` 不串；见 `harnesses/workbuddy/test/multi-instance.test.mjs`。
+
+**已验证（真实 CLI，未登录）**：`HOME=<实例 state>`、`CODEBUDDY_CONFIG_DIR=<实例>/.codebuddy`
+时，CLI 的 `local_storage/`、`user-state.json` 写在实例目录内，不再落到真实 `~/.codebuddy`。
+**未验证**：如果某个 CLI 版本把登录 token 放进 OS 钥匙串，`HOME` 隔离可能只隔离会话记录，
+不隔离登录态；这要等真实登录后确认。
+
+**内置工具关不掉的取舍**（`--tools ""` 实测无效，`--allowedTools` 只是预批准不是限制）：
+
+| 方案 | 取舍 |
+|---|---|
+| 允许清单 | 最干净，但依赖 CLI 提供真正的工具白名单/禁用语义；当前 `--tools` 不满足 |
+| 钩子（hooks） | 能在工具执行前 fail closed，真正阻止 Bash/WebFetch 绕桥；代价是维护 hook、跟版本绑定、自身故障必须拒绝 |
+| 审计告警 | 从 stream-json 事件发现内置工具调用并告警；只能发现不能阻止，适合做兜底 |
+
+建议短期「钩子拦截 + 审计兜底」，允许清单等上游稳定语义；本轮不实施。详见
+`docs/06-harness-adapters.md` 的 WorkBuddy「内置工具关不掉」一节。
 
 ---
 
@@ -381,6 +419,10 @@ OpenClaw gateway WS 客户端。`node --test harnesses/lobsterai/test/*.test.mjs
 缺 gateway-port/token。真实 app 没运行、`~/.config/LobsterAI` 为空，所以真实 gateway
 握手、额度和模型回话仍未见（见第 7 节）。
 
+**当前处置（2026-11-06）**：**LobsterAI 暂时搁置，代码保留、不回退**；桥上槽位由
+WorkBuddy instance 1 顶替。LobsterAI 登录并生成 state 后，把桥配置的
+`[[sessions]] harness` 切回 `lobsterai` 即可启用，不需要改代码。
+
 ### 5.6 主要风险
 
 - **应用每次 sync 重新生成 `openclaw.json`**：必须走 `openclaw.user.json` 覆盖，或确认 `openclaw mcp add` 的写入位置不会被覆盖。
@@ -415,7 +457,7 @@ OpenClaw gateway WS 客户端。`node --test harnesses/lobsterai/test/*.test.mjs
 - **次直接**：把 `OPENCLAW_STATE_DIR` 指到 `<userData>/openclaw/state`，跑 `openclaw agent --session-key ... --json`；但必须保证 gateway 在运行、`LOBSTER_PROXY_TOKEN` 在环境里，且 agent 的默认模型是 `lobsterai-server/*`。
 - **裸 OpenClaw / 自带 provider 的 `openclaw agent`**：**不走 LobsterAI 额度**。
 
-**结论分级**：**能走额度（机制已验证；实际扣费未验证）**。风险是 app 生命周期、token 读取、状态目录发现；不是扩展面缺失。
+**结论分级**：**能走额度（机制已验证；实际扣费未验证）**。风险是 app 生命周期、token 读取、状态目录发现；不是扩展面缺失。当前 **app 未运行/未登录，暂时搁置**，以 WorkBuddy instance 1 顶替。
 
 ---
 
@@ -425,6 +467,7 @@ OpenClaw gateway WS 客户端。`node --test harnesses/lobsterai/test/*.test.mjs
 
 - **默认工程顺序（未知最少）**：1. WorkBuddy → 2. LobsterAI。Trae 本轮不做。
 - **如果目标是 LobsterAI 免费额度**：1. LobsterAI（接 app gateway/token proxy）→ 2. WorkBuddy。Trae 本轮不做。
+- **当前执行状态（2026-11-06）**：LobsterAI 待 app 登录后启用；先用 WorkBuddy instance 1 顶替它的槽位，登录后切回只改配置。
 
 ### 理由
 
@@ -489,6 +532,9 @@ OpenClaw gateway WS 客户端。`node --test harnesses/lobsterai/test/*.test.mjs
 - `-r` 指向不存在会话：只发 `{"type":"error","error":"No conversation found…"}`，
   没有 result，exit 0；适配器识别并改用 `--session-id` 重建。
 - `--tools ""` 不能关闭内置工具（Bash/Edit/Read/WebFetch 仍在 init 的 `tools` 里）。
+- 多实例：两个假 CLI 实例并行，MCP URL、state/HOME、会话 id 前缀、`-r` 续接都不共享。
+- 真实 CLI（未登录）在 `HOME` + `CODEBUDDY_CONFIG_DIR` 指向实例目录时，`local_storage/`
+  和 `user-state.json` 落在实例目录内。
 
 **仍未验证**：
 
@@ -496,6 +542,8 @@ OpenClaw gateway WS 客户端。`node --test harnesses/lobsterai/test/*.test.mjs
 - 真实 ticket 共享的完整端到端（当前只有假 CLI + 假桥覆盖）。
 - `--permission-mode` / `--allowedTools` 在真实 MCP 工具调用下是否完全不弹权限。
 - CLI 与 GUI 是否共享会话/agent 配置；目前看是 `~/.codebuddy` vs `~/.workbuddy` 两套状态。
+- 多实例在真实登录态下：如果 CLI 把 token 放进 OS 钥匙串，`HOME` 隔离可能只隔离
+  会话记录、不隔离登录态。
 - `--serve` / `--acp` 外部驱动的鉴权、事件 schema、会话映射。
 - `CODEBUDDY_FORCE_HEADLESS_BUNDLE`/`CODEBUDDY_FORCE_LITE_WB_BUNDLE` 在宿主 sidecar 里的实际行为。
 - 本包没有 full bundle 是**上游 WorkBuddy 发行物**，不是 Nix 裁剪；这条已经核对清楚，
@@ -503,6 +551,10 @@ OpenClaw gateway WS 客户端。`node --test harnesses/lobsterai/test/*.test.mjs
   `@tencent-ai/codebuddy-code`，不是 `@genie/agent-cli`。
 
 ### LobsterAI
+
+**当前处置（2026-11-06）**：app 未运行、未登录，**暂时搁置（代码保留，不回退）**；桥上槽位
+由 WorkBuddy instance 1 顶替。登录并生成 `<userData>/openclaw/state` 后，把桥配置的
+`[[sessions]] harness` 切回 `lobsterai` 即可启用，不需要改代码。
 
 **已从「未验证」转「协议层已验证」（2026-11-06，假 gateway）**：
 
@@ -539,6 +591,8 @@ OpenClaw gateway WS 客户端。`node --test harnesses/lobsterai/test/*.test.mjs
 - [`harnesses/shared/mini-ws.mjs`](../../harnesses/shared/mini-ws.mjs) — 手写 WebSocket 客户端（LobsterAI gateway 用）。
 - [`harnesses/dsh/src/mcp-http-server.mjs`](../../harnesses/dsh/src/mcp-http-server.mjs)、[`mcp-server.mjs`](../../harnesses/dsh/src/mcp-server.mjs) — 可复用 MCP server。
 - [`harnesses/workbuddy/src/driver.mjs`](../../harnesses/workbuddy/src/driver.mjs)、[`config.mjs`](../../harnesses/workbuddy/src/config.mjs)、[`codebuddy-client.mjs`](../../harnesses/workbuddy/src/codebuddy-client.mjs) — WorkBuddy 适配器实现。
+- [`harnesses/workbuddy/test/multi-instance.test.mjs`](../../harnesses/workbuddy/test/multi-instance.test.mjs) — 两实例并行、端口/state/会话前缀隔离。
+- [`harnesses/workbuddy/instance-1.env.example`](../../harnesses/workbuddy/instance-1.env.example)、[`instance-2.env.example`](../../harnesses/workbuddy/instance-2.env.example) — 多实例配置样例。
 - [`harnesses/lobsterai/src/driver.mjs`](../../harnesses/lobsterai/src/driver.mjs)、[`config.mjs`](../../harnesses/lobsterai/src/config.mjs)、[`openclaw-gateway.mjs`](../../harnesses/lobsterai/src/openclaw-gateway.mjs) — LobsterAI 适配器实现。
 
 ### Trae
