@@ -54,12 +54,14 @@ const PORT_KEYS: &[&str] = &["ACB_UNIT_CONSOLE_PORT", "ACB_UNIT_OPENCODE_PORT"];
 const OPTIONAL_KEYS: &[&str] = &[
     "ACB_UNIT_REPO_DIR",
     "ACB_UNIT_BIN_DIR",
+    "ACB_UNIT_SHELL",
     "ACB_UNIT_CONSOLE_PORT",
     "ACB_UNIT_OPENCODE_PORT",
     "ACB_UNIT_AUTOSTART",
 ];
 
 const KEY_DEFAULTS: &[(&str, &str)] = &[
+    ("ACB_UNIT_SHELL", "/run/current-system/sw/bin/bash"),
     ("ACB_UNIT_CONSOLE_PORT", "3100"),
     ("ACB_UNIT_OPENCODE_PORT", "4097"),
     ("ACB_UNIT_AUTOSTART", "0"),
@@ -548,7 +550,9 @@ fn validate_value(key: &str, value: &str) -> Result<(), String> {
     if value.contains('\n') || value.contains('\r') || value.contains('\0') {
         return Err(format!("{key} must not contain line breaks or NUL"));
     }
-    if (key.ends_with("_DIR") || key.ends_with("_FILE")) && !value.starts_with('/') {
+    if (key.ends_with("_DIR") || key.ends_with("_FILE") || key == "ACB_UNIT_SHELL")
+        && !value.starts_with('/')
+    {
         return Err(format!("{key} must be an absolute path: {value}"));
     }
     Ok(())

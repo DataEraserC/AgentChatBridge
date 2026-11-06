@@ -56,6 +56,10 @@ fn base_values(root: &Path, bin: &Path, repo: &Path) -> Vec<(&'static str, Strin
         ),
         ("ACB_UNIT_BIN_DIR", bin.to_string_lossy().into_owned()),
         (
+            "ACB_UNIT_SHELL",
+            common::bash_path().to_string_lossy().into_owned(),
+        ),
+        (
             "ACB_UNIT_CONFIG_FILE",
             repo.join("config.toml").to_string_lossy().into_owned(),
         ),
