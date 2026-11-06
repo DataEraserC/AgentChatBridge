@@ -1,6 +1,7 @@
 //! ACB 运维 CLI：`acbctl unit` / `run` / `status`。
 
 mod fsutil;
+mod profile;
 mod run;
 mod status;
 mod unit;
@@ -55,6 +56,7 @@ fn run() -> Result<ExitCode, String> {
         }
         "run" => run::command(&args.collect::<Vec<_>>()),
         "status" => status::command(&args.collect::<Vec<_>>()),
+        "profile" => profile::command(&args.collect::<Vec<_>>()),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -72,6 +74,7 @@ Usage:
   acbctl unit doctor --root DIR
   acbctl run --mode=launcher|direct [--config PATH] [--state-dir DIR]
   acbctl status --mode=run [--state-dir DIR] [--config PATH] [--health-url URL]
+  acbctl profile list|current|add|switch|gc|seed
   acbctl unit --help
 
 Values are read only from whitelisted ACB_UNIT_* environment variables.",
