@@ -1,0 +1,10 @@
+{
+  "name": "acb-workbuddy",
+  "private": true,
+  "type": "module",
+  "description": "acb 的 WorkBuddy 适配器：每轮驱动 codebuddy-headless.js，工具走 MCP",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "probe": "node src/driver.mjs"
+  }
+}

@@ -1,0 +1,19 @@
+# 桥这一侧的配置片段：一个 harness + 一个会话。
+# 完整可运行配置见仓库根的 config.example.toml；这里只列 WorkBuddy 相关的部分。
+
+[[harnesses]]
+id = "workbuddy"
+name = "WorkBuddy"
+
+[[sessions]]
+id = "workbuddy-main"
+harness = "workbuddy"
+# 接入令牌：和适配器进程的 ACB_TOKEN 一致。
+token = "换成你自己的一长串随机字符"
+# 人格卡 id 必须指向文件里已定义的人格。
+persona = "main"
+
+# 订阅的房间按你的平台配置填；下面只是形状示例。
+[[sessions.subscriptions]]
+connection = "qq"
+path = ["group", "123456789"]
