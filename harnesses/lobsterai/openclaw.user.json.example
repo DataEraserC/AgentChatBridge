@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "acb": {
+        "url": "http://127.0.0.1:7717/mcp",
+        "transport": "streamable-http",
+        "enabled": true,
+        "connectionTimeoutMs": 5000,
+        "requestTimeoutMs": 60000
+      }
+    }
+  }
+}
