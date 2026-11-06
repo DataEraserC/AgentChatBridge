@@ -221,7 +221,8 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
     let bin_dir = crate::profile::resolve_bin_dir(fallback_bin.as_deref())?;
     let fallback_repo = env_path("ACB_UNIT_REPO_DIR");
     let repo_dir = crate::profile::resolve_repo_dir_optional(fallback_repo.as_deref())?;
-    let generation = crate::profile::active_meta()?.map(|meta| meta.generation_ref());
+    let profile_root = crate::profile::root();
+    let generation = crate::profile::active_meta()?.map(|meta| meta.generation_ref(&profile_root));
 
     match arguments.mode {
         Mode::Launcher => {
@@ -318,10 +319,17 @@ fn render_supervisor_config(state_dir: &Path) -> Result<String, String> {
     );
     let generation_section = match crate::profile::active_meta()? {
         Some(meta) => {
+            // supervisor 只消费 generation 的 payload 路径，不感知 store/copy 策略。
+            // 把 program 钉在 payload 上，LKG 提升/回退才真正指向那一代的字节。
+            let payload = meta.payload_path(&crate::profile::root());
+            values.insert(
+                "ACB_UNIT_BIN_DIR".to_string(),
+                payload.join("bin").to_string_lossy().into_owned(),
+            );
             let mut section = format!(
                 "\n[supervisor.generation]\nid = \"{}\"\npath = \"{}\"\n",
                 toml_escape(&meta.id),
-                toml_escape(&meta.source.path)
+                toml_escape(&payload.to_string_lossy())
             );
             if let Some(config) = &meta.config {
                 section.push_str(&format!(
