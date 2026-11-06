@@ -1519,6 +1519,7 @@ connection = "qq"
 account = "10002"
 
 [[grants.rules]]
+id = "fixture-grant-11"
 subject = "system_admin"
 place = "private"
 scope = "room"

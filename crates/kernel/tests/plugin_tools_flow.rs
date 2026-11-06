@@ -122,6 +122,7 @@ fn bot_admin_config(with_plugin: bool) -> String {
 accounts = [{{ connection = "qq", account = "10001" }}]
 
 [[grants.rules]]
+id = "fixture-grant-9"
 subject = "bot_admin"
 place = "private"
 scope = "subscribed"

@@ -130,8 +130,8 @@ pub struct LoadedConfig {
     /// 合并后的 TOML（无分片时就是 base 原文）。供 memory-steward / process-provider
     /// 这类独立解析器复用同一份生效文本。
     pub merged_toml: String,
-    /// 是否在不同层里出现了完全相同的 `[[grants.rules]]` 条目。
-    /// 只用于启动摘要提示；规则仍然按原样追加，不降级为错误、不自动去重。
+    /// 是否在不同层里出现了内容相同、但 id 不同的 `[[grants.rules]]` 条目。
+    /// 同 id 已在 `GrantsConfig::validate` 里硬失败；这里只给启动摘要提示。
     pub duplicate_rules: bool,
 }
 
@@ -3016,16 +3016,27 @@ fn load_single(base_path: &Path, text: &str) -> Result<LoadedConfig, ConfigError
 }
 
 fn duplicate_rules_across_files(files: &[ParsedConfigFile]) -> bool {
-    let mut seen: Vec<(usize, &toml::Value)> = Vec::new();
+    // 同 id 已在 GrantsConfig::validate 里硬失败；这里只提示“内容相同但 id 不同”
+    // 的重复，避免把 warning 当成第二套身份对账。
+    fn payload(rule: &toml::Value) -> toml::Value {
+        let mut value = rule.clone();
+        if let Some(table) = value.as_table_mut() {
+            table.remove("id");
+        }
+        value
+    }
+
+    let mut seen: Vec<(usize, toml::Value)> = Vec::new();
     for (index, file) in files.iter().enumerate() {
         for rule in &file.rules {
+            let payload = payload(rule);
             if seen
                 .iter()
-                .any(|(seen_index, seen_rule)| *seen_index != index && seen_rule == &rule)
+                .any(|(seen_index, seen_rule)| *seen_index != index && seen_rule == &payload)
             {
                 return true;
             }
-            seen.push((index, rule));
+            seen.push((index, payload));
         }
     }
     false
@@ -3159,7 +3170,7 @@ fn merge_grants(acc: &mut toml::Table, value: toml::Value) {
         .expect("checked above");
     for (key, value) in next {
         match key.as_str() {
-            "rules" => merge_entry(current, key, value),
+            "rules" | "deny" => merge_entry(current, key, value),
             "rooms" | "accounts" => merge_keyed_table(current, key, value),
             _ => {
                 current.insert(key, value);
@@ -3634,7 +3645,7 @@ mod tests {
     #[test]
     fn grants_parse_and_reject_unknown_fields() {
         let text = format!(
-            "{}\n[grants]\n[grants.bot_admin]\naccounts = [{{ connection = \"qq\", account = \"10001\" }}]\n[grants.system_admin]\nconnection = \"qq\"\naccount = \"10002\"\n[[grants.rules]]\nsubject = \"bot_admin\"\nplace = \"private\"\nscope = \"subscribed\"\ncapability = [\"room_read\", \"room_write\", \"plugin\"]\n",
+            "{}\n[grants]\n[grants.bot_admin]\naccounts = [{{ connection = \"qq\", account = \"10001\" }}]\n[grants.system_admin]\nconnection = \"qq\"\naccount = \"10002\"\n[[grants.rules]]\nid = \"fixture-grant-5\"\nsubject = \"bot_admin\"\nplace = \"private\"\nscope = \"subscribed\"\ncapability = [\"room_read\", \"room_write\", \"plugin\"]\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         let config = Config::parse(&text).expect("合法 grants");
@@ -3652,7 +3663,7 @@ mod tests {
         );
 
         let bad_target = format!(
-            "{}\n[[grants.rules]]\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ntarget = \"qq:group/1\"\ncapability = [\"room_read\"]\n",
+            "{}\n[[grants.rules]]\nid = \"fixture-grant-6\"\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ntarget = \"qq:group/1\"\ncapability = [\"room_read\"]\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         assert!(
@@ -3661,7 +3672,7 @@ mod tests {
         );
 
         let typed_target = format!(
-            "{}\n[[grants.rules]]\nsubject = \"user\"\nplace = \"group\"\nscope = \"room\"\ntarget = {{ kind = \"room\", id = \"qq:group/1\" }}\ncapability = [\"room_read\"]\n",
+            "{}\n[[grants.rules]]\nid = \"fixture-grant-7\"\nsubject = \"user\"\nplace = \"group\"\nscope = \"room\"\ntarget = {{ kind = \"room\", id = \"qq:group/1\" }}\ncapability = [\"room_read\"]\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         assert!(
@@ -3670,7 +3681,7 @@ mod tests {
         );
 
         let bad_capability = format!(
-            "{}\n[[grants.rules]]\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ncapability = [\"root\"]\n",
+            "{}\n[[grants.rules]]\nid = \"fixture-grant-8\"\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ncapability = [\"root\"]\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         assert!(Config::parse(&bad_capability).is_err(), "能力枚举必须封闭");
@@ -4605,6 +4616,7 @@ mod tests {
 [grants]
 
 [[grants.rules]]
+id = "fixture-grant-1"
 subject = "user"
 place = "group"
 scope = "subscribed"
@@ -4630,6 +4642,7 @@ url = "ws://127.0.0.1:3002"
 account = "10002"
 
 [[grants.rules]]
+id = "fixture-grant-2"
 subject = "user"
 place = "group"
 scope = "subscribed"
@@ -4696,9 +4709,10 @@ approval_route = ["qq:group/456"]
     }
 
     #[test]
-    fn drop_in_identical_rules_across_layers_set_warning_flag() {
+    fn drop_in_duplicate_rule_id_fails() {
         let duplicate_rule = r#"
 [[grants.rules]]
+id = "fixture-grant-1"
 subject = "user"
 place = "group"
 scope = "subscribed"
@@ -4709,15 +4723,18 @@ capability = ["room_read"]
             &drop_in_base(),
             &[("10-same-rule.toml", duplicate_rule)],
         );
-        let loaded = loaded.expect("分片应能加载");
-        assert_eq!(loaded.config.grants.rules.len(), 2, "规则仍然追加");
-        assert!(loaded.duplicate_rules, "跨层相同规则应置告警标记");
+        let error = loaded.expect_err("重复 rule id 必须拒绝");
+        assert!(
+            error.to_string().contains("duplicate grant rule id"),
+            "{error}"
+        );
     }
 
     #[test]
     fn drop_in_different_rules_do_not_set_warning_flag() {
         let unique_rule = r#"
 [[grants.rules]]
+id = "fixture-grant-4"
 subject = "user"
 place = "group"
 scope = "subscribed"

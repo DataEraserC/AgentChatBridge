@@ -16,6 +16,7 @@ pub mod notice;
 pub mod outbound;
 pub mod plugin;
 pub mod plugin_meta;
+pub mod policy;
 pub mod query;
 pub mod relay;
 pub mod render;
@@ -76,6 +77,7 @@ pub use plugin::{
     WakeContext, WakeProvider, default_delivery_plan,
 };
 pub use plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetadata, PluginSource};
+pub use policy::{CorePolicy, Policy, PolicyError};
 pub use relay::{FileRelay, RelayError};
 pub use route_worker::RouteWorker;
 pub use storage::{

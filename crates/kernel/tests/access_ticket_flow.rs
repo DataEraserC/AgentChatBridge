@@ -177,7 +177,8 @@ fn config() -> &'static str {
         approval_route = ["qq:private/admin"]
 
         [[grants.rules]]
-        subject = "user"
+                id = "fixture-grant-12"
+                subject = "user"
         place = "group"
         scope = "connection"
         target = { kind = "connection", id = "qq" }
@@ -665,7 +666,7 @@ fn session_cooldown_rejects_the_next_request() {
 
 fn config_without_request_rule() -> String {
     config().replace(
-        "        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"connection\"\n        target = { kind = \"connection\", id = \"qq\" }\n        capability = [\"access_request\"]\n",
+        "        [[grants.rules]]\n                id = \"fixture-grant-12\"\n                subject = \"user\"\n        place = \"group\"\n        scope = \"connection\"\n        target = { kind = \"connection\", id = \"qq\" }\n        capability = [\"access_request\"]\n",
         "",
     )
 }
@@ -1051,7 +1052,7 @@ fn mixed_target_kinds_are_refused_before_a_ticket_exists() {
 #[test]
 fn critical_runs_directly_when_a_rule_grants_it() {
     let text = format!(
-        "{}\n[[grants.rules]]\nsubject = \"user\"\nplace = \"group\"\nscope = \"connection\"\ntarget = {{ kind = \"connection\", id = \"qq\" }}\ncapability = [\"connection_read\", \"critical\"]\n",
+        "{}\n[[grants.rules]]\nid = \"fixture-grant-14\"\nsubject = \"user\"\nplace = \"group\"\nscope = \"connection\"\ntarget = {{ kind = \"connection\", id = \"qq\" }}\ncapability = [\"connection_read\", \"critical\"]\n",
         config()
     );
     let (mut bridge, _sends, calls) = bridge_with_calls(&text);
@@ -1092,7 +1093,7 @@ fn critical_runs_directly_when_a_rule_grants_it() {
 #[test]
 fn unverified_op_stays_ticket_only_even_when_rules_grant_critical() {
     let text = format!(
-        "{}\n[[grants.rules]]\nsubject = \"user\"\nplace = \"group\"\nscope = \"connection\"\ntarget = {{ kind = \"connection\", id = \"qq\" }}\ncapability = [\"connection_read\", \"platform\", \"destructive\", \"critical\"]\n",
+        "{}\n[[grants.rules]]\nid = \"fixture-grant-15\"\nsubject = \"user\"\nplace = \"group\"\nscope = \"connection\"\ntarget = {{ kind = \"connection\", id = \"qq\" }}\ncapability = [\"connection_read\", \"platform\", \"destructive\", \"critical\"]\n",
         config()
     );
     let (mut bridge, _sends, calls) = bridge_with_calls(&text);
@@ -1130,13 +1131,13 @@ fn unverified_op_stays_ticket_only_even_when_rules_grant_critical() {
 #[test]
 fn config_can_grant_critical_but_not_account_secret() {
     let allowed = format!(
-        "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"connection\"\n        target = {{ kind = \"connection\", id = \"qq\" }}\n        capability = [\"critical\"]\n",
+        "{}\n        [[grants.rules]]\n                id = \"fixture-grant-16\"\n                subject = \"user\"\n        place = \"group\"\n        scope = \"connection\"\n        target = {{ kind = \"connection\", id = \"qq\" }}\n        capability = [\"critical\"]\n",
         config()
     );
     Config::parse(&allowed).expect("critical 允许被规则显式授予");
 
     let text = format!(
-        "{}\n        [[grants.rules]]\n        subject = \"user\"\n        place = \"group\"\n        scope = \"subscribed\"\n        capability = [\"account_secret\"]\n",
+        "{}\n        [[grants.rules]]\n                id = \"fixture-grant-17\"\n                subject = \"user\"\n        place = \"group\"\n        scope = \"subscribed\"\n        capability = [\"account_secret\"]\n",
         config()
     );
     let error = Config::parse(&text).expect_err("account_secret 仍只能走票据");
