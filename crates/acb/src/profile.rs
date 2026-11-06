@@ -157,6 +157,28 @@ pub(crate) fn resolve_bin_dir(fallback: Option<&Path>) -> Result<PathBuf, String
     }
 }
 
+/// scripts/harnesses 的根：profile 活跃时用 profile/current，否则用传入回退值。
+pub(crate) fn resolve_repo_dir(fallback: Option<&Path>) -> Result<PathBuf, String> {
+    match status() {
+        Status::Active { root, .. } => Ok(root.join("current")),
+        Status::Missing { .. } => fallback.map(Path::to_path_buf).ok_or_else(|| {
+            "missing ACB_UNIT_REPO_DIR and no active ACB profile (profile/current not found)"
+                .to_string()
+        }),
+        Status::Broken { detail, .. } => Err(format!("ACB profile current is broken: {detail}")),
+    }
+}
+
+pub(crate) fn resolve_repo_dir_optional(
+    fallback: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
+    match status() {
+        Status::Active { root, .. } => Ok(Some(root.join("current"))),
+        Status::Missing { .. } => Ok(fallback.map(Path::to_path_buf)),
+        Status::Broken { detail, .. } => Err(format!("ACB profile current is broken: {detail}")),
+    }
+}
+
 pub(crate) fn active_meta() -> Result<Option<Meta>, String> {
     match status() {
         Status::Missing { .. } => Ok(None),
@@ -464,6 +486,11 @@ fn validate_payload(source: &Path) -> Result<(), String> {
         "deploy/start-drivers.sh",
         "deploy/opencode-serve.sh",
         "deploy/run/supervisor.toml.tmpl",
+        "harnesses/dsh/src/driver.mjs",
+        "harnesses/dsh/dsh-mcp.patch.yml",
+        "harnesses/opencode/plugin/index.js",
+        "harnesses/opencode/plugin/acb-wire.mjs",
+        "harnesses/shared/tools.mjs",
     ];
     let mut missing = Vec::new();
     for relative in dirs {

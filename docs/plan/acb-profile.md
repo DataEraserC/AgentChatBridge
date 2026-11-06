@@ -64,9 +64,13 @@ acbctl profile seed <path> [--profile-dir DIR]
 - `current`：有 current 退出 0，无 current/损坏退出 1。
 - `add`：校验产物布局，创建 generation，写 `meta.json`，不自动 switch。
   校验项：`bin/`、`harnesses/`、`deploy/start-dsh.sh`、`deploy/start-drivers.sh`、
-  `deploy/opencode-serve.sh`、`deploy/run/supervisor.toml.tmpl`、`deploy/units/systemd/`。
-  不强制每个 bin 文件名都存在
+  `deploy/opencode-serve.sh`、`deploy/run/supervisor.toml.tmpl`、`deploy/units/systemd/`、
+  `harnesses/dsh/src/driver.mjs`、`harnesses/dsh/dsh-mcp.patch.yml`、
+  `harnesses/opencode/plugin/index.js`、`harnesses/opencode/plugin/acb-wire.mjs`、
+  `harnesses/shared/tools.mjs`。不强制每个 bin 文件名都存在
   （`acb-drivers` / `acb-issue-service` 尚未全部产出）。
+  插件必须保持原仓库的相对结构：`harnesses/opencode/plugin/index.js` 通过
+  `../../shared/tools.mjs` 引用 `harnesses/shared/tools.mjs`，不能只单独拷插件目录。
 - `switch`：只改 `current` 软链；先校验 generation 的 `root` 存在，再在 profile 根目录创建
   临时软链并 `rename` 到 `current`。失败只删临时软链，旧 `current` 保持有效。
 - `gc`：默认 `--keep 5`；保留最新 N 个 generation + current + 兄弟目录
@@ -77,11 +81,16 @@ acbctl profile seed <path> [--profile-dir DIR]
 
 ## 4. 与现有契约衔接
 
-- `unit render` 与 `acbctl run` 解析二进制时，优先用 `profile/current/bin`；profile
-  不存在时回退到现有 `ACB_UNIT_BIN_DIR`。两者都没有才报错。
-- `ACB_UNIT_BIN_DIR` 从必填改为可选；profile 活跃时 `unit render` 生成的
-  `ExecStart` 指向 `<profile>/current/bin/...`，切换 generation 后下次启动自然跟随。
-- `acbctl run --mode=launcher` 渲染 `supervisor.toml` 时，profile 活跃则追加：
+- `unit render` 与 `acbctl run` 解析路径时，优先用 `profile/current/`：
+  - `profile/current/bin` 提供 bridge/launcher/acbctl 等二进制；
+  - `profile/current/deploy/*.sh` 提供启动脚本；
+  - `profile/current/harnesses/` 提供 dsh/opencode 插件与共享代码，目录结构必须与原仓库一致。
+- `ACB_UNIT_REPO_DIR` 从必填改为可选；profile 不存在时才回退到它（开发覆盖/回退路径）。
+  `ACB_UNIT_BIN_DIR` 同理。
+- `unit render` 生成的 `WorkingDirectory`、`ExecStart` 脚本路径全部指向
+  `<profile>/current/...`；切换 generation 后下次启动自然跟随。
+- `acbctl run` 也使用同一解析结果，并把 `ACB_UNIT_REPO_DIR=<profile>/current` 传给子进程；
+  launcher 模式渲染 `supervisor.toml` 时，profile 活跃则追加：
 
 ```toml
 [supervisor.generation]
@@ -92,8 +101,9 @@ config_sha256 = "..."
 
 - supervisor 的 `CommandSpec` 增加可选 `generation` 字段，`current.json` / `lkg.json`
   原样携带 id、path、配置摘要。旧 JSON 无该字段仍可读。
-- `acbctl unit doctor`：profile 缺失打印 `warn: profile not used (...)`，不改变退出码；
-  `current` 存在但目标损坏算 drift，退出 1。doctor 仍不读取 env 文件内容。
+- `acbctl unit doctor`：profile 缺失打印
+  `warn: profile not used; using fallback ACB_UNIT_REPO_DIR/ACB_UNIT_BIN_DIR paths`，
+  不改变退出码；`current` 存在但目标损坏算 drift，退出 1。doctor 仍不读取 env 文件内容。
 
 ## 5. 边界
 
