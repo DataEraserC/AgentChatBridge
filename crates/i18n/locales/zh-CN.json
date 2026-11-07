@@ -303,6 +303,7 @@
   "bridge.main.system_admin_configured": "已配置系统管理员：连接 {connection} 账号 {account}；私信/控制台常驻，群内不自动提权。",
   "bridge.main.notifications_enabled": "带外通知已启用（topic 来源：{source}；值不打印）",
   "bridge.main.notifications_disabled": "带外通知未启动（{error}）",
+  "bridge.main.notifications_check_failed": "带外通知已启用，但通知进程不可用：{error}",
   "bridge.main.endpoint_listening": "接入点已监听 {listen}",
   "bridge.main.endpoint_stopped": "接入点停了：{error}",
   "bridge.main.file_relay_disabled": "没有配 [file_relay]，本机文件路径原样透传",

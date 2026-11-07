@@ -159,6 +159,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     if options.check_only {
+        // 通知配了却找不到子进程，线上就是静默降级；--check 必须能拦住。
+        // 这里只查路径，不 spawn（check 不应产生副作用）。
+        if config
+            .notifications
+            .as_ref()
+            .filter(|notifications| notifications.active())
+            .is_some()
+        {
+            ProcessNotifier::preflight().map_err(|error| {
+                acb_i18n::t!("bridge.main.notifications_check_failed", error = error)
+            })?;
+        }
         println!("{}", acb_i18n::t!("bridge.main.check_ok"));
         return Ok(ExitCode::SUCCESS);
     }
@@ -874,10 +886,7 @@ fn print_summary(
     let secret_entries = secrets.entries();
     println!(
         "{}",
-        acb_i18n::t!(
-            "bridge.main.secrets_count",
-            count = secret_entries.len()
-        )
+        acb_i18n::t!("bridge.main.secrets_count", count = secret_entries.len())
     );
     for entry in &secret_entries {
         println!(
