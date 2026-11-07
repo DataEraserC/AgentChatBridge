@@ -88,7 +88,7 @@ health_url = "http://127.0.0.1:@ACB_UNIT_CONSOLE_PORT@/healthz"
 
 **launcher 已经是一个常驻的、单组件的进程监管者**，并且升级链、LKG、75/78 都围绕这一个组件成立。它缺的不是“常驻”，而是**组件表、进程组、每组件策略和预设装载**。
 
-另有一个要改的结构点：**当前 launcher 是从 payload 的 `bin/` 启动的**。`acbctl unit install` 的 `ACB_UNIT_LAUNCHER_BIN` 默认从 `bin_dir` 派生，而 `resolve_bin_dir` 优先解析到 `profile/current/bin`（`crates/acb/src/unit.rs:539-549`、`crates/acb/src/profile.rs:209-217`）。这等于把“监管者”放进了它要监管的 payload：每次换代都跟着换监管者，也就必须重启监管者。第七轮要做的就是把这件事拆开。
+另一个已经落地的结构点（**A-8 已实现**）：unit 的 `ExecStart` 不再从 payload 的 `profile/current/bin` 派生，而是指向**静态安装的 acbl**（`ACB_UNIT_ACBL_PREFIX` 默认 `/usr/local` → `$prefix/bin/acb-launcher`；落在 profile/generations 内的显式路径会被拒绝）。`acbctl unit install` 只渲染 `share/acb/units/` 里的模板。
 
 ---
 
@@ -135,7 +135,7 @@ acbl 是唯一的常驻者；bridge 与预设组件都在它的进程树里。**
 
 | 场景 | 来源 | 入口路径 | 更新方式 |
 |---|---|---|---|
-| **NixOS** | nix-config 提供 acbl 包与 unit | `/run/current-system/sw/bin/acb-launcher`（或模块生成的固定路径） | `nixos-rebuild switch`；随系统升级，低频 |
+| **NixOS** | 本仓库 flake 的 `acbl` package（nix-config 以 input 引用，§2.5.7）；unit 由 nix-config 生成 | `/run/current-system/sw/bin/acb-launcher`（稳定入口，不写 store 路径） | `nixos-rebuild switch`；随系统升级，低频 |
 | 非 NixOS + 有 nix | 本仓库 flake / `nix profile` | `~/.nix-profile/bin/acb-launcher` | `nix profile upgrade` |
 | 非 NixOS + 无 nix | cargo 构建 | `cargo build --release` 后复制到 `/usr/local/bin/acb-launcher` | 人工替换 + 重启 acbl |
 | 非 NixOS + 无 nix | 预编译 `tar.gz`（gnu 或 musl，C-9） | 解包到 `/opt/acbl`；入口是 `/opt/acbl/bin/acb-launcher` | 解包新 tar.gz + 重启 acbl（规格见 §2.5） |
@@ -165,13 +165,18 @@ payload 只包含会迭代的内容：
 
 **迁移提示（从现有部署切到新结构）**：先安装 acbl，把 unit 的 `ACB_UNIT_LAUNCHER_BIN` 指到静态入口，再从 payload 里移除 acbl 二进制。过渡期可以保留一代“什么都带”的 payload，但 unit 必须已经指向外部 acbl。
 
-### 2.5 安装包规格（C-9，待交付）
+### 2.5 安装包规格（C-9）
 
-**状态：规格已出，实现未开始。** 只产出 `tar.gz`，没有 deb / rpm / apk / Windows 包；服务注册由安装脚本或 `acbctl` 完成，不再有包管理器 `postinst` 兜底。
+**状态：nix 包已实现（§2.5.7）；非 nix 的 `tar.gz` 规格已出，实现未开始。** 分发分两条路，不能混用：
+
+- **nix 环境**：本仓库 flake 产出 `acbl` 与 `acb-payload` 两个 package，nix-config 以 flake input 引用，**不产出 `tar.gz`**（§2.5.7）。
+- **非 nix 环境**：只产出 `tar.gz`，没有 deb / rpm / apk / Windows 包；服务注册由安装脚本或 `acbctl` 完成，不再有包管理器 `postinst` 兜底。
+
+两条路共用同一份 workspace 构建，但工件形态与安装方式不同：nix 包由 store 管理生命周期，`tar.gz` 由安装脚本管理。
 
 #### 2.5.1 制品清单
 
-只出两个制品，文件名必须带 target triple，避免用户下错：
+非 nix 环境只出两个 `tar.gz` 制品，文件名必须带 target triple，避免用户下错：
 
 | 制品 | 链接方式 | 面向 |
 |---|---|---|
@@ -202,7 +207,7 @@ payload 只包含会迭代的内容：
 tar.gz 可重定位，默认用户级不写 `/usr`、不建系统用户；`--scope system` 时可选创建 `acb` 系统用户与空的 `/var/lib/acb`：
 
 ```text
-acbl/                       # 解包后的目录名；target triple 只出现在文件名里
+acbl-x86_64-unknown-linux-{gnu,musl}/
   bin/acb-launcher  bin/acb-supervisor  bin/acbctl
   share/acb/units/          # unit 模板（供 acbctl unit install 渲染）
   share/acb/presets/        # 预设清单与脚本
@@ -211,13 +216,13 @@ acbl/                       # 解包后的目录名；target triple 只出现在
   README.md  LICENSE
 ```
 
-推荐安装到 `/opt/acbl`（系统级）或 `~/.local/opt/acbl`（用户级）：解包到目标父目录后，归档里的 `acbl/` 即为前缀。
+推荐安装到 `/opt/acbl`（系统级）或 `~/.local/opt/acbl`（用户级）：解包到目标父目录后，归档里的 `acbl-x86_64-unknown-linux-<triple>/` 即为前缀。
 
 ```sh
 # 系统级
 sha256sum -c SHA256SUMS
 sudo tar -xzf acbl-x86_64-unknown-linux-musl.tar.gz -C /opt
-sudo /opt/acbl/install.sh --prefix /opt/acbl --scope system --autostart 0
+sudo /opt/acbl/install.sh --prefix /opt/acbl --scope system --with-install-section 0
 
 # 用户级：把 -C /opt 换成 ~/.local/opt，--scope system 换成 user
 ```
@@ -226,12 +231,16 @@ sudo /opt/acbl/install.sh --prefix /opt/acbl --scope system --autostart 0
 
 1. 校验前缀与目标架构（gnu / musl 选错时给出明确提示，不静默继续）；
 2. 把 `bin/` 与 `share/acb/` 放到位；
-3. 调 `acbctl unit install --scope user|system --autostart 0|1 --root <unit-dir>`，由 `acbctl` **渲染** `share/acb/units/` 里的模板，而不是直接复制模板；
+3. 调 `acbctl unit install --scope user|system --with-install-section 0|1 --root <unit-dir>`，由 `acbctl` **渲染** `share/acb/units/` 里的模板，而不是直接复制模板；
 4. 打印后续步骤（配置、密钥、`profile seed`、启动命令），**不执行它们**。
 
 - **unit 文件从哪来**：模板随 tar.gz 分发在 `share/acb/units/`，最终 unit 由 `acbctl unit install` 渲染。没有包管理器，就没有 `postinst`；`install.sh` 与手工执行 `acbctl unit install` 等价。
-- **是否 enable / start**：只有显式 `--autostart 1` 才写 `[Install]` 并执行 `systemctl enable`；默认只写文件 + `daemon-reload`，不启动。三种启动方式的选择权仍归部署者（§4.3）。
+- **是否 enable / start**：`acbctl unit install` 只渲染并落盘 unit，**不执行 `systemctl enable` / `daemon-reload`**（保持 installer 不触碰服务状态）。`--with-install-section 1` 决定是否渲染 `[Install]` 段；enable 由部署者显式执行：
+  - user scope：`systemctl --user daemon-reload && systemctl --user enable --now acb-launcher-user.service`
+  - system scope：`sudo systemctl daemon-reload && sudo systemctl enable --now acb-launcher.service`
+  默认（不传或 `0`）只写文件，不 enable、不 start。三种启动方式的选择权仍归部署者（§4.3）。
 - **unit 必须是 `KillMode=process`**（§4.7.1），否则 `systemctl stop` 会连带杀掉 bridge。
+- **A-8 实现说明**：`--with-install-section` 取代原先名不副实的 `--autostart`；`--scope user|system` 决定 stack target 的 `WantedBy`。升级 acbl 同样不重启服务。
 
 #### 2.5.4 升级与卸载：状态目录永不删除
 
@@ -261,12 +270,57 @@ sudo /opt/acbl/install.sh --prefix /opt/acbl --scope system --autostart 0
 #### 2.5.6 依赖与交付顺序
 
 ```text
-A-8（unit 入口指向静态 acbl） → B-12（契约 v1 + payload 校验收窄，已完成） → C-9（打包实现与发布）
+A-8（unit 入口指向静态 acbl） → B-12（契约 v1 + payload 校验收窄） → C-9（打包实现与发布）
 ```
 
-- 规格可先出（本节），**实现被 A-8 阻塞（B-12 已实现）**：unit 仍指向 `profile/current/bin` 时，安装出的 unit 会把 `ExecStart` 指回 payload；契约文件已由 B-12 落地，发布说明可直接引用 `contract` / `min_acbl` 区间。
-- C-9 还依赖 2.5.2 的构建矩阵定案（gnu 基线、musl 动态 bridge）与 2.5.5 的边界评审通过。
+- **A-8 已实现**；B-12（契约 v1 + payload 校验收窄）已合入；nix 包（§2.5.7）已实现。
+- 剩余 C-9 工作：非 nix 的 `tar.gz` 构建矩阵（gnu 基线、musl 动态 bridge）与 §2.5.5 的边界评审。
 - 发布物必须附：版本号、target triple、链接方式、最低 glibc 基线、支持的 `contract` 区间、SHA256 校验和。
+
+#### 2.5.7 nix 包（NixOS 主路径）
+
+nix 环境不走 `tar.gz`。本仓库 flake 直接产出两个 package，nix-config 以 flake input 引用：
+
+| package | 内容 | 服务谁 |
+|---|---|---|
+| `acbl` | `bin/acb-launcher`、`bin/acb-supervisor`、`bin/acbctl`、`share/acb/units/`（unit 模板 + `acb-launcher.service` 静态样例） | 静态 acbl 入口，独立于 payload |
+| `acb-payload`（别名 `payload`） | `bin/acb-bridge`、`harnesses/`、`deploy/start-drivers.sh`、`acb-contract.json` | `acbctl profile seed/add` 的 payload |
+
+`acbl` 严格只含 acbl 侧内容；bridge / harnesses / drivers 一律不进 `acbl`，它们属于 `acb-payload`。
+
+```sh
+nix build .#acbl
+nix build .#acb-payload
+```
+
+nix-config 引用方式（input 形式，取 `acbl` package）：
+
+```nix
+{
+  inputs.acb.url = "github:<owner>/<repo>/<ref>";
+
+  # 在模块里：
+  # environment.systemPackages = [ inputs.acb.packages.${pkgs.system}.acbl ];
+}
+```
+
+- **unit 的 `ExecStart` 必须写 `/run/current-system/sw/bin/acb-launcher`，不写 `/nix/store/...`。** NixOS 上 `/usr/local` 不可写，`acbctl unit install` 的默认前缀（`/usr/local/bin`）只适用于普通 Linux；NixOS 的 unit 由 nix-config 模块生成，指向 `environment.systemPackages` 暴露的稳定路径。
+- **为什么不写 store 路径**：store 路径带 hash，acbl 每次升级都会变；把它写进 unit，等于每次升级都要改 unit 并重启服务，违背 §2.4 的静态入口约定。稳定路径让 unit 与 acbl 版本解耦。
+- `acbl` 里的 `acb-launcher.service` 是普通 Linux 静态样例（`/usr/local/bin`），NixOS 不直接使用；NixOS 用模块生成的 unit，仍必须是 `KillMode=process`（§4.7.1）。
+- `acb-payload` 的口径与 B-12 的 `validate_payload` 一致，`acb-contract.json` 随包产出在 payload 根，不能再依赖 nix-config 手工补齐。
+
+**两条路各自服务谁：**
+
+| 路径 | 面向 | 生命周期 |
+|---|---|---|
+| nix 包（本节） | NixOS；以及已有 nix 的非 NixOS 主机（flake input / `nix profile`） | 由 store 与系统/ profile 管理，随 `switch` / `upgrade` 更新 |
+| `tar.gz`（§2.5.1–2.5.3） | 没有 nix 的 Debian / Ubuntu / Fedora / RHEL / Alpine 等 | 由 `install.sh` 解包覆盖，人工控制更新 |
+
+同一份源码共用 workspace 构建，但两条路的产物形态与安装方式不同，不能把一个环境的工件搬到另一个环境使用。
+
+**nix 构建不跑测试的取舍（`doCheck = false`）**：nix 包用 release profile 构建，而 workspace 里多个 crate 的 dev-dependency 以 `features = ["test-fixtures"]` 引用 `acb-kernel`；release 下 `cargo check/test` 会把这个 feature 打开，命中 `crates/kernel/src/config.rs` 的守卫 `#[cfg(all(feature = "test-fixtures", not(debug_assertions)))]`。集成测试链接的是 lib，`cfg(test)` 对它不生效，只能以「release + feature」编译 lib，于是触发 `compile_error!`。因此 nix 构建只负责产出二进制，测试由本地/ CI 的 `cargo test`（debug profile）承担。
+
+> **待办（切换后的结构性改动，本次不实现）**：把 fixture 入口迁到独立的测试支持 crate，让生产 crate 永不依赖 `test-fixtures`。之后该守卫才能只针对「生产构建误开 feature」这一种情况，而不是被正常的集成测试触发。
 
 ---
 
@@ -286,7 +340,7 @@ A-8（unit 入口指向静态 acbl） → B-12（契约 v1 + payload 校验收�
 | G10 | 预设脚本里仍有 nix 默认路径 | `opencode-serve.sh:16,25`；`start-drivers.sh:17` | 预设脚本（默认值/参数化） | 非 NixOS |
 | G11 | 启动 acbl 的默认方式未定 | 文档/部署层 | 安装器参数（§4.3 三种并列） | 全组合 |
 | G12 | 组件表只在启动时读一次 | launcher 启动即 `load_config`（`main.rs:35-41`） | launcher（按 §4.6 做按钮热加载，**不做自动**） | 全组合 |
-| G13 | unit 默认把 launcher 指向 `profile/current/bin` | `ACB_UNIT_LAUNCHER_BIN` 默认从 `bin_dir` 派生（`unit.rs:539-549`） | `acbctl unit`（默认值改为“静态入口优先”） | 全组合 |
+| G13 | ~~unit 默认把 launcher 指向 `profile/current/bin`~~ **已实现（A-8）** | `ACB_UNIT_ACBL_PREFIX`（默认 `/usr/local`）→ `$prefix/bin/acb-launcher`；显式 `ACB_UNIT_LAUNCHER_BIN` 落在 profile/generation 内时报错（`unit.rs`） | `acbctl unit`（已完成） | 全组合 |
 | G14 | payload 校验仍要求 acbl 侧的文件 | 原 `validate_payload` 要求 `deploy/units/systemd`、`deploy/run/supervisor.toml.tmpl`、`deploy/start-dsh.sh`、`deploy/opencode-serve.sh`（`profile.rs:1599-1611`）；**B-12 已把清单收窄为 payload 自有的 9 项**（§6.4） | `profile`（已实现，分支 `feat/b12-contract`） | 全组合 |
 | G15 | 没有契约版本声明与校验 | 原 payload 无契约文件；三个校验点都不比较版本。**B-12 已实现 payload 根 `acb-contract.json` + 原因码 + 三处校验**（§6.4） | `profile` + `launcher`（已实现，分支 `feat/b12-contract`） | 全组合 |
 
@@ -312,7 +366,7 @@ G9 不是缺陷：**外部组件不参与 LKG 回滚是刻意设计**。桥是 A
 |---|---|---|
 | payload 升级提交指针 | **不退出** | acbl 原地停旧 bridge、提交、起新 bridge；进程不重启 |
 | bridge 回滚到 LKG | **不退出** | acbl 原地停失败版本、写回 LKG 指针、起旧 bridge |
-| acbl 自身崩溃 / 被系统 switch 重启 | 非 75 | init 的 `Restart=always` 或 `acbctl run` 父循环拉起；bridge 不受影响，新 acbl 先探测身份再 adopt（§4.7） |
+| acbl 自身崩溃 / 被系统 switch 重启 | 非 75 | init 的 `Restart=on-failure`（A-8 定稿）或 `acbctl run` 父循环拉起；bridge 不受影响，新 acbl 先探测身份再 adopt（§4.7） |
 | 配置/指针/journal 不可恢复 | **78** | 不再重拉，等人处理 |
 | 回滚后的 LKG 再失败 | **78** | 同上 |
 | 启动时契约版本不兼容 | **78** | 明确报错：acbl 不认识当前 generation，必须人工换 payload |
@@ -336,8 +390,8 @@ G9 不是缺陷：**外部组件不参与 LKG 回滚是刻意设计**。桥是 A
 | 方式 | acbl 崩溃 / 78 后由谁重拉 | 日志归谁 / 怎么轮转 | cgroup 隔离 | 升级 payload 时 acbl 是否重启 |
 |---|---|---|---|---|
 | **A. 用户终端手工启动**（前台 `acb-launcher`） | **没有人**。78 后停在终端等用户处理；崩溃后用户自己重跑 | 终端输出归用户；要留存就自己重定向（如 `> log 2>&1`），轮转由用户/外部工具做 | **无**（和用户 shell 同 cgroup） | 否（只原地重启 bridge） |
-| **B. systemd 开机自启**（`enable --now acb-launcher-user.service` / 系统级） | systemd：`Restart=always` 拉起普通崩溃；`RestartPreventExitStatus=78` 停在 failed | journald（stdout/stderr）或模板里的 `StandardOutput=append:` 文件；轮转由 journald / logrotate 负责 | **有**（独立 service cgroup，`KillMode=process`；stop 不连带 bridge） | 否 |
-| **C. systemd 只做进程守护、不开机自启**（装 unit 但不 `enable`，或 `ACB_UNIT_AUTOSTART=0`） | 同 B，但只有 `systemctl start` 之后才存在 | 同 B | **有**（同 B） | 否 |
+| **B. systemd 开机自启**（`enable --now acb-launcher-user.service` / 系统级） | systemd：`Restart=on-failure` 拉起异常退出；`RestartForceExitStatus=75`；`RestartPreventExitStatus=78` 停在 failed。正常 stop（退出 0）不会被重拉 | journald（stdout/stderr）或模板里的 `StandardOutput=append:` 文件；轮转由 journald / logrotate 负责 | **有**（独立 service cgroup，`KillMode=process`；stop 不连带 bridge） | 否 |
+| **C. systemd 只做进程守护、不开机自启**（装 unit 但不 `enable`，或 `ACB_UNIT_INSTALL_SECTION=0`） | 同 B，但只有 `systemctl start` 之后才存在 | 同 B | **有**（同 B） | 否 |
 | **D. 无 systemd 自管**（runit / s6 / openrc / 容器 entrypoint / `acbctl run --mode=launcher`） | 用户的 init 或 `acbctl run` 父循环：普通崩溃重拉、78 停止（容器里 78 转成正常停止） | 由 init / 容器日志驱动；`acbctl run` 下是 `run.json` + launcher 自身输出；轮转由 init / runtime 负责 | **取决于 init**（runit/s6 通常有；裸前台没有） | 否 |
 
 **共同点：升级链在四种方式下都不重启 acbl。** 它只在 acbl 进程内停旧 bridge、切指针、起新 bridge。方式之间的差别只剩“acbl 自己崩溃/放弃时谁把它拉起来、日志去哪、有没有 cgroup”。
@@ -345,11 +399,11 @@ G9 不是缺陷：**外部组件不参与 LKG 回滚是刻意设计**。桥是 A
 安装器要预留的接口（避免以后返工）：
 
 - `ACB_MANAGED_BY`：`manual | systemd-user | systemd-system | container | custom-init | acbctl-run`，写进 `capabilities.json`，**只用于诊断与生成文档**，不参与升级准入。
-- `ACB_UNIT_AUTOSTART`：0/1，决定是否生成 `[Install]`（对应方式 B / C）。
+- `ACB_UNIT_INSTALL_SECTION`：0/1，决定是否渲染 `[Install]`（对应方式 B / C）；只影响渲染，不执行 enable。
 - `ACB_UNIT_SCOPE`：`user | system`，决定 unit root、`loginctl enable-linger`、以及系统级 `User=` 的必要性。
 - `ACB_LOG_TARGET`：`journal | file | inherit`，决定 unit 的 `StandardOutput=` 和安装器是否创建日志目录；日志轮转责任随 target 明确归属。
 - `ACB_UNIT_LOG_DIR` / `ACB_UNIT_ENV_FILE`：日志与密钥路径，安装器只写模板占位，不在 unit 里写死。
-- `acbctl unit install --autostart=0|1 --scope=user|system`：一次性把 A/B/C 的差异表达清楚；D 由文档与示例覆盖，不塞进同一开关。
+- `acbctl unit install --with-install-section=0|1 --scope=user|system`：一次性把 A/B/C 的差异表达清楚；D 由文档与示例覆盖，不塞进同一开关。
 
 **`restart_owner` 的结论：取消，`self` 档取消。**
 
@@ -448,12 +502,19 @@ acbl 启动时**必须先探测、再决策**，禁止无条件起新 bridge，�
 
 adopt 成功后与“自己启动”走同一套观察逻辑：健康探针、稳定窗口、LKG 提升只在**重新确认健康满窗口**后发生，不因为 adopt 就立即提升。
 
+**A-8 已落地的过渡形态**（完整形态仍属 B-12）：
+
+- bridge 由 `ProcessRunner` 拉起后原子写 `<state_dir>/bridge.instance.json`，含 `instance_id`、pid、`/proc/<pid>/stat` starttime、exe 路径、程序与参数；pid 只作诊断，身份由 starttime + exe + 参数 + `instance_id` 共同判定。
+- acbl 启动时读该记录：无记录但健康探针通过 → conflict(78)；pid 不在或 starttime/exe 不匹配 → 视为空缺，按 `current.json` 启动；全部匹配 → adopt，不重复拉起。
+- 两个 acbl 的互斥复用 `ActivationWriter` 对 `current.json` 的 `flock`，并**覆盖整个决策窗口**：从启动对账、探测、决定 adopt/拉起，到 `Supervisor::new` 完成首次 start 才释放；因此第二个 acbl 不会在第一个尚未拉起 bridge 时同时判定“没有 bridge”。首次 start 后必须释放，否则后续升级提交/回滚在同一进程内重新加锁会自锁。单独的 `adopt.lock` 不再需要。
+- **TODO（B-12）**：把本地记录比对替换/补充为 bridge 自报的 `/internal/instance`；调用点在 `crates/supervisor/src/instance.rs` 与 `crates/launcher/src/main.rs` 的 detect 分支。B-12 已落 `acb-contract.json` 的 `contract` / `min_acbl` 校验，但不含实例端点。
+
 #### 4.7.3 崩溃 vs 正常停止
 
 | 事件 | acbl | bridge | 谁恢复 |
 |---|---|---|---|
-| **acbl 崩溃**（panic / OOM / `kill -9`） | 进程消失 | **继续运行**，7700 不断 | init 按 `Restart=always` 重拉 acbl；新 acbl adopt 现有 bridge |
-| **acbl 正常停止**（`systemctl stop`、升级 acbl、SIGTERM） | 前台进程退出 0 | **继续运行**，服务不中断 | 升级：系统层/安装脚本启动新 acbl，adopt 旧 bridge；手工 stop：等人再 start |
+| **acbl 崩溃**（panic / OOM / `kill -9`） | 进程消失 | **继续运行**，7700 不断 | init 按 `Restart=on-failure` 重拉 acbl；新 acbl adopt 现有 bridge |
+| **acbl 正常停止**（`systemctl stop`、升级 acbl、SIGTERM） | 前台进程退出 0 | **继续运行**，服务不中断 | `Restart=on-failure` 不会重拉退出 0 的 acbl；升级：系统层/安装脚本启动新 acbl，adopt 旧 bridge；手工 stop：等人再 start |
 | **acbl 退出 78** | 放弃自动恢复 | **继续运行**（除非 bridge 本身也坏了） | 人处理；bridge 在此期间仍服务，但无人拉起 |
 | **bridge 崩溃（acbl 在跑）** | 存活 | 退出 | acbl 按组件策略重启 bridge |
 | **bridge 崩溃（acbl 不在）** | 不在 | 退出 | **没有人**；见 4.7.5 的无守护窗口 |
@@ -513,6 +574,14 @@ supervisor 目前是 owner 模型：`ProcessRunner` 持有 `Child`，`stop()` �
 | M9 | `deploy/run/supervisor.toml.tmpl` | 新增 `detach = true`、`identity_url = "http://127.0.0.1:<port>/internal/instance"` | 配置表达 |
 | M10 | Windows（C-5） | Job Object 不设 kill-on-close；独立 Job 或脱管 | 等价语义 |
 
+以下部分**已在 A-8 落地**（其余 M 项仍待后续）：
+
+| 项 | 落地内容 | 备注 |
+|---|---|---|
+| M3 | 新增 `crates/supervisor/src/instance.rs` + `adopted.rs`：探测 → 身份比对 → adopt / start / conflict(78) | 身份先按本地 `bridge.instance.json`（pid + `/proc` starttime + exe + 参数），不是端点 |
+| M4 | launcher 启动先 detect 再选 runner；正常停止只退出自身，不杀 bridge | 崩溃路径靠 unit `KillMode=process` + `Restart=on-failure` |
+| M7 | unit 模板移到 `share/acb/units/`，`ExecStart` 指向静态 acbl；`KillMode=process`；`Restart=on-failure` + `Force=75` / `Prevent=78` | 安装入口：`ACB_UNIT_ACBL_PREFIX`（默认 `/usr/local`） |
+| 未做 | M1（setsid）、M2（日志重定向）、M5（`capabilities.json` 字段）、M6（`/internal/instance`）、M9（配置项）、M10（Windows） | M6 属 adopt 后续；M10 属 C-5 |
 实现阶段的验证：`kill -9` acbl 后 bridge 仍在 7700 响应；新 acbl 启动后 adopt、不产生第二个进程；bridge 属于别的 generation 时 acbl 拒绝接管并 78；`systemctl stop acb-launcher` 后 bridge 仍健康。
 
 ---
@@ -656,7 +725,7 @@ url = "127.0.0.1:7788"
 
 | 事实 | 证据 |
 |---|---|
-| 单元先要桥：`After=acb-bridge.service`、`Wants=acb-bridge.service` | `deploy/units/systemd/acb-drivers.service.tmpl:4-5` |
+| 单元先要桥：`After=acb-bridge.service`、`Wants=acb-bridge.service` | `share/acb/units/acb-drivers.service.tmpl:4-5` |
 | 每个驱动进程做三件事：连桥（环回口）+ 起本地 MCP 端点 + 驱动一个 dsh 会话 | `deploy/start-drivers.sh:4-6` |
 | 会话写死在脚本里，一条会话一个进程：`dsh-qas:3101`、`dsh-dev:3103`、`dsh-snowluma-test:3104`、`dsh-group2:3102`（格式 `会话 id : MCP 端口 : preset 名`） | `deploy/start-drivers.sh:69-74` |
 | 每个进程的启动环境：`ACB_ENDPOINT=127.0.0.1:7700`（桥）、`ACB_TOKEN`（该会话的接入 token）、`ACB_HARNESS=dsh`、`ACB_PRESET`、`ACB_MCP_PORT`、`DSH_BASE_URL=http://127.0.0.1:3080` | `deploy/start-drivers.sh:84-94` |
@@ -763,7 +832,7 @@ url = "127.0.0.1:7788"
 
 ### 6.1 nix 路线：先独立构建，成功再替换
 
-- `nix build .#acb-bridge -o result` 在独立目录产出；成功后再 `profile add` → `profile switch`，失败不动当前 `current.json`。这与现有 `profile` 的 staging + 原子 rename 一致。
+- `nix build .#acb-payload -o result` 在独立目录产出；成功后再 `profile add` → `profile switch`，失败不动当前 `current.json`。这与现有 `profile` 的 staging + 原子 rename 一致。
 - ACB **不调用 `nix profile`**：`store` 策略用 gcroot pin + `/nix/store` 软链，`copy` 策略用本地快照。是否另外用 `nix profile install` 管理你自己的工具链，是用户的选择，ACB 不依赖它。
 - 如果未来要支持“nix profile 作为产物来源”，应作为新的策略（例如 `profile-nix`），不和现有 `store` / `copy` 混在一起。
 
@@ -780,9 +849,10 @@ url = "127.0.0.1:7788"
 
 unit 的 `ExecStart` 必须指向**系统层安装的 acbl**，不能指向 `profile/current/bin` 里的二进制：
 
-- 现状默认值是 `<bin_dir>/acb-launcher`，而 `bin_dir` 优先解析到 `profile/current/bin`（`crates/acb/src/unit.rs:539-549`、`crates/acb/src/profile.rs:209-217`）。新结构下这个默认值必须改，或在安装时显式覆盖 `ACB_UNIT_LAUNCHER_BIN`（G13）。
+- **A-8 已实现**：默认 `ACB_UNIT_ACBL_PREFIX=/usr/local` → `$prefix/bin/acb-launcher`；也接受显式 `ACB_UNIT_LAUNCHER_BIN`，但拒绝落在 `profile/generations/` 的路径。`acbctl unit doctor` 仍会检查 `ExecStart` 程序存在。
 - 部署校验：`acbctl unit doctor` + `test -x <静态入口>`，并额外确认 `ExecStart` 路径不在 `profile/generations/` 下。
-- payload 不再需要 `acbctl` / `acb-launcher` / `acb-supervisor`；`profile seed` 的必带清单要相应收窄（G14）。
+- payload 不再需要 `acbctl` / `acb-launcher` / `acb-supervisor`；`profile seed` 的必带清单已由 B-12 相应收窄（G14）。
+- **已知未改（C-9 硬前置）**：launcher unit 的 `WorkingDirectory` 仍沿用 `@ACB_UNIT_REPO_DIR@`，bridge 子进程继承该 cwd。A-8 不动它，避免改变 bridge 的运行时 cwd；打包前必须完成 §6.5.1 的审计，把所有持久化路径改为从显式配置的根推导，与 cwd 解耦。
 
 ### 6.4 acbl ↔ payload 契约版本化（B-12 已实现）
 
@@ -848,9 +918,8 @@ unit 的 `ExecStart` 必须指向**系统层安装的 acbl**，不能指向 `pro
   身份端点尚未实现）。它们是 adopt 落地后的新增项：若做成必需字段，按“删除 / 改名 / 语义
   变化”规则升 `contract`；若作为可选能力，可作为新增可选字段不升版本。归属留给 adopt 落地
   时定（§4.7.4）。
-- **旧 payload 没有 `acb-contract.json` 时如何处理：待定。** 实现里现有一段过渡放行逻辑
-  （缺失按 `contract = 1` 处理并告警），但该策略是否保留尚未拍板，不作为已定契约；确定后
-  回填本节。
+- **旧 payload 没有 `acb-contract.json` 时**：实现按 `contract = 1` 过渡放行，并在每个校验点打两条 `WARNING`。这是过渡兜底、也是旁路（删除契约文件即可回到 legacy 放行）；设置 `ACB_CONTRACT_STRICT=1` 后缺文件按 `contract_unreadable` 拒绝（默认关闭）。payload 打包链路稳定产出契约、现场 generation 全部带文件后，再把严格模式改为默认开启。
+
 
 ### 6.5 两条升级路径对照
 
@@ -861,13 +930,37 @@ unit 的 `ExecStart` 必须指向**系统层安装的 acbl**，不能指向 `pro
 
 这直接回答“守护者为什么需要重启”：**它不需要因为 payload 换代而重启；只有在它自己的版本/启动方式变了时才重启**。
 
+### 6.5.1 C-9 硬前置：bridge 的 cwd / 相对路径审计
+
+unit 的 `WorkingDirectory` 会原样传给 bridge 子进程（launcher 不另设 `current_dir`）。打包 acbl 到无仓库环境前，必须按下面的代码事实逐项审计；**不能只写“需要改”**。
+
+**已知依赖（代码事实）**：
+
+| 依赖点 | 位置 | 相对 cwd 的行为 |
+|---|---|---|
+| `[storage].path` 默认 `state/acb.db` | `crates/kernel/src/config.rs:33-35`、`271-273`；`config.example.toml:113-115` | 注释明确“相对路径按启动时的工作目录算” |
+| `[file_relay].dir` 默认 `state/relay` | `crates/kernel/src/config.rs:52-53`、`566` | 收文件落盘位置随 cwd |
+| `[memory].worktrees_root` 默认 `state/worktrees` | `crates/kernel/src/config.rs:55-58`、`103`；`memory.rs:65-66` | `ensure_bare_repo(location)` 直接 `PathBuf::from`，相对值按 cwd 解析 |
+| `kernel.task` 工具参数 `cwd` | `crates/kernel/src/task.rs:57-84` | 相对值按 bridge cwd 解析；`create_dir_all` 同样相对 |
+| 组件 / 适配器 `path`（`.so`、wasm host、脚本） | `config.example.toml:81`、`85`、`129` | 示例写“绝对路径”，但未见启动时强制校验；相对值会落到 cwd |
+| drivers / harness 脚本 | `deploy/start-dsh.sh`、`deploy/opencode-serve.sh`、`start-drivers.sh` | 脚本自己 source env、用 `REPO` 绝对路径；若配置里给相对脚本路径，仍按 cwd 解析 |
+
+**审计结论（C-9 硬性口径）**：
+
+- **原则：cwd 只是启动位置的偶然产物，不得用于推导任何持久化路径。** 所有持久化路径（`storage`、`file_relay`、`memory.worktrees_root`、组件与适配器 `path`、drivers / harness 脚本路径等）必须从一个**显式配置的根**推导，与 cwd 无关。
+- 具体做法：配置新增/复用显式的根（例如 `ACB_STATE_ROOT` 或 `[paths].root`），未配置时取安装时确定的绝对默认值；解析出的路径必须是绝对路径。`state/acb.db` 这类相对默认值要么改为从根拼出，要么在启动时直接报错，不再静默按 cwd 解析。
+- `acbctl unit doctor` 增加兜底检查：配置里出现相对持久化路径、或路径落在 payload/generation 内时报错；这只作为兜底，不能替代显式根。
+- **不采用方案 B（把 `WorkingDirectory` 换成状态根）**：它会把 `state/acb.db` 变成 `<状态根>/state/acb.db`，多套一层；同时改变现网已有的 `acb.db`、`relay/`、`worktrees/` 位置。这种变更不能静默切换，必须搬移数据或保留兼容期，代价和风险都高于“显式根推导”。保留 `WorkingDirectory` 现状也不意味着允许它参与路径推导。
+- **验收**：`readlink /proc/<bridge-pid>/cwd` 只作诊断；从 `/`、`/tmp`、payload 根分别启动 bridge，db / relay / worktrees / 组件路径的落点必须完全一致，且不落在 payload 或被只读挂载挡住；`kernel.task` 传相对 `cwd` 时仍以显式配置的根解析；doctor 能拒绝含相对持久化路径的配置。
+- **状态**：A-8 只记录、不改 `WorkingDirectory`；本审计是 C-9 的硬前置，未完成前不得发布非仓库环境的 acbl 包。
+
 ---
 
 ## 7. 落地拆分（只列步骤，不改代码）
 
 | 步骤 | 内容 | 依赖 | 验证 |
 |---|---|---|---|
-| P0 | **拆分分发**：acbl 独立包（NixOS 由 nix-config 提供）+ payload 收窄 + `acb-contract.json` 声明与校验（B-12 已实现） | 无 | acbl 不在 generation 里；unit 指向静态入口；不兼容 payload 被拒绝切换 |
+| P0 | **拆分分发**：acbl 独立包（NixOS 由 nix-config 提供）+ payload 收窄 + `acb-contract.json` 声明与校验（B-12 已实现） | 无 | acbl 不在 generation 里；unit 指向静态入口；不兼容 payload 被拒绝切换；旧 payload 在过渡期仍能启动 |
 | P1 | 组件表 schema + `supervisor.toml` 解析（bridge 之外的 `[[component]]`） | P0 | 配置文件能加载；非法字段报错；不启动任何新组件时行为与现在一致 |
 | P2 | supervisor 多组件 Runner：每组件独立 `Option<Child>`、进程组、独立停止 | P1 | 起 2 个假组件，kill 一个不影响另一个；脚本后台孙进程随组停止 |
 | P3 | 每组件健康探针 + 退避 + 独立状态文件 | P2 | 组件失败重试到上限后标 failed，acbl 不退出；`state/components/*.json` 可读 |
@@ -883,12 +976,12 @@ unit 的 `ExecStart` 必须指向**系统层安装的 acbl**，不能指向 `pro
 
 **已定：**
 
-1. **acbl 独立安装**：不进 payload；NixOS 由 nix-config 提供，非 NixOS 用 nix profile / cargo / 预编译 tar.gz（gnu 或 musl，§2.4 / §2.5）。
+1. **acbl 独立安装**：不进 payload；NixOS 由 nix-config 引用 flake 的 `acbl` package，非 NixOS 用 nix profile / cargo / 预编译 tar.gz（gnu 或 musl，§2.4 / §2.5 / §2.5.7）。
 2. **payload 升级不重启 acbl**：只切 payload、原地重启 bridge；acbl 自身的升级走系统层，只重启 acbl，bridge 继续运行并被新 acbl adopt（§4.2 / §4.7 / §6.5）。
 3. **75 退役、78 保留**：75 只作为兼容保留值，不再由升级路径发出；78 表示“现场坏了、需要人”（§4.2）。
 4. **`restart_owner` 取消**：不再作为升级门禁；`self` 档取消，改 `managed_by` 诊断（§4.3）。
 5. **契约版本化（B-12 已实现）**：声明在 payload 根 `acb-contract.json`；acbl 只支持 `contract = 1`，三处校验点分别拒绝 add / 拒绝切换 / 启动退 78（§6.4）。
-6. **谁启动 acbl**：三类并列，安装器参数选择——A 用户终端手工、B systemd 开机自启、C systemd 只守护不自启；无 systemd 由用户自管（D）。差异见 §4.3，接口用 `ACB_MANAGED_BY` / `ACB_UNIT_AUTOSTART` / `ACB_UNIT_SCOPE` / `ACB_LOG_TARGET` 预留。
+6. **谁启动 acbl**：三类并列，安装器参数选择——A 用户终端手工、B systemd 开机自启、C systemd 只守护不自启；无 systemd 由用户自管（D）。差异见 §4.3，接口用 `ACB_MANAGED_BY` / `ACB_UNIT_INSTALL_SECTION` / `ACB_UNIT_SCOPE` / `ACB_LOG_TARGET` 预留。
 7. **热加载**：不做自动热加载；只做控制台按钮，加载对象是 `[[component]]`，失败保留旧表（§4.6）。
 8. **drivers**：v1 作为单个组件（`drivers_acb`），理由是代码事实（§5.5）；单驱动死亡要通过“脚本整体退出”暴露给 acbl。**会话列表必须从配置/库读取（与 `[[sessions]]` 同一数据源），不得写死在 preset 脚本里**。
 9. **控制台**：短期只读；长期允许“选预设 / 开关 / 白名单字段”，不允许任意命令，前置条件见 §5.8。
@@ -896,10 +989,10 @@ unit 的 `ExecStart` 必须指向**系统层安装的 acbl**，不能指向 `pro
 
 **仍待决：**
 
-1. **旧 payload 没有 `acb-contract.json` 时的处理策略**：实现里现有一段“按 `contract = 1` 放行并告警”的过渡逻辑，但是否保留、何时删除尚未拍板（§6.4）。`N-1` 的并行窗口等 v2 出现时再定。
+1. **acbl 与 payload 的默认分发形态**：非 nix 环境仍是预编译 `tar.gz`（gnu / musl）的构建流水线、校验和与签名（C-4 / C-9）；nix 包已实现（§2.5.7）。
 2. **默认推荐哪种启动方式**：三类都支持，但安装器默认给 A / B / C 哪一个？（建议 B，但需要用户确认是否接受 linger 与 journald）。
 3. **系统级 vs 用户级**默认 scope，以及系统级 `User=` 是否由安装器强制生成。
-4. **acbl 的非 nix 分发渠道**：预编译 `tar.gz`（gnu / musl）的构建流水线、校验和与签名由谁维护（C-4 / C-9）。
+4. **`ACB_CONTRACT_STRICT` 何时改为默认开启**：过渡放行保留到 payload 打包链路稳定产出契约、现场 generation 全部带文件为止（§6.4）。
 5. **每会话拆组件**：drivers 何时从单组件拆成“每会话一个组件”，取决于是否需要单独重启某个会话。
 6. **npm / guix / scoop 的预设脚本谁补**：v1 可以先只交付 `dsh_nix` / `opencode_nix` / `opencode_npm` / `drivers_acb`，其余欢迎 PR。
 7. **控制台长期编辑的落地时间**：鉴权、二次确认、审计都具备后再开写入。
@@ -913,4 +1006,4 @@ unit 的 `ExecStart` 必须指向**系统层安装的 acbl**，不能指向 `pro
 
 **acbl 是独立安装的静态监管者，payload 是它监管的迭代内容：升级只切 payload、只重启 bridge，acbl 全程不动。** 因此不需要 `restart_owner`，也不需要“退出 75 等外部重拉”；75 退役为兼容值，78 保留。要变成组件管理者，缺的仍是多组件表、进程组、每组件健康/重启策略和预设装载；预设按安装方式拆分并随 acbl 安装，同一组件只能启用一个来源。代价是 acbl↔payload 的接口必须版本化：payload 根 `acb-contract.json` 声明 `contract` / `min_acbl` / `layout` / `commands`，acbl 只支持 `1..=1`（B-12 已实现），否则两个独立分发单元会悄悄失配。
 
-**acbl 还是 bridge 的观察者与恢复者，不是所有者：** bridge 的生命周期独立于 acbl，acbl 停止 / 崩溃 / 升级期间 bridge 继续服务，新 acbl 启动先按身份端点探测再 adopt，禁止盲起第二个实例；无守护窗口是被接受的代价（§4.7）。分发上只出 `tar.gz`：gnu 制品钉死最低 glibc 基线，musl 制品里的 acbl 全静态，但 **bridge 在 musl 上必须是动态链接**（`.so` 插件靠 `dlopen`，静态 musl 不支持动态加载），所以 acbl 与 payload 必须按同一 libc 家族配对交付（§2.5）。
+**acbl 还是 bridge 的观察者与恢复者，不是所有者：** bridge 的生命周期独立于 acbl，acbl 停止 / 崩溃 / 升级期间 bridge 继续服务，新 acbl 启动先按身份端点探测再 adopt，禁止盲起第二个实例；无守护窗口是被接受的代价（§4.7）。分发上分两条路：nix 环境用本仓库 flake 的 `acbl` package（§2.5.7），非 nix 环境出 `tar.gz`——gnu 制品钉死最低 glibc 基线，musl 制品里的 acbl 全静态，但 **bridge 在 musl 上必须是动态链接**（`.so` 插件靠 `dlopen`，静态 musl 不支持动态加载），所以 acbl 与 payload 必须按同一 libc 家族配对交付（§2.5）。

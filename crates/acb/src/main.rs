@@ -60,7 +60,13 @@ fn run() -> Result<ExitCode, String> {
         }
         "run" => run::command(&args.collect::<Vec<_>>()),
         "status" => status::command(&args.collect::<Vec<_>>()),
-        "profile" => profile::command(&args.collect::<Vec<_>>()),
+        "profile" => match profile::command(&args.collect::<Vec<_>>()) {
+            Ok(code) => Ok(code),
+            Err(failure) => {
+                eprintln!("acbctl: {failure}");
+                Ok(ExitCode::from(failure.exit_code()))
+            }
+        },
         "grants" => grants::command(&args.collect::<Vec<_>>()),
         "secrets" => secrets::command(&args.collect::<Vec<_>>()),
         "upgrade" => upgrade::command(&args.collect::<Vec<_>>()),
@@ -76,7 +82,7 @@ Usage:
   acbctl unit render --print
   acbctl unit render --output-dir DIR
   acbctl unit render --diff --root DIR
-  acbctl unit install --root DIR
+  acbctl unit install --root DIR [--scope user|system] [--with-install-section 0|1]
   acbctl unit uninstall --root DIR
   acbctl unit doctor --root DIR
   acbctl run --mode=launcher|direct [--config PATH] [--state-dir DIR]
@@ -99,7 +105,7 @@ fn print_unit_help() {
   acbctl unit render --print
   acbctl unit render --output-dir DIR
   acbctl unit render --diff --root DIR
-  acbctl unit install --root DIR
+  acbctl unit install --root DIR [--scope user|system] [--with-install-section 0|1]
   acbctl unit uninstall --root DIR
   acbctl unit doctor --root DIR"
     );

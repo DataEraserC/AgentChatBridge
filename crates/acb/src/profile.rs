@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::contract;
 use crate::fsutil::{now_ms, sha256_hex, write_atomic};
 use crate::pins::{self, PinOutcome};
 
@@ -247,10 +248,73 @@ pub fn active_meta() -> Result<Option<Meta>, String> {
     }
 }
 
-pub fn command(args: &[String]) -> Result<ExitCode, String> {
+/// CLI 失败：区分用法错误与配置级拒绝。
+///
+/// 配置被拒（payload 布局/契约不满足）是终态，退出码固定 `78`，和 launcher 的
+/// `EXIT_GIVE_UP` 对齐；用法、IO、参数错误仍退 `2`，让调用方分得清“命令写错了”
+/// 还是“这份配置被拒绝”。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    message: String,
+    rejected: bool,
+}
+
+impl Failure {
+    /// 用法/环境错误，退出 2。
+    pub fn usage(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            rejected: false,
+        }
+    }
+
+    /// 配置级拒绝，退出 78。
+    pub fn rejected(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            rejected: true,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// 契约/布局等配置级拒绝返回 `true`。
+    pub fn is_rejected(&self) -> bool {
+        self.rejected
+    }
+
+    pub fn exit_code(&self) -> u8 {
+        if self.rejected {
+            EXIT_REJECTED
+        } else {
+            EXIT_USAGE
+        }
+    }
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::usage(message)
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+/// 用法/环境错误。
+pub const EXIT_USAGE: u8 = 2;
+/// 配置级拒绝；与 launcher 的 `EXIT_GIVE_UP` 一致。
+pub const EXIT_REJECTED: u8 = 78;
+
+pub fn command(args: &[String]) -> Result<ExitCode, Failure> {
     let Some(subcommand) = args.first() else {
         print_help();
-        return Err("missing profile subcommand".to_string());
+        return Err("missing profile subcommand".to_string().into());
     };
     let rest = &args[1..];
     match subcommand.as_str() {
@@ -258,15 +322,15 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
             print_help();
             Ok(ExitCode::SUCCESS)
         }
-        "list" => list_command(rest),
-        "current" => current_command(rest),
+        "list" => list_command(rest).map_err(Failure::from),
+        "current" => current_command(rest).map_err(Failure::from),
         "add" => add_command(rest),
         "switch" => switch_command(rest),
-        "gc" => gc_command(rest),
+        "gc" => gc_command(rest).map_err(Failure::from),
         "seed" => seed_command(rest),
-        "verify" => verify_command(rest),
-        "migrate" => migrate_command(rest),
-        other => Err(format!("unknown profile subcommand: {other}")),
+        "verify" => verify_command(rest).map_err(Failure::from),
+        "migrate" => migrate_command(rest).map_err(Failure::from),
+        other => Err(format!("unknown profile subcommand: {other}").into()),
     }
 }
 
@@ -365,16 +429,15 @@ fn current_command(args: &[String]) -> Result<ExitCode, String> {
     }
 }
 
-fn add_command(args: &[String]) -> Result<ExitCode, String> {
+fn add_command(args: &[String]) -> Result<ExitCode, Failure> {
     let (positional, options) = parse_options(
         args,
         &["profile-dir", "label", "config", "version", "strategy"],
     )?;
     if positional.len() != 1 {
-        return Err(
-            "usage: acbctl profile add <path> --strategy store|copy [--label LABEL] [--config PATH] [--version VERSION]"
-                .to_string(),
-        );
+        return Err(Failure::usage(
+            "usage: acbctl profile add <path> --strategy store|copy [--label LABEL] [--config PATH] [--version VERSION]",
+        ));
     }
     let root = profile_root(&options);
     let label = options.get("label").cloned();
@@ -423,23 +486,23 @@ fn parse_strategy(value: &str) -> Result<Strategy, String> {
     }
 }
 
-fn switch_command(args: &[String]) -> Result<ExitCode, String> {
+fn switch_command(args: &[String]) -> Result<ExitCode, Failure> {
     let (positional, options) = parse_options(args, &["profile-dir", "state-dir"])?;
     if positional.len() != 1 {
-        return Err(
-            "usage: acbctl profile switch <gen-or-label> [--state-dir DIR] [--profile-dir DIR]"
-                .to_string(),
-        );
+        return Err(Failure::usage(
+            "usage: acbctl profile switch <gen-or-label> [--state-dir DIR] [--profile-dir DIR]",
+        ));
     }
     let root = profile_root(&options);
     let id = resolve_target(&root, &positional[0])?;
     let target = generation_dir(&root, &id).join("root");
     if !target.is_dir() {
-        return Err(format!(
+        return Err(Failure::rejected(format!(
             "generation {id} payload missing: {}",
             target.display()
-        ));
+        )));
     }
+    verify_generation_contract(&root, &id)?;
     let state_dir = supervisor_state_dir(&options, &root);
     // 先建 pin 再提交指针：避免 switch 成功后 store 路径被 GC 收走。
     pin_generation(&root, &id);
@@ -464,7 +527,7 @@ pub fn add_payload(
     profile_root: &Path,
     payload: &Path,
     strategy: &str,
-) -> Result<acb_supervisor::GenerationRef, String> {
+) -> Result<acb_supervisor::GenerationRef, Failure> {
     let strategy = parse_strategy(strategy.trim())?;
     let meta = add_generation(profile_root, payload, None, None, None, strategy)?;
     Ok(meta.generation_ref(profile_root))
@@ -478,7 +541,7 @@ pub fn activate_generation(
     profile_root: &Path,
     state_dir: &Path,
     generation_id: &str,
-) -> Result<acb_supervisor::CommandSpec, String> {
+) -> Result<acb_supervisor::CommandSpec, Failure> {
     let command = resolve_generation_command(profile_root, state_dir, generation_id)?;
     pin_generation(profile_root, generation_id);
     commit_command(profile_root, generation_id, state_dir, "acb-launcher", &command)?;
@@ -492,7 +555,7 @@ pub fn validate_generation(
     profile_root: &Path,
     state_dir: &Path,
     generation_id: &str,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     resolve_generation_command(profile_root, state_dir, generation_id).map(|_| ())
 }
 
@@ -501,9 +564,11 @@ fn resolve_generation_command(
     profile_root: &Path,
     state_dir: &Path,
     generation_id: &str,
-) -> Result<acb_supervisor::CommandSpec, String> {
+) -> Result<acb_supervisor::CommandSpec, Failure> {
     let meta = load_meta(profile_root, generation_id)?
         .ok_or_else(|| format!("generation not found: {generation_id}"))?;
+    // 契约不兼容要在停旧之前失败；resolve 是 launcher 的升级预检入口。
+    verify_generation_contract(profile_root, generation_id)?;
     let payload = generation_dir(profile_root, generation_id).join("root");
     let command = match acb_supervisor::load_current(state_dir)? {
         Some(current) => {
@@ -512,10 +577,10 @@ fn resolve_generation_command(
                 .ok_or_else(|| format!("cannot derive program name from {}", current.program))?;
             let program = payload.join("bin").join(program_name);
             if !program.is_file() {
-                return Err(format!(
+                return Err(Failure::rejected(format!(
                     "target generation has no binary: {}",
                     program.display()
-                ));
+                )));
             }
             acb_supervisor::CommandSpec {
                 program: program.to_string_lossy().into_owned(),
@@ -533,10 +598,10 @@ fn resolve_generation_command(
         None => {
             let command = command_for_generation(profile_root, &meta);
             if !Path::new(&command.program).is_file() {
-                return Err(format!(
+                return Err(Failure::rejected(format!(
                     "target generation has no binary: {}",
                     command.program
-                ));
+                )));
             }
             command
         }
@@ -591,7 +656,7 @@ fn command_for_generation(root: &Path, meta: &Meta) -> acb_supervisor::CommandSp
 }
 
 /// 给 generation 的 store payload 建 pin。失败只告警，不让 add/switch 失败；
-/// 非 nix 环境降级为 `<profile>/../state/pins`，并说明挡不住 nix GC。
+/// 只有建根并被 nix 回查确认后才算保护，其余情况明确说明不提供保护。
 fn pin_generation(root: &Path, id: &str) {
     let generation_root = generation_dir(root, id).join("root");
     let payload = match fs::canonicalize(&generation_root) {
@@ -602,15 +667,19 @@ fn pin_generation(root: &Path, id: &str) {
         }
     };
     match pins::pin_store_path(root, id, &payload) {
-        Ok(PinOutcome::Gcroot(path)) => println!("pin: {id} -> {}", path.display()),
-        Ok(PinOutcome::Local(path)) => eprintln!(
-            "pin: warning: no writable nix gcroot; wrote local pin {} (nix GC can still collect {}; \
-             keep this generation with `profile gc --keep` or add a gcroot manually)",
-            path.display(),
-            payload.display()
-        ),
+        Ok(PinOutcome::Gcroot(path)) => {
+            println!("pin: {id} -> {} (verified gcroot)", path.display())
+        }
+        Ok(PinOutcome::Unprotected { path, reason }) => {
+            let pin = path
+                .map(|path| format!("; local pin {} kept", path.display()))
+                .unwrap_or_default();
+            eprintln!("pin: warning: generation {id} is NOT protected from nix GC: {reason}{pin}");
+        }
         Ok(PinOutcome::Skipped) => {}
-        Err(error) => eprintln!("pin: warning: {error}"),
+        Err(error) => {
+            eprintln!("pin: warning: generation {id} is NOT protected from nix GC: {error}")
+        }
     }
 }
 
@@ -674,20 +743,19 @@ fn gc_command(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn seed_command(args: &[String]) -> Result<ExitCode, String> {
+fn seed_command(args: &[String]) -> Result<ExitCode, Failure> {
     let (positional, options) = parse_options(args, &["profile-dir", "strategy", "state-dir"])?;
     if positional.len() > 1 {
-        return Err(
-            "usage: acbctl profile seed [<path>] --strategy store|copy [--state-dir DIR] [--profile-dir DIR]"
-                .to_string(),
-        );
+        return Err(Failure::usage(
+            "usage: acbctl profile seed [<path>] --strategy store|copy [--state-dir DIR] [--profile-dir DIR]",
+        ));
     }
     let root = profile_root(&options);
     let existing = load_generations(&root)?;
     if !existing.is_empty() {
         if let CurrentState::NeedsRepair(detail) = current_state(&root)? {
             let Some(payload) = positional.first() else {
-                return Err(repair_error(&detail, "no payload argument provided"));
+                return Err(repair_error(&detail, "no payload argument provided").into());
             };
             let strategy = required_strategy(&options, "acbctl profile seed <path>")?;
             let state_dir = supervisor_state_dir(&options, &root);
@@ -701,10 +769,9 @@ fn seed_command(args: &[String]) -> Result<ExitCode, String> {
     }
 
     let Some(payload) = positional.first() else {
-        return Err(
-            "usage: acbctl profile seed <path> --strategy store|copy [--state-dir DIR] [--profile-dir DIR]"
-                .to_string(),
-        );
+        return Err(Failure::usage(
+            "usage: acbctl profile seed <path> --strategy store|copy [--state-dir DIR] [--profile-dir DIR]",
+        ));
     };
     let strategy = required_strategy(&options, "acbctl profile seed <path>")?;
     let config = config_identity(None)?;
@@ -721,10 +788,7 @@ fn seed_command(args: &[String]) -> Result<ExitCode, String> {
 fn write_initial_lkg(root: &Path, id: &str, state_dir: &Path) -> Result<(), String> {
     let path = state_dir.join("lkg.json");
     if path.exists() {
-        println!(
-            "lkg: {} already exists; left untouched",
-            path.display()
-        );
+        println!("lkg: {} already exists; left untouched", path.display());
         return Ok(());
     }
     let meta = load_meta(root, id)?.ok_or_else(|| format!("generation not found: {id}"))?;
@@ -813,10 +877,16 @@ fn repair_seed(
     detail: &str,
     strategy: Strategy,
     state_dir: &Path,
-) -> Result<ExitCode, String> {
+) -> Result<ExitCode, Failure> {
     let config = config_identity(None)?;
-    let meta = add_generation(root, payload, None, config, None, strategy)
-        .map_err(|error| repair_error(detail, &error))?;
+    let meta = add_generation(root, payload, None, config, None, strategy).map_err(|error| {
+        let message = repair_error(detail, error.message());
+        if error.is_rejected() {
+            Failure::rejected(message)
+        } else {
+            Failure::usage(message)
+        }
+    })?;
     commit_profile_switch(root, &meta.id, state_dir, "acbctl-profile-seed-repair")?;
     println!("seed repaired current -> {} (was: {detail})", meta.id);
     Ok(ExitCode::SUCCESS)
@@ -838,28 +908,28 @@ fn add_generation(
     config: Option<ConfigIdentity>,
     version: Option<String>,
     strategy: Strategy,
-) -> Result<Meta, String> {
+) -> Result<Meta, Failure> {
     if let Some(label) = &label {
         if label.trim().is_empty() {
-            return Err("--label must not be empty".to_string());
+            return Err(Failure::usage("--label must not be empty"));
         }
     }
 
     let source = fs::canonicalize(source)
         .map_err(|error| format!("canonicalize {}: {error}", source.display()))?;
     if !source.is_dir() {
-        return Err(format!(
+        return Err(Failure::rejected(format!(
             "generation payload is not a directory: {}",
             source.display()
-        ));
+        )));
     }
     validate_payload(&source)?;
     if strategy == Strategy::Store && !source.to_string_lossy().starts_with("/nix/store/") {
-        return Err(format!(
+        return Err(Failure::usage(format!(
             "store strategy requires the payload under /nix/store: {}\n\
              use --strategy copy for a local snapshot",
             source.display()
-        ));
+        )));
     }
 
     let generations = load_generations(root)?;
@@ -868,7 +938,7 @@ fn add_generation(
             .iter()
             .any(|(_, meta)| meta.label.as_deref() == Some(label.as_str()))
         {
-            return Err(format!("label already exists: {label}"));
+            return Err(Failure::usage(format!("label already exists: {label}")));
         }
     }
 
@@ -892,7 +962,7 @@ fn add_generation(
             },
             Err(error) => {
                 let _ = fs::remove_dir_all(&gen_dir);
-                return Err(error);
+                return Err(error.into());
             }
         },
         Strategy::Copy => {
@@ -901,7 +971,7 @@ fn add_generation(
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     let _ = fs::remove_dir_all(&gen_dir);
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
             let manifest = Manifest {
@@ -910,7 +980,7 @@ fn add_generation(
             };
             if let Err(error) = write_manifest(&gen_dir.join("manifest.json"), &manifest) {
                 let _ = fs::remove_dir_all(&gen_dir);
-                return Err(error);
+                return Err(error.into());
             }
             Payload {
                 strategy,
@@ -936,7 +1006,7 @@ fn add_generation(
     };
     if let Err(error) = write_meta(&gen_dir.join("meta.json"), &meta) {
         let _ = fs::remove_dir_all(&gen_dir);
-        return Err(error);
+        return Err(error.into());
     }
     // store payload 随时可能被 nix GC 回收；add 成功后立刻建 pin（失败只告警）。
     pin_generation(root, &meta.id);
@@ -1265,10 +1335,7 @@ fn verify_copy(
     Ok(ExitCode::from(if diff.clean() { 0 } else { 1 }))
 }
 
-fn load_manifest_for_verify(
-    id: &str,
-    generation_root: &Path,
-) -> Result<Option<Manifest>, String> {
+fn load_manifest_for_verify(id: &str, generation_root: &Path) -> Result<Option<Manifest>, String> {
     let path = generation_root
         .parent()
         .map(|dir| dir.join("manifest.json"))
@@ -1478,13 +1545,13 @@ fn migrate_one(root: &Path, id: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-fn validate_payload(source: &Path) -> Result<(), String> {
-    let dirs = ["bin", "harnesses", "deploy/units/systemd"];
+fn validate_payload(source: &Path) -> Result<(), Failure> {
+    // payload 只校验它自己该带的东西：acbl 的 launcher / supervisor / unit 模板
+    // 已剥离到 acbl 包，不再出现在 generation 里。
+    let dirs = ["bin", "harnesses"];
     let files = [
-        "deploy/start-dsh.sh",
+        "bin/acb-bridge",
         "deploy/start-drivers.sh",
-        "deploy/opencode-serve.sh",
-        "deploy/run/supervisor.toml.tmpl",
         "harnesses/dsh/src/driver.mjs",
         "harnesses/dsh/dsh-mcp.patch.yml",
         "harnesses/opencode/plugin/index.js",
@@ -1494,23 +1561,64 @@ fn validate_payload(source: &Path) -> Result<(), String> {
     let mut missing = Vec::new();
     for relative in dirs {
         if !source.join(relative).is_dir() {
-            missing.push(relative.to_string());
+            missing.push(format!("{relative} (directory)"));
         }
     }
     for relative in files {
         if !source.join(relative).is_file() {
-            missing.push(relative.to_string());
+            missing.push(format!("{relative} (file)"));
         }
     }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "generation payload {} missing required paths: {}",
+    if !missing.is_empty() {
+        return Err(Failure::rejected(format!(
+            "generation payload {} missing required entries: {}",
             source.display(),
             missing.join(", ")
-        ))
+        )));
     }
+    verify_contract(source)?;
+    Ok(())
+}
+
+/// payload 契约声明校验；缺文件时默认按契约 v1 放行并打印醒目告警（过渡行为），
+/// 设置 `ACB_CONTRACT_STRICT` 后改为按 `contract_unreadable` 拒绝。
+fn verify_contract(payload: &Path) -> Result<(), Failure> {
+    match contract::verify_with(payload, contract::configured_missing_policy()) {
+        Ok(contract::State::Declared(_)) => Ok(()),
+        Ok(contract::State::Legacy) => {
+            eprintln!(
+                "WARNING: payload {} has no {}; treating it as acb_contract={}.",
+                payload.display(),
+                contract::CONTRACT_FILE,
+                contract::CONTRACT_MIN
+            );
+            eprintln!(
+                "WARNING: TRANSITIONAL fallback only - the next minor acbl release will \
+                 HARD-REJECT such payloads. Ship {} or set {}=1 to enforce strict mode now.",
+                contract::CONTRACT_FILE,
+                contract::STRICT_ENV
+            );
+            Ok(())
+        }
+        Err(violation) => Err(Failure::rejected(format!(
+            "generation payload {} rejected: {violation}",
+            payload.display()
+        ))),
+    }
+}
+
+/// generation 的 payload 契约校验；`add` / `switch` / 升级预检都走这里，
+/// 保证「不兼容的目标代」在停旧之前就被拒。
+fn verify_generation_contract(root: &Path, id: &str) -> Result<(), Failure> {
+    let payload = generation_dir(root, id).join("root");
+    verify_contract(&payload).map_err(|error| {
+        let message = format!("generation {id}: {error}");
+        if error.is_rejected() {
+            Failure::rejected(message)
+        } else {
+            Failure::usage(message)
+        }
+    })
 }
 
 fn config_identity(explicit: Option<&Path>) -> Result<Option<ConfigIdentity>, String> {

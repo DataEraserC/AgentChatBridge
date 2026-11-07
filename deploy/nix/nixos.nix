@@ -1,4 +1,7 @@
-# NixOS module：可选启用 acb-launcher（不默认启用）。
+# NixOS module：可选启用静态 acbl（不默认启用）。
+#
+# acbl 独立于 payload/generation：package 提供 acb-launcher，版本切换只动
+# current.json，不换这个 unit 的 ExecStart。
 #
 # 用法（flake / configuration.nix）：
 #   imports = [ ./deploy/nix/nixos.nix ];
@@ -16,7 +19,7 @@ let
 in
 {
   options.services.acb-launcher = {
-    enable = lib.mkEnableOption "acb-launcher systemd front-end";
+    enable = lib.mkEnableOption "static acbl systemd front-end";
     package = lib.mkOption {
       type = lib.types.package;
       description = "包含 acb-launcher 的包";
@@ -39,7 +42,7 @@ in
 
   config = lib.mkIf cfg.enable {
     systemd.services.acb-launcher = {
-      description = "ACB launcher (supervisor front-end)";
+      description = "ACB launcher (static acbl; observer/restorer)";
       after = [ "network.target" ];
       wantedBy = [ "multi-user.target" ];
       unitConfig = {
@@ -58,7 +61,8 @@ in
         RestartForceExitStatus = [ 75 ];
         RestartPreventExitStatus = [ 78 ];
         TimeoutStopSec = 45;
-        KillMode = "control-group";
+        # acbl 只观察/恢复 bridge，不是它的所有者：停/重启 acbl 不能连带杀 bridge。
+        KillMode = "process";
       } // lib.optionalAttrs (cfg.user != null) {
         User = cfg.user;
       };

@@ -1,4 +1,7 @@
-# Home Manager module：可选启用 acb-launcher（不默认启用）。
+# Home Manager module：可选启用静态 acbl（不默认启用）。
+#
+# acbl 独立于 payload/generation：package 提供 acb-launcher，版本切换只动
+# current.json，不换这个 unit 的 ExecStart。
 #
 # 用法：
 #   imports = [ ./deploy/nix/home-manager.nix ];
@@ -15,7 +18,7 @@ let
 in
 {
   options.services.acb-launcher = {
-    enable = lib.mkEnableOption "acb-launcher user systemd front-end";
+    enable = lib.mkEnableOption "static acbl user systemd front-end";
     package = lib.mkOption {
       type = lib.types.package;
       description = "包含 acb-launcher 的包";
@@ -33,7 +36,7 @@ in
   config = lib.mkIf cfg.enable {
     systemd.user.services.acb-launcher = {
       Unit = {
-        Description = "ACB launcher (supervisor front-end)";
+        Description = "ACB launcher (static acbl; observer/restorer)";
         After = [ "network.target" ];
         StartLimitIntervalSec = 60;
         StartLimitBurst = 3;
@@ -50,7 +53,8 @@ in
         RestartForceExitStatus = [ 75 ];
         RestartPreventExitStatus = [ 78 ];
         TimeoutStopSec = 45;
-        KillMode = "control-group";
+        # acbl 只观察/恢复 bridge，不是它的所有者：停/重启 acbl 不能连带杀 bridge。
+        KillMode = "process";
       };
       Install.WantedBy = [ "default.target" ];
     };
