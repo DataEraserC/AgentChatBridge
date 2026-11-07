@@ -1043,7 +1043,7 @@ fn fill_room_target(
 ) -> Result<(), CallError> {
     match payload.get(key) {
         Some(value) => {
-            let given = value.as_str().unwrap_or_default();
+            let given = target_id_text(value);
             if given != room_id {
                 let kind = if key == "group_id" {
                     "group"
@@ -1054,9 +1054,9 @@ fn fill_room_target(
                     "adapter.onebot11.target_mismatch",
                     method = method,
                     key = key,
-                    given = given,
+                    given = given.as_str(),
                     room = room,
-                    target_room = target_room_text(room, kind, given)
+                    target_room = target_room_text(room, kind, given.as_str())
                 )));
             }
         }
@@ -1065,6 +1065,16 @@ fn fill_room_target(
         }
     }
     Ok(())
+}
+
+/// 目标 id 可能写成字符串（走 platform_call）或数字（适配器内部补查），
+/// 比较前统一成文本；数字形式只要等于当前房间，同样不算换目标。
+fn target_id_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.trim().to_owned(),
+        Value::Number(number) => number.to_string(),
+        _ => String::new(),
+    }
 }
 
 /// 给错误信息一个能直接照抄的 room 值：用当前连接的连接名 + 目标类型 + 目标 id。
@@ -2041,6 +2051,25 @@ mod tests {
         // 显式给了别的群：拒绝，不允许在 params 里换房间。
         let error = call_payload(route, &room, &json!({"group_id": "999"}))
             .expect_err("不能在 params 里换群");
+        assert!(matches!(error, CallError::BadParams(_)), "{error:?}");
+    }
+
+    /// 数字形式的群号只要等于当前房间，就不算「在 params 里换目标」。
+    /// poke 昵称补查就是这么传的；把它挡掉会让昵称一律退回号码。
+    #[test]
+    fn a_numeric_group_id_equal_to_the_room_is_not_a_retarget() {
+        let route = ROUTES
+            .iter()
+            .find(|route| route.method == "member.info")
+            .expect("有这个路由");
+        let room = RoomId::new("qq", "group/456").expect("合法");
+
+        let payload = call_payload(route, &room, &json!({"group_id": 456, "user_id": "10002"}))
+            .expect("数字群号等于当前群");
+        assert_eq!(payload["group_id"], 456);
+
+        let error = call_payload(route, &room, &json!({"group_id": 789, "user_id": "10002"}))
+            .expect_err("换成别的群仍要拒绝");
         assert!(matches!(error, CallError::BadParams(_)), "{error:?}");
     }
 
