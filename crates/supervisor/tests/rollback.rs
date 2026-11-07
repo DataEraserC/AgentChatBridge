@@ -552,7 +552,10 @@ fn external_rollback_writes_pointer_and_exits_75_without_starting_lkg() {
     assert_eq!(runner.starts().len(), 1, "launcher 不自己起 LKG");
     assert_eq!(runner.stops(), 0, "子进程已经退出，不需要再停");
     assert_eq!(
-        load_current(&dir).expect("current.json 已写").program,
+        load_current(&dir)
+            .expect("current.json readable")
+            .expect("current.json 已写")
+            .program,
         "/lkg"
     );
     let events = audit_events(&supervisor);
@@ -785,7 +788,7 @@ fn rollback_none_degrades_to_78_without_touching_current_pointer() {
     assert!(supervisor.failed().is_some(), "要记录放弃原因");
     assert_eq!(supervisor.current().program, "/current", "不能切到 LKG");
     assert!(
-        load_current(&dir).is_none(),
+        load_current(&dir).expect("current.json readable").is_none(),
         "rollback=none 不能写 current.json"
     );
     assert_eq!(runner.starts().len(), 1, "不能启动 LKG");

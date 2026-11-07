@@ -74,8 +74,12 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
     }
 
     match load_current(&state_dir) {
-        Some(command) => println!("current: {}", command.id()),
-        None => println!("current: none"),
+        Ok(Some(command)) => println!("current: {}", command.id()),
+        Ok(None) => println!("current: none"),
+        Err(error) => {
+            println!("current: unreadable: {error}");
+            healthy = false;
+        }
     }
     match load_lkg(&state_dir) {
         Some(command) => println!("lkg: {}", command.id()),

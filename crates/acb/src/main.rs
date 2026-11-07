@@ -2,10 +2,12 @@
 
 mod fsutil;
 mod grants;
+mod pins;
 mod profile;
 mod run;
 mod status;
 mod unit;
+mod upgrade;
 
 use std::process::ExitCode;
 
@@ -59,6 +61,7 @@ fn run() -> Result<ExitCode, String> {
         "status" => status::command(&args.collect::<Vec<_>>()),
         "profile" => profile::command(&args.collect::<Vec<_>>()),
         "grants" => grants::command(&args.collect::<Vec<_>>()),
+        "upgrade" => upgrade::command(&args.collect::<Vec<_>>()),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -77,6 +80,8 @@ Usage:
   acbctl run --mode=launcher|direct [--config PATH] [--state-dir DIR]
   acbctl status --mode=run [--state-dir DIR] [--config PATH] [--health-url URL]
   acbctl profile list|current|add|switch|gc|seed
+  acbctl upgrade --generation ID | --payload PATH --strategy store|copy
+  acbctl upgrade status [REQUEST_ID]
   acbctl grants explain|matrix|diff
   acbctl unit --help
 

@@ -166,7 +166,7 @@ fn doctor_reports_clean_state() {
     let output = run_doctor(&root, &shim, &home);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
-        stdout(&output).contains("ok: 5 units verified"),
+        stdout(&output).contains("ok: 7 units verified"),
         "{}",
         stdout(&output)
     );
@@ -245,11 +245,22 @@ fn doctor_reports_missing_execstart_program() {
     fs::create_dir_all(&shim_dir).expect("shim");
     let values = base_values(temp.path(), &bin, &repo);
 
-    let installed = install(&root, &values);
-    assert!(installed.status.success(), "{}", stderr(&installed));
-
     let home = temp.path().join("home");
     fs::create_dir_all(home.join(".config/systemd/user")).expect("user unit dir");
+
+    let installed = run_acb(
+        &values,
+        &[
+            ("HOME", home.to_string_lossy().into_owned()),
+            (
+                "ACB_PROFILE_DIR",
+                home.join("profile-absent").to_string_lossy().into_owned(),
+            ),
+        ],
+        &["unit", "install", "--root", root.to_str().unwrap()],
+    );
+    assert!(installed.status.success(), "{}", stderr(&installed));
+
     let shim = systemctl_shim(
         &shim_dir,
         &format!("{}/.config/systemd/user", home.display()),

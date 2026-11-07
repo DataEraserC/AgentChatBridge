@@ -8,7 +8,11 @@
 //! 采样进程/健康/失败 → 构造 `Snapshot` → 调策略 → 执行 `fail / hold / rollback`。
 //! 即时触发（进程退出）走内置策略，不在故障路径上等待外部策略。
 
-#![forbid(unsafe_code)]
+// `pointer` 模块要用 `flock` 保证指针单写者；只允许该模块申请 `unsafe`。
+#![deny(unsafe_code)]
+
+mod pointer;
+pub mod upgrade;
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -24,6 +28,10 @@ use acb_supervisor_policy::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+pub use pointer::{
+    ActivationWriter, Projection, ReconcileOutcome, current_path, load_current,
+};
 
 pub const DEFAULT_PROBE_INTERVAL_SECS: u64 = 5;
 pub const DEFAULT_STABLE_WINDOW_SECS: u64 = 60;
@@ -556,6 +564,22 @@ impl Supervisor {
         self.exit_code = Some(EXIT_OK);
     }
 
+    /// 升级提交前停旧子进程。失败由调用方决定 abort 还是继续。
+    pub fn stop_child(&mut self) -> Result<(), String> {
+        self.runner.stop()
+    }
+
+    /// 指针未提交（stage/停旧/提交失败）时恢复旧版本进程。
+    pub fn restart_current(&mut self) -> Result<(), String> {
+        let spec = self.current.clone();
+        self.runner.start(&spec)
+    }
+
+    /// launcher 主动退出：75 请求外部重拉，78 放弃自动恢复。
+    pub fn request_exit(&mut self, code: i32) {
+        self.exit_code = Some(code);
+    }
+
     pub fn audit_path(&self) -> &Path {
         &self.audit
     }
@@ -908,9 +932,12 @@ impl Supervisor {
                             return;
                         }
                     }
-                    if let Err(error) =
-                        save_current(&PathBuf::from(&self.config.state_dir), &target, now)
-                    {
+                    if let Err(error) = commit_current(
+                        &PathBuf::from(&self.config.state_dir),
+                        &target,
+                        "acb-supervisor",
+                        now,
+                    ) {
                         // 写不了 current.json 就必须停下：systemd 重新拉起仍会读旧指针，
                         // 变成无限回滚循环。
                         self.failed = Some(format!("rollback pointer write failed: {error}"));
@@ -1064,29 +1091,16 @@ fn lkg_path(state_dir: &Path) -> PathBuf {
     state_dir.join("lkg.json")
 }
 
-fn current_path(state_dir: &Path) -> PathBuf {
-    state_dir.join("current.json")
-}
-
-/// 读 launcher 应该启动的版本指针。文件不存在/损坏返回 `None`，由调用方回退配置。
-pub fn load_current(state_dir: &Path) -> Option<CommandSpec> {
-    let text = std::fs::read_to_string(current_path(state_dir)).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    serde_json::from_value(value.get("command")?.clone()).ok()
-}
-
-/// 原子替换 `current.json`。launcher 启动时写一次；回滚时 supervisor 改写它。
-pub fn save_current(state_dir: &Path, command: &CommandSpec, now: i64) -> Result<(), String> {
-    let record = json!({"command": command, "updated_at_ms": now, "updated_by": "acb-launcher"});
-    let path = current_path(state_dir);
-    let temp = path.with_extension("json.tmp");
-    std::fs::write(
-        &temp,
-        serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("cannot write {}: {error}", temp.display()))?;
-    std::fs::rename(&temp, &path)
-        .map_err(|error| format!("cannot replace {}: {error}", path.display()))
+/// 按统一写入器提交 `current.json`，回滚也走同一条路径（锁 + journal + 投影）。
+fn commit_current(
+    state_dir: &Path,
+    command: &CommandSpec,
+    updated_by: &str,
+    now: i64,
+) -> Result<(), String> {
+    let writer = ActivationWriter::acquire(state_dir)?;
+    let projection = command.generation.as_ref().and_then(Projection::discover);
+    writer.commit(command, projection, updated_by, now)
 }
 
 fn load_lkg(state_dir: &Path) -> Option<CommandSpec> {

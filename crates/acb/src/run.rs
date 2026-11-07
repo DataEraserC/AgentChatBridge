@@ -89,10 +89,13 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
     install_signal_handlers();
     let mut failures: VecDeque<Instant> = VecDeque::new();
     loop {
-        let mut selected = if prepared.mode == Mode::Launcher {
-            load_current(&prepared.state_dir).unwrap_or_else(|| prepared.selected.clone())
-        } else {
-            prepared.selected.clone()
+        let mut selected = match read_pointer(&prepared) {
+            Ok(Some(current)) => current,
+            Ok(None) => prepared.selected.clone(),
+            Err(error) => {
+                eprintln!("acbctl run: {error}");
+                return Ok(ExitCode::from(78));
+            }
         };
         if selected.generation.is_none() {
             selected.generation = prepared.generation.clone();
@@ -144,10 +147,13 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
                     return Ok(ExitCode::from(78));
                 }
 
-                let selected = if prepared.mode == Mode::Launcher {
-                    load_current(&prepared.state_dir).unwrap_or_else(|| prepared.selected.clone())
-                } else {
-                    prepared.selected.clone()
+                let selected = match read_pointer(&prepared) {
+                    Ok(Some(current)) => current,
+                    Ok(None) => prepared.selected.clone(),
+                    Err(error) => {
+                        eprintln!("acbctl run: {error}");
+                        return Ok(ExitCode::from(78));
+                    }
                 };
                 eprintln!(
                     "acbctl run: child requested rollback (75), re-read current.json -> {}",
@@ -167,6 +173,15 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
                 return Ok(ExitCode::from(u8::try_from(128 + signal).unwrap_or(1)));
             }
         }
+    }
+}
+
+/// launcher 模式下以 `current.json` 为准；损坏时返回 `Err`，不退回配置版本。
+fn read_pointer(prepared: &Prepared) -> Result<Option<CommandSpec>, String> {
+    if prepared.mode == Mode::Launcher {
+        load_current(&prepared.state_dir)
+    } else {
+        Ok(None)
     }
 }
 
@@ -373,6 +388,10 @@ fn spawn_child(prepared: &Prepared) -> Result<Child, String> {
         .env_remove("WATCHDOG_USEC");
     if let Some(repo_dir) = &prepared.repo_dir {
         command.env("ACB_UNIT_REPO_DIR", repo_dir.to_string_lossy().into_owned());
+    }
+    if prepared.mode == Mode::Launcher {
+        // launcher 写 capabilities.json 时据此声明“有人会重拉我”，升级请求才被接受。
+        command.env("ACB_RESTART_OWNER", "acbctl-run");
     }
     command.spawn().map_err(|error| {
         format!(
