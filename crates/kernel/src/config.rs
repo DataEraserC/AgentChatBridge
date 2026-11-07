@@ -451,6 +451,8 @@ pub struct NotificationsConfig {
     pub url: Option<String>,
     /// ntfy topic。
     pub topic: Option<String>,
+    /// topic 引用的来源名。只用于启动摘要/审计，不参与发送；值本身不落日志。
+    pub topic_source: Option<String>,
     /// 可选访问令牌；填了就发 `Authorization: Bearer <token>`。
     pub token: Option<String>,
     /// 同一依赖边沿/抑制事件的去重窗口（秒）。
@@ -1529,6 +1531,10 @@ impl Config {
                     .url
                     .map(|url| url.trim().trim_end_matches('/').to_owned())
                     .filter(|url| !url.is_empty());
+                let topic_source = match raw.topic.as_ref() {
+                    Some(RawSecretValue::Reference(reference)) => Some(reference.secret.clone()),
+                    _ => None,
+                };
                 let topic = secrets
                     .resolve_opt(raw.topic, "notifications.topic")?
                     .map(|topic| topic.trim().trim_start_matches('/').to_owned())
@@ -1571,6 +1577,7 @@ impl Config {
                     enabled: raw.enabled,
                     url,
                     topic,
+                    topic_source,
                     token,
                     min_interval_secs,
                     in_band,
