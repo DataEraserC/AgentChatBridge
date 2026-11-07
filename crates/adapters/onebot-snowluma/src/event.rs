@@ -65,7 +65,7 @@ pub fn parse(connection: &str, event: &Value, admin_qqs: &[String]) -> Result<Pa
                 Ok(Parsed::Ignored("心跳/生命周期".into()))
             }
         }
-        Some("request") => request(connection, event, at, admin_qqs),
+        Some("request") => request(connection, event, &self_id, at, admin_qqs),
         other => {
             let name = match other {
                 Some(name) => name.to_owned(),
@@ -304,6 +304,7 @@ fn notice(
 fn request(
     connection: &str,
     event: &Value,
+    self_id: &str,
     at: i64,
     admin_qqs: &[String],
 ) -> Result<Parsed, EventError> {
@@ -312,7 +313,14 @@ fn request(
         .and_then(Value::as_str)
         .ok_or(EventError::Missing("request_type"))?;
     let sender_id = id_of(event.get("user_id"));
-    let room = notice_room(connection, event, &sender_id)?;
+    // 发给 bot 自身的入群邀请在 SnowLuma 里由私聊邀请卡片派生：此时 bot 还没进群，
+    // 按 `group_id` 归房间会落进一个没有订阅者的房间，被 core 当成未订阅丢掉。
+    // 改归邀请人私聊，已有的私聊订阅就能收到；群号仍在载荷的 `group_id` 里。
+    let room = if self_group_invite(event, request_type, self_id) && !sender_id.is_empty() {
+        room(connection, &format!("private/{sender_id}"))?
+    } else {
+        notice_room(connection, event, &sender_id)?
+    };
     let scope = room_scope(&room);
     let body = format!("[请求 {request_type}] {}", comment_of(event));
 
@@ -332,6 +340,17 @@ fn request(
             Some(body),
         ),
     ))
+}
+
+/// 发给 bot 自身的入群邀请（`request_type=group` + `sub_type=invite` + `invited_id` 是自己）。
+///
+/// 这类事件在 SnowLuma 里由私聊邀请卡片派生，bot 还没进群；缺 `invited_id`、或邀请的是
+/// 别人时都不算，保持按 `group_id` 归群房间的老逻辑。
+fn self_group_invite(event: &Value, request_type: &str, self_id: &str) -> bool {
+    request_type == "group"
+        && event.get("sub_type").and_then(Value::as_str) == Some("invite")
+        && !self_id.is_empty()
+        && id_of(event.get("invited_id")) == self_id
 }
 
 /// 事件发生在哪个房间：有群号就是群，否则算私聊。
@@ -658,6 +677,92 @@ mod tests {
             "私聊由适配器声明为一对一"
         );
         assert!(!draft.at_self);
+    }
+
+    #[test]
+    fn group_invite_to_bot_lands_in_the_inviter_private_room() {
+        let event = json!({
+            "post_type": "request",
+            "request_type": "group",
+            "sub_type": "invite",
+            "self_id": 999,
+            "group_id": 147527106,
+            "user_id": 10001,
+            "invited_id": 999,
+            "comment": "",
+            "flag": "slreq:1:1794050894129679:147527106:2:0"
+        });
+        let Parsed::Record(draft) = parse("qq", &event, &[]).expect("能解析") else {
+            panic!("应当成一条记录");
+        };
+
+        assert_eq!(
+            draft.room,
+            RoomId::new("qq", "private/10001").expect("合法"),
+            "自邀请还没进群，挂到未加入的群房间会被 core 当成未订阅丢掉"
+        );
+        assert_eq!(
+            draft.room_scope,
+            Some(RoomScope::Direct),
+            "归到私聊房间就按一对一声明"
+        );
+
+        let acb_proto::RecordKind::Event { payload, .. } = &draft.kind else {
+            panic!("应当是事件记录");
+        };
+        let payload = payload.as_ref().expect("原始载荷要完整保留");
+        assert_eq!(
+            payload.get("group_id").and_then(Value::as_u64),
+            Some(147527106),
+            "群号不能丢，仍要能看出是针对哪个群的邀请"
+        );
+        assert_eq!(
+            payload.get("flag").and_then(Value::as_str),
+            Some("slreq:1:1794050894129679:147527106:2:0"),
+            "flag 不能被裁剪"
+        );
+    }
+
+    #[test]
+    fn group_invite_to_someone_else_stays_in_the_group_room() {
+        let event = json!({
+            "post_type": "request",
+            "request_type": "group",
+            "sub_type": "invite",
+            "self_id": 999,
+            "group_id": 147527106,
+            "user_id": 10001,
+            "invited_id": 10002
+        });
+        let Parsed::Record(draft) = parse("qq", &event, &[]).expect("能解析") else {
+            panic!("应当成一条记录");
+        };
+        assert_eq!(
+            draft.room,
+            RoomId::new("qq", "group/147527106").expect("合法"),
+            "邀请的不是 bot，仍按群房间记"
+        );
+    }
+
+    #[test]
+    fn group_add_request_stays_in_the_group_room() {
+        let event = json!({
+            "post_type": "request",
+            "request_type": "group",
+            "sub_type": "add",
+            "self_id": 999,
+            "group_id": 456,
+            "user_id": 10001,
+            "comment": "求进群"
+        });
+        let Parsed::Record(draft) = parse("qq", &event, &[]).expect("能解析") else {
+            panic!("应当成一条记录");
+        };
+        assert_eq!(
+            draft.room,
+            RoomId::new("qq", "group/456").expect("合法"),
+            "加群申请不变：群是已加入的，房间本来就有订阅者"
+        );
     }
 
     #[test]
