@@ -21,31 +21,31 @@ const MANIFEST_VERSION: u32 = 1;
 const TEMPLATES: &[(&str, &str)] = &[
     (
         "dsh-acb.service",
-        include_str!("../../../deploy/units/systemd/dsh-acb.service.tmpl"),
+        include_str!("../../../share/acb/units/dsh-acb.service.tmpl"),
     ),
     (
         "acb-bridge.service",
-        include_str!("../../../deploy/units/systemd/acb-bridge.service.tmpl"),
+        include_str!("../../../share/acb/units/acb-bridge.service.tmpl"),
     ),
     (
         "acb-drivers.service",
-        include_str!("../../../deploy/units/systemd/acb-drivers.service.tmpl"),
+        include_str!("../../../share/acb/units/acb-drivers.service.tmpl"),
     ),
     (
         "acb-opencode-serve.service",
-        include_str!("../../../deploy/units/systemd/acb-opencode-serve.service.tmpl"),
+        include_str!("../../../share/acb/units/acb-opencode-serve.service.tmpl"),
     ),
     (
         "acb-launcher.service",
-        include_str!("../../../deploy/units/systemd/acb-launcher.service.tmpl"),
+        include_str!("../../../share/acb/units/acb-launcher.service.tmpl"),
     ),
     (
         "acb-launcher-user.service",
-        include_str!("../../../deploy/units/systemd/acb-launcher-user.service.tmpl"),
+        include_str!("../../../share/acb/units/acb-launcher-user.service.tmpl"),
     ),
     (
         "acb-stack.target",
-        include_str!("../../../deploy/units/systemd/acb-stack.target.tmpl"),
+        include_str!("../../../share/acb/units/acb-stack.target.tmpl"),
     ),
 ];
 
@@ -67,6 +67,7 @@ const OPTIONAL_KEYS: &[&str] = &[
     "ACB_UNIT_OPENCODE_PORT",
     "ACB_UNIT_AUTOSTART",
     "ACB_UNIT_LAUNCHER_BIN",
+    "ACB_UNIT_ACBL_PREFIX",
     "ACB_UNIT_STATE_DIR",
     "ACB_UNIT_SUPERVISOR_CONFIG_FILE",
 ];
@@ -76,6 +77,7 @@ const KEY_DEFAULTS: &[(&str, &str)] = &[
     ("ACB_UNIT_CONSOLE_PORT", "3100"),
     ("ACB_UNIT_OPENCODE_PORT", "4097"),
     ("ACB_UNIT_AUTOSTART", "0"),
+    ("ACB_UNIT_ACBL_PREFIX", "/usr/local"),
 ];
 
 struct RenderedUnit {
@@ -160,8 +162,9 @@ pub fn install_command(args: &[String]) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let root = parse_root_arg(args, "install")?;
-    let units = render_all()?;
+    let parsed = parse_install_args(args)?;
+    let units = render_all_with_autostart(parsed.autostart.as_deref(), parsed.scope.as_deref())?;
+    let root = parsed.root;
     fs::create_dir_all(&root).map_err(|error| format!("create {}: {error}", root.display()))?;
 
     let previous = read_manifest(&root)?;
@@ -199,6 +202,15 @@ pub fn uninstall_command(args: &[String]) -> Result<ExitCode, String> {
     if is_help(args) {
         print_uninstall_help();
         return Ok(ExitCode::SUCCESS);
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--purge" || arg.starts_with("--purge="))
+    {
+        return Err(
+            "acbctl unit uninstall has no --purge: profile and LKG state are never removed"
+                .to_string(),
+        );
     }
 
     let root = parse_root_arg(args, "uninstall")?;
@@ -459,6 +471,71 @@ fn parse_root_arg(args: &[String], command: &str) -> Result<PathBuf, String> {
     root.ok_or_else(|| format!("{command} requires --root DIR"))
 }
 
+struct InstallArgs {
+    root: PathBuf,
+    /// `None` 表示沿用 `ACB_UNIT_AUTOSTART` 环境值；`Some("1")` 才写 `[Install]`。
+    autostart: Option<String>,
+    /// `user` / `system`，决定 stack target 的 `WantedBy`。
+    scope: Option<String>,
+}
+
+fn parse_install_args(args: &[String]) -> Result<InstallArgs, String> {
+    let mut root = None;
+    let mut autostart = None;
+    let mut scope = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        match arg.as_str() {
+            "--root" => {
+                root = Some(PathBuf::from(next_value(args, &mut index, "--root")?));
+            }
+            "--scope" => {
+                let value = next_value(args, &mut index, "--scope")?;
+                scope = Some(validate_scope(&value)?);
+            }
+            "--autostart" => {
+                // 允许 `--autostart 0|1`，也允许单独 `--autostart` 表示开启。
+                match args.get(index + 1) {
+                    Some(value) if value == "0" || value == "1" => {
+                        autostart = Some(value.clone());
+                        index += 1;
+                    }
+                    _ => autostart = Some("1".to_string()),
+                }
+            }
+            "--no-autostart" => autostart = Some("0".to_string()),
+            _ if arg.starts_with("--root=") => {
+                root = Some(PathBuf::from(non_empty_value(arg, "--root")?));
+            }
+            _ if arg.starts_with("--scope=") => {
+                scope = Some(validate_scope(&non_empty_value(arg, "--scope")?)?);
+            }
+            _ if arg.starts_with("--autostart=") => {
+                let value = non_empty_value(arg, "--autostart")?;
+                if value != "0" && value != "1" {
+                    return Err(format!("--autostart must be 0 or 1: {value}"));
+                }
+                autostart = Some(value);
+            }
+            other => return Err(format!("unknown argument for install: {other}")),
+        }
+        index += 1;
+    }
+    Ok(InstallArgs {
+        root: root.ok_or_else(|| "install requires --root DIR".to_string())?,
+        autostart,
+        scope,
+    })
+}
+
+fn validate_scope(value: &str) -> Result<String, String> {
+    match value {
+        "user" | "system" => Ok(value.to_string()),
+        other => Err(format!("--scope must be user or system: {other}")),
+    }
+}
+
 fn next_value(args: &[String], index: &mut usize, flag: &str) -> Result<String, String> {
     *index += 1;
     args.get(*index)
@@ -478,8 +555,12 @@ fn non_empty_value(arg: &str, flag: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-fn render_all() -> Result<Vec<RenderedUnit>, String> {
-    let values = resolved_values()?;
+fn render_all_with_autostart(
+    autostart: Option<&str>,
+    scope: Option<&str>,
+) -> Result<Vec<RenderedUnit>, String> {
+    let mut values = resolved_values()?;
+    apply_autostart(&mut values, autostart, scope)?;
     TEMPLATES
         .iter()
         .map(|(name, template)| {
@@ -487,6 +568,10 @@ fn render_all() -> Result<Vec<RenderedUnit>, String> {
             Ok(RenderedUnit { name, content })
         })
         .collect()
+}
+
+fn render_all() -> Result<Vec<RenderedUnit>, String> {
+    render_all_with_autostart(None, None)
 }
 
 /// 先收集 ACB_UNIT_*，再把 BIN_DIR / REPO_DIR 换成 profile/current 下的路径（可用时）。
@@ -505,7 +590,6 @@ pub(crate) fn resolved_values() -> Result<BTreeMap<String, String>, String> {
         repo_dir.to_string_lossy().into_owned(),
     );
 
-    // launcher 相关默认值全部从已解析的 profile/bin 派生，不写死发行版路径。
     // state 必须落在 profile 外的稳定目录，不能跟着 generation 换。
     let profile_dir = PathBuf::from(
         values
@@ -535,19 +619,60 @@ pub(crate) fn resolved_values() -> Result<BTreeMap<String, String>, String> {
                 .to_string_lossy()
                 .into_owned()
         });
-    let launcher_bin = values
-        .get("ACB_UNIT_LAUNCHER_BIN")
+
+    // launcher 是独立安装的静态 acbl，不随 ACB generation 换代。
+    // 前缀默认 /usr/local（对应 C-9 的 /usr/local/bin/acb-launcher 软链），
+    // NixOS 部署可覆盖为 /run/current-system/sw。
+    let acbl_prefix = values
+        .get("ACB_UNIT_ACBL_PREFIX")
         .cloned()
-        .unwrap_or_else(|| {
-            bin_dir
-                .join("acb-launcher")
-                .to_string_lossy()
-                .into_owned()
-        });
+        .unwrap_or_else(|| "/usr/local".to_owned());
+    let launcher_bin = resolve_launcher_bin(
+        &acbl_prefix,
+        values.get("ACB_UNIT_LAUNCHER_BIN").map(String::as_str),
+        &profile_dir,
+        &bin_dir,
+    )?;
+    values.insert("ACB_UNIT_ACBL_PREFIX".to_string(), acbl_prefix);
     values.insert("ACB_UNIT_STATE_DIR".to_string(), state_dir);
-    values.insert("ACB_UNIT_SUPERVISOR_CONFIG_FILE".to_string(), supervisor_config);
+    values.insert(
+        "ACB_UNIT_SUPERVISOR_CONFIG_FILE".to_string(),
+        supervisor_config,
+    );
     values.insert("ACB_UNIT_LAUNCHER_BIN".to_string(), launcher_bin);
     Ok(values)
+}
+
+/// 解析静态 acbl 的安装路径，并拒绝任何落在 profile/generation 里的
+/// payload launcher（否则 acbl 会成为版本树的一部分，换代后旧 acbl 仍在跑）。
+fn resolve_launcher_bin(
+    acbl_prefix: &str,
+    explicit: Option<&str>,
+    profile_dir: &Path,
+    bin_dir: &Path,
+) -> Result<String, String> {
+    let launcher = match explicit {
+        Some(value) => PathBuf::from(value),
+        None => Path::new(acbl_prefix).join("bin").join("acb-launcher"),
+    };
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let profile = canonical(profile_dir);
+    let launcher_canonical = canonical(&launcher);
+    let inside_profile = launcher_canonical.starts_with(&profile)
+        || launcher
+            .components()
+            .any(|component| component.as_os_str() == "generations");
+    let legacy_default = canonical(&bin_dir.join("acb-launcher")) == launcher_canonical
+        && bin_dir.starts_with(profile_dir);
+    if inside_profile || legacy_default {
+        return Err(format!(
+            "ACB_UNIT_LAUNCHER_BIN must point to the static acbl install, not an ACB payload \
+             (got {}); set ACB_UNIT_ACBL_PREFIX (default /usr/local) or an explicit static \
+             ACB_UNIT_LAUNCHER_BIN",
+            launcher.display()
+        ));
+    }
+    Ok(launcher.to_string_lossy().into_owned())
 }
 
 pub(crate) fn values_from_env() -> Result<BTreeMap<String, String>, String> {
@@ -580,27 +705,44 @@ pub(crate) fn values_from_env() -> Result<BTreeMap<String, String>, String> {
         validate_port(key, value)?;
     }
 
-    let autostart = values
-        .get("ACB_UNIT_AUTOSTART")
-        .cloned()
-        .expect("defaults cover autostart");
-    let install_section = match autostart.as_str() {
-        "0" => String::new(),
-        "1" => "\n[Install]\nWantedBy=default.target".to_string(),
-        other => return Err(format!("ACB_UNIT_AUTOSTART must be 0 or 1: {other}")),
-    };
-    values.insert("INSTALL_SECTION".to_string(), install_section);
-    let system_install_section = match autostart.as_str() {
-        "0" => String::new(),
-        "1" => "\n[Install]\nWantedBy=multi-user.target".to_string(),
-        other => return Err(format!("ACB_UNIT_AUTOSTART must be 0 or 1: {other}")),
-    };
-    values.insert(
-        "SYSTEM_INSTALL_SECTION".to_string(),
-        system_install_section,
-    );
-
+    apply_autostart(&mut values, None, None)?;
     Ok(values)
+}
+
+/// `ACB_UNIT_AUTOSTART` 控制是否在渲染结果里写 `[Install]`。
+/// `--autostart 0|1` 显式覆盖环境值；`scope` 只影响 stack target 的 `WantedBy`。
+fn apply_autostart(
+    values: &mut BTreeMap<String, String>,
+    autostart: Option<&str>,
+    scope: Option<&str>,
+) -> Result<(), String> {
+    let enabled = match autostart {
+        Some(value) => value.to_string(),
+        None => values
+            .get("ACB_UNIT_AUTOSTART")
+            .cloned()
+            .expect("defaults cover autostart"),
+    };
+    let (install_section, system_install_section) = match enabled.as_str() {
+        "0" => (String::new(), String::new()),
+        "1" => (
+            "\n[Install]\nWantedBy=default.target".to_string(),
+            "\n[Install]\nWantedBy=multi-user.target".to_string(),
+        ),
+        other => return Err(format!("ACB_UNIT_AUTOSTART must be 0 or 1: {other}")),
+    };
+    let stack_section = match scope {
+        Some("user") => install_section.clone(),
+        Some("system") => system_install_section.clone(),
+        Some(other) => return Err(format!("--scope must be user or system: {other}")),
+        // 未指定 scope 时沿用旧行为：stack target 跟随 user 安装段。
+        None => install_section.clone(),
+    };
+    values.insert("ACB_UNIT_AUTOSTART".to_string(), enabled);
+    values.insert("INSTALL_SECTION".to_string(), install_section);
+    values.insert("SYSTEM_INSTALL_SECTION".to_string(), system_install_section);
+    values.insert("STACK_INSTALL_SECTION".to_string(), stack_section);
+    Ok(())
 }
 
 fn is_known_key(key: &str) -> bool {
@@ -614,7 +756,10 @@ fn validate_value(key: &str, value: &str) -> Result<(), String> {
     if value.contains('\n') || value.contains('\r') || value.contains('\0') {
         return Err(format!("{key} must not contain line breaks or NUL"));
     }
-    if (key.ends_with("_DIR") || key.ends_with("_FILE") || key.ends_with("_BIN")
+    if (key.ends_with("_DIR")
+        || key.ends_with("_FILE")
+        || key.ends_with("_BIN")
+        || key.ends_with("_PREFIX")
         || key == "ACB_UNIT_SHELL")
         && !value.starts_with('/')
     {
@@ -819,11 +964,20 @@ fn print_render_help() {
 }
 
 fn print_install_help() {
-    println!("Usage: acbctl unit install --root DIR");
+    println!("Usage: acbctl unit install --root DIR [--scope user|system] [--autostart 0|1]");
+    println!();
+    println!("  --root DIR         unit 文件写到哪里（user 通常是 ~/.config/systemd/user，");
+    println!("                     system 通常是 /etc/systemd/system）");
+    println!("  --scope user|system  决定 stack target 的 [Install] WantedBy");
+    println!("  --autostart 1     在 unit 里写 [Install] 段；0 或省略则不写");
+    println!("                     （acbctl 只渲染文件，不执行 systemctl enable/start）");
 }
 
 fn print_uninstall_help() {
     println!("Usage: acbctl unit uninstall --root DIR");
+    println!();
+    println!("只删除本工具渲染并记录的 unit 文件；没有 --purge。");
+    println!("profile、LKG 与状态目录永不删除。");
 }
 
 fn print_doctor_help() {

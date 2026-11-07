@@ -76,7 +76,7 @@ Usage:
   acbctl unit render --print
   acbctl unit render --output-dir DIR
   acbctl unit render --diff --root DIR
-  acbctl unit install --root DIR
+  acbctl unit install --root DIR [--scope user|system] [--autostart 0|1]
   acbctl unit uninstall --root DIR
   acbctl unit doctor --root DIR
   acbctl run --mode=launcher|direct [--config PATH] [--state-dir DIR]
@@ -99,7 +99,7 @@ fn print_unit_help() {
   acbctl unit render --print
   acbctl unit render --output-dir DIR
   acbctl unit render --diff --root DIR
-  acbctl unit install --root DIR
+  acbctl unit install --root DIR [--scope user|system] [--autostart 0|1]
   acbctl unit uninstall --root DIR
   acbctl unit doctor --root DIR"
     );

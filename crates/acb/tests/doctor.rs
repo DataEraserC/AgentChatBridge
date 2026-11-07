@@ -55,6 +55,11 @@ fn base_values(root: &Path, bin: &Path, repo: &Path) -> Vec<(&'static str, Strin
             "/etc/profiles/per-user/test".to_string(),
         ),
         ("ACB_UNIT_BIN_DIR", bin.to_string_lossy().into_owned()),
+        // acbl 是独立安装的静态入口，不来自 payload；测试里显式指到 fixture。
+        (
+            "ACB_UNIT_LAUNCHER_BIN",
+            bin.join("acb-launcher").to_string_lossy().into_owned(),
+        ),
         (
             "ACB_UNIT_SHELL",
             common::bash_path().to_string_lossy().into_owned(),
