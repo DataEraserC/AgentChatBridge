@@ -31,7 +31,7 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
         Some(path) => path,
         None => match &config {
             Some(config) => PathBuf::from(&config.state_dir),
-            None => default_state_dir(),
+            None => crate::profile::default_state_dir(),
         },
     };
     let health_url = arguments
@@ -110,14 +110,6 @@ fn load_lkg(state_dir: &std::path::Path) -> Option<acb_supervisor::CommandSpec> 
     let text = fs::read_to_string(state_dir.join("lkg.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     serde_json::from_value(value.get("command")?.clone()).ok()
-}
-
-fn default_state_dir() -> PathBuf {
-    std::env::var_os("ACB_UNIT_REPO_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|repo| repo.join("state").join("supervisor"))
-        .unwrap_or_else(|| PathBuf::from("state/supervisor"))
 }
 
 fn parse_arguments(args: &[String]) -> Result<Arguments, String> {

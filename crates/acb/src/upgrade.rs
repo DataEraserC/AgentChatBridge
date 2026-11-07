@@ -291,7 +291,7 @@ fn status_command(args: &[String]) -> Result<ExitCode, String> {
 }
 
 fn upgrade_state_dir() -> PathBuf {
-    acb_supervisor::upgrade::default_state_dir()
+    crate::profile::default_state_dir()
 }
 
 fn empty_dash(value: &str) -> &str {
@@ -312,6 +312,6 @@ Options:
   --reason TEXT            人读的原因
   --expected-current ID    乐观并发：当前 generation 不符则拒绝
   --ttl-secs N             请求有效期，默认 300 秒
-  --state-dir DIR          默认 ACB_STATE_DIR 或 state/supervisor"
+  --state-dir DIR          默认 ACB_STATE_DIR 或 <profile 父目录>/state/supervisor"
     );
 }
