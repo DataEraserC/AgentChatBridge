@@ -185,10 +185,14 @@ fn main() -> ExitCode {
 
     while !supervisor.stopped() {
         if shutdown::requested() {
-            // 正常停止 / 升级 acbl：acbl 只观察和恢复 bridge，不拥有它。
-            // unit 用 KillMode=process，子进程本来就不会被 cgroup 带走；
-            // 这里也不主动杀，下一任 acbl 会通过 bridge.instance.json 接管。
-            eprintln!("acb-launcher: stop requested; leaving bridge running");
+            // unit 用 KillMode=process，cgroup 不会带走子进程，必须自己停：
+            // 否则 systemctl stop / 回退到旧 unit 时，孤儿 bridge 占着端口，
+            // 下一个进程只会 EADDRINUSE 然后 78。升级路径不经过这里——
+            // 它在提交前已显式 stop_child，退出 75 由 systemd 重拉。
+            eprintln!("acb-launcher: stop requested; stopping bridge");
+            if let Err(error) = supervisor.stop_child() {
+                eprintln!("acb-launcher: cannot stop bridge: {error}");
+            }
             notifier.stopping();
             return ExitCode::from(EXIT_OK as u8);
         }
