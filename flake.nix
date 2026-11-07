@@ -9,16 +9,13 @@
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
-    in
-    {
-      packages.${system} = rec {
-        default = acb-bridge;
-        # acb-launcher 与 acb-bridge 是同一个 workspace 构建产物；这个别名方便
-        # deploy/nix/*.nix 的 package 选项直接引用。
-        acb-launcher = acb-bridge;
-        acb-bridge = pkgs.rustPlatform.buildRustPackage {
-          pname = "acb-bridge";
-          version = "0.1.0";
+      version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+
+      # 整个 workspace 的 Rust 构建：产出全部二进制。它本身不再是部署产物，
+      # 只作为 acbl / payload 两个分发包的取材来源。
+      workspace = pkgs.rustPlatform.buildRustPackage {
+          pname = "acb-workspace";
+          inherit version;
           src = ./.;
 
           # libgit2 通过 git2 crate 的 vendored 实现编译，需要这些系统依赖。
@@ -39,7 +36,46 @@
           cargoLock = {
             lockFile = ./Cargo.lock;
           };
+
+          # checkPhase 会以 release profile 跑 `cargo check --workspace`，某个
+          # dev-dependency 会打开 kernel 的 `test-fixtures` feature，命中它内置的
+          # compile_error! 守卫。该守卫是刻意为之；nix 包只负责产出二进制，
+          # 测试由 `cargo test` 单独执行。
+          doCheck = false;
         };
+
+      # acbl：静态入口分发包。只含 acbl 侧内容；bridge / harnesses / drivers
+      # 属于 payload，不在这里。unit 模板随包分发，由 `acbctl unit install` 渲染。
+      acbl = pkgs.runCommand "acbl-${version}" { } ''
+        mkdir -p $out/bin $out/share/acb/units
+        install -m755 ${workspace}/bin/acb-launcher $out/bin/acb-launcher
+        install -m755 ${workspace}/bin/acb-supervisor $out/bin/acb-supervisor
+        install -m755 ${workspace}/bin/acbctl $out/bin/acbctl
+        install -m644 ${./share/acb/units}/*.tmpl $out/share/acb/units/
+        install -m644 ${./deploy/systemd/acb-launcher.service} $out/share/acb/units/acb-launcher.service
+      '';
+
+      # payload：会随迭代换代的内容。口径与 B-12 的 validate_payload 对齐：
+      # bin/acb-bridge、harnesses/、deploy/start-drivers.sh、acb-contract.json。
+      acb-payload = pkgs.runCommand "acb-payload-${version}" { } ''
+        mkdir -p $out/bin $out/harnesses $out/deploy
+        install -m755 ${workspace}/bin/acb-bridge $out/bin/acb-bridge
+        cp -r ${./harnesses}/. $out/harnesses/
+        install -m755 ${./deploy/start-drivers.sh} $out/deploy/start-drivers.sh
+        install -m644 ${./deploy/acb-contract.json} $out/acb-contract.json
+      '';
+    in
+    {
+      packages.${system} = rec {
+        default = acb-bridge;
+        # 完整 workspace 构建；部署请取 acbl / acb-payload。
+        acb-bridge = workspace;
+        # acb-launcher 与 acb-bridge 是同一个 workspace 构建产物；这个别名方便
+        # deploy/nix/*.nix 的 package 选项直接引用。
+        acb-launcher = workspace;
+        inherit acbl acb-payload;
+        # `nix build .#payload` 的简写。
+        payload = acb-payload;
 
         # ACB 的 dsh preset bundle：默认没有会话，部署侧用
         # `.override { sessions = [ { preset = "..."; port = 3101; } ]; }` 注入。
