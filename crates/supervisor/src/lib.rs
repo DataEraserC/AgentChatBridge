@@ -12,6 +12,8 @@
 #![deny(unsafe_code)]
 
 mod pointer;
+pub mod adopted;
+pub mod instance;
 pub mod upgrade;
 
 use std::collections::VecDeque;
@@ -261,12 +263,28 @@ pub trait Runner {
     fn running(&mut self) -> bool;
     /// 上一次观察到的退出信息；没有退出记录返回 `None`。
     fn last_exit(&mut self) -> Option<ExitInfo>;
+    /// 当前被监督进程的 pid；用于写入可验证的实例记录。
+    fn pid(&mut self) -> Option<u32> {
+        None
+    }
 }
 
 #[derive(Default)]
 pub struct ProcessRunner {
     child: Option<Child>,
     last_exit: Option<ExitInfo>,
+    /// 每次成功拉起后写入 `bridge.instance.json`，供 acbl 重启后接管。
+    instance_file: Option<PathBuf>,
+}
+
+impl ProcessRunner {
+    pub fn with_instance_file(path: impl Into<PathBuf>) -> Self {
+        Self {
+            child: None,
+            last_exit: None,
+            instance_file: Some(path.into()),
+        }
+    }
 }
 
 impl Runner for ProcessRunner {
@@ -281,8 +299,13 @@ impl Runner for ProcessRunner {
         let child = command
             .spawn()
             .map_err(|error| format!("cannot start {}: {error}", spec.program))?;
+        let pid = child.id();
         self.child = Some(child);
         self.last_exit = None;
+        if let Some(path) = &self.instance_file {
+            instance::write_record(path, spec, pid)
+                .map_err(|error| format!("cannot write instance record: {error}"))?;
+        }
         Ok(())
     }
 
@@ -315,6 +338,10 @@ impl Runner for ProcessRunner {
 
     fn last_exit(&mut self) -> Option<ExitInfo> {
         self.last_exit.clone()
+    }
+
+    fn pid(&mut self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
     }
 }
 

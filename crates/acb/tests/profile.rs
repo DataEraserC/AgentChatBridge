@@ -40,7 +40,7 @@ fn payload(root: &Path, name: &str) -> PathBuf {
     let dir = root.join(format!("payload-{name}"));
     fs::create_dir_all(dir.join("bin")).expect("bin");
     fs::create_dir_all(dir.join("harnesses")).expect("harnesses");
-    fs::create_dir_all(dir.join("deploy/units/systemd")).expect("templates");
+    fs::create_dir_all(dir.join("share/acb/units")).expect("templates");
     fs::create_dir_all(dir.join("deploy/run")).expect("run templates");
     fs::create_dir_all(dir.join("harnesses/dsh/src")).expect("dsh harness");
     fs::create_dir_all(dir.join("harnesses/opencode/plugin")).expect("opencode plugin");
