@@ -1,13 +1,13 @@
 //! ACB 运维 CLI：`acbctl unit` / `run` / `status`。
 
-mod fsutil;
 mod grants;
-mod pins;
-mod profile;
 mod run;
 mod status;
 mod unit;
 mod upgrade;
+
+// profile/fsutil 与库入口共用同一份实现，避免 bin 与 lib 各编译一份。
+use acb::{fsutil, profile};
 
 use std::process::ExitCode;
 

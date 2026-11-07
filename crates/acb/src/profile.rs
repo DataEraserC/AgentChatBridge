@@ -24,7 +24,7 @@ const SCHEMA: u32 = 1;
 const DEFAULT_KEEP: usize = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Source {
+pub struct Source {
     pub kind: String,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,13 +32,13 @@ pub(crate) struct Source {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ConfigIdentity {
+pub struct ConfigIdentity {
     pub path: String,
     pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Meta {
+pub struct Meta {
     pub schema: u32,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,7 +54,7 @@ pub(crate) struct Meta {
 
 /// payload 如何落到 generation 目录：store 靠 store 不可变，copy 是本地快照。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Payload {
+pub struct Payload {
     pub strategy: Strategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<SnapshotInfo>,
@@ -62,13 +62,13 @@ pub(crate) struct Payload {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Strategy {
+pub enum Strategy {
     Store,
     Copy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SnapshotInfo {
+pub struct SnapshotInfo {
     pub files: usize,
     pub bytes: u64,
 }
@@ -97,14 +97,14 @@ impl Meta {
     /// 该 generation 实际使用的 payload 路径。新格式统一是 `root`
     /// （store 策略下它仍是指向 store 的软链），旧格式保持原来的源路径。
     /// launcher/supervisor 只消费这个路径，不需要知道策略。
-    pub(crate) fn payload_path(&self, root: &Path) -> PathBuf {
+    pub fn payload_path(&self, root: &Path) -> PathBuf {
         match &self.payload {
             Some(_) => generation_dir(root, &self.id).join("root"),
             None => PathBuf::from(&self.source.path),
         }
     }
 
-    pub(crate) fn generation_ref(&self, root: &Path) -> acb_supervisor::GenerationRef {
+    pub fn generation_ref(&self, root: &Path) -> acb_supervisor::GenerationRef {
         acb_supervisor::GenerationRef {
             id: self.id.clone(),
             path: self.payload_path(root).to_string_lossy().into_owned(),
@@ -113,7 +113,7 @@ impl Meta {
     }
 }
 
-pub(crate) enum Status {
+pub enum Status {
     Missing {
         root: PathBuf,
     },
@@ -129,7 +129,7 @@ pub(crate) enum Status {
     },
 }
 
-pub(crate) fn root() -> PathBuf {
+pub fn root() -> PathBuf {
     if let Some(dir) = std::env::var_os("ACB_PROFILE_DIR").filter(|value| !value.is_empty()) {
         return PathBuf::from(dir);
     }
@@ -145,7 +145,7 @@ pub(crate) fn root() -> PathBuf {
     base.join("acb").join("profile")
 }
 
-pub(crate) fn status() -> Status {
+pub fn status() -> Status {
     status_at(&root())
 }
 
@@ -206,7 +206,7 @@ pub(crate) fn status_at(root: &Path) -> Status {
 }
 
 /// render/run 的二进制解析：profile 活跃时用 profile/current/bin，否则用传入回退值。
-pub(crate) fn resolve_bin_dir(fallback: Option<&Path>) -> Result<PathBuf, String> {
+pub fn resolve_bin_dir(fallback: Option<&Path>) -> Result<PathBuf, String> {
     match status() {
         Status::Active { bin, .. } => Ok(bin),
         Status::Missing { .. } => fallback.map(Path::to_path_buf).ok_or_else(|| {
@@ -218,7 +218,7 @@ pub(crate) fn resolve_bin_dir(fallback: Option<&Path>) -> Result<PathBuf, String
 }
 
 /// scripts/harnesses 的根：profile 活跃时用 profile/current，否则用传入回退值。
-pub(crate) fn resolve_repo_dir(fallback: Option<&Path>) -> Result<PathBuf, String> {
+pub fn resolve_repo_dir(fallback: Option<&Path>) -> Result<PathBuf, String> {
     match status() {
         Status::Active { root, .. } => Ok(root.join("current")),
         Status::Missing { .. } => fallback.map(Path::to_path_buf).ok_or_else(|| {
@@ -229,9 +229,7 @@ pub(crate) fn resolve_repo_dir(fallback: Option<&Path>) -> Result<PathBuf, Strin
     }
 }
 
-pub(crate) fn resolve_repo_dir_optional(
-    fallback: Option<&Path>,
-) -> Result<Option<PathBuf>, String> {
+pub fn resolve_repo_dir_optional(fallback: Option<&Path>) -> Result<Option<PathBuf>, String> {
     match status() {
         Status::Active { root, .. } => Ok(Some(root.join("current"))),
         Status::Missing { .. } => Ok(fallback.map(Path::to_path_buf)),
@@ -239,7 +237,7 @@ pub(crate) fn resolve_repo_dir_optional(
     }
 }
 
-pub(crate) fn active_meta() -> Result<Option<Meta>, String> {
+pub fn active_meta() -> Result<Option<Meta>, String> {
     match status() {
         Status::Missing { .. } => Ok(None),
         Status::Broken { detail, .. } => Err(format!("ACB profile current is broken: {detail}")),
@@ -459,6 +457,72 @@ fn supervisor_state_dir(options: &BTreeMap<String, String>, root: &Path) -> Path
         .unwrap_or_else(|| state_dir_for(root))
 }
 
+/// 升级链 stage：把 payload 落成 generation，返回它的引用。
+///
+/// 只建代与 pin，不切换 `current.json`；切换由 [`activate_generation`] 完成。
+pub fn add_payload(
+    profile_root: &Path,
+    payload: &Path,
+    strategy: &str,
+) -> Result<acb_supervisor::GenerationRef, String> {
+    let strategy = parse_strategy(strategy.trim())?;
+    let meta = add_generation(profile_root, payload, None, None, None, strategy)?;
+    Ok(meta.generation_ref(profile_root))
+}
+
+/// 升级链提交：校验 generation，一次写好 `current.json` 与 `profile/current` 投影，
+/// 返回 launcher 重启后应运行的命令。
+///
+/// 新代没有自己的 config 时沿用当前指针的 `args`，保持升级前后启动参数一致。
+pub fn activate_generation(
+    profile_root: &Path,
+    state_dir: &Path,
+    generation_id: &str,
+) -> Result<acb_supervisor::CommandSpec, String> {
+    let meta = load_meta(profile_root, generation_id)?
+        .ok_or_else(|| format!("generation not found: {generation_id}"))?;
+    let payload = generation_dir(profile_root, generation_id).join("root");
+    let command = match acb_supervisor::load_current(state_dir)? {
+        Some(current) => {
+            let program_name = Path::new(&current.program)
+                .file_name()
+                .ok_or_else(|| format!("cannot derive program name from {}", current.program))?;
+            let program = payload.join("bin").join(program_name);
+            if !program.is_file() {
+                return Err(format!(
+                    "target generation has no binary: {}",
+                    program.display()
+                ));
+            }
+            acb_supervisor::CommandSpec {
+                program: program.to_string_lossy().into_owned(),
+                args: current.args.clone(),
+                generation: Some(acb_supervisor::GenerationRef {
+                    id: generation_id.to_string(),
+                    path: payload.to_string_lossy().into_owned(),
+                    config_sha256: current
+                        .generation
+                        .as_ref()
+                        .and_then(|generation| generation.config_sha256.clone()),
+                }),
+            }
+        }
+        None => {
+            let command = command_for_generation(profile_root, &meta);
+            if !Path::new(&command.program).is_file() {
+                return Err(format!(
+                    "target generation has no binary: {}",
+                    command.program
+                ));
+            }
+            command
+        }
+    };
+    pin_generation(profile_root, generation_id);
+    commit_command(profile_root, generation_id, state_dir, "acb-launcher", &command)?;
+    Ok(command)
+}
+
 /// 把 generation 写成 `current.json` 的 command，并同时更新 `profile/current`。
 fn commit_profile_switch(
     root: &Path,
@@ -468,13 +532,23 @@ fn commit_profile_switch(
 ) -> Result<(), String> {
     let meta = load_meta(root, id)?.ok_or_else(|| format!("generation not found: {id}"))?;
     let command = command_for_generation(root, &meta);
+    commit_command(root, id, state_dir, updated_by, &command)
+}
+
+fn commit_command(
+    root: &Path,
+    id: &str,
+    state_dir: &Path,
+    updated_by: &str,
+    command: &acb_supervisor::CommandSpec,
+) -> Result<(), String> {
     let projection = acb_supervisor::Projection {
         link: root.join("current"),
         target: PathBuf::from("generations").join(id).join("root"),
     };
     let writer = acb_supervisor::ActivationWriter::acquire(state_dir)?;
     writer
-        .commit(&command, Some(projection), updated_by, now_ms())
+        .commit(command, Some(projection), updated_by, now_ms())
         .map_err(|error| format!("commit current.json: {error}"))
 }
 
@@ -651,7 +725,7 @@ fn write_initial_lkg(root: &Path, id: &str, state_dir: &Path) -> Result<(), Stri
 /// `ACB_UNIT_STATE_DIR` 的派生规则一致；`ACB_STATE_DIR` 可以显式覆盖。
 /// `seed`/`switch`/`run`/`status`/`upgrade` 都走这里，避免各自看不同的
 /// `current.json` 或 upgrade mailbox。
-pub(crate) fn default_state_dir() -> PathBuf {
+pub fn default_state_dir() -> PathBuf {
     state_dir_for(&root())
 }
 
