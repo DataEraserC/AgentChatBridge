@@ -1043,7 +1043,7 @@ fn add_rejects_incompatible_contract() {
             "copy",
         ],
     );
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
     let text = stderr(&output);
     assert!(text.contains("contract_incompatible"), "{text}");
     assert!(
@@ -1074,7 +1074,7 @@ fn add_rejects_payload_needing_newer_acbl() {
             "copy",
         ],
     );
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
     let text = stderr(&output);
     assert!(text.contains("acbl_too_old"), "{text}");
     assert!(text.contains("99.0.0"), "{text}");
@@ -1102,7 +1102,7 @@ fn add_names_the_missing_payload_entry() {
             "copy",
         ],
     );
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
     let text = stderr(&output);
     assert!(
         text.contains("deploy/start-drivers.sh (file)"),
@@ -1168,7 +1168,7 @@ fn add_strict_mode_rejects_payload_without_contract() {
             "copy",
         ],
     );
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
     let text = stderr(&output);
     assert!(text.contains("contract_unreadable"), "{text}");
     assert!(text.contains("ACB_CONTRACT_STRICT"), "{text}");
@@ -1190,7 +1190,7 @@ fn switch_rejects_contract_incompatible_generation_before_commit() {
     // 模拟 payload 被替换成声明更高契约的版本：必须在指针提交前拒绝。
     write_contract(&generation_dir(&profile, &id).join("root"), 2, "0.1.0", &["bin"]);
     let rejected = run_acb(&env, &["profile", "switch", &id]);
-    assert_eq!(rejected.status.code(), Some(2), "{}", stderr(&rejected));
+    assert_eq!(rejected.status.code(), Some(78), "{}", stderr(&rejected));
     assert!(stderr(&rejected).contains("contract_incompatible"), "{}", stderr(&rejected));
     assert_eq!(read_link(&profile), before, "pointer must not move");
 }

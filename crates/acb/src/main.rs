@@ -60,7 +60,13 @@ fn run() -> Result<ExitCode, String> {
         }
         "run" => run::command(&args.collect::<Vec<_>>()),
         "status" => status::command(&args.collect::<Vec<_>>()),
-        "profile" => profile::command(&args.collect::<Vec<_>>()),
+        "profile" => match profile::command(&args.collect::<Vec<_>>()) {
+            Ok(code) => Ok(code),
+            Err(failure) => {
+                eprintln!("acbctl: {failure}");
+                Ok(ExitCode::from(failure.exit_code()))
+            }
+        },
         "grants" => grants::command(&args.collect::<Vec<_>>()),
         "secrets" => secrets::command(&args.collect::<Vec<_>>()),
         "upgrade" => upgrade::command(&args.collect::<Vec<_>>()),
