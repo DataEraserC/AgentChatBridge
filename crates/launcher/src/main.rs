@@ -113,6 +113,12 @@ fn main() -> ExitCode {
     config.args = current.args.clone();
     // generation 元数据同样以 current.json 为准；否则重启后 LKG 提升/回滚会记错代。
     config.generation = current.generation.clone();
+    // 契约校验必须在 supervisor 拉起 bridge 之前：不兼容就以 78 终止，
+    // 不出现「旧 bridge 已停、新 bridge 未起」的半启动。
+    if let Some(error) = payload_contract_error(&current) {
+        eprintln!("acb-launcher: refusing to start generation: {error}");
+        return ExitCode::from(EXIT_GIVE_UP as u8);
+    }
     // systemd 重启由 launcher 请求；策略本身不直接起 LKG。
     config.rollback_mode = RollbackMode::External;
 
@@ -224,6 +230,35 @@ fn profile_root_for(current: &CommandSpec) -> Option<PathBuf> {
     }
     let payload = Path::new(current.generation.as_ref()?.path.as_str());
     payload.parent()?.parent()?.parent().map(Path::to_path_buf)
+}
+
+/// 启动前的契约校验。返回 `Some(可诊断原因)` 表示必须 78 放弃启动。
+/// 没有 generation 的配置式启动（旧部署）不校验；缺契约文件默认过渡放行并告警，
+/// 开启 `ACB_CONTRACT_STRICT` 后按 `contract_unreadable` 拒绝（78）。
+fn payload_contract_error(current: &CommandSpec) -> Option<String> {
+    let generation = current.generation.as_ref()?;
+    match acb::contract::verify_with(
+        Path::new(&generation.path),
+        acb::contract::configured_missing_policy(),
+    ) {
+        Ok(acb::contract::State::Declared(_)) => None,
+        Ok(acb::contract::State::Legacy) => {
+            eprintln!(
+                "WARNING: generation {} has no {}; treating it as acb_contract={}.",
+                generation.id,
+                acb::contract::CONTRACT_FILE,
+                acb::contract::CONTRACT_MIN
+            );
+            eprintln!(
+                "WARNING: TRANSITIONAL fallback only - the next minor acbl release will \
+                 HARD-REJECT such payloads. Ship {} or set {}=1 to enforce strict mode now.",
+                acb::contract::CONTRACT_FILE,
+                acb::contract::STRICT_ENV
+            );
+            None
+        }
+        Err(violation) => Some(format!("generation {}: {violation}", generation.id)),
+    }
 }
 
 fn announce_capabilities(
@@ -374,7 +409,11 @@ fn maybe_handle_upgrade(
             match profile::add_payload(&profile_root, Path::new(path), strategy) {
                 Ok(generation) => generation.id,
                 Err(error) => {
-                    finish_request(mailbox, &active, "aborted", "stage_failed", &error);
+                    finish_request(mailbox, &active, "aborted", "stage_failed", error.message());
+                    // 契约/布局被拒是配置级终态：统一 78，不再拉起任何版本。
+                    if error.is_rejected() {
+                        return give_up_on_rejection(supervisor, &error);
+                    }
                     return Ok(());
                 }
             }
@@ -384,7 +423,10 @@ fn maybe_handle_upgrade(
     // 停旧之前把目标代的解析与可执行文件校验做完：任何会失败的准备动作
     // 都发生在服务还活着的时候，构建/产物不可用不能打断正在跑的版本。
     if let Err(error) = profile::validate_generation(&profile_root, state_dir, &target_id) {
-        finish_request(mailbox, &active, "aborted", "target_invalid", &error);
+        finish_request(mailbox, &active, "aborted", "target_invalid", error.message());
+        if error.is_rejected() {
+            return give_up_on_rejection(supervisor, &error);
+        }
         return Ok(());
     }
 
@@ -400,7 +442,7 @@ fn maybe_handle_upgrade(
     //（锁 + journal + current.json + 投影），launcher 不再拼指针或调 acbctl。
     if let Err(error) = profile::activate_generation(&profile_root, state_dir, &target_id) {
         let _ = supervisor.restart_current();
-        finish_request(mailbox, &active, "aborted", "commit_failed", &error);
+        finish_request(mailbox, &active, "aborted", "commit_failed", error.message());
         return Ok(());
     }
 
@@ -410,6 +452,20 @@ fn maybe_handle_upgrade(
         active.request_id
     );
     supervisor.request_exit(exit_code);
+    Ok(())
+}
+
+/// 配置级拒绝的终态：停止当前子进程并按统一约定 78 收场，不走 LKG 回滚。
+///
+/// 78 与 `ACB_EXIT_GIVE_UP` 同义（配置问题、不再拉起），和 `profile add/switch`
+/// 的拒绝退出码保持一致，调用方只需判断「是否 78」就知道是配置被拒而非用法错误。
+fn give_up_on_rejection(
+    supervisor: &mut acb_supervisor::Supervisor,
+    error: &profile::Failure,
+) -> Result<(), String> {
+    eprintln!("acb-launcher: contract/config rejected: {error}");
+    supervisor.shutdown();
+    supervisor.request_exit(EXIT_GIVE_UP);
     Ok(())
 }
 
@@ -660,5 +716,35 @@ mod tests {
 
         let _ = std::fs::remove_file(mailbox.requests_dir());
         let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    /// 启动读到不兼容契约的 generation 时，必须在拉起 bridge 之前就给出可诊断原因。
+    #[test]
+    fn startup_rejects_generation_with_incompatible_contract() {
+        let payload = temp_state_dir("payload-contract").join("root");
+        std::fs::create_dir_all(payload.join("bin")).expect("payload bin");
+        std::fs::write(payload.join("bin/acb-bridge"), b"#!/bin/sh\n").expect("bridge");
+        std::fs::write(
+            payload.join("acb-contract.json"),
+            r#"{"schema":1,"contract":2,"min_acbl":"0.1.0","layout":[],
+                "commands":[{"name":"bridge","program":"bin/acb-bridge","args":["--config"]}]}"#,
+        )
+        .expect("contract file");
+        let current = CommandSpec {
+            program: payload
+                .join("bin/acb-bridge")
+                .to_string_lossy()
+                .into_owned(),
+            args: vec!["--config".to_string(), "/tmp/config.toml".to_string()],
+            generation: Some(acb_supervisor::GenerationRef {
+                id: "gen-test".to_string(),
+                path: payload.to_string_lossy().into_owned(),
+                config_sha256: None,
+            }),
+        };
+        let error = payload_contract_error(&current).expect("contract 2 must be rejected");
+        assert!(error.contains("contract_incompatible"), "{error}");
+        assert!(error.contains("gen-test"), "{error}");
+        let _ = std::fs::remove_dir_all(payload.parent().expect("payload parent"));
     }
 }
