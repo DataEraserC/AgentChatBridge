@@ -9,8 +9,8 @@ use std::thread;
 use std::time::Duration;
 
 use acb_supervisor::{
-    AlwaysHealthy, HttpProbe, Parts, ProcessRunner, Supervisor, SystemClock, SystemSleeper,
-    build_policy, load_config,
+    Parts, ProcessRunner, Supervisor, SystemClock, SystemSleeper, build_policy, build_probe,
+    load_config,
 };
 
 fn main() -> ExitCode {
@@ -33,10 +33,7 @@ fn main() -> ExitCode {
             return ExitCode::from(acb_supervisor::EXIT_GIVE_UP as u8);
         }
     };
-    let probe: Box<dyn acb_supervisor::Probe> = match &config.health_url {
-        Some(url) => Box::new(HttpProbe::new(url)),
-        None => Box::new(AlwaysHealthy),
-    };
+    let probe = build_probe(&config);
     let supervisor = Supervisor::new(
         config,
         Parts {
