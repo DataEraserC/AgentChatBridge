@@ -99,6 +99,7 @@ fn run_acb(env: &[(&str, String)], args: &[&str]) -> Output {
     command.env_remove("ACB_PROFILE_DIR");
     command.env_remove("ACB_PROFILE_STRATEGY");
     command.env_remove("ACB_STATE_DIR");
+    command.env_remove("ACB_CONTRACT_STRICT");
     for (key, value) in env {
         command.env(key, value);
     }
@@ -1136,7 +1137,41 @@ fn add_accepts_legacy_payload_without_contract_and_warns() {
     );
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stderr(&output);
-    assert!(text.contains("assuming legacy acb_contract=1"), "{text}");
+    assert!(text.contains("TRANSITIONAL fallback only"), "{text}");
+    assert!(text.contains("HARD-REJECT"), "{text}");
+    assert!(text.contains("ACB_CONTRACT_STRICT"), "{text}");
+}
+
+#[test]
+fn add_strict_mode_rejects_payload_without_contract() {
+    let temp = TempDir::new("contract-strict");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "strict");
+    assert!(
+        !source.join("acb-contract.json").exists(),
+        "fixture must stay contract-less"
+    );
+    let mut env = profile_env(&profile, &config);
+    env.push(("ACB_CONTRACT_STRICT", "1".to_string()));
+
+    let output = run_acb(
+        &env,
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--label",
+            "strict",
+            "--strategy",
+            "copy",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("contract_unreadable"), "{text}");
+    assert!(text.contains("ACB_CONTRACT_STRICT"), "{text}");
 }
 
 #[test]
