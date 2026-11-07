@@ -76,7 +76,7 @@ fn config(admin: bool) -> String {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = {{ secret = "t-main" }}
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -103,7 +103,7 @@ fn bridge(root: &Path, admin: bool) -> Bridge<MemoryStore> {
         .install_manager(manager)
         .expect("安装动态扩展 manager");
     Bridge::with_plugins(
-        Config::parse(&config(admin)).expect("配置合法"),
+        Config::parse_fixture(&config(admin)).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

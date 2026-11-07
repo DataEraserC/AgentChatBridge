@@ -374,7 +374,7 @@ mod tests {
             }
         }
 
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
                 [[connections]]
                 id = "qq"
@@ -396,7 +396,7 @@ mod tests {
                 id = "main"
                 harness = "dsh"
                 persona = "p"
-                token = "t-main"
+                token = { secret = "t-main" }
 
                 [[sessions.subscriptions]]
                 connection = "qq"

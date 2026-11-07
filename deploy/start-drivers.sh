@@ -5,7 +5,7 @@
 # 一个 preset 只挂一个 MCP，模型在某个会话里就只看到那一套工具，不会拿着「另一套没票的
 # 工具」去试错（ADR-0019）。
 #
-# 会话令牌不写死在这里：从 config.toml 读。否则改配置得同步改脚本，两边一漂就握手失败。
+# 会话令牌不写死在这里：由 acbctl secrets resolve 按会话 id 解析（配置里只有来源名）。
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -16,6 +16,10 @@ PATCH=$REPO/harnesses/dsh/dsh-mcp.patch.yml
 
 NODE=${NODE:-$(command -v node || echo /etc/profiles/per-user/nixos/bin/node)}
 [[ -x $NODE ]] || { echo "找不到 node：$NODE" >&2; exit 1; }
+
+ACBCTL=${ACBCTL_BIN:-$REPO/result/bin/acbctl}
+[[ -x $ACBCTL ]] || ACBCTL=$(command -v acbctl || true)
+[[ -x $ACBCTL ]] || { echo "找不到 acbctl；用 ACBCTL_BIN 指定" >&2; exit 1; }
 
 # 模型：以 dsh-mcp.patch.yml 的 agent-default-model 为准，脚本不另存一份。
 # 为什么要传给驱动：dsh 把「上次用的模型」记在会话记录里，复用老会话时它优先于默认模型，
@@ -54,14 +58,9 @@ mkdir -p "$ACB_CWD"
 export ACB_CWD ACB_WORKSPACE_TITLE
 echo "dsh 会话归组：$ACB_CWD（workspace 标题：$ACB_WORKSPACE_TITLE）"
 
-# 从 config.toml 的 [[sessions]] 块里取某个会话的 token。
+# 按会话 id 解析接入 token；配置文件里只有 { secret = "<name>" }，值由来源提供。
 session_token() {
-  awk -v want="\"$1\"" '
-    /^\[\[sessions\]\]$/ { ins=1; hit=0; next }
-    /^\[\[/              { ins=0; next }
-    ins && /^id = /      { hit = (index($0, want) > 0); next }
-    ins && hit && /^token = / { gsub(/^token = "|"[[:space:]]*$/, ""); print; exit }
-  ' "$CONFIG"
+  "$ACBCTL" secrets resolve --session "$1" --config "$CONFIG"
 }
 
 # 会话 id : MCP 端口 : preset 名
@@ -78,7 +77,7 @@ for entry in "${SESSIONS[@]}"; do
   IFS=: read -r sid port preset <<< "$entry"
   token=$(session_token "$sid")
   if [[ -z $token ]]; then
-    echo "config.toml 里没有会话 $sid 的 token，跳过" >&2
+    echo "解析不到会话 $sid 的 token，跳过" >&2
     continue
   fi
   echo "起驱动：会话 $sid → MCP $port → preset $preset"

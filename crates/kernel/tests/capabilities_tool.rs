@@ -187,7 +187,7 @@ fn config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [sessions.access]
         provider = "test.read_only"
@@ -203,7 +203,7 @@ fn config() -> &'static str {
         id = "other"
         harness = "dsh"
         persona = "p"
-        token = "t-other"
+        token = { secret = "t-other" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -257,7 +257,7 @@ fn deny_read_config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [sessions.access]
         provider = "test.deny_read"
@@ -366,7 +366,7 @@ fn bridge_with_provider(
         )
         .expect("能注册自定义 access provider");
     let bridge = Bridge::with_plugins(
-        Config::parse(text).expect("配置合法"),
+        Config::parse_fixture(text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             catalog: catalog(),

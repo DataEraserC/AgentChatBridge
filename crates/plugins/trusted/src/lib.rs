@@ -228,7 +228,7 @@ mod tests {
             id = "main"
             harness = "dsh"
             persona = "p"
-            token = "t-main"
+            token = { secret = "t-main" }
 
             [[sessions.subscriptions]]
             connection = "qq"
@@ -237,7 +237,7 @@ mod tests {
             [sessions.subscriptions.wake]
             provider = "trusted.accumulate_only"
         "#;
-        let config = acb_kernel::Config::parse(text).expect("配置合法");
+        let config = acb_kernel::Config::parse_fixture(text).expect("配置合法");
         let mut plugins = PluginManager::with_native_builtins();
         plugins
             .install_loader(&TrustedLoader)

@@ -32,7 +32,7 @@ fn config() -> String {
     id = "main"
     harness = "dsh"
     persona = "p"
-    token = "t-main"
+    token = { secret = "t-main" }
 
     [[sessions.subscriptions]]
     connection = "qq"
@@ -121,7 +121,7 @@ fn bridge(provider: Arc<dyn ToolAccessProvider>) -> Arc<Mutex<Bridge<MemoryStore
         )
         .expect("注册工具访问 provider");
     Arc::new(Mutex::new(Bridge::with_plugins(
-        Config::parse(&config()).expect("配置合法"),
+        Config::parse_fixture(&config()).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

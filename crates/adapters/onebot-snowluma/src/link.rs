@@ -1725,7 +1725,7 @@ mod tests {
 
     #[test]
     fn probe_identity_writes_version_and_status_to_dependencies() {
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[connections]]
             id = "qq"
@@ -1781,7 +1781,7 @@ mod tests {
 
     #[test]
     fn the_configured_account_is_read_back_for_the_right_connection() {
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[connections]]
             id = "qq"
@@ -1801,7 +1801,7 @@ mod tests {
             id = "main"
             persona = "p"
             memory = "m"
-            token = "t"
+            token = { secret = "t" }
 
             [[devices.subscriptions]]
             connection = "qq"
@@ -1830,7 +1830,7 @@ mod tests {
 
     #[test]
     fn ws_server_listen_prefers_options_and_falls_back_to_url() {
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[connections]]
             id = "qq"
@@ -1967,7 +1967,7 @@ mod tests {
 
     #[test]
     fn download_stream_frames_are_accumulated_until_complete() {
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[connections]]
             id = "qq"

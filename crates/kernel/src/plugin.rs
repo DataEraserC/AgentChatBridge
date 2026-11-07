@@ -4916,7 +4916,7 @@ mod tests {
             id = "main"
             harness = "dsh"
             persona = "p"
-            token = "t-main"
+            token = { secret = "t-main" }
 
             [[sessions.subscriptions]]
             connection = "qq"
@@ -4925,7 +4925,7 @@ mod tests {
             [sessions.subscriptions.wake]
             provider = "vendor.missing"
         "#;
-        let config = Config::parse(text).expect("语法合法");
+        let config = Config::parse_fixture(text).expect("语法合法");
         let manager = PluginManager::with_native_builtins();
         assert!(matches!(
             manager.validate_config(&config),
@@ -4956,7 +4956,7 @@ mod tests {
             id = "main"
             harness = "dsh"
             persona = "p"
-            token = "t-main"
+            token = { secret = "t-main" }
 
             [sessions.access]
             provider = "vendor.missing"
@@ -4965,7 +4965,7 @@ mod tests {
             connection = "qq"
             room = "group/1"
         "#;
-        let config = Config::parse(text).expect("语法合法");
+        let config = Config::parse_fixture(text).expect("语法合法");
         let manager = PluginManager::with_native_builtins();
         assert!(matches!(
             manager.validate_config(&config),
@@ -4996,7 +4996,7 @@ mod tests {
             id = "main"
             harness = "dsh"
             persona = "p"
-            token = "t-main"
+            token = {{ secret = "t-main" }}
 
             {extra}
 
@@ -5005,7 +5005,7 @@ mod tests {
             room = "group/1"
             "#
         );
-        Config::parse(&text).expect("语法合法")
+        Config::parse_fixture(&text).expect("语法合法")
     }
 
     #[test]

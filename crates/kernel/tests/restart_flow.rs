@@ -77,7 +77,7 @@ fn config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -116,7 +116,7 @@ fn message(text: &str) -> RecordDraft {
 
 fn open_bridge(path: &Path) -> Bridge<SqliteStore> {
     Bridge::new(
-        Config::parse(config()).expect("配置合法"),
+        Config::parse_fixture(config()).expect("配置合法"),
         SqliteStore::open(path).expect("库能打开"),
         Box::new(Sink),
     )

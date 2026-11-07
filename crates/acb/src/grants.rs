@@ -1444,7 +1444,7 @@ name = "H"
 id = "s"
 harness = "h"
 persona = "p"
-token = "tok"
+token = {{ secret = "tok" }}
 
 [[sessions.subscriptions]]
 connection = "t"
@@ -1453,7 +1453,7 @@ room = "group/1"
 {extra_grants}
 "#
         );
-        Config::parse(&text).expect("测试配置应能解析")
+        Config::parse_fixture(&text).expect("测试配置应能解析")
     }
 
     fn source_with(grants: GrantsConfig) -> ConfigSource {

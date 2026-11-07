@@ -137,7 +137,7 @@ fn config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -155,7 +155,7 @@ fn config() -> &'static str {
         id = "other"
         harness = "dsh"
         persona = "p"
-        token = "t-other"
+        token = { secret = "t-other" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -195,7 +195,7 @@ fn bridge_with_calls(text: &str) -> (Bridge<MemoryStore>, Sends, Calls) {
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let bridge = Bridge::new(
-        Config::parse(text).expect("配置合法"),
+        Config::parse_fixture(text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -1287,13 +1287,13 @@ fn config_can_grant_critical_but_not_account_secret() {
         "{}\n        [[grants.rules]]\n                id = \"fixture-grant-16\"\n                subject = \"user\"\n        place = \"group\"\n        scope = \"connection\"\n        target = {{ kind = \"connection\", id = \"qq\" }}\n        capability = [\"critical\"]\n",
         config()
     );
-    Config::parse(&allowed).expect("critical 允许被规则显式授予");
+    Config::parse_fixture(&allowed).expect("critical 允许被规则显式授予");
 
     let text = format!(
         "{}\n        [[grants.rules]]\n                id = \"fixture-grant-17\"\n                subject = \"user\"\n        place = \"group\"\n        scope = \"subscribed\"\n        capability = [\"account_secret\"]\n",
         config()
     );
-    let error = Config::parse(&text).expect_err("account_secret 仍只能走票据");
+    let error = Config::parse_fixture(&text).expect_err("account_secret 仍只能走票据");
     let detail = format!("{error:?}").to_lowercase();
     assert!(detail.contains("account_secret"), "{error:?}");
 }

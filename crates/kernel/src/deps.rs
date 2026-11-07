@@ -989,7 +989,7 @@ mod tests {
     use super::*;
 
     fn platform_config() -> Config {
-        Config::parse(
+        Config::parse_fixture(
             r#"
             [[connections]]
             id = "qq"
@@ -1003,7 +1003,7 @@ mod tests {
     }
 
     fn harness_config() -> Config {
-        Config::parse(
+        Config::parse_fixture(
             r#"
             [[harnesses]]
             id = "dsh"
@@ -1150,7 +1150,7 @@ mod tests {
     fn retain_config_keeps_existing_and_adds_new_entries() {
         let registry = DependencyRegistry::from_config(&harness_config());
         registry.harness_connection_opened("dsh", 100);
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[harnesses]]
             id = "dsh"
@@ -1191,7 +1191,7 @@ mod tests {
 
     #[test]
     fn retain_config_removes_dependencies_dropped_from_config() {
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[harnesses]]
             id = "dsh"
@@ -1210,7 +1210,7 @@ mod tests {
         registry.platform_connected("qq", 100);
         registry.harness_connection_opened("dsh", 100);
 
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[harnesses]]
             id = "opencode"
@@ -1414,7 +1414,7 @@ mod tests {
 
     #[test]
     fn models_are_registered_only_after_observation() {
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[harnesses]]
             id = "dsh"
@@ -1429,7 +1429,7 @@ mod tests {
             id = "main"
             harness = "dsh"
             persona = "p"
-            token = "t-main"
+            token = { secret = "t-main" }
             model = "test/model"
             "#,
         )
@@ -1464,7 +1464,7 @@ mod tests {
 
     #[test]
     fn retain_config_prunes_observed_model_no_longer_referenced() {
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[harnesses]]
             id = "dsh"
@@ -1479,7 +1479,7 @@ mod tests {
             id = "main"
             harness = "dsh"
             persona = "p"
-            token = "t-main"
+            token = { secret = "t-main" }
             model = "test/model"
             "#,
         )
@@ -1487,7 +1487,7 @@ mod tests {
         let registry = DependencyRegistry::from_config(&config);
         registry.model_down("test/model", "model_unavailable", "gateway refused", 100);
 
-        let next = Config::parse(
+        let next = Config::parse_fixture(
             r#"
             [[harnesses]]
             id = "dsh"
@@ -1509,7 +1509,7 @@ mod tests {
 
     #[test]
     fn ops_payload_shape_for_healthz_and_dependencies() {
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[harnesses]]
             id = "dsh"
@@ -1700,7 +1700,7 @@ mod tests {
 
     #[test]
     fn failures_count_by_class_within_the_window_and_success_clears() {
-        let config = Config::parse(
+        let config = Config::parse_fixture(
             r#"
             [[connections]]
             id = "qq"

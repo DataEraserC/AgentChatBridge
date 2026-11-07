@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 无 systemd：用 acbctl run 的前台父循环；run.json 就是 pidfile。
 # 脚本只把白名单 ACB_UNIT_* 传给 acbctl，env 文件里的其它变量不会进入子进程。
+# 桥密钥用 [secrets] 的 file 来源时由桥进程自己读，不受白名单影响；用 env 来源时
+# 会在加载期明确报“环境变量未设置”，不会静默变成空串。
 #
 # 用法：
 #   examples/deploy/no-systemd-run.sh

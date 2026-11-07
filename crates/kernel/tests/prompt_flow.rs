@@ -37,7 +37,7 @@ fn config(prompts: &[&str]) -> String {
     id = "main"
     harness = "dsh"
     persona = "p"
-    token = "t-main"
+    token = {{ secret = "t-main" }}
     prompts = [{list}]
 
     [[sessions.subscriptions]]
@@ -133,7 +133,7 @@ fn bridge_with(entries: &[(&str, Arc<dyn PromptProvider>)]) -> Arc<Mutex<Bridge<
             .expect("注册 prompt provider");
     }
     Arc::new(Mutex::new(Bridge::with_plugins(
-        Config::parse(&config(&ids)).expect("配置合法"),
+        Config::parse_fixture(&config(&ids)).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

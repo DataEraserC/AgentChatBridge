@@ -43,7 +43,7 @@ name = "DSH"
 id = "main"
 harness = "dsh"
 persona = "p"
-token = "t-main"
+token = { secret = "t-main" }
 
 [[sessions.subscriptions]]
 connection = "qq"
@@ -144,7 +144,7 @@ fn main() {
         .expect("注册 ToolLoader");
 
     let mut bridge = Bridge::with_plugins(
-        Config::parse(CONFIG).expect("配置合法"),
+        Config::parse_fixture(CONFIG).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

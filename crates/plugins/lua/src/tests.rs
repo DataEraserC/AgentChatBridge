@@ -409,7 +409,7 @@ return {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -418,7 +418,7 @@ return {
         [sessions.subscriptions.wake]
         provider = "lua.mention"
     "#;
-    let config = Config::parse(text).expect("配置合法");
+    let config = Config::parse_fixture(text).expect("配置合法");
     plugins
         .validate_config(&config)
         .expect("lua provider 应当能解析");
@@ -658,7 +658,7 @@ return {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [sessions.delivery]
         provider = "lua.newest"
@@ -676,7 +676,7 @@ return {
         [sessions.subscriptions.clock]
         provider = "lua.hourly"
     "#;
-    let config = Config::parse(text).expect("配置合法");
+    let config = Config::parse_fixture(text).expect("配置合法");
     plugins
         .validate_config(&config)
         .expect("lua 扩展点应当能解析");

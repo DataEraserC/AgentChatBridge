@@ -31,7 +31,7 @@ fn config() -> String {
     id = "main"
     harness = "dsh"
     persona = "p"
-    token = "t-main"
+    token = { secret = "t-main" }
 
     [[sessions.subscriptions]]
     connection = "qq"
@@ -93,7 +93,7 @@ fn bridge_with(loader: Arc<ToolLoader>) -> Arc<Mutex<Bridge<MemoryStore>>> {
         .install_loader_owned(loader)
         .expect("能装 ToolLoader");
     Arc::new(Mutex::new(Bridge::with_plugins(
-        Config::parse(&config()).expect("配置合法"),
+        Config::parse_fixture(&config()).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

@@ -1695,13 +1695,13 @@ platform = "qq"
 kind = "onebot11"
 url = "{connection_url}"
 account = "10001"
-token = "conn-secret"
+token = {{ secret = "conn-secret" }}
 
 [[sessions]]
 id = "main"
 harness = "dsh"
 persona = "default"
-token = "sess-secret"
+token = {{ secret = "sess-secret" }}
 
 [[sessions.subscriptions]]
 connection = "qq"
@@ -1713,7 +1713,7 @@ listen = "{endpoint_listen}"
 
 [console]
 listen = "127.0.0.1:31990"
-token = "ctok123"
+token = {{ secret = "ctok123" }}
 "#
         )
     }
@@ -1726,7 +1726,7 @@ token = "ctok123"
     fn reload_impact_sorts_hot_from_restart() {
         // 只改唤醒策略 → 热重载；只改监听/连接 → 要重启；什么都不改 → 两边都空。
         let base = toml_with("", "127.0.0.1:37700", "ws://127.0.0.1:53001/ws");
-        let old = acb_kernel::Config::parse(&base).expect("能解析");
+        let old = acb_kernel::Config::parse_fixture(&base).expect("能解析");
 
         let hot_only = toml_with(
             // 注意：at_mention 默认就是 true，改它等于没改；keywords 默认空，一定有差异。
@@ -1734,13 +1734,13 @@ token = "ctok123"
             "127.0.0.1:37700",
             "ws://127.0.0.1:53001/ws",
         );
-        let new = acb_kernel::Config::parse(&hot_only).expect("能解析");
+        let new = acb_kernel::Config::parse_fixture(&hot_only).expect("能解析");
         let (hot, restart) = reload_impact(&old, &new);
         assert!(restart.is_empty());
         assert!(rendered(&hot).iter().any(|item| item.contains("sessions")));
 
         let restart_only = toml_with("", "127.0.0.1:39999", "ws://127.0.0.1:53001/ws");
-        let new = acb_kernel::Config::parse(&restart_only).expect("能解析");
+        let new = acb_kernel::Config::parse_fixture(&restart_only).expect("能解析");
         let (hot, restart) = reload_impact(&old, &new);
         assert!(hot.is_empty());
         assert!(
@@ -1754,7 +1754,7 @@ token = "ctok123"
             "127.0.0.1:37700",
             "ws://127.0.0.1:53002/ws?token=newsecret",
         );
-        let new = acb_kernel::Config::parse(&conn_changed).expect("能解析");
+        let new = acb_kernel::Config::parse_fixture(&conn_changed).expect("能解析");
         let (_, restart) = reload_impact(&old, &new);
         assert!(
             rendered(&restart)
@@ -1762,7 +1762,7 @@ token = "ctok123"
                 .any(|item| item.contains("connections"))
         );
 
-        let same = acb_kernel::Config::parse(&base).expect("能解析");
+        let same = acb_kernel::Config::parse_fixture(&base).expect("能解析");
         let (hot, restart) = reload_impact(&old, &same);
         assert!(hot.is_empty());
         assert!(restart.is_empty());
@@ -1814,7 +1814,7 @@ name = "DeepSeek"
 id = "main"
 harness = "dsh"
 persona = "default"
-token = "t-main"
+token = { secret = "t-main" }
 
 [[sessions.subscriptions]]
 connection = "qq"
@@ -1841,7 +1841,7 @@ room = "group/123"
             "控制台保存不能改写 base"
         );
 
-        let first = acb_kernel::Config::load(&base, Some(&config_dir)).expect("首次加载");
+        let first = acb_kernel::Config::load_fixture(&base, Some(&config_dir)).expect("首次加载");
         assert_eq!(first.config.delivery_limit, 50);
 
         // 模拟部署侧重新生成 base：控制台改动必须仍然生效。
@@ -1850,7 +1850,7 @@ room = "group/123"
             SAVE_BASE.replace("delivery_limit = 10", "delivery_limit = 20"),
         )
         .expect("重写 base");
-        let second = acb_kernel::Config::load(&base, Some(&config_dir)).expect("重生成后加载");
+        let second = acb_kernel::Config::load_fixture(&base, Some(&config_dir)).expect("重生成后加载");
         assert_eq!(second.config.delivery_limit, 50, "控制台改动仍在");
 
         let console_text = console_text.replace("delivery_limit = 50", "delivery_limit = 60");

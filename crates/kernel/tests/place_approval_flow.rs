@@ -119,7 +119,7 @@ fn config() -> String {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -214,7 +214,7 @@ fn config() -> String {
 fn bridge() -> (Bridge<MemoryStore>, Sends) {
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let bridge = Bridge::new(
-        Config::parse(&config()).expect("配置合法"),
+        Config::parse_fixture(&config()).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -561,7 +561,7 @@ fn explicit_route_delivers_even_without_subscription_and_never_falls_back() {
 #[test]
 fn no_carrier_keeps_ticket_pending_and_records_delivery_failure() {
     let mut bridge = Bridge::with_outbounds(
-        Config::parse(&config()).expect("配置合法"),
+        Config::parse_fixture(&config()).expect("配置合法"),
         MemoryStore::new(),
         Outbounds::new(),
         PluginManager::with_native_builtins(),
@@ -673,7 +673,7 @@ fn adapter_default_direct_room_is_the_last_resort() {
         )
         .with_manifest("qq", manifest);
     let mut bridge = Bridge::with_outbounds(
-        Config::parse(&text).expect("配置合法"),
+        Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         outbounds,
         PluginManager::with_native_builtins(),
@@ -810,7 +810,7 @@ fn one_target_send_failure_does_not_block_other_targets() {
         }),
     );
     let mut bridge = Bridge::with_outbounds(
-        Config::parse(&config()).expect("配置合法"),
+        Config::parse_fixture(&config()).expect("配置合法"),
         MemoryStore::new(),
         outbounds,
         PluginManager::with_native_builtins(),
@@ -843,7 +843,7 @@ fn all_target_send_failures_mark_the_ticket_failed() {
         }),
     );
     let mut bridge = Bridge::with_outbounds(
-        Config::parse(&config()).expect("配置合法"),
+        Config::parse_fixture(&config()).expect("配置合法"),
         MemoryStore::new(),
         outbounds,
         PluginManager::with_native_builtins(),

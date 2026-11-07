@@ -22,6 +22,37 @@
 # （数组追加、标量/表后覆盖、带 key 的表按键覆盖）；控制台保存写到
 # config.d/90-console.toml。详见 docs/guide/config.md「配置分片」。
 
+# 密钥来源（ADR 待编号）：配置里只写来源名，不写密钥本体。
+# 桥自己消费的密钥（控制台 / 连接 / 会话接入 / 通知）都走这里；dsh/opencode 的 API key
+# 仍由各自的环境或 EnvironmentFile 提供。读不到值会启动失败（退出码 78）。
+[secrets]
+# 不写 kind 的来源默认用这个。
+default_kind = "env"
+
+[[secrets.sources]]
+name = "console-token"
+variable = "ACB_CONSOLE_TOKEN"
+
+[[secrets.sources]]
+name = "qq-token"
+variable = "ACB_SNOWLUMA_TOKEN"
+
+[[secrets.sources]]
+name = "qq2-token"
+variable = "ACB_SNOWLUMA_TOKEN_2"
+
+[[secrets.sources]]
+name = "main-session-token"
+variable = "ACB_DSH_DEV_TOKEN"
+
+# 也可以读独立文件（path 必须是绝对路径）。format 缺省是 raw：整个文件就是一个值。
+# [[secrets.sources]]
+# name = "ntfy-topic"
+# kind = "file"
+# path = "/run/agenix/ntfy-acb-topic.env"
+# format = "dotenv"
+# key = "NTFY_ACB_TOPIC"
+
 [endpoint]
 # harness 连这个地址。默认只听本机，外网连不上。
 listen = "127.0.0.1:7700"
@@ -33,7 +64,7 @@ listen = "127.0.0.1:7700"
 # 要启用就把下面三行取消注释：
 # [console]
 # listen = "127.0.0.1:3100"
-# token = "换成你自己的一长串随机字符"
+# token = { secret = "console-token" }
 
 # 文件中继（ADR-0025）：agent 和平台不共用文件系统时，桥把本机文件收下来，
 # 换成平台能下载的 URL。不配就不起文件服务，本机路径原样透传。
@@ -131,7 +162,7 @@ platform = "qq"
 kind = "onebot11"
 transport = "ws-client"
 url = "ws://127.0.0.1:3001"
-token = ""
+token = { secret = "qq-token" }
 account = "10001"
 admin_qqs = []   # 这些 QQ 号会被标成系统管理员（记录里的 sender.role = system_admin）
 # SnowLuma 兼容下限（默认 2.4.0）；低于下限只在启动日志告警，不断连。
@@ -153,7 +184,7 @@ admin_qqs = []   # 这些 QQ 号会被标成系统管理员（记录里的 sende
 # kind = "onebot11"
 # transport = "ws-server"
 # options = { listen = "0.0.0.0:3001" }
-# token = "change-me"
+# token = { secret = "qq-reverse-token" }
 # account = "10001"
 
 # 入站策略（ADR-0026）：决定这条连接上的记录收不收。默认全部接收。
@@ -187,7 +218,7 @@ platform = "qq"
 kind = "onebot11"
 transport = "ws-client"
 url = "ws://127.0.0.1:3002"
-token = ""
+token = { secret = "qq2-token" }
 account = "10002"
 
 # ---------------------------------------------------------------------------
@@ -249,7 +280,7 @@ memories = ["main-memory"]
 # model 这个会话要用哪个模型。留空 = 由 harness 侧决定（dsh 改 profile、opencode 改 config）。
 model = "deepseek-chat"
 # 接入令牌：harness 连进来时报出 harness id + 这个令牌，桥据此绑定会话。
-token = "换成你自己的一长串随机字符"
+token = { secret = "main-session-token" }
 
 # 这个会话一轮失败后的通知动作（log / send:<房间>）。空 = 只记日志，
 # 回退到全局 default_on_turn_error。

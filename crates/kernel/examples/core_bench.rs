@@ -42,7 +42,7 @@ name = "DSH"
 id = "main"
 harness = "dsh"
 persona = "p"
-token = "t-main"
+token = { secret = "t-main" }
 
 [[sessions.subscriptions]]
 connection = "qq"
@@ -93,7 +93,7 @@ fn build(observers: usize) -> (Bridge<MemoryStore>, u128) {
             .expect("注册观察者");
     }
     let bridge = Bridge::with_plugins(
-        Config::parse(CONFIG).expect("配置合法"),
+        Config::parse_fixture(CONFIG).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

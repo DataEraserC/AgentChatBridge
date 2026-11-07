@@ -21,8 +21,8 @@ use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::{
     AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ConfigSource, ControlRegistry,
     DependencyRegistry, Element, EventQueue, FileRelay, Outbounds, PluginManager, RecordDraft,
-    RecordKind, RouteWorker, Sender, SqliteStore, carrier_create_failed, drain_events, run_adapter,
-    serve,
+    RecordKind, RouteWorker, SecretStore, Sender, SqliteStore, carrier_create_failed, drain_events,
+    run_adapter, serve,
 };
 use acb_memory_steward::{
     Notifier as MemoryNotifier, Steward, StewardConfig, SyncNotice, Target as MemoryTarget,
@@ -102,7 +102,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let steward_config = StewardConfig::from_toml(&loaded.merged_toml)?;
     // 外置进程 provider 同样独立校验；列表为空就不启动任何子进程。
     let process_providers = ProcessProviderConfig::from_toml(&loaded.merged_toml)?;
-    print_summary(&config, &options.config, &sources, duplicate_rules);
+    print_summary(
+        &config,
+        &options.config,
+        &sources,
+        duplicate_rules,
+        &loaded.secrets,
+    );
     if let Some(admin) = &config.grants.system_admin {
         eprintln!(
             "{}",
@@ -810,7 +816,38 @@ impl Options {
     }
 }
 
-fn print_summary(config: &Config, path: &str, sources: &[ConfigSource], duplicate_rules: bool) {
+/// 打印连接 URL 时遮掉查询串里的 token/access_token 值，避免启动日志泄露密钥。
+fn redact_url(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_owned();
+    };
+    let mut parts = Vec::new();
+    for pair in query.split('&') {
+        let (key, value) = match pair.split_once('=') {
+            Some((key, value)) => (key, Some(value)),
+            None => (pair, None),
+        };
+        if key.trim().eq_ignore_ascii_case("token")
+            || key.trim().eq_ignore_ascii_case("access_token")
+        {
+            parts.push(match value {
+                Some(_) => format!("{key}=***"),
+                None => key.to_owned(),
+            });
+        } else {
+            parts.push(pair.to_owned());
+        }
+    }
+    format!("{base}?{}", parts.join("&"))
+}
+
+fn print_summary(
+    config: &Config,
+    path: &str,
+    sources: &[ConfigSource],
+    duplicate_rules: bool,
+    secrets: &SecretStore,
+) {
     println!("{}", acb_i18n::t!("bridge.main.config_path", path = path));
     for source in sources {
         println!(
@@ -835,6 +872,26 @@ fn print_summary(config: &Config, path: &str, sources: &[ConfigSource], duplicat
         println!("{}", acb_i18n::t!("bridge.main.duplicate_rules_warning"));
     }
 
+    let secret_entries = secrets.entries();
+    println!(
+        "{}",
+        acb_i18n::t!(
+            "bridge.main.secrets_count",
+            count = secret_entries.len()
+        )
+    );
+    for entry in &secret_entries {
+        println!(
+            "{}",
+            acb_i18n::t!(
+                "bridge.main.secret_source",
+                name = entry.name,
+                kind = entry.kind,
+                origin = entry.origin
+            )
+        );
+    }
+
     println!(
         "{}",
         acb_i18n::t!(
@@ -855,7 +912,7 @@ fn print_summary(config: &Config, path: &str, sources: &[ConfigSource], duplicat
                 platform = connection.platform,
                 kind = connection.kind,
                 transport = connection.transport.as_str(),
-                url = url,
+                url = redact_url(&url),
                 account = connection.account
             )
         );

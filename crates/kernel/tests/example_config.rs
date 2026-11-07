@@ -10,7 +10,7 @@ fn example_path() -> PathBuf {
 
 fn example() -> Config {
     let text = std::fs::read_to_string(example_path()).expect("示例配置应当存在");
-    Config::parse(&text).expect("示例配置应当能解析")
+    Config::parse_fixture(&text).expect("示例配置应当能解析")
 }
 
 #[test]

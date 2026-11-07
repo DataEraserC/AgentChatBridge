@@ -33,7 +33,7 @@ kind = "onebot11"      # 规范值；onebot-snowluma 是等价别名
 transport = "ws-client" # 连接方向：ws-client 桥主动去连；ws-server 桥监听、平台连入
 url = "ws://127.0.0.1:3001"   # ws-client 必填；ws-server 用 options.listen
 options = { ... }      # 适配器专属配置；SnowLuma 的 snowluma_min_version / ws-server 的 listen 放这里
-token = "..."          # OneBot 实现开了 access_token 就填
+token = { secret = "qq-token" }  # 可选；引用 [secrets] 里声明的来源
 account = "10001"      # 这个号登录的是谁，必填
 ```
 

@@ -39,7 +39,7 @@ name = "DSH"
 id = "main"
 harness = "dsh"
 persona = "p"
-token = "t-main"
+token = { secret = "t-main" }
 
 [[sessions.subscriptions]]
 connection = "qq"
@@ -199,7 +199,7 @@ fn repeated_panics_do_not_leak_pending_or_state() {
         )
         .expect("注册工具");
     let bridge = Arc::new(Mutex::new(Bridge::with_plugins(
-        Config::parse(CONFIG).expect("配置合法"),
+        Config::parse_fixture(CONFIG).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

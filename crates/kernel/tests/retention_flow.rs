@@ -48,7 +48,7 @@ fn config(max_records: u64, max_days: u64) -> String {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = {{ secret = "t-main" }}
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -61,7 +61,7 @@ fn config(max_records: u64, max_days: u64) -> String {
         id = "helper"
         harness = "dsh"
         persona = "p"
-        token = "t-helper"
+        token = {{ secret = "t-helper" }}
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -79,7 +79,7 @@ fn config(max_records: u64, max_days: u64) -> String {
 
 fn bridge(max_records: u64, max_days: u64) -> Bridge<MemoryStore> {
     Bridge::new(
-        acb_kernel::Config::parse(&config(max_records, max_days)).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&config(max_records, max_days)).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Sink),
     )

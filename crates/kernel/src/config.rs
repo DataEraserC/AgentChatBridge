@@ -15,6 +15,7 @@
 //! 配置从 TOML 读进来后**完全校验**：非法配置在这里就死，不会带病启动。
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use acb_proto::RoomId;
@@ -126,6 +127,8 @@ pub struct ConfigSource {
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
     pub config: Config,
+    /// 解析后的密钥集合。只暴露 `entries()` / `value(name)`，Debug 输出不含值。
+    pub secrets: SecretStore,
     pub sources: Vec<ConfigSource>,
     /// 合并后的 TOML（无分片时就是 base 原文）。供 memory-steward / process-provider
     /// 这类独立解析器复用同一份生效文本。
@@ -1035,10 +1038,6 @@ pub enum ConfigError {
         first: String,
         second: String,
     },
-    #[error("{}", acb_i18n::t!("kernel.config.missing_env", name = name))]
-    MissingEnv { name: String },
-    #[error("{}", acb_i18n::t!("kernel.config.bad_env_ref", detail = detail))]
-    BadEnvRef { detail: String },
     #[error("{}", acb_i18n::t!("kernel.config.empty_field", session = session, field = field))]
     EmptyField {
         session: String,
@@ -1214,91 +1213,67 @@ pub enum ConfigError {
     EmptyWorktreesRoot,
     #[error("{}", acb_i18n::t!("kernel.config.bad_turn_error_action", action = action))]
     BadTurnErrorAction { action: String },
-}
-
-/// 把 `${NAME}` / `${{NAME}}` 展开成环境变量的值。
-///
-/// - `${NAME}` 用于字符串：值里的引号/反斜杠按 TOML 基本字符串转义。
-/// - `${{NAME}}` 原样注入：可以写数字/布尔，也可以自己带引号；值不转义。
-/// - 两者都支持 `:-默认`，变量未设置或为空时用默认值。
-fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
-    if !text.contains("${") {
-        return Ok(text.to_owned());
-    }
-
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let raw = rest[start..].starts_with("${{");
-        let (after, close) = if raw {
-            (&rest[start + 3..], "}}")
-        } else {
-            (&rest[start + 2..], "}")
-        };
-        let end = after.find(close).ok_or_else(|| ConfigError::BadEnvRef {
-            detail: acb_i18n::t!(
-                "kernel.config.missing_close",
-                open = &rest[start..start + 2 + raw as usize],
-                close = close
-            ),
-        })?;
-        let (name, fallback) = match after[..end].split_once(":-") {
-            Some((name, fallback)) => (name, Some(fallback)),
-            None => (&after[..end], None),
-        };
-        if name.is_empty()
-            || !name
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        {
-            return Err(ConfigError::BadEnvRef {
-                detail: acb_i18n::t!("kernel.config.invalid_env_name", name = name),
-            });
-        }
-        let value = match std::env::var(name) {
-            Ok(value) if !value.is_empty() => value,
-            _ => fallback
-                .ok_or_else(|| ConfigError::MissingEnv {
-                    name: name.to_owned(),
-                })?
-                .to_owned(),
-        };
-        let injected = if raw {
-            value
-        } else {
-            escape_toml_string(&value)
-        };
-        out.push_str(&injected);
-        let consumed = if raw { end + 2 } else { end + 1 };
-        rest = &after[consumed..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
-fn escape_toml_string(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    #[error("{}", acb_i18n::t!("kernel.config.secret_literal", field = field))]
+    SecretLiteral { field: String },
+    #[error("{}", acb_i18n::t!("kernel.config.secret_unknown", field = field, name = name))]
+    UnknownSecret { field: String, name: String },
+    #[error("{}", acb_i18n::t!("kernel.config.secret_duplicate", name = name))]
+    DuplicateSecret { name: String },
+    #[error("{}", acb_i18n::t!("kernel.config.secret_source_bad", name = name, kind = kind, detail = detail))]
+    BadSecretSource {
+        name: String,
+        kind: String,
+        detail: String,
+    },
+    #[error("{}", acb_i18n::t!("kernel.config.secret_env_missing", name = name, variable = variable))]
+    MissingSecretEnv { name: String, variable: String },
+    #[error("{}", acb_i18n::t!("kernel.config.secret_file_read", name = name, path = path, detail = detail))]
+    BadSecretFile {
+        name: String,
+        path: String,
+        detail: String,
+    },
+    #[error("{}", acb_i18n::t!("kernel.config.secret_file_insecure", name = name, path = path, detail = detail))]
+    InsecureSecretFile {
+        name: String,
+        path: String,
+        detail: String,
+    },
+    #[error("{}", acb_i18n::t!("kernel.config.secret_file_empty", name = name, origin = origin))]
+    EmptySecret { name: String, origin: String },
+    #[error("{}", acb_i18n::t!("kernel.config.secret_dotenv_bad", name = name, path = path, line = line, detail = detail))]
+    BadSecretDotenv {
+        name: String,
+        path: String,
+        line: usize,
+        detail: String,
+    },
+    #[error("{}", acb_i18n::t!("kernel.config.console_secret_source"))]
+    ConsoleSecretSource,
 }
 
 impl Config {
     /// 从 TOML 文本解析并校验。
     ///
-    /// 字符串里的 `${NAME}` 在解析前按进程环境展开：端口由 Nix 注册表注入，
-    /// 密钥由 agenix 注入，配置文件本身只留引用。环境里没有对应变量就报错，
-    /// 不静默变成空串（空 token 会以很难查的方式失败）。
+    /// 配置里不再做任何文本插值：密钥字段写 `{ secret = "<来源名>" }`，
+    /// 由加载期的 [`SecretStore`] 解析；读不到就报错，不静默变成空串。
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
-        let expanded = expand_env_vars(text)?;
-        let raw: RawConfig =
-            toml::from_str(&expanded).map_err(|error| ConfigError::ParseFailed {
-                detail: error.to_string(),
-            })?;
-        Self::from_raw(raw)
+        let raw: RawConfig = toml::from_str(text).map_err(|error| ConfigError::ParseFailed {
+            detail: error.to_string(),
+        })?;
+        Self::from_raw(raw, SecretMode::Strict)
+    }
+
+    /// 测试用解析入口：密钥引用未声明时按名字自身解析。
+    ///
+    /// 生产路径永远不会用它；这里只是让仓库内大量 fixture 不必各自声明来源，
+    /// 字面量密钥仍然和 [`Config::parse`] 一样被硬拒绝。
+    #[doc(hidden)]
+    pub fn parse_fixture(text: &str) -> Result<Self, ConfigError> {
+        let raw: RawConfig = toml::from_str(text).map_err(|error| ConfigError::ParseFailed {
+            detail: error.to_string(),
+        })?;
+        Self::from_raw(raw, SecretMode::Fixture)
     }
 
     /// 从 base 文件加载，并按 `config_dir` 合并分片。
@@ -1307,9 +1282,26 @@ impl Config {
     /// 完全一致。目录存在时只读取其中的 `*.toml`（按文件名字典序），子目录与其他后缀
     /// 忽略；`90-console.toml` 最后加载并覆盖它包含的顶层键。
     pub fn load(base_path: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
+        Self::load_mode(base_path, config_dir, SecretMode::Strict)
+    }
+
+    /// 测试用加载入口，语义同 [`Config::parse_fixture`]。
+    #[doc(hidden)]
+    pub fn load_fixture(
+        base_path: &Path,
+        config_dir: Option<&Path>,
+    ) -> Result<LoadedConfig, ConfigError> {
+        Self::load_mode(base_path, config_dir, SecretMode::Fixture)
+    }
+
+    fn load_mode(
+        base_path: &Path,
+        config_dir: Option<&Path>,
+        mode: SecretMode,
+    ) -> Result<LoadedConfig, ConfigError> {
         let base_text = read_config_file(base_path)?;
         let Some(config_dir) = config_dir.filter(|dir| dir.exists()) else {
-            return load_single(base_path, &base_text);
+            return load_single(base_path, &base_text, mode);
         };
         if !config_dir.is_dir() {
             return Err(ConfigError::DirReadFailed {
@@ -1329,7 +1321,7 @@ impl Config {
             .cloned();
         if normal.is_empty() && console.is_none() {
             // 目录存在但没有任何分片：保持旧路径，错误信息和解析行为都不变。
-            return load_single(base_path, &base_text);
+            return load_single(base_path, &base_text, mode);
         }
 
         let mut files = vec![parse_config_file(base_path, &base_text)?];
@@ -1342,7 +1334,11 @@ impl Config {
         let console_layer = match console {
             Some(path) => {
                 let text = read_config_file(&path)?;
-                Some(parse_config_file(&path, &text)?)
+                let parsed = parse_config_file(&path, &text)?;
+                if parsed.value.get("secrets").is_some() {
+                    return Err(ConfigError::ConsoleSecretSource);
+                }
+                Some(parsed)
             }
             None => None,
         };
@@ -1369,7 +1365,7 @@ impl Config {
             sources.push(overlay.source);
         }
 
-        finish_loaded(merged, sources, duplicate_rules)
+        finish_loaded(merged, sources, duplicate_rules, mode)
     }
 
     /// 用一段控制台文本作为 `90-console.toml` 的覆盖层，合并出最终配置。
@@ -1401,6 +1397,9 @@ impl Config {
 
         let overlay_path = config_dir.join(CONSOLE_CONFIG_FILENAME);
         let overlay = parse_config_file(&overlay_path, overlay_text)?;
+        if overlay.value.get("secrets").is_some() {
+            return Err(ConfigError::ConsoleSecretSource);
+        }
         let duplicate_rules = if overlay.has_grants {
             false
         } else {
@@ -1417,10 +1416,18 @@ impl Config {
         apply_console_overlay(&mut merged, overlay.value.clone());
         sources.push(overlay.source);
 
-        finish_loaded(merged, sources, duplicate_rules)
+        finish_loaded(merged, sources, duplicate_rules, SecretMode::Strict)
     }
 
-    fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
+    fn from_raw(raw: RawConfig, mode: SecretMode) -> Result<Self, ConfigError> {
+        Self::from_raw_with_secrets(raw, mode).map(|(config, _)| config)
+    }
+
+    fn from_raw_with_secrets(
+        raw: RawConfig,
+        mode: SecretMode,
+    ) -> Result<(Self, SecretStore), ConfigError> {
+        let secrets = SecretStore::from_raw(raw.secrets, mode)?;
         if raw.policy.is_some() {
             return Err(ConfigError::GlobalPolicyUnsupported);
         }
@@ -1513,12 +1520,12 @@ impl Config {
                     .url
                     .map(|url| url.trim().trim_end_matches('/').to_owned())
                     .filter(|url| !url.is_empty());
-                let topic = raw
-                    .topic
+                let topic = secrets
+                    .resolve_opt(raw.topic, "notifications.topic")?
                     .map(|topic| topic.trim().trim_start_matches('/').to_owned())
                     .filter(|topic| !topic.is_empty());
-                let token = raw
-                    .token
+                let token = secrets
+                    .resolve_opt(raw.token, "notifications.token")?
                     .map(|token| token.trim().to_owned())
                     .filter(|token| !token.is_empty());
                 if raw.enabled && url.is_some() && topic.is_some() {
@@ -1598,7 +1605,10 @@ impl Config {
                         detail: acb_i18n::t!("kernel.config.console_host_port"),
                     });
                 }
-                let token = raw.token.trim().to_owned();
+                let token = secrets
+                    .resolve(&raw.token, "console.token")?
+                    .trim()
+                    .to_owned();
                 if token.is_empty() {
                     return Err(ConfigError::BadListen {
                         address,
@@ -1717,7 +1727,7 @@ impl Config {
 
         let mut connections: Vec<Connection> = Vec::with_capacity(raw.connections.len());
         for raw_connection in raw.connections {
-            let connection = build_connection(raw_connection)?;
+            let connection = build_connection(raw_connection, &secrets)?;
             if connections.iter().any(|seen| seen.id == connection.id) {
                 return Err(ConfigError::DuplicateConnection {
                     connection: connection.id,
@@ -1844,7 +1854,11 @@ impl Config {
                     field,
                 }
             })?;
-            check_not_blank(&raw_session.token, "token").map_err(|_| ConfigError::EmptyToken {
+            let token = secrets
+                .resolve(&raw_session.token, &format!("sessions[{id}].token"))?
+                .trim()
+                .to_owned();
+            check_not_blank(&token, "token").map_err(|_| ConfigError::EmptyToken {
                 session: id.clone(),
             })?;
 
@@ -1940,7 +1954,7 @@ impl Config {
                 model,
                 persona: raw_session.persona,
                 memories: raw_session.memories,
-                token: raw_session.token.trim().to_owned(),
+                token,
                 subscriptions,
                 access,
                 delivery,
@@ -1951,7 +1965,7 @@ impl Config {
             });
         }
 
-        Ok(Self {
+        let config = Self {
             personas,
             memories,
             harnesses,
@@ -1975,7 +1989,8 @@ impl Config {
             default_on_turn_error,
             delivery_limit: raw.delivery_limit.unwrap_or(DEFAULT_DELIVERY_LIMIT),
             turn_timeout_secs: raw.turn_timeout_secs.unwrap_or(DEFAULT_TURN_TIMEOUT_SECS),
-        })
+        };
+        Ok((config, secrets))
     }
 
     /// 找某条连接的配置。
@@ -2076,6 +2091,37 @@ impl Config {
             }
         }
 
+        // URL 查询串里的 token 不属于密钥来源抽象；提醒拆到 token 字段。
+        // 只报连接 id 和参数名，绝不把 URL 或参数值写进提醒。
+        for connection in &self.connections {
+            let Some(url) = connection.url.as_deref() else {
+                continue;
+            };
+            let Some((_, query)) = url.split_once('?') else {
+                continue;
+            };
+            let sensitive = query
+                .split('&')
+                .filter_map(|pair| {
+                    let key = pair
+                        .split_once('=')
+                        .map(|(key, _)| key)
+                        .unwrap_or(pair)
+                        .trim();
+                    (key.eq_ignore_ascii_case("token")
+                        || key.eq_ignore_ascii_case("access_token"))
+                    .then_some(key)
+                })
+                .next();
+            if let Some(key) = sensitive {
+                warnings.push(acb_i18n::t!(
+                    "kernel.config.url_token_query",
+                    connection = connection.id,
+                    key = key
+                ));
+            }
+        }
+
         warnings
     }
 }
@@ -2089,7 +2135,7 @@ fn canonical_adapter_kind(kind: &str) -> &str {
     }
 }
 
-fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
+fn build_connection(raw: RawConnection, secrets: &SecretStore) -> Result<Connection, ConfigError> {
     let id = raw.id.trim().to_owned();
     if id.is_empty() {
         return Err(ConfigError::EmptyConnectionId);
@@ -2160,6 +2206,10 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
 
     let receive = build_receive(&id, raw.receive)?;
     let routes = build_routes(&id, raw.routes)?;
+    let token = secrets
+        .resolve_opt(raw.token, &format!("connections[{id}].token"))?
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty());
     Ok(Connection {
         id,
         platform,
@@ -2167,10 +2217,7 @@ fn build_connection(raw: RawConnection) -> Result<Connection, ConfigError> {
         transport,
         url,
         options,
-        token: raw
-            .token
-            .map(|token| token.trim().to_owned())
-            .filter(|token| !token.is_empty()),
+        token,
         account,
         admin_qqs: raw
             .admin_qqs
@@ -2645,6 +2692,9 @@ struct RawConfig {
     lkg: Option<RawLkg>,
     provider_calls: Option<RawProviderCalls>,
     notifications: Option<RawNotifications>,
+    /// 密钥来源声明；密钥字段通过 `{ secret = "<name>" }` 引用。
+    #[serde(default)]
+    secrets: Option<RawSecrets>,
     worktrees_root: Option<String>,
     /// 会话没配 `on_turn_error` 时的默认动作列表（默认空 = 只记日志）。
     #[serde(default)]
@@ -2655,6 +2705,520 @@ struct RawConfig {
     /// 一轮最多跑多久（秒）。0 = 关闭超时。不配 = 默认关闭。
     #[serde(default)]
     turn_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSecrets {
+    #[serde(default)]
+    default_kind: Option<String>,
+    #[serde(default)]
+    sources: Vec<RawSecretSource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSecretSource {
+    name: String,
+    /// 缺省用 `[secrets].default_kind`，再缺省是 `env`。
+    #[serde(default)]
+    kind: Option<String>,
+    /// `kind = "env"`：进程环境变量名。
+    #[serde(default)]
+    variable: Option<String>,
+    /// `kind = "file"`：绝对路径。
+    #[serde(default)]
+    path: Option<String>,
+    /// `kind = "file"`：`raw`（默认）或 `dotenv`。
+    #[serde(default)]
+    format: Option<String>,
+    /// `format = "dotenv"`：要取的键。
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// 密钥字段的值：只允许 `{ secret = "<name>" }`；字面量一律拒绝。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawSecretValue {
+    #[allow(dead_code)]
+    Literal(String),
+    Reference(RawSecretRef),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSecretRef {
+    secret: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretMode {
+    /// 生产：所有引用必须命中声明，所有声明必须能读到值。
+    Strict,
+    /// 测试 fixture：未声明的引用按名字自身解析。
+    Fixture,
+}
+
+/// 单个密钥来源的展示信息。只含引导参数，不含值。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretEntry {
+    pub name: String,
+    /// `env` / `file`。
+    pub kind: String,
+    /// 环境变量名或文件路径（含 `dotenv` 的键）。
+    pub origin: String,
+}
+
+#[derive(Clone)]
+struct ResolvedSecret {
+    kind: String,
+    origin: String,
+    value: String,
+}
+
+/// 加载期解析出来的密钥集合。值只留在内存里，不写回配置文本、不进数据库。
+#[derive(Clone)]
+pub struct SecretStore {
+    mode: SecretMode,
+    sources: BTreeMap<String, ResolvedSecret>,
+}
+
+impl std::fmt::Debug for SecretStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let entries = self.entries();
+        f.debug_struct("SecretStore")
+            .field("sources", &entries)
+            .finish()
+    }
+}
+
+impl SecretStore {
+    fn from_raw(raw: Option<RawSecrets>, mode: SecretMode) -> Result<Self, ConfigError> {
+        let raw = raw.unwrap_or_default();
+        let default_kind = raw
+            .default_kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or("env");
+        if !matches!(default_kind, "env" | "file") {
+            return Err(ConfigError::BadSecretSource {
+                name: "(default_kind)".to_owned(),
+                kind: default_kind.to_owned(),
+                detail: acb_i18n::t!("kernel.config.secret_kind_unknown").to_owned(),
+            });
+        }
+
+        // 先校验 schema 并查重，再读值：同名来源必须在任何量表之前就失败，
+        // 不能因为第一个来源读不到环境变量而把重复声明错报成「缺值」。
+        let mut plans = BTreeMap::new();
+        for raw_source in raw.sources {
+            let name = raw_source.name.trim().to_owned();
+            let plan = plan_source(&raw_source, default_kind)?;
+            if plans.insert(name.clone(), plan).is_some() {
+                return Err(ConfigError::DuplicateSecret { name });
+            }
+        }
+
+        let mut sources = BTreeMap::new();
+        for (name, plan) in plans {
+            let value = match mode {
+                SecretMode::Strict => load_plan(&name, &plan)?,
+                // fixture 里的来源只校验 schema；引用按名字自身解析，不读真实文件/环境。
+                SecretMode::Fixture => String::new(),
+            };
+            sources.insert(
+                name,
+                ResolvedSecret {
+                    kind: plan.kind,
+                    origin: plan.origin,
+                    value,
+                },
+            );
+        }
+        Ok(Self { mode, sources })
+    }
+
+    /// 引用解析：返回密钥值。调用方负责按字段语义 trim。
+    fn resolve(&self, value: &RawSecretValue, field: &str) -> Result<String, ConfigError> {
+        let name = match value {
+            RawSecretValue::Literal(_) => {
+                return Err(ConfigError::SecretLiteral {
+                    field: field.to_owned(),
+                });
+            }
+            RawSecretValue::Reference(reference) => &reference.secret,
+        };
+        if self.mode == SecretMode::Fixture {
+            return Ok(name.clone());
+        }
+        if let Some(source) = self.sources.get(name) {
+            return Ok(source.value.clone());
+        }
+        Err(ConfigError::UnknownSecret {
+            field: field.to_owned(),
+            name: name.clone(),
+        })
+    }
+
+    fn resolve_opt(
+        &self,
+        value: Option<RawSecretValue>,
+        field: &str,
+    ) -> Result<Option<String>, ConfigError> {
+        value.map(|value| self.resolve(&value, field)).transpose()
+    }
+
+    /// 所有已声明来源的引导信息（不含值）。`acbctl secrets check` 用。
+    pub fn entries(&self) -> Vec<SecretEntry> {
+        self.sources
+            .iter()
+            .map(|(name, source)| SecretEntry {
+                name: name.clone(),
+                kind: source.kind.clone(),
+                origin: source.origin.clone(),
+            })
+            .collect()
+    }
+
+    /// 按来源名取解析后的值。不存在返回 `None`。
+    pub fn value(&self, name: &str) -> Option<&str> {
+        self.sources.get(name).map(|source| source.value.as_str())
+    }
+}
+
+const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
+
+enum SecretLoad {
+    Env {
+        variable: String,
+    },
+    File {
+        path: String,
+        format: String,
+        key: Option<String>,
+    },
+}
+
+struct SecretPlan {
+    kind: String,
+    origin: String,
+    load: SecretLoad,
+}
+
+/// 只校验 schema，不读值。Fixture 模式也会走这里，保证示例配置拼错字段能被发现。
+fn plan_source(raw: &RawSecretSource, default_kind: &str) -> Result<SecretPlan, ConfigError> {
+    let name = raw.name.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+    {
+        return Err(ConfigError::BadSecretSource {
+            name: raw.name.clone(),
+            kind: default_kind.to_owned(),
+            detail: acb_i18n::t!("kernel.config.secret_name_invalid").to_owned(),
+        });
+    }
+    let kind = raw
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or(default_kind);
+    match kind {
+        "env" => {
+            if raw.path.is_some() || raw.format.is_some() || raw.key.is_some() {
+                return Err(ConfigError::BadSecretSource {
+                    name: name.to_owned(),
+                    kind: kind.to_owned(),
+                    detail: acb_i18n::t!("kernel.config.secret_env_fields").to_owned(),
+                });
+            }
+            let variable = raw.variable.as_deref().map(str::trim).unwrap_or("");
+            if variable.is_empty()
+                || !variable
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                return Err(ConfigError::BadSecretSource {
+                    name: name.to_owned(),
+                    kind: kind.to_owned(),
+                    detail: acb_i18n::t!("kernel.config.secret_variable_invalid").to_owned(),
+                });
+            }
+            Ok(SecretPlan {
+                kind: "env".to_owned(),
+                origin: variable.to_owned(),
+                load: SecretLoad::Env {
+                    variable: variable.to_owned(),
+                },
+            })
+        }
+        "file" => {
+            if raw.variable.is_some() {
+                return Err(ConfigError::BadSecretSource {
+                    name: name.to_owned(),
+                    kind: kind.to_owned(),
+                    detail: acb_i18n::t!("kernel.config.secret_file_fields").to_owned(),
+                });
+            }
+            let path = raw.path.as_deref().map(str::trim).unwrap_or("");
+            if path.is_empty() {
+                return Err(ConfigError::BadSecretSource {
+                    name: name.to_owned(),
+                    kind: kind.to_owned(),
+                    detail: acb_i18n::t!("kernel.config.secret_path_required").to_owned(),
+                });
+            }
+            if !Path::new(path).is_absolute() {
+                return Err(ConfigError::BadSecretSource {
+                    name: name.to_owned(),
+                    kind: kind.to_owned(),
+                    detail: acb_i18n::t!("kernel.config.secret_path_relative").to_owned(),
+                });
+            }
+            let format = raw
+                .format
+                .as_deref()
+                .map(str::trim)
+                .filter(|format| !format.is_empty())
+                .unwrap_or("raw");
+            let key = match format {
+                "raw" => {
+                    if raw.key.is_some() {
+                        return Err(ConfigError::BadSecretSource {
+                            name: name.to_owned(),
+                            kind: kind.to_owned(),
+                            detail: acb_i18n::t!("kernel.config.secret_key_with_raw").to_owned(),
+                        });
+                    }
+                    None
+                }
+                "dotenv" => {
+                    let key = raw.key.as_deref().map(str::trim).unwrap_or("");
+                    if key.is_empty()
+                        || !key
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    {
+                        return Err(ConfigError::BadSecretSource {
+                            name: name.to_owned(),
+                            kind: kind.to_owned(),
+                            detail: acb_i18n::t!("kernel.config.secret_key_required").to_owned(),
+                        });
+                    }
+                    Some(key.to_owned())
+                }
+                other => {
+                    return Err(ConfigError::BadSecretSource {
+                        name: name.to_owned(),
+                        kind: kind.to_owned(),
+                        detail: acb_i18n::t!(
+                            "kernel.config.secret_format_unknown",
+                            format = other
+                        ),
+                    });
+                }
+            };
+            let origin = match key.as_deref() {
+                Some(key) => format!("{path}#{key}"),
+                None => path.to_owned(),
+            };
+            Ok(SecretPlan {
+                kind: "file".to_owned(),
+                origin,
+                load: SecretLoad::File {
+                    path: path.to_owned(),
+                    format: format.to_owned(),
+                    key,
+                },
+            })
+        }
+        other => Err(ConfigError::BadSecretSource {
+            name: name.to_owned(),
+            kind: other.to_owned(),
+            detail: acb_i18n::t!("kernel.config.secret_kind_unknown").to_owned(),
+        }),
+    }
+}
+
+fn load_plan(name: &str, plan: &SecretPlan) -> Result<String, ConfigError> {
+    match &plan.load {
+        SecretLoad::Env { variable } => {
+            let value = std::env::var(variable).ok();
+            value.filter(|value| !value.is_empty()).ok_or_else(|| {
+                ConfigError::MissingSecretEnv {
+                    name: name.to_owned(),
+                    variable: variable.clone(),
+                }
+            })
+        }
+        SecretLoad::File { path, format, key } => {
+            read_secret_file(name, path, format, key.as_deref())
+        }
+    }
+}
+
+fn read_secret_file(
+    name: &str,
+    path: &str,
+    format: &str,
+    key: Option<&str>,
+) -> Result<String, ConfigError> {
+    let path_ref = Path::new(path);
+    let mut file = std::fs::File::open(path_ref).map_err(|error| ConfigError::BadSecretFile {
+        name: name.to_owned(),
+        path: path.to_owned(),
+        detail: error.to_string(),
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| ConfigError::BadSecretFile {
+            name: name.to_owned(),
+            path: path.to_owned(),
+            detail: error.to_string(),
+        })?;
+    if !metadata.is_file() {
+        return Err(ConfigError::BadSecretFile {
+            name: name.to_owned(),
+            path: path.to_owned(),
+            detail: acb_i18n::t!("kernel.config.secret_not_regular").to_owned(),
+        });
+    }
+    if metadata.len() > MAX_SECRET_FILE_BYTES {
+        return Err(ConfigError::BadSecretFile {
+            name: name.to_owned(),
+            path: path.to_owned(),
+            detail: acb_i18n::t!(
+                "kernel.config.secret_file_too_large",
+                limit = MAX_SECRET_FILE_BYTES
+            ),
+        });
+    }
+    check_secret_file_security(name, path, &metadata)?;
+
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|error| ConfigError::BadSecretFile {
+            name: name.to_owned(),
+            path: path.to_owned(),
+            detail: error.to_string(),
+        })?;
+
+    if text.contains('\0') {
+        return Err(ConfigError::EmptySecret {
+            name: name.to_owned(),
+            origin: path.to_owned(),
+        });
+    }
+    match format {
+        "dotenv" => parse_dotenv(name, path, &text, key.unwrap_or_default()),
+        _ => {
+            let value = text.strip_suffix('\n').unwrap_or(&text);
+            let value = value.strip_suffix('\r').unwrap_or(value);
+            if value.is_empty() || value.chars().all(char::is_whitespace) {
+                return Err(ConfigError::EmptySecret {
+                    name: name.to_owned(),
+                    origin: path.to_owned(),
+                });
+            }
+            Ok(value.to_owned())
+        }
+    }
+}
+
+fn check_secret_file_security(
+    name: &str,
+    path: &str,
+    metadata: &std::fs::Metadata,
+) -> Result<(), ConfigError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let mode = metadata.mode() & 0o777;
+        if mode & 0o077 != 0 || mode & 0o400 == 0 {
+            return Err(ConfigError::InsecureSecretFile {
+                name: name.to_owned(),
+                path: path.to_owned(),
+                detail: acb_i18n::t!("kernel.config.secret_file_mode", mode = format!("{mode:o}")).to_owned(),
+            });
+        }
+        let owner = metadata.uid();
+        let euid = unsafe { libc::geteuid() };
+        if owner != euid && owner != 0 {
+            return Err(ConfigError::InsecureSecretFile {
+                name: name.to_owned(),
+                path: path.to_owned(),
+                detail: acb_i18n::t!(
+                    "kernel.config.secret_file_owner",
+                    owner = owner,
+                    euid = euid
+                )
+                .to_owned(),
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (name, path, metadata);
+    Ok(())
+}
+
+fn parse_dotenv(
+    name: &str,
+    path: &str,
+    text: &str,
+    wanted: &str,
+) -> Result<String, ConfigError> {
+    let mut values: BTreeMap<String, String> = BTreeMap::new();
+    for (index, raw_line) in text.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(ConfigError::BadSecretDotenv {
+                name: name.to_owned(),
+                path: path.to_owned(),
+                line: index + 1,
+                detail: acb_i18n::t!("kernel.config.secret_dotenv_no_equal").to_owned(),
+            });
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() {
+            return Err(ConfigError::BadSecretDotenv {
+                name: name.to_owned(),
+                path: path.to_owned(),
+                line: index + 1,
+                detail: acb_i18n::t!("kernel.config.secret_dotenv_empty_key").to_owned(),
+            });
+        }
+        if value.is_empty() {
+            return Err(ConfigError::EmptySecret {
+                name: name.to_owned(),
+                origin: format!("{path}#{key}"),
+            });
+        }
+        if values.insert(key.to_owned(), value.to_owned()).is_some() {
+            return Err(ConfigError::BadSecretDotenv {
+                name: name.to_owned(),
+                path: path.to_owned(),
+                line: index + 1,
+                detail: acb_i18n::t!("kernel.config.secret_dotenv_duplicate", key = key),
+            });
+        }
+    }
+    values
+        .remove(wanted)
+        .ok_or_else(|| ConfigError::BadSecretDotenv {
+            name: name.to_owned(),
+            path: path.to_owned(),
+            line: 0,
+            detail: acb_i18n::t!("kernel.config.secret_dotenv_missing", key = wanted),
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -2689,8 +3253,8 @@ struct RawSession {
     persona: String,
     #[serde(default)]
     memories: Vec<String>,
-    /// 接入令牌。必填——没有令牌就没有身份，桥不知道该把这条连接绑到哪些会话。
-    token: String,
+    /// 接入令牌引用。必填——没有令牌就没有身份，桥不知道该把这条连接绑到哪些会话。
+    token: RawSecretValue,
     #[serde(default)]
     subscriptions: Vec<RawSubscription>,
     /// 访问策略（默认按订阅）。
@@ -2779,8 +3343,8 @@ struct RawNotifications {
     #[serde(default = "default_enabled")]
     enabled: bool,
     url: Option<String>,
-    topic: Option<String>,
-    token: Option<String>,
+    topic: Option<RawSecretValue>,
+    token: Option<RawSecretValue>,
     min_interval_secs: Option<u64>,
     #[serde(default)]
     in_band: RawInBand,
@@ -2844,7 +3408,7 @@ struct RawConnection {
     /// 适配器专属配置；core 原样交给适配器。
     #[serde(default)]
     options: toml::value::Table,
-    token: Option<String>,
+    token: Option<RawSecretValue>,
     account: Option<String>,
     /// 系统管理员账号列表，可为空。
     #[serde(default)]
@@ -2890,7 +3454,7 @@ struct RawEndpoint {
 #[derive(Debug, Deserialize)]
 struct RawConsole {
     listen: String,
-    token: String,
+    token: RawSecretValue,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2981,19 +3545,15 @@ fn list_config_fragments(dir: &Path) -> Result<Vec<PathBuf>, ConfigError> {
 
 fn parse_config_file(path: &Path, text: &str) -> Result<ParsedConfigFile, ConfigError> {
     let label = path.display().to_string();
-    let expanded = expand_env_vars(text).map_err(|error| ConfigError::FileParseFailed {
-        path: label.clone(),
-        detail: error.to_string(),
-    })?;
     let value: toml::Value =
-        toml::from_str(&expanded).map_err(|error| ConfigError::FileParseFailed {
+        toml::from_str(text).map_err(|error| ConfigError::FileParseFailed {
             path: label.clone(),
             detail: error.to_string(),
         })?;
     // 逐文件先按 RawConfig 校验一次：fragment 里的未知字段/缺必填字段必须在
     // 这里带着文件名失败，不能等到合并后才报一个无来源的错误。
     let _raw: RawConfig =
-        toml::from_str(&expanded).map_err(|error| ConfigError::FileParseFailed {
+        toml::from_str(text).map_err(|error| ConfigError::FileParseFailed {
             path: label.clone(),
             detail: error.to_string(),
         })?;
@@ -3018,8 +3578,15 @@ fn parse_config_file(path: &Path, text: &str) -> Result<ParsedConfigFile, Config
     })
 }
 
-fn load_single(base_path: &Path, text: &str) -> Result<LoadedConfig, ConfigError> {
-    let config = Config::parse(text)?;
+fn load_single(
+    base_path: &Path,
+    text: &str,
+    mode: SecretMode,
+) -> Result<LoadedConfig, ConfigError> {
+    let raw: RawConfig = toml::from_str(text).map_err(|error| ConfigError::ParseFailed {
+        detail: error.to_string(),
+    })?;
+    let (config, secrets) = Config::from_raw_with_secrets(raw, mode)?;
     Ok(LoadedConfig {
         sources: vec![ConfigSource {
             path: base_path.display().to_string(),
@@ -3028,6 +3595,7 @@ fn load_single(base_path: &Path, text: &str) -> Result<LoadedConfig, ConfigError
             rules: config.grants.rules.len(),
         }],
         config,
+        secrets,
         merged_toml: text.to_owned(),
         duplicate_rules: false,
     })
@@ -3064,6 +3632,7 @@ fn finish_loaded(
     mut merged: toml::Value,
     sources: Vec<ConfigSource>,
     duplicate_rules: bool,
+    mode: SecretMode,
 ) -> Result<LoadedConfig, ConfigError> {
     dedupe_admin_lists(&mut merged);
     let merged_toml = toml::to_string(&merged).map_err(|error| ConfigError::ParseFailed {
@@ -3073,8 +3642,10 @@ fn finish_loaded(
         toml::from_str(&merged_toml).map_err(|error| ConfigError::ParseFailed {
             detail: error.to_string(),
         })?;
+    let (config, secrets) = Config::from_raw_with_secrets(raw, mode)?;
     Ok(LoadedConfig {
-        config: Config::from_raw(raw)?,
+        config,
+        secrets,
         sources,
         merged_toml,
         duplicate_rules,
@@ -3110,9 +3681,27 @@ fn array_ids(value: &toml::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn secret_source_names(value: &toml::Value) -> Vec<String> {
+    value
+        .get("secrets")
+        .and_then(|secrets| secrets.get("sources"))
+        .and_then(toml::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("name").and_then(toml::Value::as_str))
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn check_duplicate_ids(files: &[ParsedConfigFile]) -> Result<(), ConfigError> {
     let mut connections: BTreeMap<String, String> = BTreeMap::new();
     let mut sessions: BTreeMap<String, String> = BTreeMap::new();
+    let mut secret_names: BTreeMap<String, String> = BTreeMap::new();
     for file in files {
         for id in array_ids(&file.value, "connections") {
             if let Some(first) = connections.insert(id.clone(), file.source.path.clone()) {
@@ -3134,6 +3723,16 @@ fn check_duplicate_ids(files: &[ParsedConfigFile]) -> Result<(), ConfigError> {
                 });
             }
         }
+        for name in secret_source_names(&file.value) {
+            if let Some(first) = secret_names.insert(name.clone(), file.source.path.clone()) {
+                return Err(ConfigError::DuplicateAcrossFiles {
+                    kind: "secrets.sources".to_owned(),
+                    id: name,
+                    first,
+                    second: file.source.path.clone(),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -3148,6 +3747,8 @@ fn merge_document(acc: &mut toml::Value, next: toml::Value) {
             for (key, value) in next_table {
                 if key == "grants" {
                     merge_grants(acc_table, value);
+                } else if key == "secrets" {
+                    merge_secrets(acc_table, value);
                 } else {
                     merge_entry(acc_table, key, value);
                 }
@@ -3190,6 +3791,33 @@ fn merge_grants(acc: &mut toml::Table, value: toml::Value) {
         match key.as_str() {
             "rules" | "deny" => merge_entry(current, key, value),
             "rooms" | "accounts" => merge_keyed_table(current, key, value),
+            _ => {
+                current.insert(key, value);
+            }
+        }
+    }
+}
+
+/// `[secrets]` 跨分片合并：`sources` 数组追加，`default_kind` 后者覆盖。
+fn merge_secrets(acc: &mut toml::Table, value: toml::Value) {
+    let next = match value {
+        toml::Value::Table(next) => next,
+        other => {
+            acc.insert("secrets".to_owned(), other);
+            return;
+        }
+    };
+    if acc.get("secrets").and_then(toml::Value::as_table).is_none() {
+        acc.insert("secrets".to_owned(), toml::Value::Table(next));
+        return;
+    }
+    let current = acc
+        .get_mut("secrets")
+        .and_then(toml::Value::as_table_mut)
+        .expect("checked above");
+    for (key, value) in next {
+        match key.as_str() {
+            "sources" => merge_entry(current, key, value),
             _ => {
                 current.insert(key, value);
             }
@@ -3267,71 +3895,18 @@ mod tests {
     }
 
     #[test]
-    fn env_placeholders_are_expanded_at_load() {
-        let expected = std::env::var("PATH").expect("测试环境一定有 PATH");
-        let text = config_with(ONE_CONNECTION, ONE_SESSION).replace("t-main", "${PATH}");
-        let config = Config::parse(&text).expect("能解析");
-        assert_eq!(config.session("main").expect("会话在").token, expected);
-    }
-
-    #[test]
-    fn missing_env_placeholder_is_an_error() {
-        let text = config_with(ONE_CONNECTION, ONE_SESSION)
-            .replace("t-main", "${ACB_TEST_SURELY_MISSING_VAR}");
-        let error = Config::parse(&text).expect_err("环境变量缺失要报错");
-        assert!(
-            matches!(error, ConfigError::MissingEnv { ref name } if name == "ACB_TEST_SURELY_MISSING_VAR"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn env_placeholder_falls_back_to_the_default() {
-        let text = config_with(ONE_CONNECTION, ONE_SESSION)
-            .replace("t-main", "${ACB_TEST_SURELY_MISSING_VAR:-t-default}");
-        let config = Config::parse(&text).expect("有默认值就能解析");
-        assert_eq!(config.session("main").expect("会话在").token, "t-default");
-
-        let text = config_with(ONE_CONNECTION, ONE_SESSION).replace("t-main", "${PATH:-unused}");
-        let config = Config::parse(&text).expect("有环境变量就用环境变量");
-        assert_eq!(
-            config.session("main").expect("会话在").token,
-            std::env::var("PATH").expect("测试环境一定有 PATH")
-        );
-    }
-
-    #[test]
-    fn raw_env_placeholder_injects_toml_literals() {
-        // 原样注入：数字不需要引号，默认值也按原文落进 TOML。
-        let text = config_with(ONE_CONNECTION, ONE_SESSION).replace(
-            "[[connections]]",
-            "delivery_limit = ${{ACB_TEST_SURELY_MISSING_VAR:-42}}\n\n[[connections]]",
-        );
-        let config = Config::parse(&text).expect("原样注入的数字能解析");
-        assert_eq!(config.delivery_limit, 42);
-    }
-
-    #[test]
-    fn env_values_are_escaped_as_toml_strings() {
-        assert_eq!(
-            super::escape_toml_string("a\"b\\c\n\t"),
-            "a\\\"b\\\\c\\n\\t"
-        );
-    }
-
-    #[test]
     fn onebot_snowluma_kind_is_a_canonical_alias() {
         let alias = ONE_CONNECTION.replace("kind = \"onebot11\"", "kind = \"onebot-snowluma\"");
-        let config = Config::parse(&config_with(&alias, ONE_SESSION)).expect("别名能解析");
+        let config = Config::parse_fixture(&config_with(&alias, ONE_SESSION)).expect("别名能解析");
         assert_eq!(config.connections[0].kind, "onebot11");
 
-        let canonical = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("旧写法");
+        let canonical = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("旧写法");
         assert_eq!(canonical.connections[0].kind, "onebot11");
     }
 
     #[test]
     fn tickets_policy_defaults_and_overrides() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.tickets.request_cooldown_secs, 60);
         assert_eq!(config.tickets.admin_cooldown_secs, 30);
 
@@ -3339,7 +3914,7 @@ mod tests {
             "{}\n[tickets]\nrequest_cooldown_secs = 5\nadmin_cooldown_secs = 2",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("覆盖值能解析");
+        let config = Config::parse_fixture(&text).expect("覆盖值能解析");
         assert_eq!(config.tickets.request_cooldown_secs, 5);
         assert_eq!(config.tickets.admin_cooldown_secs, 2);
     }
@@ -3367,7 +3942,7 @@ mod tests {
         id = "main"
         harness = "dsh"
         persona = "default"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -3403,7 +3978,7 @@ mod tests {
             id = "main"
             harness = "dsh"
             persona = "p"
-            token = "t-main"
+            token = { secret = "t-main" }
             prompts = ["test.provider"]
 
             [sessions.access]
@@ -3428,7 +4003,7 @@ mod tests {
             [sessions.subscriptions.clock]
             provider = "test.provider"
         "#;
-        let config = Config::parse(text).expect("配置合法");
+        let config = Config::parse_fixture(text).expect("配置合法");
         let refs = config.provider_references();
         let locations: Vec<&str> = refs
             .iter()
@@ -3460,7 +4035,7 @@ mod tests {
 
     #[test]
     fn minimal_config_uses_documented_defaults() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("应当能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("应当能解析");
         let subscription = &config.sessions[0].subscriptions[0];
 
         assert!(config.sessions[0].prompts.is_empty(), "默认不注入上下文");
@@ -3479,7 +4054,7 @@ mod tests {
 
     #[test]
     fn access_defaults_to_the_builtin_grants_evaluator() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         let access = &config.sessions[0].access;
         assert_eq!(access.provider, ProviderId::builtin_grants_access());
     }
@@ -3501,7 +4076,7 @@ mod tests {
             "acb.access.privileged_origins",
         ] {
             let sessions = session_with_access(&format!("        provider = \"{provider}\""));
-            let error = Config::parse(&config_with(ONE_CONNECTION, &sessions))
+            let error = Config::parse_fixture(&config_with(ONE_CONNECTION, &sessions))
                 .expect_err("旧 provider 必须启动失败");
             assert!(
                 matches!(error, ConfigError::RemovedAccessProvider { .. }),
@@ -3524,7 +4099,7 @@ mod tests {
         ] {
             let sessions = session_with_access(key);
             assert!(
-                Config::parse(&config_with(ONE_CONNECTION, &sessions)).is_err(),
+                Config::parse_fixture(&config_with(ONE_CONNECTION, &sessions)).is_err(),
                 "旧键 {key} 不能被静默忽略"
             );
         }
@@ -3534,7 +4109,7 @@ mod tests {
     fn access_policy_rejects_bad_provider() {
         let bad_provider = session_with_access("        provider = \"subscribed\"");
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &bad_provider)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &bad_provider)),
             Err(ConfigError::BadAccessProvider { .. })
         ));
     }
@@ -3542,7 +4117,7 @@ mod tests {
     #[test]
     fn turn_timeout_is_configurable_and_disablable() {
         // 0 = 关闭：桥不掐，帧里带 0，harness 也不许自己兜底。
-        let config = Config::parse(&format!(
+        let config = Config::parse_fixture(&format!(
             "turn_timeout_secs = 0\n{}",
             config_with(ONE_CONNECTION, ONE_SESSION)
         ))
@@ -3551,7 +4126,7 @@ mod tests {
         assert_eq!(config.turn_timeout_ms(), 0);
 
         // 自定义值原样进帧。
-        let config = Config::parse(&format!(
+        let config = Config::parse_fixture(&format!(
             "turn_timeout_secs = 3600\n{}",
             config_with(ONE_CONNECTION, ONE_SESSION)
         ))
@@ -3561,7 +4136,7 @@ mod tests {
 
     #[test]
     fn transport_defaults_to_forward_websocket() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.connections[0].transport.as_str(), "ws-client");
     }
 
@@ -3572,7 +4147,7 @@ mod tests {
             "{}\n[file_relay]\nlisten = \"0.0.0.0:3131\"\npublic_base = \"http://10.89.0.1:3131\"",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         let relay = config.file_relay.expect("应解析出 file_relay");
         assert_eq!(relay.mode, "file-server");
     }
@@ -3583,7 +4158,7 @@ mod tests {
             "{}\n[file_relay]\nmode = \"file-server\"\nlisten = \"0.0.0.0:3131\"\npublic_base = \"http://10.89.0.1:3131\"",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         assert_eq!(config.file_relay.unwrap().mode, "file-server");
     }
 
@@ -3594,7 +4169,7 @@ mod tests {
             "{}\n[file_relay]\nmode = \"carrier-pigeon\"\nlisten = \"0.0.0.0:3131\"\npublic_base = \"http://10.89.0.1:3131\"",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let error = Config::parse(&text).expect_err("应当报错");
+        let error = Config::parse_fixture(&text).expect_err("应当报错");
         assert!(error.to_string().contains("file_relay.mode"), "{error}");
     }
 
@@ -3605,7 +4180,7 @@ mod tests {
             "{}\n[connections.policy.risk]\ndestructive = \"allow\"\n{}",
             ONE_CONNECTION, ONE_SESSION
         );
-        let error = Config::parse(&text).expect_err("policy.risk 必须启动失败");
+        let error = Config::parse_fixture(&text).expect_err("policy.risk 必须启动失败");
         let message = error.to_string();
         eprintln!("policy.risk 启动报错：{message}");
         assert!(message.contains("policy.risk"), "{message}");
@@ -3625,7 +4200,7 @@ mod tests {
                 "account = \"10001\"",
                 &format!("account = \"10001\"\n{legacy}"),
             );
-            let error = Config::parse(&config_with(&connection, ONE_SESSION))
+            let error = Config::parse_fixture(&config_with(&connection, ONE_SESSION))
                 .expect_err("旧键必须启动失败");
             let message = error.to_string();
             eprintln!("allow_destructive 启动报错：{message}");
@@ -3643,7 +4218,7 @@ mod tests {
             "{}\n[policy.risk]\ndestructive = \"allow\"\n{}",
             ONE_CONNECTION, ONE_SESSION
         );
-        let error = Config::parse(&text).expect_err("顶层 policy 必须启动失败");
+        let error = Config::parse_fixture(&text).expect_err("顶层 policy 必须启动失败");
         let message = error.to_string();
         assert!(message.contains("grants.rules"), "{message}");
     }
@@ -3656,7 +4231,7 @@ mod tests {
             r#"kind = "onebot11""#,
             "kind = \"onebot11\"\ntransport = \"ws-server\"",
         );
-        let config = Config::parse(&config_with(&text, ONE_SESSION)).expect("config 层不拦");
+        let config = Config::parse_fixture(&config_with(&text, ONE_SESSION)).expect("config 层不拦");
         assert_eq!(config.connections[0].transport, Transport::WsServer);
     }
 
@@ -3666,7 +4241,7 @@ mod tests {
             "{}\n[grants]\n[grants.bot_admin]\naccounts = [{{ connection = \"qq\", account = \"10001\" }}]\n[grants.system_admin]\nconnection = \"qq\"\naccount = \"10002\"\n[[grants.rules]]\nid = \"fixture-grant-5\"\nsubject = \"bot_admin\"\nplace = \"private\"\nscope = \"subscribed\"\ncapability = [\"room_read\", \"room_write\", \"plugin\"]\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("合法 grants");
+        let config = Config::parse_fixture(&text).expect("合法 grants");
         assert_eq!(config.grants.rules.len(), 1);
         assert!(config.grants.bot_admin.is_some());
         assert!(config.grants.system_admin.is_some());
@@ -3676,7 +4251,7 @@ mod tests {
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         assert!(
-            Config::parse(&unknown).is_err(),
+            Config::parse_fixture(&unknown).is_err(),
             "未知字段必须启动失败，不能静默忽略"
         );
 
@@ -3685,7 +4260,7 @@ mod tests {
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         assert!(
-            Config::parse(&bad_target).is_err(),
+            Config::parse_fixture(&bad_target).is_err(),
             "旧字符串 target 必须在启动期报错，不留兼容层"
         );
 
@@ -3694,7 +4269,7 @@ mod tests {
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         assert!(
-            Config::parse(&typed_target).is_ok(),
+            Config::parse_fixture(&typed_target).is_ok(),
             "typed target 应能解析"
         );
 
@@ -3702,12 +4277,12 @@ mod tests {
             "{}\n[[grants.rules]]\nid = \"fixture-grant-8\"\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ncapability = [\"root\"]\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        assert!(Config::parse(&bad_capability).is_err(), "能力枚举必须封闭");
+        assert!(Config::parse_fixture(&bad_capability).is_err(), "能力枚举必须封闭");
     }
 
     #[test]
     fn deps_thresholds_default_and_validate() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(
             config.deps.failure_threshold,
             DEFAULT_DEPS_FAILURE_THRESHOLD
@@ -3721,7 +4296,7 @@ mod tests {
             "{}\n[deps]\nfailure_threshold = 5\nfailure_window_secs = 60\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         assert_eq!(config.deps.failure_threshold, 5);
         assert_eq!(config.deps.failure_window_secs, 60);
 
@@ -3731,7 +4306,7 @@ mod tests {
                 config_with(ONE_CONNECTION, ONE_SESSION)
             );
             assert!(
-                matches!(Config::parse(&text), Err(ConfigError::BadDepsConfig { .. })),
+                matches!(Config::parse_fixture(&text), Err(ConfigError::BadDepsConfig { .. })),
                 "{field} = 0 要拒绝"
             );
         }
@@ -3739,7 +4314,7 @@ mod tests {
 
     #[test]
     fn lkg_thresholds_default_and_validate() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.lkg.max_failures, DEFAULT_LKG_MAX_FAILURES);
         assert_eq!(config.lkg.window_secs, DEFAULT_LKG_WINDOW_SECS);
 
@@ -3747,7 +4322,7 @@ mod tests {
             "{}\n[lkg]\nmax_failures = 5\nwindow_secs = 60\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         assert_eq!(config.lkg.max_failures, 5);
         assert_eq!(config.lkg.window_secs, 60);
 
@@ -3757,7 +4332,7 @@ mod tests {
                 config_with(ONE_CONNECTION, ONE_SESSION)
             );
             assert!(matches!(
-                Config::parse(&text),
+                Config::parse_fixture(&text),
                 Err(ConfigError::BadLkgConfig { .. })
             ));
         }
@@ -3765,7 +4340,7 @@ mod tests {
 
     #[test]
     fn provider_calls_timeout_defaults_and_validates() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(
             config.provider_calls.timeout_ms,
             DEFAULT_PROVIDER_CALL_TIMEOUT_MS
@@ -3775,14 +4350,14 @@ mod tests {
             "{}\n[provider_calls]\ntimeout_ms = 100\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         assert_eq!(config.provider_calls.timeout_ms, 100);
 
         let text = format!(
             "{}\n[provider_calls]\ntimeout_ms = 0\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         assert_eq!(config.provider_calls.timeout_ms, 0, "0 = 关闭超时");
 
         let text = format!(
@@ -3791,31 +4366,31 @@ mod tests {
             MAX_PROVIDER_CALL_TIMEOUT_MS + 1
         );
         assert!(matches!(
-            Config::parse(&text),
+            Config::parse_fixture(&text),
             Err(ConfigError::BadProviderCallsTimeout { .. })
         ));
     }
 
     #[test]
     fn notifications_are_optional_and_inactive_without_url_or_topic() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert!(config.notifications.is_none(), "没写整块就不加载");
 
         let missing_topic = format!(
             "{}\n[notifications]\nurl = \"http://127.0.0.1:8080\"\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&missing_topic).expect("能解析");
+        let config = Config::parse_fixture(&missing_topic).expect("能解析");
         assert!(
             !config.notifications.expect("块存在").active(),
             "缺 topic 时不加载"
         );
 
         let disabled = format!(
-            "{}\n[notifications]\nenabled = false\nurl = \"http://127.0.0.1:8080\"\ntopic = \"acb\"\n",
+            "{}\n[notifications]\nenabled = false\nurl = \"http://127.0.0.1:8080\"\ntopic = {{ secret = \"acb\" }}\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&disabled).expect("能解析");
+        let config = Config::parse_fixture(&disabled).expect("能解析");
         assert!(
             !config.notifications.expect("块存在").active(),
             "总开关关掉时不加载"
@@ -3825,10 +4400,10 @@ mod tests {
     #[test]
     fn notifications_parse_defaults_and_validate() {
         let text = format!(
-            "{}\n[notifications]\nurl = \"http://127.0.0.1:8080/\"\ntopic = \"/acb\"\n",
+            "{}\n[notifications]\nurl = \"http://127.0.0.1:8080/\"\ntopic = {{ secret = \"/acb\" }}\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         let notifications = config.notifications.expect("块存在");
         assert!(notifications.active());
         assert_eq!(notifications.url.as_deref(), Some("http://127.0.0.1:8080"));
@@ -3840,10 +4415,10 @@ mod tests {
         assert_eq!(notifications.in_band, InBandNoticeConfig::default());
 
         let custom = format!(
-            "{}\n[notifications]\nurl = \"https://ntfy.example\"\ntopic = \"acb\"\nmin_interval_secs = 60\n[notifications.in_band]\nwindow_secs = 30\nroom_limit = 5\nmax_entries = 100\n",
+            "{}\n[notifications]\nurl = \"https://ntfy.example\"\ntopic = {{ secret = \"acb\" }}\nmin_interval_secs = 60\n[notifications.in_band]\nwindow_secs = 30\nroom_limit = 5\nmax_entries = 100\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&custom).expect("能解析");
+        let config = Config::parse_fixture(&custom).expect("能解析");
         let notifications = config.notifications.expect("块存在");
         assert_eq!(notifications.min_interval_secs, 60);
         assert_eq!(notifications.in_band.window_secs, 30);
@@ -3851,11 +4426,11 @@ mod tests {
         assert_eq!(notifications.in_band.max_entries, 100);
 
         let bad_url = format!(
-            "{}\n[notifications]\nurl = \"127.0.0.1:8080\"\ntopic = \"acb\"\n",
+            "{}\n[notifications]\nurl = \"127.0.0.1:8080\"\ntopic = {{ secret = \"acb\" }}\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         assert!(matches!(
-            Config::parse(&bad_url),
+            Config::parse_fixture(&bad_url),
             Err(ConfigError::BadNotificationsUrl { .. })
         ));
 
@@ -3866,11 +4441,11 @@ mod tests {
             "in_band.max_entries = 0",
         ] {
             let text = format!(
-                "{}\n[notifications]\nurl = \"http://127.0.0.1:8080\"\ntopic = \"acb\"\n{setting}\n",
+                "{}\n[notifications]\nurl = \"http://127.0.0.1:8080\"\ntopic = {{ secret = \"acb\" }}\n{setting}\n",
                 config_with(ONE_CONNECTION, ONE_SESSION)
             );
             assert!(matches!(
-                Config::parse(&text),
+                Config::parse_fixture(&text),
                 Err(ConfigError::BadNotificationsConfig { .. })
             ));
         }
@@ -3878,7 +4453,7 @@ mod tests {
 
     #[test]
     fn queues_default_and_reject_zero() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.queues.inbound, DEFAULT_INBOUND_QUEUE);
         assert_eq!(config.queues.route, DEFAULT_ROUTE_QUEUE);
 
@@ -3886,7 +4461,7 @@ mod tests {
             "{}\n[queues]\ninbound = 64\nroute = 16\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         assert_eq!(config.queues.inbound, 64);
         assert_eq!(config.queues.route, 16);
 
@@ -3896,7 +4471,7 @@ mod tests {
                 config_with(ONE_CONNECTION, ONE_SESSION)
             );
             assert!(matches!(
-                Config::parse(&text),
+                Config::parse_fixture(&text),
                 Err(ConfigError::BadQueueLimit { .. })
             ));
         }
@@ -3908,7 +4483,7 @@ mod tests {
             "{}\n[[tool_plugins]]\nid = \"echo.tools\"\ncommand = \"/usr/bin/node\"\nargs = [\"/opt/echo.js\"]\ntimeout_ms = 500\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         assert_eq!(config.tool_plugins.len(), 1);
         assert_eq!(config.tool_plugins[0].id, "echo.tools");
         assert_eq!(config.tool_plugins[0].command, "/usr/bin/node");
@@ -3919,13 +4494,13 @@ mod tests {
             "{}\n[[tool_plugins]]\nid = \"echo.tools\"\ncommand = \"/bin/echo\"\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&defaults).expect("能解析");
+        let config = Config::parse_fixture(&defaults).expect("能解析");
         assert_eq!(config.tool_plugins[0].timeout(), 5000);
 
         let duplicate =
             format!("{text}\n[[tool_plugins]]\nid = \"echo.tools\"\ncommand = \"/bin/echo\"\n");
         assert!(matches!(
-            Config::parse(&duplicate),
+            Config::parse_fixture(&duplicate),
             Err(ConfigError::DuplicateToolPluginId { .. })
         ));
 
@@ -3934,7 +4509,7 @@ mod tests {
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         assert!(matches!(
-            Config::parse(&empty),
+            Config::parse_fixture(&empty),
             Err(ConfigError::EmptyToolPluginCommand { .. })
         ));
 
@@ -3943,7 +4518,7 @@ mod tests {
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         assert!(matches!(
-            Config::parse(&reserved),
+            Config::parse_fixture(&reserved),
             Err(ConfigError::ReservedToolPluginId { .. })
         ));
 
@@ -3953,7 +4528,7 @@ mod tests {
                 config_with(ONE_CONNECTION, ONE_SESSION)
             );
             assert!(matches!(
-                Config::parse(&text),
+                Config::parse_fixture(&text),
                 Err(ConfigError::BadToolPluginTimeout { .. })
             ));
         }
@@ -3965,7 +4540,7 @@ mod tests {
             "{}\n[[plugins]]\npath = \"/tmp/libdemo.so\"\nkind = \"demo\"\ntimeout_ms = 300\nversion = \"1.2.3\"\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         assert_eq!(config.plugins.len(), 1);
         assert_eq!(config.plugins[0].path, "/tmp/libdemo.so");
         assert_eq!(config.plugins[0].kind.as_deref(), Some("demo"));
@@ -3974,13 +4549,13 @@ mod tests {
 
         let duplicate = format!("{text}\n[[plugins]]\npath = \"/tmp/libdemo.so\"\n");
         assert!(matches!(
-            Config::parse(&duplicate),
+            Config::parse_fixture(&duplicate),
             Err(ConfigError::DuplicatePluginPath { .. })
         ));
 
         let empty = config_with(ONE_CONNECTION, ONE_SESSION) + "\n[[plugins]]\npath = \"  \"\n";
         assert!(matches!(
-            Config::parse(&empty),
+            Config::parse_fixture(&empty),
             Err(ConfigError::EmptyPluginPath)
         ));
     }
@@ -3994,7 +4569,7 @@ mod tests {
                 .replace("10001", "10002")
         );
         let config =
-            Config::parse(&config_with(&two, ONE_SESSION)).expect("同一平台两条连接要允许");
+            Config::parse_fixture(&config_with(&two, ONE_SESSION)).expect("同一平台两条连接要允许");
         assert_eq!(config.connections.len(), 2);
         assert_eq!(config.connection("qq2").expect("有第二条").account, "10002");
     }
@@ -4003,7 +4578,7 @@ mod tests {
     fn duplicate_connection_id_is_rejected() {
         let twice = format!("{ONE_CONNECTION}\n{ONE_CONNECTION}");
         assert!(matches!(
-            Config::parse(&config_with(&twice, ONE_SESSION)),
+            Config::parse_fixture(&config_with(&twice, ONE_SESSION)),
             Err(ConfigError::DuplicateConnection { .. })
         ));
     }
@@ -4012,7 +4587,7 @@ mod tests {
     fn connection_needs_a_login_account() {
         let no_account = ONE_CONNECTION.replace("        account = \"10001\"", "");
         assert!(matches!(
-            Config::parse(&config_with(&no_account, ONE_SESSION)),
+            Config::parse_fixture(&config_with(&no_account, ONE_SESSION)),
             Err(ConfigError::EmptyAccount { .. })
         ));
     }
@@ -4021,7 +4596,7 @@ mod tests {
     fn subscription_to_a_missing_connection_is_rejected() {
         let session = ONE_SESSION.replace("connection = \"qq\"", "connection = \"nope\"");
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::UnknownConnection { .. })
         ));
     }
@@ -4037,7 +4612,7 @@ mod tests {
         "#
         );
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::DuplicateRoom { .. })
         ));
     }
@@ -4051,11 +4626,11 @@ mod tests {
         id = "second"
         harness = "dsh"
         persona = "default"
-        token = "t-main"
+        token = { secret = "t-main" }
         "#
         );
         let config =
-            Config::parse(&config_with(ONE_CONNECTION, &session)).expect("同 harness 要算一组");
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)).expect("同 harness 要算一组");
         let group = config.sessions_by_harness("dsh");
         assert_eq!(group.len(), 2);
         assert_eq!(group[1].id, "second");
@@ -4070,14 +4645,14 @@ mod tests {
         id = "second"
         harness = "dsh"
         persona = "default"
-        token = "t-second"
+        token = { secret = "t-second" }
 
         [[sessions.subscriptions]]
         connection = "qq"
         room = "group/123"
         "#
         );
-        let config = Config::parse(&config_with(ONE_CONNECTION, &session)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, &session)).expect("能解析");
         let warnings = config.warnings();
         assert!(
             warnings
@@ -4088,10 +4663,34 @@ mod tests {
     }
 
     #[test]
+    fn url_token_query_is_a_warning_that_does_not_leak_the_value() {
+        let connection = r#"
+        [[connections]]
+        id = "qq"
+        platform = "qq"
+        kind = "onebot11"
+        url = "ws://127.0.0.1:3001?access_token=s3cret"
+        account = "10001"
+        "#;
+        let config = Config::parse_fixture(&config_with(connection, ONE_SESSION)).expect("能解析");
+        let warnings = config.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("qq") && warning.contains("access_token")),
+            "应当提醒 URL 里的 token：{warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|warning| warning.contains("s3cret")),
+            "提醒不能带出 token 值：{warnings:?}"
+        );
+    }
+
+    #[test]
     fn empty_room_path_is_rejected() {
         let session = ONE_SESSION.replace("room = \"group/123\"", "room = \"  \"");
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::BadRoom { .. })
         ));
     }
@@ -4103,16 +4702,19 @@ mod tests {
             "room = \"group/123\"\n        [sessions.subscriptions.wake]\n        accumulate = 0",
         );
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::BadAccumulate { .. })
         ));
     }
 
     #[test]
     fn empty_token_is_rejected() {
-        let session = ONE_SESSION.replace("token = \"t-main\"", "token = \" \"");
+        let session = ONE_SESSION.replace(
+            "token = { secret = \"t-main\" }",
+            "token = { secret = \" \" }",
+        );
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::EmptyToken { .. })
         ));
     }
@@ -4121,7 +4723,7 @@ mod tests {
     fn unknown_persona_is_rejected() {
         let session = ONE_SESSION.replace("persona = \"default\"", "persona = \"nope\"");
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::UnknownPersona { .. })
         ));
     }
@@ -4133,7 +4735,7 @@ mod tests {
             "persona = \"default\"\n        memories = [\"nope\"]",
         );
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::UnknownMemory { .. })
         ));
     }
@@ -4142,7 +4744,7 @@ mod tests {
     fn unknown_harness_is_rejected() {
         let session = ONE_SESSION.replace("harness = \"dsh\"", "harness = \"nope\"");
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::UnknownHarness { .. })
         ));
     }
@@ -4158,7 +4760,7 @@ mod tests {
         "#
         );
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::DuplicateHarness { .. })
         ));
     }
@@ -4166,17 +4768,17 @@ mod tests {
     #[test]
     fn session_name_defaults_to_id_and_model_is_optional() {
         // 不写 name / model：name 默认 = id，model 为 None。
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         let session = &config.sessions[0];
         assert_eq!(session.name, "main");
         assert_eq!(session.model, None);
 
         // 写 name + model：都读进来。
         let with = ONE_SESSION.replace(
-            "token = \"t-main\"",
-            "name = \"主群助手\"\n        model = \"deepseek-chat\"\n        token = \"t-main\"",
+            "token = { secret = \"t-main\" }",
+            "name = \"主群助手\"\n        model = \"deepseek-chat\"\n        token = { secret = \"t-main\" }",
         );
-        let config = Config::parse(&config_with(ONE_CONNECTION, &with)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, &with)).expect("能解析");
         let session = &config.sessions[0];
         assert_eq!(session.name, "主群助手");
         assert_eq!(session.model.as_deref(), Some("deepseek-chat"));
@@ -4184,7 +4786,7 @@ mod tests {
 
     #[test]
     fn harness_is_a_first_class_object() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.harnesses.len(), 1);
         let harness = config.harness("dsh").expect("有 dsh");
         assert_eq!(harness.id, "dsh");
@@ -4204,7 +4806,7 @@ mod tests {
         "#
         );
         assert!(matches!(
-            Config::parse(&config_with(ONE_CONNECTION, &session)),
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)),
             Err(ConfigError::UnknownMemoryKind { .. })
         ));
     }
@@ -4223,7 +4825,7 @@ mod tests {
         let text = format!(
             "{ONE_CONNECTION}\n{ONE_SESSION}\n[sessions.subscriptions.wake]\nprovider = \"vendor.test\"\n"
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         let wake = &config.session("main").expect("会话在").subscriptions[0].wake;
         assert_eq!(wake.provider.to_string(), "vendor.test");
 
@@ -4231,7 +4833,7 @@ mod tests {
             "{ONE_CONNECTION}\n{ONE_SESSION}\n[sessions.subscriptions.wake]\nprovider = \"nodot\"\n"
         );
         assert!(matches!(
-            Config::parse(&bad),
+            Config::parse_fixture(&bad),
             Err(ConfigError::BadWakeProvider { .. })
         ));
     }
@@ -4243,7 +4845,7 @@ mod tests {
              event_tags = [\"reaction\", \" reaction \"]\n\
              events = [\"qq.poke\", \"qq.*\"]\n"
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         let wake = &config.sessions[0].subscriptions[0].wake;
         assert_eq!(wake.event_tags, vec!["reaction"]);
         assert_eq!(wake.events, vec!["qq.poke", "qq.*"]);
@@ -4257,7 +4859,7 @@ mod tests {
              [sessions.subscriptions.wake.options]\n\
              min_count = 5\n"
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         let wake = &config.sessions[0].subscriptions[0].wake;
         assert_eq!(wake.provider.to_string(), "lua.frequent_speaker");
         assert_eq!(wake.options["min_count"], 5);
@@ -4265,7 +4867,7 @@ mod tests {
         let access = session_with_access(
             "        provider = \"lua.allow_read_only\"\n        [sessions.access.options]\n        allow_send = false",
         );
-        let config = Config::parse(&config_with(ONE_CONNECTION, &access)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, &access)).expect("能解析");
         assert_eq!(config.sessions[0].access.options["allow_send"], false);
     }
 
@@ -4277,7 +4879,7 @@ mod tests {
              events = [\"discord.reaction_add\"]\n"
         );
         assert!(matches!(
-            Config::parse(&bad),
+            Config::parse_fixture(&bad),
             Err(ConfigError::BadWakeEvent { .. })
         ));
 
@@ -4300,7 +4902,7 @@ mod tests {
              events = [\"discord.reaction_add\", \"discord.*\"]\n"
         );
         // 这个 wake 表落在最后一个订阅（discord 房间）上；qq 房间没有配事件。
-        let config = Config::parse(&text).expect("每个房间配自己平台的事件应当能解析");
+        let config = Config::parse_fixture(&text).expect("每个房间配自己平台的事件应当能解析");
         let subscriptions = &config.sessions[0].subscriptions;
         assert!(subscriptions[0].wake.events.is_empty());
         assert_eq!(
@@ -4314,7 +4916,7 @@ mod tests {
         let text = format!(
             "{ONE_CONNECTION}\n{ONE_SESSION}\n[sessions.subscriptions.wake]\npoke = false\n"
         );
-        let config = Config::parse(&text).expect("能解析");
+        let config = Config::parse_fixture(&text).expect("能解析");
         assert_eq!(
             config.sessions[0].subscriptions[0].wake.ignore_event_tags,
             vec!["poke"]
@@ -4323,13 +4925,13 @@ mod tests {
 
     #[test]
     fn worktrees_root_defaults_and_can_be_overridden() {
-        let config = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.worktrees_root, DEFAULT_WORKTREES_ROOT);
 
         // worktrees_root 是顶层字段，得放在任何 [[...]] 表格之前。
         let with_root =
             format!("worktrees_root = \"/srv/worktrees\"\n{ONE_CONNECTION}\n{ONE_SESSION}");
-        let config = Config::parse(&with_root).expect("能解析");
+        let config = Config::parse_fixture(&with_root).expect("能解析");
         assert_eq!(config.worktrees_root, "/srv/worktrees");
     }
 
@@ -4794,7 +5396,7 @@ approval_route = ["qq:group/456"]
         for (name, text) in fragments {
             write_config(&config_dir.join(name), text);
         }
-        let loaded = Config::load(&base_path, Some(&config_dir));
+        let loaded = Config::load_fixture(&base_path, Some(&config_dir));
         (dir, loaded)
     }
 
@@ -4914,7 +5516,7 @@ capability = ["room_write"]
         std::fs::create_dir_all(&nested).expect("创建子目录");
         write_config(&nested.join("20-nested.toml"), "delivery_limit = 99\n");
 
-        let loaded = Config::load(&base_path, Some(&config_dir)).expect("能加载");
+        let loaded = Config::load_fixture(&base_path, Some(&config_dir)).expect("能加载");
         assert_eq!(loaded.config.delivery_limit, 20);
         assert_eq!(loaded.sources.len(), 2, "只加载 base + 一个 .toml 文件");
     }
@@ -4969,7 +5571,7 @@ capability = ["room_write"]
 
     #[test]
     fn drop_in_duplicate_session_id_names_both_files() {
-        let fragment = "[[sessions]]\nid = \"main\"\nharness = \"dsh\"\npersona = \"default\"\ntoken = \"t2\"\n";
+        let fragment = "[[sessions]]\nid = \"main\"\nharness = \"dsh\"\npersona = \"default\"\ntoken = { secret = \"t2\" }\n";
         let (_dir, loaded) =
             load_with_fragments("dup-session", &drop_in_base(), &[("10-dup.toml", fragment)]);
         match loaded.expect_err("重复 session id 必须失败") {
@@ -5019,22 +5621,6 @@ capability = ["room_write"]
     }
 
     #[test]
-    fn drop_in_fragment_uses_the_same_interpolation_as_base() {
-        let path = std::env::var("PATH").expect("测试环境一定有 PATH");
-        let base = format!(
-            "worktrees_root = \"${{PATH}}\"\n\n{}",
-            drop_in_base().trim()
-        );
-        let (_dir, loaded) = load_with_fragments(
-            "interpolation",
-            &base,
-            &[("10-fragment.toml", "worktrees_root = \"${PATH}\"\n")],
-        );
-        let loaded = loaded.expect("分片插值应能加载");
-        assert_eq!(loaded.config.worktrees_root, path);
-    }
-
-    #[test]
     fn console_overlay_is_last_and_survives_base_regeneration() {
         let dir = TempDir::new("console-overlay");
         let base_path = dir.path().join("base.toml");
@@ -5046,7 +5632,7 @@ capability = ["room_write"]
             "delivery_limit = 90\n",
         );
 
-        let first = Config::load(&base_path, Some(&config_dir)).expect("首次加载");
+        let first = Config::load_fixture(&base_path, Some(&config_dir)).expect("首次加载");
         assert_eq!(first.config.delivery_limit, 90, "90-console 最高优先级");
         assert_eq!(first.sources.len(), 2);
         assert!(
@@ -5057,10 +5643,272 @@ capability = ["room_write"]
 
         let regenerated = drop_in_base().replace("delivery_limit = 10", "delivery_limit = 20");
         write_config(&base_path, &regenerated);
-        let second = Config::load(&base_path, Some(&config_dir)).expect("重生成后加载");
+        let second = Config::load_fixture(&base_path, Some(&config_dir)).expect("重生成后加载");
         assert_eq!(
             second.config.delivery_limit, 90,
             "base 被重新生成后控制台覆盖仍然生效"
         );
+    }
+
+    // ---- 密钥来源 ----
+
+    fn config_with_secrets(declarations: &str) -> String {
+        format!(
+            "[secrets]\n{declarations}\n\n{}",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        )
+    }
+
+    fn set_secret_file_mode(path: &Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(path).expect("读文件权限").permissions();
+            permissions.set_mode(mode);
+            std::fs::set_permissions(path, permissions).expect("设置文件权限");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, mode);
+        }
+    }
+
+    #[test]
+    fn env_secret_source_resolves_into_the_field() {
+        let variable = "ACB_TEST_SECRET_ENV_OK";
+        unsafe { std::env::set_var(variable, "s3cret") };
+        let text = config_with_secrets(&format!(
+            "[[secrets.sources]]\nname = \"t-main\"\nkind = \"env\"\nvariable = \"{variable}\""
+        ));
+        let config = Config::parse(&text).expect("env 来源能解析");
+        assert_eq!(config.session("main").expect("会话在").token, "s3cret");
+        unsafe { std::env::remove_var(variable) };
+    }
+
+    #[test]
+    fn missing_env_secret_is_a_config_error() {
+        let text = config_with_secrets(
+            "[[secrets.sources]]\nname = \"t-main\"\nkind = \"env\"\nvariable = \"ACB_TEST_SECRET_SURELY_MISSING\"",
+        );
+        let error = Config::parse(&text).expect_err("环境变量缺失要报错");
+        assert!(
+            matches!(error, ConfigError::MissingSecretEnv { ref name, .. } if name == "t-main"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn literal_token_is_rejected() {
+        let text = config_with(ONE_CONNECTION, ONE_SESSION)
+            .replace("token = { secret = \"t-main\" }", "token = \"literal\"");
+        let error = Config::parse(&text).expect_err("字面量 token 要拒绝");
+        assert!(
+            matches!(error, ConfigError::SecretLiteral { ref field } if field == "sessions[main].token"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unknown_secret_reference_is_a_config_error() {
+        let error = Config::parse(&config_with(ONE_CONNECTION, ONE_SESSION))
+            .expect_err("未声明的来源要报错");
+        assert!(
+            matches!(error, ConfigError::UnknownSecret { ref name, .. } if name == "t-main"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn duplicate_secret_source_is_rejected() {
+        let text = config_with_secrets(
+            "[[secrets.sources]]\nname = \"t-main\"\nvariable = \"ACB_TEST_SECRET_DUP_A\"\n\n\
+             [[secrets.sources]]\nname = \"t-main\"\nvariable = \"ACB_TEST_SECRET_DUP_B\"",
+        );
+        let error = Config::parse(&text).expect_err("同名来源要拒绝");
+        assert!(
+            matches!(error, ConfigError::DuplicateSecret { ref name } if name == "t-main"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn raw_file_secret_resolves() {
+        let dir = TempDir::new("secret-raw");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "file-secret\n").expect("写密钥文件");
+        set_secret_file_mode(&path, 0o600);
+        let text = config_with_secrets(&format!(
+            "[[secrets.sources]]\nname = \"t-main\"\nkind = \"file\"\npath = \"{}\"",
+            path.display()
+        ));
+        let config = Config::parse(&text).expect("file 来源能解析");
+        assert_eq!(config.session("main").expect("会话在").token, "file-secret");
+    }
+
+    #[test]
+    fn dotenv_file_uses_a_strict_subset() {
+        let dir = TempDir::new("secret-dotenv");
+        let path = dir.path().join("acb.env");
+        std::fs::write(
+            &path,
+            "# 注释\n\nACB_OTHER=nope\nACB_TOKEN = dotenv-secret \n",
+        )
+        .expect("写 dotenv 文件");
+        set_secret_file_mode(&path, 0o600);
+        let text = config_with_secrets(&format!(
+            "[[secrets.sources]]\nname = \"t-main\"\nkind = \"file\"\npath = \"{}\"\n\
+             format = \"dotenv\"\nkey = \"ACB_TOKEN\"",
+            path.display()
+        ));
+        let config = Config::parse(&text).expect("dotenv 能解析");
+        assert_eq!(
+            config.session("main").expect("会话在").token,
+            "dotenv-secret"
+        );
+    }
+
+    #[test]
+    fn dotenv_does_not_strip_quotes() {
+        let dir = TempDir::new("secret-dotenv-quotes");
+        let path = dir.path().join("acb.env");
+        std::fs::write(&path, "ACB_TOKEN=\"quoted\"\n").expect("写 dotenv 文件");
+        set_secret_file_mode(&path, 0o600);
+        let text = config_with_secrets(&format!(
+            "[[secrets.sources]]\nname = \"t-main\"\nkind = \"file\"\npath = \"{}\"\n\
+             format = \"dotenv\"\nkey = \"ACB_TOKEN\"",
+            path.display()
+        ));
+        let config = Config::parse(&text).expect("dotenv 能解析");
+        assert_eq!(
+            config.session("main").expect("会话在").token,
+            "\"quoted\"",
+            "严格子集不处理引号"
+        );
+    }
+
+    #[test]
+    fn relative_secret_path_is_rejected() {
+        let text = config_with_secrets(
+            "[[secrets.sources]]\nname = \"t-main\"\nkind = \"file\"\npath = \"secrets/token\"",
+        );
+        let error = acb_i18n::with_locale("zh-CN", || Config::parse(&text))
+            .expect_err("相对路径要拒绝");
+        assert!(
+            matches!(error, ConfigError::BadSecretSource { ref detail, .. } if detail.contains("绝对路径")),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn insecure_secret_file_mode_is_rejected() {
+        let dir = TempDir::new("secret-mode");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "file-secret\n").expect("写密钥文件");
+        set_secret_file_mode(&path, 0o644);
+        let text = config_with_secrets(&format!(
+            "[[secrets.sources]]\nname = \"t-main\"\nkind = \"file\"\npath = \"{}\"",
+            path.display()
+        ));
+        let error = Config::parse(&text).expect_err("权限过宽要拒绝");
+        assert!(
+            matches!(error, ConfigError::InsecureSecretFile { ref name, .. } if name == "t-main"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn empty_secret_file_is_rejected() {
+        let dir = TempDir::new("secret-empty");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "\n").expect("写空密钥文件");
+        set_secret_file_mode(&path, 0o600);
+        let text = config_with_secrets(&format!(
+            "[[secrets.sources]]\nname = \"t-main\"\nkind = \"file\"\npath = \"{}\"",
+            path.display()
+        ));
+        let error = Config::parse(&text).expect_err("空值要拒绝");
+        assert!(
+            matches!(error, ConfigError::EmptySecret { ref name, .. } if name == "t-main"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn secret_sources_merge_across_fragments() {
+        let variable_a = "ACB_TEST_SECRET_FRAGMENT_A";
+        let variable_b = "ACB_TEST_SECRET_FRAGMENT_B";
+        unsafe {
+            std::env::set_var(variable_a, "a");
+            std::env::set_var(variable_b, "b");
+        }
+        let base = config_with_secrets(&format!(
+            "[[secrets.sources]]\nname = \"t-main\"\nvariable = \"{variable_a}\""
+        ));
+        let dir = TempDir::new("secret-fragments");
+        let base_path = dir.path().join("base.toml");
+        let config_dir = dir.path().join("config.d");
+        std::fs::create_dir_all(&config_dir).expect("创建 config.d");
+        write_config(&base_path, &base);
+        write_config(
+            &config_dir.join("10-secrets.toml"),
+            &format!(
+                "[[secrets.sources]]\nname = \"extra\"\nvariable = \"{variable_b}\"\n"
+            ),
+        );
+        let loaded = Config::load(&base_path, Some(&config_dir)).expect("跨分片合并来源");
+        let entries = loaded.secrets.entries();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["extra", "t-main"]);
+        unsafe {
+            std::env::remove_var(variable_a);
+            std::env::remove_var(variable_b);
+        }
+    }
+
+    #[test]
+    fn duplicate_secret_source_across_fragments_is_rejected() {
+        let base = config_with_secrets(
+            "[[secrets.sources]]\nname = \"t-main\"\nvariable = \"ACB_TEST_SECRET_DUP_FRAG\"",
+        );
+        let dir = TempDir::new("secret-fragments-dup");
+        let base_path = dir.path().join("base.toml");
+        let config_dir = dir.path().join("config.d");
+        std::fs::create_dir_all(&config_dir).expect("创建 config.d");
+        write_config(&base_path, &base);
+        write_config(
+            &config_dir.join("10-secrets.toml"),
+            "[[secrets.sources]]\nname = \"t-main\"\nvariable = \"ACB_TEST_SECRET_DUP_FRAG_2\"\n",
+        );
+        let error = Config::load(&base_path, Some(&config_dir)).expect_err("跨文件重名要拒绝");
+        assert!(
+            matches!(error, ConfigError::DuplicateAcrossFiles { ref kind, .. } if kind == "secrets.sources"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn console_overlay_must_not_declare_secret_sources() {
+        let variable = "ACB_TEST_SECRET_OVERLAY";
+        unsafe { std::env::set_var(variable, "v") };
+        let base = config_with_secrets(&format!(
+            "[[secrets.sources]]\nname = \"t-main\"\nvariable = \"{variable}\""
+        ));
+        let dir = TempDir::new("secret-overlay");
+        let base_path = dir.path().join("base.toml");
+        let config_dir = dir.path().join("config.d");
+        std::fs::create_dir_all(&config_dir).expect("创建 config.d");
+        write_config(&base_path, &base);
+        let error = Config::load_with_console_overlay(
+            &base_path,
+            &config_dir,
+            "[[secrets.sources]]\nname = \"extra\"\nvariable = \"NOPE\"\n",
+        )
+        .expect_err("覆盖层不能声明来源");
+        assert!(matches!(error, ConfigError::ConsoleSecretSource), "{error}");
+        unsafe { std::env::remove_var(variable) };
     }
 }

@@ -211,7 +211,7 @@ fn config_with_wake(provider: &str) -> String {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = {{ secret = "t-main" }}
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -239,7 +239,7 @@ fn bridge(text: &str, loader: Arc<TestLoader>) -> Bridge<MemoryStore> {
         .install_loader_owned(loader)
         .expect("测试 loader 应当能安装");
     Bridge::with_plugins(
-        Config::parse(text).expect("配置合法"),
+        Config::parse_fixture(text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

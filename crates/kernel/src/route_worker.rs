@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn full_route_queue_rejects_without_inflating_busy() {
-        let config = Arc::new(crate::config::Config::parse("").expect("空配置合法"));
+        let config = Arc::new(crate::config::Config::parse_fixture("").expect("空配置合法"));
         let (tx, _rx) = sync_channel(1);
         let worker = RouteWorker {
             tx,
