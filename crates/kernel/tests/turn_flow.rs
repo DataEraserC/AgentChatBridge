@@ -472,6 +472,58 @@ fn poke(room: &str, at_self: bool) -> RecordDraft {
     )
 }
 
+/// 群表情回应：适配器会把目标消息 id 塞进 `Element::Quote`，这里按同样形状构造。
+fn reaction(room: &str, sender: &str, target: &str, added: bool) -> RecordDraft {
+    let room = room_of(room);
+    let body = if added {
+        format!("[表情回应] 给消息 {target} 加了 5")
+    } else {
+        format!("[表情撤销] 给消息 {target} 撤了 5")
+    };
+    let mut tags = vec![
+        "notice".to_owned(),
+        "reaction".to_owned(),
+        "group_msg_emoji_like".to_owned(),
+    ];
+    tags.push(if added { "reaction_add" } else { "reaction_remove" }.to_owned());
+    let draft = RecordDraft::event(
+        room,
+        Sender {
+            id: sender.to_owned(),
+            name: "老王".to_owned(),
+            role: None,
+        },
+        AT + 1000,
+        "group_msg_emoji_like",
+        vec![
+            Element::text(body.clone()),
+            Element::Quote {
+                message_id: target.to_owned(),
+            },
+        ],
+        false,
+    )
+    .with_room_scope(acb_kernel::RoomScope::MultiParty)
+    .with_event_meta(
+        tags,
+        Some(json!({
+            "post_type": "notice",
+            "notice_type": "group_msg_emoji_like",
+            "sub_type": if added { "add" } else { "remove" },
+            "message_id": target,
+            "likes": [{ "emoji_id": "5" }],
+        })),
+        Some(body),
+    )
+    .without_body()
+    .with_target_platform_id(target.to_owned());
+    if added {
+        draft.with_target_labels(vec!["reaction".to_owned()])
+    } else {
+        draft
+    }
+}
+
 fn cursor(session: &str, room: &str) -> Cursor {
     Cursor::new(session, room_of(room))
 }
@@ -501,7 +553,11 @@ fn mention_wakes_then_reply_and_ack_advance_the_watermark() {
     assert_eq!(delivery.session, "main");
     assert_eq!(delivery.room, room("qq:group/123"));
     assert_eq!(delivery.reason, TurnReason::Wake);
-    assert_eq!(delivery.wake_reason.as_deref(), Some("@ 了我"));
+    assert_eq!(
+        delivery.wake_reason.as_deref(),
+        Some("@ 了我，触发消息 #1"),
+        "理由要能定位到具体消息"
+    );
     assert_eq!(delivery.records.len(), 1);
     assert_eq!(delivery.records[0].id, 1);
     assert_eq!(delivery.records[0].redelivery, None, "第一次投递不带标注");
@@ -2256,6 +2312,127 @@ fn quoting_someone_elses_message_stays_quiet() {
             woke: Vec::new()
         },
         "引用别人的话不算冲我来的"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 表情回应：和引用同类，回应的是我说的话就叫醒
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reaction_on_my_message_wakes_without_a_mention() {
+    let (mut bridge, _sends) = bridge();
+
+    // 1. 先让我方说出一句，它会带着平台编号 p-1 进流水。
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
+    let ticket = delivery.ticket;
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message",
+            json!({"elements": [{"type": "text", "text": "在"}]}),
+        )
+        .expect("能发");
+    bridge
+        .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [1]}))
+        .expect("能确认");
+    bridge.end_turn(&ticket, None).expect("能收尾");
+
+    // 2. 对方给我那条加了个表情，没 @ 也没叫名字。
+    let ingested = bridge
+        .ingest(reaction("qq:group/123", "10001", "p-1", true))
+        .expect("能记下来");
+
+    assert_eq!(
+        ingested,
+        Ingest::Recorded {
+            id: 3,
+            woke: vec!["main".to_owned()]
+        },
+        "回应我的话就是在跟我说话，不 @ 也该醒"
+    );
+    let recorded = bridge
+        .store()
+        .since(&room("qq:group/123"), 2, 10)
+        .expect("能读")
+        .last()
+        .expect("有那条")
+        .clone();
+    assert!(recorded.reply_to_self, "归属要留在记录上，不能只用来叫醒");
+    assert_eq!(
+        recorded.quote_of(),
+        Some("p-1"),
+        "目标消息要有可查询的指向"
+    );
+    assert!(
+        !recorded.suppressed,
+        "表情回应和引用同类，不该被默认静默"
+    );
+}
+
+#[test]
+fn reaction_removal_is_recorded_without_waking() {
+    let (mut bridge, _sends) = bridge();
+
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
+    let ticket = delivery.ticket;
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message",
+            json!({"elements": [{"type": "text", "text": "在"}]}),
+        )
+        .expect("能发");
+    bridge
+        .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [1]}))
+        .expect("能确认");
+    bridge.end_turn(&ticket, None).expect("能收尾");
+
+    // 撤销是对同一次互动的收回，记下来但不叫醒。
+    let ingested = bridge
+        .ingest(reaction("qq:group/123", "10001", "p-1", false))
+        .expect("能记下来");
+    assert_eq!(
+        ingested,
+        Ingest::Recorded {
+            id: 3,
+            woke: Vec::new()
+        },
+        "撤销反应不该叫醒"
+    );
+    let recorded = bridge
+        .store()
+        .since(&room("qq:group/123"), 2, 10)
+        .expect("能读")
+        .last()
+        .expect("有那条")
+        .clone();
+    assert!(
+        recorded.reply_to_self,
+        "归属照样要记下来，只是不拿来叫醒"
+    );
+
+    // 回应别人的话也照旧不醒。
+    bridge
+        .ingest(message("qq:group/123", "10001", "随便说说", false).with_platform_id("m-9"))
+        .expect("能记下来");
+    assert_eq!(
+        bridge
+            .ingest(reaction("qq:group/123", "10001", "m-9", true))
+            .expect("能记下来"),
+        Ingest::Recorded {
+            id: 5,
+            woke: Vec::new()
+        },
+        "回应别人的话不算冲我来的"
     );
 }
 

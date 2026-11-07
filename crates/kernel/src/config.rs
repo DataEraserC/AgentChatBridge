@@ -916,7 +916,7 @@ impl WakePolicy {
             .iter()
             .find(|tag| input.tags.iter().any(|candidate| candidate == tag))
         {
-            return WakeVerdict::wake(format!("命中标签 {tag}"));
+            return wake_with_backlog(input, format!("命中标签 {tag}"));
         }
 
         if let Some(event) = input.event {
@@ -927,36 +927,54 @@ impl WakePolicy {
                 .iter()
                 .any(|wanted| wanted == event || wanted == &qualified || wanted == &wildcard)
             {
-                return WakeVerdict::wake(format!("命中事件 {event}"));
+                return wake_with_backlog(input, format!("命中事件 {event}"));
             }
             // 没点名的事件：只有冲我来的（拍到我）才按 at_mention 醒。
             // 这就是旧 `poke = true` 的语义；`poke = false` 由 ignore_event_tags 表达。
             if self.at_mention && input.at_self {
-                return WakeVerdict::wake(format!("事件 {event} 指向我"));
+                return wake_with_backlog(input, format!("事件 {event} 指向我"));
+            }
+            // 表情回应是对某条消息的回应，和引用同类：被回应的是我说的话就叫醒。
+            // 撤销反应（reaction_remove）不算新的互动，只记录不叫醒。
+            if self.reply
+                && input.reply_to_self
+                && !input.tags.iter().any(|tag| *tag == "reaction_remove")
+            {
+                return wake_with_backlog(input, format!("事件 {event} 回应了我说的话"));
             }
             return WakeVerdict::stay();
         }
 
         if self.at_mention && input.at_self {
-            return WakeVerdict::wake("@ 了我");
+            return wake_with_backlog(input, "@ 了我");
         }
         // 引用我的话等同于对我说：QQ 里「回复」是最自然的追问方式，很多人不会再加 @。
         if self.reply && input.reply_to_self {
-            return WakeVerdict::wake("引用了我说的话");
+            return wake_with_backlog(input, "引用了我说的话");
         }
         if self.name_mention && matches_any(&self.names, input.text) {
-            return WakeVerdict::wake("叫了我的名字");
+            return wake_with_backlog(input, "叫了我的名字");
         }
         if matches_any(&self.keywords, input.text) {
-            return WakeVerdict::wake("命中关键词");
+            return wake_with_backlog(input, "命中关键词");
         }
         if let Some(threshold) = self.accumulate {
             if threshold > 0 && input.unread >= threshold {
-                return WakeVerdict::wake(format!("攒够 {threshold} 条未读"));
+                // 阈值和实际积压分开写：阈值是配置，实际条数才是这轮要处理的量。
+                return wake_with_backlog(input, format!("积压达到阈值（{threshold} 条）"));
             }
         }
         WakeVerdict::stay()
     }
+}
+
+/// 命中后统一补一句实际积压量。主因由调用方给，这里只把「涉及多少条」讲清楚。
+fn wake_with_backlog(input: &WakeInput<'_>, reason: impl Into<String>) -> WakeVerdict {
+    let mut reason = reason.into();
+    if input.unread > 1 {
+        reason.push_str(&format!("，这轮共 {} 条未读", input.unread));
+    }
+    WakeVerdict::wake(reason)
 }
 
 /// TOML 的自由表 → JSON，原样交给 provider。core 不解释里面的键。
@@ -4350,6 +4368,114 @@ mod tests {
             unread: 1,
         };
         assert_eq!(policy.decide(&input), WakeDecision::Stay);
+    }
+
+    #[test]
+    fn reaction_on_my_message_wakes_by_the_reply_switch() {
+        let tags: &[&str] = &["notice", "reaction", "group_msg_emoji_like", "reaction_add"];
+        let input = WakeInput {
+            sender_id: "someone",
+            text: "",
+            at_self: false,
+            reply_to_self: true,
+            has_body: false,
+            event: Some("group_msg_emoji_like"),
+            platform: "qq",
+            tags,
+            unread: 1,
+        };
+        assert_eq!(WakePolicy::default().decide(&input), WakeDecision::Wake);
+
+        let policy = WakePolicy {
+            reply: false,
+            ..WakePolicy::default()
+        };
+        assert_eq!(
+            policy.decide(&input),
+            WakeDecision::Stay,
+            "关掉 reply 后，反应和引用一起失效"
+        );
+    }
+
+    #[test]
+    fn reaction_on_someone_elses_message_does_not_wake() {
+        let tags: &[&str] = &["notice", "reaction", "reaction_add"];
+        let input = WakeInput {
+            sender_id: "someone",
+            text: "",
+            at_self: false,
+            reply_to_self: false,
+            has_body: false,
+            event: Some("group_msg_emoji_like"),
+            platform: "qq",
+            tags,
+            unread: 1,
+        };
+        assert_eq!(WakePolicy::default().decide(&input), WakeDecision::Stay);
+    }
+
+    #[test]
+    fn reaction_removal_is_recorded_but_does_not_wake() {
+        let tags: &[&str] = &["notice", "reaction", "reaction_remove"];
+        let input = WakeInput {
+            sender_id: "someone",
+            text: "",
+            at_self: false,
+            reply_to_self: true,
+            has_body: false,
+            event: Some("group_msg_emoji_like"),
+            platform: "qq",
+            tags,
+            unread: 1,
+        };
+        assert_eq!(WakePolicy::default().decide(&input), WakeDecision::Stay);
+    }
+
+    #[test]
+    fn wake_reason_names_the_cause_and_the_backlog() {
+        let input = WakeInput {
+            sender_id: "someone",
+            text: "在吗",
+            at_self: true,
+            reply_to_self: false,
+            has_body: true,
+            event: None,
+            platform: "qq",
+            tags: &[],
+            unread: 12,
+        };
+        let verdict = WakePolicy::default().decide_with_reason(&input);
+        assert_eq!(verdict.decision, WakeDecision::Wake);
+        assert_eq!(
+            verdict.reason.as_deref(),
+            Some("@ 了我，这轮共 12 条未读"),
+            "主因和积压量一句话讲清"
+        );
+    }
+
+    #[test]
+    fn accumulate_reason_separates_threshold_from_the_actual_backlog() {
+        let policy = WakePolicy {
+            accumulate: Some(5),
+            ..WakePolicy::default()
+        };
+        let input = WakeInput {
+            sender_id: "someone",
+            text: "闲聊",
+            at_self: false,
+            reply_to_self: false,
+            has_body: true,
+            event: None,
+            platform: "qq",
+            tags: &[],
+            unread: 12,
+        };
+        let verdict = policy.decide_with_reason(&input);
+        assert_eq!(verdict.decision, WakeDecision::Wake);
+        assert_eq!(
+            verdict.reason.as_deref(),
+            Some("积压达到阈值（5 条），这轮共 12 条未读")
+        );
     }
 
     #[test]

@@ -318,10 +318,15 @@ ignore_speakers = ["987654321"]
 # 一次性票据的申请冷却与审批聚合（可选，不写用默认值）。
 # request_cooldown_secs：同一会话两次审批私信之间的最小间隔（秒）。
 # admin_cooldown_secs：同一个 system admin 收到两条审批私信的最小间隔（秒）。
+# auto_expire：审批等待超时后自动置 Expired（终态，区别于「有人拒绝」的 Denied），
+#              并把结果写回申请房间；按批次聚合唤醒会话。
+# pending_ttl_secs：pending 票据的等待上限（秒）；0 = 不做 pending 过期。
 # 0 = 关闭对应冷却；同一轮里的多张 pending 仍会聚合成一条私信。
 # [tickets]
 # request_cooldown_secs = 60
 # admin_cooldown_secs = 30
+# auto_expire = true
+# pending_ttl_secs = 600
 
 # 访问授权（可选）。不写 [grants] = 只有订阅边界。
 # 规则是叠加在订阅边界之上的常态授予；风险等级不参与鉴权：

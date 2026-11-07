@@ -159,10 +159,15 @@ fn notice(
 
     let sender_id = {
         let user = id_of(event.get("user_id"));
-        if user.is_empty() {
-            id_of(event.get("target_id"))
-        } else {
+        if !user.is_empty() {
             user
+        } else {
+            let target = id_of(event.get("target_id"));
+            if !target.is_empty() {
+                target
+            } else {
+                id_of(event.get("operator_id"))
+            }
         }
     };
     let room = notice_room(connection, event, &sender_id)?;
@@ -195,6 +200,57 @@ fn notice(
             )
             .without_body(),
         ));
+    }
+
+    // 群表情回应。SnowLuma 2.2.1 的载荷：表情 id 在 `likes[0].emoji_id`，
+    // `sub_type` 区分 `add` / `remove`；事件只给 `message_id`，没有原消息作者，
+    // 归属交给 core 用引用链路回查（`quotes_own_message`）。
+    if notice_type == "group_msg_emoji_like" {
+        let target = id_of(event.get("message_id"));
+        let emoji = reaction_emoji(event);
+        let added = event
+            .get("sub_type")
+            .and_then(Value::as_str)
+            .map(|sub| sub != "remove")
+            .unwrap_or(true);
+        let body = match (added, emoji.is_empty()) {
+            (true, false) => format!("[表情回应] 给消息 {target} 加了 {emoji}"),
+            (true, true) => format!("[表情回应] 给消息 {target} 加了表情"),
+            (false, false) => format!("[表情撤销] 给消息 {target} 撤了 {emoji}"),
+            (false, true) => format!("[表情撤销] 给消息 {target} 撤了表情"),
+        };
+        let mut elements = vec![Element::text(body.clone())];
+        if !target.is_empty() {
+            // 只借引用段表达「指向哪条消息」；反应本身仍然不能被回复。
+            elements.push(Element::Quote {
+                message_id: target.clone(),
+            });
+        }
+        elements.push(Element::Opaque {
+            platform: "qq".to_owned(),
+            payload: event.clone(),
+        });
+
+        let mut tags = vec![
+            "notice".to_owned(),
+            "reaction".to_owned(),
+            notice_type.to_owned(),
+        ];
+        tags.push(if added { "reaction_add" } else { "reaction_remove" }.to_owned());
+
+        let mut draft = RecordDraft::event(room, sender, at, notice_type, elements, false)
+            .with_room_scope(scope)
+            .with_event_meta(tags, Some(event.clone()), Some(body))
+            // 反应是纯触发，不算有正文。
+            .without_body();
+        if !target.is_empty() {
+            draft = draft.with_target_platform_id(target);
+            if added {
+                // 目标消息只打粗粒度标记；谁、用什么、几次都在反应事件里。
+                draft = draft.with_target_labels(vec!["reaction".to_owned()]);
+            }
+        }
+        return Ok(Parsed::Record(draft));
     }
 
     // 其它通知（进退群、禁言、撤回……）也是房间里发生的事，记一条可读的。
@@ -487,6 +543,21 @@ fn id_of(value: Option<&Value>) -> String {
     }
 }
 
+/// 表情回应里的表情 id。SnowLuma 2.2.1 放在 `likes[0].emoji_id`，
+/// 顶层 `emoji_id` 只是兼容旧载荷的兜底。
+fn reaction_emoji(event: &Value) -> String {
+    let nested = event
+        .get("likes")
+        .and_then(Value::as_array)
+        .and_then(|likes| {
+            likes.iter().find_map(|like| {
+                let id = id_of(like.get("emoji_id"));
+                (!id.is_empty()).then_some(id)
+            })
+        });
+    nested.unwrap_or_else(|| id_of(event.get("emoji_id")))
+}
+
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -772,35 +843,89 @@ mod tests {
         ));
     }
 
-    /// 没有解析实现的事件：降级存原始 JSON（ADR-0004 补充裁定 2026-10-31）。
-    /// 文本只给类型名，载荷整个进 Opaque——流水里一条不丢。
+    /// SnowLuma 2.2.1 的真实载荷：表情 id 在 `likes[0].emoji_id`，
+    /// `sub_type` 区分加/撤；没有原消息作者，归属交给 core 回查。
     #[test]
-    fn unrecognized_notices_keep_the_raw_event_in_an_opaque_element() {
+    fn group_reaction_add_is_an_event_pointing_at_the_message() {
         let event = json!({
             "post_type": "notice",
             "notice_type": "group_msg_emoji_like",
+            "sub_type": "add",
             "self_id": 999,
-            "group_id": 456,
+            "group_id": 769843907,
             "user_id": 10001,
             "message_id": 592852179,
-            "emoji_id": "5"
+            "message_seq": 592852179,
+            "likes": [{"emoji_id": "0123456789abcdef0123456789abcdef", "count": 1}]
         });
         let Parsed::Record(draft) = parse("qq", &event, &[]).expect("能解析") else {
-            panic!("不认识的事件也要记，只是不解析");
+            panic!("反应要记下来");
         };
-        assert_eq!(draft.elements.len(), 2, "类型名一行 + 原始载荷一段");
+
+        assert_eq!(draft.room, RoomId::new("qq", "group/769843907").expect("合法"));
+        assert_eq!(draft.target_platform_id.as_deref(), Some("592852179"));
+        assert_eq!(draft.target_labels, vec!["reaction".to_owned()]);
+        assert!(!draft.at_self, "反应不算 @");
+        assert!(!draft.suppressed, "反应不能默认静默");
         assert_eq!(
-            draft.elements[0],
-            Element::text("[group_msg_emoji_like]（未解析事件）")
+            draft.elements[1],
+            Element::Quote {
+                message_id: "592852179".to_owned()
+            },
+            "引用段只用来指向被回应的消息"
         );
-        match &draft.elements[1] {
+        assert!(matches!(
+            &draft.kind,
+            acb_proto::RecordKind::Event { event, tags, summary, body, .. }
+                if event == "group_msg_emoji_like"
+                    && tags.iter().any(|tag| tag == "reaction")
+                    && tags.iter().any(|tag| tag == "reaction_add")
+                    && summary.as_deref()
+                        == Some("[表情回应] 给消息 592852179 加了 0123456789abcdef0123456789abcdef")
+                    && !*body
+        ));
+        match &draft.elements[2] {
             Element::Opaque { platform, payload } => {
                 assert_eq!(platform, "qq");
-                assert_eq!(payload["notice_type"], "group_msg_emoji_like");
-                assert_eq!(payload["emoji_id"], "5", "载荷要原样，一个字段都不能丢");
+                assert_eq!(payload["sub_type"], "add", "载荷要原样");
+                assert_eq!(
+                    payload["likes"][0]["emoji_id"],
+                    "0123456789abcdef0123456789abcdef"
+                );
             }
-            other => panic!("第二段应当是 Opaque 原始载荷：{other:?}"),
+            other => panic!("第三段应当是 Opaque 原始载荷：{other:?}"),
         }
+    }
+
+    #[test]
+    fn group_reaction_remove_is_tagged_apart_and_keeps_the_target() {
+        let event = json!({
+            "post_type": "notice",
+            "notice_type": "group_msg_emoji_like",
+            "sub_type": "remove",
+            "self_id": 999,
+            "group_id": 769843907,
+            "user_id": 10001,
+            "message_id": 592852179,
+            "message_seq": 592852179,
+            "likes": [{"emoji_id": "5", "count": 1}]
+        });
+        let Parsed::Record(draft) = parse("qq", &event, &[]).expect("能解析") else {
+            panic!("撤销也要记下来");
+        };
+
+        assert_eq!(draft.target_platform_id.as_deref(), Some("592852179"));
+        assert!(
+            draft.target_labels.is_empty(),
+            "撤销不给目标消息打持久标签"
+        );
+        assert!(matches!(
+            &draft.kind,
+            acb_proto::RecordKind::Event { tags, summary, .. }
+                if tags.iter().any(|tag| tag == "reaction_remove")
+                    && !tags.iter().any(|tag| tag == "reaction_add")
+                    && summary.as_deref() == Some("[表情撤销] 给消息 592852179 撤了 5")
+        ));
     }
 
     /// 认得的事件不附带原始载荷——有解析实现就不必浪费字节。

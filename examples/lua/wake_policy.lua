@@ -5,15 +5,16 @@
 --   2. 每个订阅写：
 --        [sessions.subscriptions.wake]
 --        provider = "lua.wake_policy"
+--        reply = true                      # 标准字段，脚本会读
 --        [sessions.subscriptions.wake.options]
 --        at_mention = true
 --        poke = true
---        reply = true
 --        empty_body_hold_ms = 5000
 --        accumulate = 30
 --        idle_hours = 3
 --
--- 所有参数都在 options.extra 里，代码不写死；未写的参数用下面的默认值。
+-- 除 `reply` 用标准唤醒字段外，其余参数都在 options.extra 里，代码不写死；
+-- 未写的参数用下面的默认值。
 -- 三小时的「静默唤醒」还要配 clock 策略（同一个 idle_hours），因为唤醒端点
 -- 只在有入站记录时被调用，没人说话时不会自己触发。
 
@@ -53,9 +54,13 @@ return {
       return defer("@ 到我")
     end
 
-    -- 回复我（可选，默认关闭）
-    if extra.reply and context.reply_to_self then
-      return defer("回复了我")
+    -- 回复我。开关就是配置里的 `wake.reply`（默认开），和内置策略对齐。
+    -- 表情回应和引用同类：core 已按被回应消息的归属给出 reply_to_self；
+    -- 撤销（reaction_remove）不算新互动，不叫醒。
+    if options.reply and context.reply_to_self
+       and not has_tag(context.tags, "reaction_remove") then
+      local reason = context.event and "回应了我的消息" or "回复了我"
+      return defer(reason)
     end
 
     -- 叫名字（可选，默认关闭）
@@ -88,7 +93,8 @@ return {
     if threshold > 0 and context.unread >= threshold then
       return {
         decision = "wake",
-        reason = "未读消息达到 " .. threshold .. " 条",
+        -- core 会在后面补上实际积压条数，这里只报阈值，避免两个数打架。
+        reason = "积压达到阈值（" .. threshold .. " 条）",
       }
     end
 

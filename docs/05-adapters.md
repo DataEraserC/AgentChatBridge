@@ -208,9 +208,12 @@ Lua 的 `turn_error` 收到 `decide(request, options)`；动态库的 `turn_erro
 `may_modify_text`、`may_wake`）是文档，不是强制保证。控制台的 `GET /api/plugins`
 是同一份目录的只读 JSON。
 
-轮次开头也会带 `wake_reason`：内置/trusted/动态库 wake 策略命中时给出具体原因
-（如「有新消息（@ 了我）」），agent 不用猜自己为什么被叫醒。Lua 脚本可以返回
-`{ decision = "wake", reason = "..." }` 表；只返回布尔/字符串时原因为空（协议版本 5）。
+轮次开头也会带 `wake_reason`：内置/trusted/动态库 wake 策略命中时给出具体原因，
+core 再补上触发记录的水位编号（消息还带平台消息号、事件带目标消息号）和这轮的未读
+总量，例如「有新消息（@ 了我，触发消息 #42（平台消息 10086），这轮共 12 条未读）」。
+理由里不放消息正文；房间和会话由 harness 在轮次开头渲染，不重复塞。Lua 脚本可以
+返回 `{ decision = "wake", reason = "..." }` 表，core 同样补编号和计数；只返回
+布尔/字符串时原因为空（协议版本 5 起字段不变，仍是可选字符串）。
 事件记录扩了 `tags` / `payload` / `summary` 后，协议版本升到 6。
 
 ## 事件怎么映射

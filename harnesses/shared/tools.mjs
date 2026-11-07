@@ -123,6 +123,12 @@ get_platform_events，wait_message，或 platform_call:<op>（如 platform_call:
                 description:
                   "挂起动作的参数快照（只存内存、上限 256 KiB）。send 类给 elements；platform_call 给方法参数。只读 op 可省略。",
               },
+              reason: {
+                type: "string",
+                maxLength: 500,
+                description:
+                  "申请人自述理由（可选）。会在审批消息里单独标注为「申请人自述，未经验证」，不参与授权判定，也不影响 op 解析。",
+              },
             },
             required: ["target", "ops"],
             additionalProperties: false,

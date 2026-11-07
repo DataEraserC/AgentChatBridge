@@ -258,6 +258,9 @@ pub struct AccessRequestItem {
     /// 挂起动作的参数快照。发送类给 `elements` / `text`；平台调用给 params 对象。
     #[serde(default)]
     pub params: Option<serde_json::Value>,
+    /// 申请人自述理由；只用于审批展示与审计，不参与授权判定。旧调用可省略。
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// 只读查询票据。`id` 与 `batch_id` 必须且只能给一个。

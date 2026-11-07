@@ -2500,11 +2500,12 @@ impl<S: Store> Bridge<S> {
             };
             if verdict.decision == WakeDecision::Wake {
                 woke.push(subscriber.session.clone());
+                let reason = wake_reason_with_record(verdict.reason, &record, pending);
                 self.enqueue(
                     subscriber.session,
                     room.clone(),
                     TurnReason::Wake,
-                    verdict.reason,
+                    reason,
                     Some(record.sender.id.clone()),
                     now,
                     verdict.delay_ms,
@@ -2542,6 +2543,9 @@ impl<S: Store> Bridge<S> {
         if !matches!(verb.as_str(), "/approve" | "/deny" | "/revoke") {
             return Ok(None);
         }
+        // 热更新后立刻按新 TTL 扫描，避免旧的 pending 票据继续沿用上一份配置。
+        self.access_tickets
+            .set_pending_ttl_ms(self.config.tickets.pending_ttl_ms());
 
         // 场所来自适配器声明，信任来自 `[grants.rooms]`；两者分开判定。
         let place = self.room_place(room, true);
@@ -5084,7 +5088,9 @@ impl<S: Store> Bridge<S> {
             ));
         }
         // 审批目标由配置/适配器决定；没有可达目标时票据仍可创建，
-        // 由 flush 记录 route_unavailable 并走 PENDING_TTL 自然过期。
+        // 由 flush 记录 route_unavailable 并走 pending TTL 自然过期。
+        self.access_tickets
+            .set_pending_ttl_ms(ctx.config.tickets.pending_ttl_ms());
         let approval_route: Vec<String> = self
             .approval_route(&ctx.config, &ctx.room)
             .iter()
@@ -5218,6 +5224,7 @@ impl<S: Store> Bridge<S> {
                 target,
                 ops,
                 params: item.params.clone(),
+                reason: item.reason.clone(),
                 origin_sender: ctx.origin_sender.clone(),
                 origin_sender_name: origin_sender_name.clone(),
                 capabilities,
@@ -6335,19 +6342,14 @@ impl<S: Store> Bridge<S> {
         targets
     }
 
-    /// 审批目标必须真的可达：连接在配置里、房间被某个会话订阅、载体在位。
+    /// 审批目标必须真的可达：连接在配置里、载体在位。
+    ///
+    /// 不再要求目标房间被某个会话订阅。审批命令在 `ingest_inner` 的订阅闸门之前
+    /// 就由 core 接管，显式写进 `approval_route` 的房间即使没人订阅也能批复；
+    /// 订阅只约束「收消息要不要叫醒会话」，不约束审批投递。
     fn approval_target_available(&self, config: &Config, room: &RoomId) -> Result<(), String> {
         if config.connection(&room.connection).is_none() {
             return Err(format!("unknown connection {}", room.connection));
-        }
-        let subscribed = config.sessions.iter().any(|session| {
-            session
-                .subscriptions
-                .iter()
-                .any(|subscription| subscription.room == *room)
-        });
-        if !subscribed {
-            return Err("target room is not subscribed by any session".to_owned());
         }
         if self.outbound.handle_for(&room.connection).is_none() {
             return Err("carrier is down".to_owned());
@@ -6575,8 +6577,32 @@ impl<S: Store> Bridge<S> {
     }
 
     fn write_ticket_result_record(&mut self, ticket: &AccessTicket, text: String, now: i64) {
+        if !self.append_ticket_event(&ticket.request_room, text, now) {
+            return;
+        }
+        let subscribed = self.config.session(&ticket.session).is_some_and(|session| {
+            session
+                .subscriptions
+                .iter()
+                .any(|subscription| subscription.room == ticket.request_room)
+        });
+        if subscribed && !self.draining {
+            self.enqueue(
+                ticket.session.clone(),
+                ticket.request_room.clone(),
+                TurnReason::Wake,
+                Some("ticket_result".to_owned()),
+                ticket.origin_sender.clone(),
+                now,
+                0,
+            );
+        }
+    }
+
+    /// 只写结果流水，不唤醒；过期批次由 `tick_tickets` 统一聚合唤醒。
+    fn append_ticket_event(&mut self, room: &RoomId, text: String, now: i64) -> bool {
         let draft = RecordDraft::event(
-            ticket.request_room.clone(),
+            room.clone(),
             Sender {
                 id: "system".to_owned(),
                 name: "system".to_owned(),
@@ -6590,26 +6616,73 @@ impl<S: Store> Bridge<S> {
         match self.store.append(draft) {
             Ok(record) => {
                 self.plugins.observe(&record);
-                let subscribed = self.config.session(&ticket.session).is_some_and(|session| {
-                    session
-                        .subscriptions
-                        .iter()
-                        .any(|subscription| subscription.room == ticket.request_room)
-                });
-                if subscribed && !self.draining {
-                    self.enqueue(
-                        ticket.session.clone(),
-                        ticket.request_room.clone(),
-                        TurnReason::Wake,
-                        Some("ticket_result".to_owned()),
-                        ticket.origin_sender.clone(),
-                        now,
-                        0,
-                    );
-                }
+                true
             }
-            Err(error) => eprintln!("[access-ticket] result record failed: {error}"),
+            Err(error) => {
+                eprintln!("[access-ticket] result record failed: {error}");
+                false
+            }
         }
+    }
+
+    /// 周期性过期扫描：一个批次/申请房间写一条结果流水，同一 (会话, 房间) 只唤醒一次。
+    /// 返回本次排了几轮。`[tickets].auto_expire = false` 时 TTL 视为无穷大，这里自然无事可做。
+    pub fn tick_tickets(&mut self, now: i64) -> usize {
+        self.access_tickets
+            .set_pending_ttl_ms(self.config.tickets.pending_ttl_ms());
+        let expired = self.access_tickets.take_expired(now);
+        if expired.is_empty() {
+            return 0;
+        }
+
+        let mut groups: std::collections::BTreeMap<(String, String, Option<String>), Vec<AccessTicket>> =
+            std::collections::BTreeMap::new();
+        for ticket in expired {
+            groups
+                .entry((
+                    ticket.session.clone(),
+                    ticket.request_room.to_string(),
+                    ticket.batch_id.clone(),
+                ))
+                .or_default()
+                .push(ticket);
+        }
+
+        let mut wakes: std::collections::BTreeMap<(String, String), Option<String>> =
+            std::collections::BTreeMap::new();
+        for ((session, room_text, _batch), tickets) in groups {
+            let Ok(room) = RoomId::parse(&room_text) else {
+                continue;
+            };
+            let origin = tickets.iter().find_map(|ticket| ticket.origin_sender.clone());
+            self.append_ticket_event(&room, ticket_expiry_text(&tickets), now);
+            wakes.entry((session, room_text)).or_insert(origin);
+        }
+
+        let mut queued = 0;
+        for ((session, room_text), origin) in wakes {
+            let Ok(room) = RoomId::parse(&room_text) else {
+                continue;
+            };
+            let subscribed = self.config.session(&session).is_some_and(|item| {
+                item.subscriptions
+                    .iter()
+                    .any(|subscription| subscription.room == room)
+            });
+            if subscribed && !self.draining {
+                self.enqueue(
+                    session,
+                    room,
+                    TurnReason::Wake,
+                    Some("ticket_result".to_owned()),
+                    origin,
+                    now,
+                    0,
+                );
+                queued += 1;
+            }
+        }
+        queued
     }
 
     /// 用会话自己的访问策略判定一次访问。
@@ -9461,7 +9534,7 @@ fn is_core_executable_op(op: &str) -> bool {
 }
 
 fn ticket_result_text(ticket: &AccessTicket, status: &str, _failure: Option<&str>) -> String {
-    format!(
+    let mut text = format!(
         "ticket {} {}：目标 {}，op {}；approval_route={}，批准房间={}，批准场所={}，批准人={}。用 access_ticket_get {{\"id\":\"{}\"}} 查详情。",
         ticket.id,
         status,
@@ -9472,6 +9545,45 @@ fn ticket_result_text(ticket: &AccessTicket, status: &str, _failure: Option<&str
         ticket.approval_place.as_deref().unwrap_or("-"),
         ticket.approver.as_deref().unwrap_or("-"),
         ticket.id,
+    );
+    if let Some(reason) = &ticket.reason {
+        text.push_str(&format!(
+            " 申请人自述（未经验证）：{}。",
+            crate::tickets::escape_reason_for_display(reason)
+        ));
+    }
+    if let Some(expire) = &ticket.expire_reason {
+        text.push_str(&format!(" 过期原因：{expire}。"));
+    }
+    text
+}
+
+/// 过期终态的聚合流水。一个批次/一个申请房间只写一条，避免逐票刷屏。
+fn ticket_expiry_text(tickets: &[AccessTicket]) -> String {
+    let ids = tickets
+        .iter()
+        .map(|ticket| ticket.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let first = &tickets[0];
+    let timeout = if tickets
+        .iter()
+        .all(|ticket| ticket.expire_reason.as_deref() == Some("active_timeout"))
+    {
+        "批准后未使用超时"
+    } else if tickets
+        .iter()
+        .all(|ticket| ticket.expire_reason.as_deref() == Some("approval_timeout"))
+    {
+        "审批等待超时"
+    } else {
+        "到期超时"
+    };
+    format!(
+        "ticket {ids} 已过期（Expired：{timeout}，非管理员拒绝；expire_reason={}）：目标 {}，op {}。用 access_ticket_get 查详情。",
+        first.expire_reason.as_deref().unwrap_or("-"),
+        first.target.display(),
+        first.ops.join(", "),
     )
 }
 
@@ -9540,6 +9652,7 @@ fn ticket_reply_json(reply: &TicketReply) -> Value {
         "state": reply.state.as_str(),
         "expires_at": reply.expires_at,
         "duplicate": reply.duplicate,
+        "reason": reply.reason,
     })
 }
 
@@ -9555,6 +9668,7 @@ fn ticket_json(ticket: &crate::tickets::AccessTicket) -> Value {
         },
         "target_display": ticket.target.display(),
         "ops": ticket.ops,
+        "reason": ticket.reason,
         "capabilities": ticket.capabilities.iter().map(|capability| capability.as_str()).collect::<Vec<_>>(),
         "unverified": ticket.unverified.iter().map(|item| json!({"op": item.op, "reason": item.reason})).collect::<Vec<_>>(),
         "created_at": ticket.created_at,
@@ -9568,8 +9682,10 @@ fn ticket_json(ticket: &crate::tickets::AccessTicket) -> Value {
         "approval_ref": ticket.approval_ref,
         "approver": ticket.approver,
         "trusted_group": ticket.trusted_group,
+        "announced": ticket.announced,
         "route_unavailable": ticket.route_unavailable,
         "route_unavailable_at": ticket.route_unavailable_at,
+        "expire_reason": ticket.expire_reason,
         "execution_status": ticket.execution_status,
         "executed_at": ticket.executed_at,
         "result": ticket.result,
@@ -9646,6 +9762,14 @@ fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
             ticket.origin_sender.as_deref().unwrap_or("-"),
             ticket.origin_sender_name.as_deref().unwrap_or("-"),
         ));
+        // 自述与系统归一化的目标/动作分区显示，避免被读成系统结论。
+        if let Some(reason) = &ticket.reason {
+            text.push_str("   〔申请人自述，未经验证，不代表系统结论〕\n");
+            text.push_str(&format!(
+                "   {}\n",
+                crate::tickets::escape_reason_for_display(reason)
+            ));
+        }
     }
     text.push_str("批准整批：/approve <batch_id>\n");
     text.push_str("批准单张：/approve <ticket-id> <nonce>\n");
@@ -11200,6 +11324,35 @@ fn with_file_hint(detail: String) -> String {
     )
 }
 
+/// 把唤醒原因补上「是哪条记录触发的」：水位编号必有，平台消息号/回应目标有就带。
+///
+/// 只拼编号、计数和人话，正文一律不进理由；房间和会话由外层渲染，不重复。
+fn wake_reason_with_record(
+    reason: Option<String>,
+    record: &Record,
+    unread: u32,
+) -> Option<String> {
+    let mut text = reason?;
+    if matches!(record.kind, RecordKind::Message) {
+        match record.platform_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => text.push_str(&format!("，触发消息 #{}（平台消息 {id}）", record.id)),
+            None => text.push_str(&format!("，触发消息 #{}", record.id)),
+        }
+    } else if let Some(target) = record.quote_of() {
+        // 表情回应这类事件指着的就是那条被回应的消息。
+        text.push_str(&format!(
+            "，触发事件 #{}（目标是消息 {target}）",
+            record.id
+        ));
+    } else {
+        text.push_str(&format!("，触发事件 #{}", record.id));
+    }
+    if unread > 1 {
+        text.push_str(&format!("，这轮共 {unread} 条未读"));
+    }
+    Some(text)
+}
+
 #[cfg(test)]
 mod limit_tests {
     use super::*;
@@ -11209,6 +11362,74 @@ mod limit_tests {
         assert_eq!(memory_git_log_limit(None), 10, "默认 10 不变");
         assert_eq!(memory_git_log_limit(Some(0)), 1, "下限 1");
         assert_eq!(memory_git_log_limit(Some(999)), 100, "上限 100");
+    }
+}
+
+#[cfg(test)]
+mod wake_reason_tests {
+    use super::*;
+
+    fn record(kind: RecordKind, platform_id: Option<&str>, quote: Option<&str>) -> Record {
+        Record {
+            id: 42,
+            room: RoomId::new("qq", "group/1").expect("合法"),
+            kind,
+            sender: Sender {
+                id: "10001".to_owned(),
+                name: "老王".to_owned(),
+                role: None,
+            },
+            at: 0,
+            elements: quote
+                .map(|target| {
+                    vec![Element::Quote {
+                        message_id: target.to_owned(),
+                    }]
+                })
+                .unwrap_or_default(),
+            at_self: false,
+            reply_to_self: false,
+            platform_id: platform_id.map(str::to_owned),
+            quote_ref: None,
+            labels: Vec::new(),
+            suppressed: false,
+            redelivery: None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn reason_locates_the_triggering_message_and_counts_the_backlog() {
+        let message = record(RecordKind::Message, Some("10086"), None);
+        assert_eq!(
+            wake_reason_with_record(Some("@ 了我".to_owned()), &message, 12).as_deref(),
+            Some("@ 了我，触发消息 #42（平台消息 10086），这轮共 12 条未读")
+        );
+    }
+
+    #[test]
+    fn reason_locates_the_target_of_an_event() {
+        let event = record(
+            RecordKind::Event {
+                event: "group_msg_emoji_like".to_owned(),
+                tags: vec!["reaction".to_owned()],
+                payload: None,
+                summary: None,
+                body: false,
+            },
+            None,
+            Some("592852179"),
+        );
+        assert_eq!(
+            wake_reason_with_record(Some("回应了我说的话".to_owned()), &event, 1).as_deref(),
+            Some("回应了我说的话，触发事件 #42（目标是消息 592852179）")
+        );
+    }
+
+    #[test]
+    fn empty_reason_stays_empty() {
+        let message = record(RecordKind::Message, None, None);
+        assert_eq!(wake_reason_with_record(None, &message, 3), None);
     }
 }
 
