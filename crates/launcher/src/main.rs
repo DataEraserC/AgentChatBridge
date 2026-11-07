@@ -12,18 +12,19 @@
 //! Windows 侧不实现 systemd 通知，但退出码与 `current.json` 逻辑保持平台无关。
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use acb::profile;
 use acb_supervisor::upgrade::{
     ActiveUpgrade, Capabilities, Mailbox, UPGRADE_SCHEMA, UpgradeResult, UpgradeTarget,
     detect_restart_owner, is_terminal_status, validate_request,
 };
 use acb_supervisor::{
-    ActivationWriter, AlwaysHealthy, CommandSpec, EXIT_GIVE_UP, EXIT_OK, EXIT_ROLLBACK,
-    GenerationRef, HttpProbe, Parts, ProcessRunner, Projection, ReconcileOutcome, RollbackMode,
-    Supervisor, SystemClock, SystemSleeper, build_policy, load_config, load_current, now_ms,
+    ActivationWriter, AlwaysHealthy, CommandSpec, EXIT_GIVE_UP, EXIT_OK, EXIT_ROLLBACK, HttpProbe,
+    Parts, ProcessRunner, Projection, ReconcileOutcome, RollbackMode, Supervisor, SystemClock,
+    SystemSleeper, build_policy, load_config, load_current, now_ms,
 };
 
 fn main() -> ExitCode {
@@ -344,23 +345,17 @@ fn maybe_handle_upgrade(
             }
             id.clone()
         }
-        UpgradeTarget::Payload { path, strategy } => match add_generation(&profile_root, path, strategy)
-        {
-            Ok(id) => id,
-            Err(error) => {
-                finish_request(mailbox, &active, "aborted", "stage_failed", &error);
-                return Ok(());
+        UpgradeTarget::Payload { path, strategy } => {
+            match profile::add_payload(&profile_root, Path::new(path), strategy) {
+                Ok(generation) => generation.id,
+                Err(error) => {
+                    finish_request(mailbox, &active, "aborted", "stage_failed", &error);
+                    return Ok(());
+                }
             }
-        },
-    };
-
-    let spec = match spec_for_generation(&profile_root, &target_id, &current) {
-        Ok(spec) => spec,
-        Err(error) => {
-            finish_request(mailbox, &active, "rejected", "target_incomplete", &error);
-            return Ok(());
         }
     };
+
     mailbox.set_active_status("staged", now_ms())?;
 
     if let Err(error) = supervisor.stop_child() {
@@ -369,14 +364,9 @@ fn maybe_handle_upgrade(
         return Ok(());
     }
 
-    // 提交点：复用 `pointer` 的单写者（锁 + journal + current.json + 投影）。
-    // 不在这里复制任何写指针逻辑。
-    let commit = (|| -> Result<(), String> {
-        let writer = ActivationWriter::acquire(state_dir)?;
-        let projection = spec.generation.as_ref().and_then(Projection::discover);
-        writer.commit(&spec, projection, "acb-launcher", now_ms())
-    })();
-    if let Err(error) = commit {
+    // 提交点：profile::activate_generation 复用同一个单写者
+    //（锁 + journal + current.json + 投影），launcher 不再拼指针或调 acbctl。
+    if let Err(error) = profile::activate_generation(&profile_root, state_dir, &target_id) {
         let _ = supervisor.restart_current();
         finish_request(mailbox, &active, "aborted", "commit_failed", &error);
         return Ok(());
@@ -393,77 +383,6 @@ fn maybe_handle_upgrade(
     );
     supervisor.request_exit(EXIT_ROLLBACK);
     Ok(())
-}
-
-/// stage payload：只调用既有 `acbctl profile add`，不复制 profile 的落盘逻辑。
-fn add_generation(profile_root: &Path, payload: &str, strategy: &str) -> Result<String, String> {
-    let acbctl = acbctl_program()?;
-    let output = Command::new(&acbctl)
-        .args(["profile", "add", payload, "--strategy", strategy])
-        .env("ACB_PROFILE_DIR", profile_root)
-        .output()
-        .map_err(|error| format!("run {} profile add: {error}", acbctl.display()))?;
-    if !output.status.success() {
-        return Err(format!(
-            "profile add failed ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .rev()
-        .find_map(|line| line.trim().strip_prefix("added "))
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| format!("profile add printed no generation id: {}", stdout.trim()))
-}
-
-fn acbctl_program() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("ACB_ACBCTL").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(path));
-    }
-    let exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
-    let sibling = exe
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("acbctl");
-    if sibling.is_file() {
-        Ok(sibling)
-    } else {
-        Err(format!(
-            "cannot find acbctl next to launcher ({}); set ACB_ACBCTL",
-            sibling.display()
-        ))
-    }
-}
-
-fn spec_for_generation(
-    profile_root: &Path,
-    target_id: &str,
-    current: &CommandSpec,
-) -> Result<CommandSpec, String> {
-    let payload = profile_root.join("generations").join(target_id).join("root");
-    let program_file = Path::new(&current.program)
-        .file_name()
-        .ok_or_else(|| format!("cannot derive program name from {}", current.program))?;
-    let program = payload.join("bin").join(program_file);
-    if !program.is_file() {
-        return Err(format!("target generation has no binary: {}", program.display()));
-    }
-    Ok(CommandSpec {
-        program: program.to_string_lossy().into_owned(),
-        args: current.args.clone(),
-        generation: Some(GenerationRef {
-            id: target_id.to_string(),
-            path: payload.to_string_lossy().into_owned(),
-            config_sha256: current
-                .generation
-                .as_ref()
-                .and_then(|generation| generation.config_sha256.clone()),
-        }),
-    })
 }
 
 fn finish_request(
