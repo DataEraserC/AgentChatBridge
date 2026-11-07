@@ -384,7 +384,11 @@ fn maybe_handle_upgrade(
             match profile::add_payload(&profile_root, Path::new(path), strategy) {
                 Ok(generation) => generation.id,
                 Err(error) => {
-                    finish_request(mailbox, &active, "aborted", "stage_failed", &error);
+                    finish_request(mailbox, &active, "aborted", "stage_failed", error.message());
+                    // 契约/布局被拒是配置级终态：统一 78，不再拉起任何版本。
+                    if error.is_rejected() {
+                        return give_up_on_rejection(supervisor, &error);
+                    }
                     return Ok(());
                 }
             }
@@ -394,7 +398,10 @@ fn maybe_handle_upgrade(
     // 停旧之前把目标代的解析与可执行文件校验做完：任何会失败的准备动作
     // 都发生在服务还活着的时候，构建/产物不可用不能打断正在跑的版本。
     if let Err(error) = profile::validate_generation(&profile_root, state_dir, &target_id) {
-        finish_request(mailbox, &active, "aborted", "target_invalid", &error);
+        finish_request(mailbox, &active, "aborted", "target_invalid", error.message());
+        if error.is_rejected() {
+            return give_up_on_rejection(supervisor, &error);
+        }
         return Ok(());
     }
 
@@ -410,7 +417,7 @@ fn maybe_handle_upgrade(
     //（锁 + journal + current.json + 投影），launcher 不再拼指针或调 acbctl。
     if let Err(error) = profile::activate_generation(&profile_root, state_dir, &target_id) {
         let _ = supervisor.restart_current();
-        finish_request(mailbox, &active, "aborted", "commit_failed", &error);
+        finish_request(mailbox, &active, "aborted", "commit_failed", error.message());
         return Ok(());
     }
 
@@ -420,6 +427,20 @@ fn maybe_handle_upgrade(
         active.request_id
     );
     supervisor.request_exit(exit_code);
+    Ok(())
+}
+
+/// 配置级拒绝的终态：停止当前子进程并按统一约定 78 收场，不走 LKG 回滚。
+///
+/// 78 与 `ACB_EXIT_GIVE_UP` 同义（配置问题、不再拉起），和 `profile add/switch`
+/// 的拒绝退出码保持一致，调用方只需判断「是否 78」就知道是配置被拒而非用法错误。
+fn give_up_on_rejection(
+    supervisor: &mut acb_supervisor::Supervisor,
+    error: &profile::Failure,
+) -> Result<(), String> {
+    eprintln!("acb-launcher: contract/config rejected: {error}");
+    supervisor.shutdown();
+    supervisor.request_exit(EXIT_GIVE_UP);
     Ok(())
 }
 

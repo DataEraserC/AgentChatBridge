@@ -470,6 +470,11 @@ payload 的固定必带项（`profile` 侧独立校验，不依赖声明）：`b
    `acbl-launcher: refusing to start generation: generation <id>: reason_code=...` 并退出 `78`。
    校验在 supervisor 拉起 bridge **之前**完成，因此不会出现“旧 bridge 已停、新 bridge 未起”。
 
+四条路径的退出码统一为 **`78`**：配置级拒绝是终态，和 supervisor 的
+`EXIT_GIVE_UP` 同义，调用方只判断“是否 78”就能区分“配置被拒”与“命令用错”。
+用法 / 参数 / IO 错误仍是 `2`。launcher 的升级预检拒绝时会先写结果文件，再停子进程并
+以 78 收场，不会停在“旧版本已停、新版本未起”的中间态。
+
 兼容规则（v1 定稿）：
 
 - **只增不改**：新增可选字段 / 可选文件不升 `contract`；删除、改名、语义变化必须升。
@@ -478,12 +483,16 @@ payload 的固定必带项（`profile` 侧独立校验，不依赖声明）：`b
   **编译期常量**，不是运行时去读三个二进制的版本号。前提是 acbl 的 launcher / acbctl /
   supervisor 按同一 workspace 版本一起发布；将来若拆版，必须改成运行时读取并把版本上报
   纳入状态文件。
+- **`min_acbl` 目前还没有真正咬合**：三个二进制当前都是 `0.1.0`，所以任何声明
+  `min_acbl <= 0.1.0` 的 payload 都会通过，版本门槛实际上不生效。它只有等 acbl 开始区分
+  版本号（例如发布 `0.2.0` 后 payload 声明 `min_acbl: "0.2.0"`）才真正起作用；在这之前
+  不要把这条字段当成防线。
 - 过渡期与旁路风险：payload 没有 `acb-contract.json` 时按 `contract = 1` 放行，每个校验点
   打印两条 `WARNING: ... TRANSITIONAL fallback only ... HARD-REJECT` 告警。
   **这条兜底本身就是旁路：删掉契约文件就会自动落回 legacy 放行**，所以它只适合过渡期，
   不能当作防线。
 - 严格模式：环境变量 `ACB_CONTRACT_STRICT` 打开后，缺文件按 `contract_unreadable` 拒绝
-  （`profile add`/`switch` 报错退出 2，launcher 启动退出 78）。取值 `0/false/no/off`
+  （`profile add`/`switch` 与 launcher 启动一律退出 78）。取值 `0/false/no/off`
   视为关闭，其余非空值视为开启（写错也朝严格一侧倒）。**默认关闭**，不改变现有现场行为。
 - 翻默认时机：payload 打包链路已稳定产出 `acb-contract.json`、且现场全部 generation 都带
   文件之后，把严格模式改为默认开启，并删除 legacy 放行分支；提前翻默认会让现役无契约
