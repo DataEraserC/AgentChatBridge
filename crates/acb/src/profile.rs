@@ -479,6 +479,29 @@ pub fn activate_generation(
     state_dir: &Path,
     generation_id: &str,
 ) -> Result<acb_supervisor::CommandSpec, String> {
+    let command = resolve_generation_command(profile_root, state_dir, generation_id)?;
+    pin_generation(profile_root, generation_id);
+    commit_command(profile_root, generation_id, state_dir, "acb-launcher", &command)?;
+    Ok(command)
+}
+
+/// 升级链预检：解析目标代的启动命令并确认可执行文件存在，但不写指针。
+///
+/// launcher 在停旧之前调用它，让「目标代不可用」这类失败发生在服务还活着的时候。
+pub fn validate_generation(
+    profile_root: &Path,
+    state_dir: &Path,
+    generation_id: &str,
+) -> Result<(), String> {
+    resolve_generation_command(profile_root, state_dir, generation_id).map(|_| ())
+}
+
+/// 解析目标代实际要跑的命令；只读，不建 pin、不提交指针。
+fn resolve_generation_command(
+    profile_root: &Path,
+    state_dir: &Path,
+    generation_id: &str,
+) -> Result<acb_supervisor::CommandSpec, String> {
     let meta = load_meta(profile_root, generation_id)?
         .ok_or_else(|| format!("generation not found: {generation_id}"))?;
     let payload = generation_dir(profile_root, generation_id).join("root");
@@ -518,8 +541,6 @@ pub fn activate_generation(
             command
         }
     };
-    pin_generation(profile_root, generation_id);
-    commit_command(profile_root, generation_id, state_dir, "acb-launcher", &command)?;
     Ok(command)
 }
 
