@@ -7,7 +7,7 @@
 # 仓库在持久子卷；日志写到仓库 state/logs/，不再用 ~/qqab-scratch。
 #
 # 用法：deploy/acb-up.sh
-# 密钥：deploy/acb.env（不入库），只有一个 NEW_API_Y9000P2025_OPENAI_RESPONSES_API_KEY。
+# 密钥：桥自己消费的来源写在 config.toml 的 [secrets]；dsh/opencode 的 key 仍走各自环境。
 set -uo pipefail
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -17,6 +17,8 @@ REPO=$(cd "$HERE/.." && pwd)
 LOGDIR=${ACB_LOG_DIR:-$REPO/state/logs}
 UNITDIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 BRIDGE=$REPO/result/bin/acb-bridge
+ACBCTL=$REPO/result/bin/acbctl
+[[ -x $ACBCTL ]] || ACBCTL=$(command -v acbctl || true)
 UNITS=(dsh-acb.service acb-bridge.service acb-drivers.service acb-opencode-serve.service)
 
 mkdir -p "$LOGDIR" "$UNITDIR"
@@ -103,7 +105,7 @@ token_line=$(grep -o 'http://127\.0\.0\.1:3080/?token=[A-Za-z0-9_-]*' "$LOGDIR/d
 [[ -n $token_line ]] && echo "dsh UI： $token_line"
 
 echo -n "桥自述： "
-curl -s --max-time 5 -H "Authorization: Bearer $(grep -A3 '^\[console\]' "$REPO/config.toml" | grep -o 'token *= *"[^"]*"' | cut -d'"' -f2)" \
+curl -s --max-time 5 -H "Authorization: Bearer $("$ACBCTL" secrets resolve --console --config "$REPO/config.toml" 2>/dev/null)" \
   http://127.0.0.1:3100/api/status || echo "（取不到，看日志）"
 echo
 echo "日志目录：$LOGDIR"

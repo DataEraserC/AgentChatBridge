@@ -88,7 +88,7 @@ fn config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -109,7 +109,7 @@ fn config() -> &'static str {
 fn bridge() -> (Bridge<MemoryStore>, Sends) {
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let bridge = Bridge::new(
-        acb_kernel::Config::parse(config()).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(config()).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -131,7 +131,7 @@ fn config_with(insert: &str) -> String {
 fn bridge_with_plugins(text: &str, plugins: PluginManager) -> (Bridge<MemoryStore>, Sends) {
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let bridge = Bridge::with_plugins(
-        acb_kernel::Config::parse(text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -414,7 +414,7 @@ fn bridge_with_limit(limit: usize) -> (Bridge<MemoryStore>, Sends) {
     let text = format!("delivery_limit = {limit}\n{}", config());
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let bridge = Bridge::new(
-        acb_kernel::Config::parse(&text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -1016,7 +1016,7 @@ fn bridge_with_admin() -> (Bridge<MemoryStore>, Sends) {
         )
         .expect("能注册路由 provider");
     let bridge = Bridge::with_plugins(
-        acb_kernel::Config::parse(&text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -1111,7 +1111,7 @@ fn bridge_with_route_and_outbound(
         )
         .expect("能注册路由 provider");
     Bridge::with_plugins(
-        acb_kernel::Config::parse(&text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         outbound,
         plugins,
@@ -1643,7 +1643,7 @@ fn active_turn_keeps_config_snapshot_after_reload() {
 "#,
         "",
     );
-    bridge.stage_config(acb_kernel::Config::parse(&reloaded).expect("新配置合法"));
+    bridge.stage_config(acb_kernel::Config::parse_fixture(&reloaded).expect("新配置合法"));
     // ingest 是配置消费点：喂一条 dc 的已订阅消息，让 staged 配置真正换上。
     bridge
         .ingest(message("dc:channel/456", "10001", "刷新配置", true))
@@ -1870,7 +1870,7 @@ fn tool_scope_is_the_turn_session_not_the_connection() {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t"
+        token = { secret = "t" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -1886,7 +1886,7 @@ fn tool_scope_is_the_turn_session_not_the_connection() {
         id = "sib"
         harness = "dsh"
         persona = "p"
-        token = "t"
+        token = { secret = "t" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -1899,7 +1899,7 @@ fn tool_scope_is_the_turn_session_not_the_connection() {
         accumulate = 50
     "#;
     let mut bridge = Bridge::new(
-        acb_kernel::Config::parse(config).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(config).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder { sends }),
     );
@@ -2463,7 +2463,7 @@ fn group_config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-shared"
+        token = { secret = "t-shared" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -2479,7 +2479,7 @@ fn group_config() -> &'static str {
         id = "helper"
         harness = "dsh"
         persona = "p"
-        token = "t-shared"
+        token = { secret = "t-shared" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -2496,7 +2496,7 @@ fn group_config() -> &'static str {
 fn group_bridge(config: &str) -> (Bridge<MemoryStore>, Sends) {
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let bridge = Bridge::new(
-        acb_kernel::Config::parse(config).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(config).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -2669,7 +2669,7 @@ fn fallback_config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -2776,7 +2776,7 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
         "        persona = \"p\"",
         "        persona = \"p\"\n        model = \"test/model\"",
     );
-    let config = Config::parse(&text).expect("配置合法");
+    let config = Config::parse_fixture(&text).expect("配置合法");
     let deps = DependencyRegistry::from_config(&config);
     let notice_events = Arc::new(Mutex::new(Vec::new()));
     deps.set_notice_sink(Arc::new(NoticeRecorder(Arc::clone(&notice_events))));
@@ -2877,7 +2877,7 @@ fn abandoned_turn_does_not_count_as_success() {
         "        persona = \"p\"",
         "        persona = \"p\"\n        model = \"test/model\"",
     );
-    let config = Config::parse(&text).expect("配置合法");
+    let config = Config::parse_fixture(&text).expect("配置合法");
     let deps = DependencyRegistry::from_config(&config);
     let notice_events = Arc::new(Mutex::new(Vec::new()));
     deps.set_notice_sink(Arc::new(NoticeRecorder(Arc::clone(&notice_events))));
@@ -2990,7 +2990,7 @@ fn turn_failure_prefers_session_override_over_default() {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
         on_turn_error = ["send:qq:group/own"]
 
         [[sessions.subscriptions]]
@@ -3660,7 +3660,7 @@ fn 发送时本机文件换成中继URL_别的路径不动() {
     );
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let mut bridge = Bridge::new(
-        acb_kernel::Config::parse(&text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -3768,7 +3768,7 @@ const TWO_SESSION_CONFIG: &str = r#"
     id = "main"
     harness = "dsh"
     persona = "p"
-    token = "t-main"
+    token = { secret = "t-main" }
 
     [[sessions.subscriptions]]
     connection = "qq"
@@ -3781,7 +3781,7 @@ const TWO_SESSION_CONFIG: &str = r#"
     id = "side"
     harness = "dsh"
     persona = "p"
-    token = "t-side"
+    token = { secret = "t-side" }
 
     [[sessions.subscriptions]]
     connection = "qq"
@@ -3798,7 +3798,7 @@ fn a_reply_is_acked_for_every_subscriber_not_just_the_speaker() {
     // 那边就永远算未读，表现为「同一批积压戳一次投一遍」（2026-10-31 真机）。
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let mut bridge = Bridge::new(
-        acb_kernel::Config::parse(TWO_SESSION_CONFIG).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(TWO_SESSION_CONFIG).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -3946,7 +3946,7 @@ fn delivery_truncation_keeps_newest_and_a_small_oldest_slice() {
     let text = format!("delivery_limit = 2\n{}", config());
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let mut bridge = Bridge::new(
-        acb_kernel::Config::parse(&text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),
@@ -4074,7 +4074,7 @@ fn interval_clock_opens_a_turn_with_no_records() {
     let text = clock_config();
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let mut bridge = Bridge::new(
-        acb_kernel::Config::parse(&text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder {
             sends: sends.clone(),

@@ -36,7 +36,7 @@ fn config(wake_provider: Option<&str>) -> String {
     id = "main"
     harness = "dsh"
     persona = "p"
-    token = "t-main"
+    token = {{ secret = "t-main" }}
 
     [[sessions.subscriptions]]
     connection = "qq"
@@ -164,7 +164,7 @@ fn one_manager_panic_does_not_take_down_the_bridge() {
     assert!(after_install > before);
 
     let bridge = Arc::new(Mutex::new(Bridge::with_plugins(
-        Config::parse(&config(None)).expect("配置合法"),
+        Config::parse_fixture(&config(None)).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,
@@ -254,7 +254,7 @@ fn referenced_provider_panic_fails_startup_with_actionable_error() {
         .expect("能装 manager");
     let before = plugins.descriptors().len();
 
-    let config = Config::parse(&config(Some("panic.wake"))).expect("配置能解析");
+    let config = Config::parse_fixture(&config(Some("panic.wake"))).expect("配置能解析");
     let error = plugins
         .validate_config(&config)
         .expect_err("被引用的坏 provider 必须在启动时拒绝");

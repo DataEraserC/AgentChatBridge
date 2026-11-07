@@ -279,7 +279,7 @@ fn config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -310,7 +310,7 @@ fn setup_with_grants(rules: &str) -> (Bridge<MemoryStore>, Calls) {
         .register_adapter(Arc::new(FakeAdapterFactory))
         .expect("注册假适配器");
     let bridge = Bridge::with_plugins(
-        acb_kernel::Config::parse(&text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Platformy {
             calls: calls.clone(),
@@ -1382,7 +1382,7 @@ fn 平台调用的params里本机文件换成中继URL() {
     );
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let mut bridge = Bridge::new(
-        acb_kernel::Config::parse(&text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Platformy {
             calls: calls.clone(),
@@ -1429,7 +1429,7 @@ fn 平台调用的http路径原样透传() {
     );
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let mut bridge = Bridge::new(
-        acb_kernel::Config::parse(&text).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Platformy {
             calls: calls.clone(),

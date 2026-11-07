@@ -61,7 +61,7 @@ fn config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -97,7 +97,7 @@ fn multi_session_config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-both"
+        token = { secret = "t-both" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -111,7 +111,7 @@ fn multi_session_config() -> &'static str {
         id = "group2"
         harness = "dsh"
         persona = "p"
-        token = "t-both"
+        token = { secret = "t-both" }
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -164,7 +164,7 @@ fn write_frame(stream: &mut TcpStream, frame: &Frame) {
 
 fn bridge() -> Bridge<MemoryStore> {
     Bridge::new(
-        acb_kernel::Config::parse(config()).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(config()).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder::default()),
     )
@@ -172,7 +172,7 @@ fn bridge() -> Bridge<MemoryStore> {
 
 fn multi_session_bridge() -> Bridge<MemoryStore> {
     Bridge::new(
-        acb_kernel::Config::parse(multi_session_config()).expect("配置合法"),
+        acb_kernel::Config::parse_fixture(multi_session_config()).expect("配置合法"),
         MemoryStore::new(),
         Box::new(Recorder::default()),
     )

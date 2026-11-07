@@ -177,7 +177,7 @@ mod tests {
             id = "main"
             harness = "dsh"
             persona = "p"
-            token = "t-main"
+            token = { secret = "t-main" }
 
             [[sessions.subscriptions]]
             connection = "qq"
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn config_can_reference_the_child_provider() {
-        let config = Config::parse(&config_with_provider(CHILD_PROVIDER)).expect("配置合法");
+        let config = Config::parse_fixture(&config_with_provider(CHILD_PROVIDER)).expect("配置合法");
         let mut plugins = PluginManager::with_native_builtins();
         install(&mut plugins).expect("嵌套子树应当能安装");
         plugins

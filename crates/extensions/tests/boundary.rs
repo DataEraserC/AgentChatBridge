@@ -77,7 +77,7 @@ fn config() -> &'static str {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
     "#
 }
 
@@ -159,7 +159,7 @@ fn boundary_reload_swaps_modules_and_keeps_live_on_bad_candidate() {
         .expect("动态扩展 manager 应当能安装");
     let route = route(&plugins);
     let mut bridge = Bridge::with_plugins(
-        Config::parse(config()).expect("配置合法"),
+        Config::parse_fixture(config()).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

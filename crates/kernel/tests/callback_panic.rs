@@ -42,7 +42,7 @@ fn config(route_provider: Option<&str>) -> String {
     id = "main"
     harness = "dsh"
     persona = "p"
-    token = "t-main"
+    token = {{ secret = "t-main" }}
 
     [[sessions.subscriptions]]
     connection = "qq"
@@ -78,7 +78,7 @@ fn draft() -> RecordDraft {
 
 fn bridge(plugins: PluginManager, route_provider: Option<&str>) -> Arc<Mutex<Bridge<MemoryStore>>> {
     Arc::new(Mutex::new(Bridge::with_plugins(
-        Config::parse(&config(route_provider)).expect("配置合法"),
+        Config::parse_fixture(&config(route_provider)).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

@@ -21,9 +21,20 @@ cp config.example.toml config.toml
 [endpoint]
 listen = "127.0.0.1:7700"        # harness 连桥的地址
 
+[secrets]                         # 密钥来源：字段只写来源名，值从环境/文件读
+default_kind = "env"
+
+[[secrets.sources]]
+name = "console-token"
+variable = "ACB_CONSOLE_TOKEN"
+
+[[secrets.sources]]
+name = "main-session-token"
+variable = "ACB_MAIN_SESSION_TOKEN"
+
 [console]
 listen = "127.0.0.1:3100"        # 网页控制台，强烈建议开
-token = "换成一长串你自己的随机字符串"
+token = { secret = "console-token" }
 
 [storage]
 path = "state/acb.db"            # 消息流水，备份就是拷这个文件
@@ -53,7 +64,7 @@ name = "DeepSeek"
 id = "main"
 harness = "dsh"
 persona = "default"
-token = "换成一长串你自己的随机字符串"
+token = { secret = "main-session-token" }
 
 [[sessions.subscriptions]]
 connection = "qq"
@@ -64,6 +75,10 @@ at_mention = true
 reply = true
 poke = true
 ```
+
+上面两个 token 从 `ACB_CONSOLE_TOKEN` / `ACB_MAIN_SESSION_TOKEN` 读，启动桥之前先 `export`
+（systemd 部署用 `EnvironmentFile`）。不想用环境变量也可以把来源改成 `file`，桥自己按
+`path` 读；文件权限必须是 `0600`。
 
 ## 第二步：构建
 

@@ -8,26 +8,54 @@
 保存即热重载，注释和排版不会丢。TOML 手改只是兜底。
 :::
 
-## 环境变量注入
+## 密钥来源（[secrets]）
 
-字符串值里可以写环境变量，启动时展开，配置文件本身不用存密钥/部署常量：
-
-- `${NAME}`：按 TOML 字符串注入，值里的引号、反斜杠会自动转义。
-- `${{NAME}}`：原样注入，用来说明这是数字/布尔，或者由你决定要不要加引号。
-- 两种都支持 `:-默认`，变量未设置或为空时用默认值。
+配置里**不写密钥本体，也不做文本插值**。先声明来源，再在字段里引用来源名：
 
 ```toml
-[endpoint]
-listen = "${ACB_ENDPOINT_LISTEN}"
+[secrets]
+default_kind = "env"
 
-delivery_limit = ${{ACB_DELIVERY_LIMIT:-50}}
+[[secrets.sources]]
+name = "console-token"
+kind = "env"
+variable = "ACB_CONSOLE_TOKEN"
+
+[[secrets.sources]]
+name = "main-session-token"
+kind = "file"
+path = "/run/agenix/acb-dsh-main.token"
+format = "raw"
+
+[console]
+token = { secret = "console-token" }
 
 [[sessions]]
-model = "${ACB_MODEL_DSH:-provider/model}"
+id = "main"
+harness = "dsh"
+persona = "default"
+token = { secret = "main-session-token" }
 ```
 
-环境里没有对应变量且没写默认值时会直接报错，不会静默变成空串。这些值只在启动时展开；
-控制台改的是文件里的占位符本身，改端口/密钥仍然要重启桥。
+规则：
+
+- 密钥字段（连接 / 会话 / 控制台 / 通知的 token，通知 topic）只接受
+  `{ secret = "<来源名>" }` 或省略。写普通字符串会被当成字面量密钥，启动直接失败。
+- `kind = "env"`：读进程环境变量（`variable` 必填）；无 systemd 且用 `env -i`
+  白名单时，未传进来的变量会在启动期明确报错，不会静默变成空串。
+- `kind = "file"`：桥自己读文件，`path` **必须是绝对路径**。`format = "raw"`
+  （默认）表示整个文件就是一个值；`format = "dotenv"` 逐行读 `KEY=VALUE`，
+  忽略空行和 `#` 开头的整行注释，用 `key` 选键。dotenv 是严格子集：不处理引号、
+  不做续行、不做变量展开。
+- 文件必须是普通文件，权限要求 group/other 无任何权限（如 `0600`），属主是当前
+  用户或 root；否则启动失败。
+- 加载期一次性解析**所有**声明的来源；任一缺失、不可读、权限不合规、值为空、
+  引用未声明，都算配置错误，桥以 78 退出（systemd 不重启）。
+- 同名来源全局唯一；`[[secrets.sources]]` 可以分散在 base 和普通分片，加载时合并。
+  `90-console.toml` 不允许声明 `[secrets]`，控制台只引用已有来源。
+- dsh / opencode 等子进程直接消费的 API key 不在这里，仍走它们自己的环境。
+
+这些值只在启动时解析；改密钥文件或环境仍要重启桥。
 
 ## 配置分片（config.d）
 
@@ -39,13 +67,14 @@ model = "${ACB_MODEL_DSH:-provider/model}"
 - `--config-dir <dir>` 指定分片目录；不写时取 **base 配置所在目录**下的 `config.d/`。
 - 目录不存在 = 未启用分片，行为和旧版完全一致。
 - 目录存在时只加载 `*.toml`，按文件名字典序排序；子目录和非 `.toml` 文件忽略。
-- base 和每个分片都在解析前做环境变量插值，行为与上面的规则相同。
+- base 和每个分片都不做文本插值；密钥字段用 `{ secret = "<来源名>" }` 引用上面的 `[secrets]`。
 
-合并规则只有三句：
+合并规则只有三句（外加一个密钥来源特例）：
 
 - **数组追加**（base 在前，分片按序在后）。
 - **标量与表：后出现者覆盖先出现者**。
 - **带 key 的表按键覆盖**（例如 `[grants.rooms."<room>"]` / `[grants.accounts."<account>"]`，分片只写自己想加的那一条）。
+  `[[secrets.sources]]` 是例外：跨分片追加，同名来源重复即启动失败。
 
 细节：
 
@@ -99,7 +128,7 @@ platform = "qq"
 kind = "onebot11"          # 规范值；也可写 "onebot-snowluma"（等价别名）
 transport = "ws-client"    # ws-client 桥主动连平台；ws-server 桥监听、平台连入
 url = "ws://127.0.0.1:3001"  # ws-client 必填；ws-server 用 options.listen
-token = ""                 # OneBot 的 access token，没设就空着
+token = { secret = "qq-token" }  # 可选；引用 [secrets] 里声明的来源，不需要就删掉
 account = "10001"          # 这个号自己的 QQ 号——桥靠它认出「哪句是 agent 自己说的」
 admin_qqs = []             # 这些号在记录里标成 system_admin；lua.stop_command 据此放行 /stop
 ```
@@ -244,7 +273,7 @@ harness = "dsh"              # 必须是上面 [[harnesses]] 里定义过的 id
 persona = "default"          # 必须是定义过的人格卡
 memories = ["main-memory"]   # 可空；多个就是多个 git 仓库
 model = "provider/model"     # 可空 = harness 侧自己决定；写成 provider/model（第一个 / 分隔）
-token = "……"                 # harness 连桥时报这个令牌绑定会话
+token = { secret = "main-session-token" }  # harness 连桥时报这个令牌绑定会话
 on_turn_error = []           # 一轮失败时做什么（log / send:<房间>）；空 = 回退全局默认
 
 [[sessions.subscriptions]]

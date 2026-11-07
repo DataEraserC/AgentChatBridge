@@ -39,9 +39,9 @@ pub use config::{
     DEFAULT_WORKTREES_ROOT, DeliveryPolicy, EndpointConfig, Harness, InBandNoticeConfig,
     KNOWN_MEMORY_KINDS, LkgConfig, LoadedConfig, Memory, NotificationsConfig, OutboundPolicy,
     Persona, PluginConfig, ProviderCallsConfig, QueueConfig, ReceivePolicy, RetentionConfig,
-    RoutePolicy, Session, StorageConfig, Subscription, ToolPluginConfig, Transport,
-    TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput, WakePolicy,
-    WakeVerdict,
+    RoutePolicy, SecretEntry, SecretStore, Session, StorageConfig, Subscription,
+    ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision,
+    WakeInput, WakePolicy, WakeVerdict,
 };
 pub use deps::{DependencyKind, DependencyRegistry, PlatformVersionInfo};
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};

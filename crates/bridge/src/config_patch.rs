@@ -8,7 +8,7 @@
 //! 备份由 console 的保存流程统一管，这里只负责「改文本」）。
 
 use acb_i18n::{Message, msg};
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{DocumentMut, InlineTable, Item, Table, Value, value};
 
 /// 补丁错误：主文案是 key + 参数，渲染由调用方按请求 locale 完成；
 /// `detail` 只放无法 key 化的底层原文（TOML 解析器、provider 校验等）。
@@ -52,6 +52,13 @@ impl From<Message> for PatchError {
     }
 }
 
+/// 把「来源名」写成 TOML 内联表 `{ secret = "<name>" }`。
+fn secret_item(name: &str) -> Item {
+    let mut table = InlineTable::new();
+    table.insert("secret", Value::from(name.to_owned()));
+    Item::Value(Value::InlineTable(table))
+}
+
 /// 应用一组补丁操作，返回（改完的 TOML 全文，人话改动清单）。
 pub fn apply_patch(
     text: &str,
@@ -92,8 +99,8 @@ pub fn apply_patch(
 /// 会话修改或**新建**：
 /// - 修改：`{"op":"session","id":"main","patch":{"persona":"p2","model":null}}`。
 ///   只改出现的键；`model` 给 null 表示清掉（= 由 harness 侧决定）。
-/// - 新建：`{"op":"session","id":"new1","create":{"harness":"dsh","token":"t",...},"patch":{...}}`。
-///   `create` 必须带 harness 和 token（接入令牌，harness 连桥全靠它）；
+/// - 新建：`{"op":"session","id":"new1","create":{"harness":"dsh","secret":"dsh-dev-token",...},"patch":{...}}`。
+///   `create` 必须带 harness 和 secret（密钥来源名，harness 连桥全靠它）；
 ///   persona / name / model / memories 可选。patch 随后照常应用。
 fn session_op(
     doc: &mut DocumentMut,
@@ -113,10 +120,10 @@ fn session_op(
         if harness_table(doc, harness).is_none() {
             return Err(msg!("bridge.patch.session_unknown_harness", harness = harness).into());
         }
-        let token = create
-            .get("token")
+        let secret = create
+            .get("secret")
             .and_then(serde_json::Value::as_str)
-            .filter(|t| !t.is_empty())
+            .filter(|name| !name.is_empty())
             .ok_or(msg!("bridge.patch.session_token_required"))?;
         let persona = create
             .get("persona")
@@ -132,7 +139,7 @@ fn session_op(
         let mut table = Table::new();
         table.insert("id", value(id.clone()));
         table.insert("harness", value(harness.to_owned()));
-        table.insert("token", value(token.to_owned()));
+        table.insert("token", secret_item(secret));
         table.insert("persona", value(persona_id));
         for key in ["name", "model"] {
             if let Some(text) = create.get(key).and_then(serde_json::Value::as_str) {
@@ -350,9 +357,9 @@ fn harness_table<'a>(doc: &'a mut DocumentMut, id: &str) -> Option<&'a Table> {
 }
 
 /// 连接修改或**新建**（改这些**要重启桥**——守护线程攥着旧连接信息）：
-/// - 修改：`{"op":"connection","id":"qq","patch":{"url":"..","token":"..","account":".."}}`
+/// - 修改：`{"op":"connection","id":"qq","patch":{"url":"..","secret":"..","account":".."}}`
 /// - 新建：`{"op":"connection","id":"qq2","create":{"platform":"qq","kind":"onebot11",
-///   "url":"ws://..","account":"10002","token":".."}}`
+///   "url":"ws://..","account":"10002","secret":"qq-token"}}`
 fn connection_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
@@ -401,9 +408,9 @@ fn connection_op(
         table.insert("kind", value(kind.to_owned()));
         table.insert("url", value(url.to_owned()));
         table.insert("account", value(account.to_owned()));
-        if let Some(token) = create.get("token").and_then(serde_json::Value::as_str) {
-            if !token.is_empty() {
-                table.insert("token", value(token.to_owned()));
+        if let Some(secret) = create.get("secret").and_then(serde_json::Value::as_str) {
+            if !secret.is_empty() {
+                table.insert("token", secret_item(secret));
             }
         }
         connections.push(table);
@@ -439,13 +446,13 @@ fn connection_op(
                     key = key
                 ));
             }
-            "token" => match val {
+            "secret" => match val {
                 serde_json::Value::Null => {
                     table.remove("token");
                     changes.push(msg!("bridge.patch.connection_token_cleared", id = &id));
                 }
-                serde_json::Value::String(text) => {
-                    table.insert("token", value(text.clone()));
+                serde_json::Value::String(name) => {
+                    table.insert("token", secret_item(name));
                     changes.push(msg!("bridge.patch.connection_token_updated", id = &id));
                 }
                 _ => return Err(msg!("bridge.patch.token_wrong_type").into()),
@@ -816,13 +823,13 @@ platform = "qq"
 kind = "onebot11"
 url = "ws://127.0.0.1:3001"
 account = "bot"
-token = "conn-secret"
+token = { secret = "conn-secret" }
 
 [[sessions]]
 id = "main"
 harness = "dsh"
 persona = "p"
-token = "t-main"
+token = { secret = "t-main" }
 
 [[sessions.subscriptions]]
 connection = "qq"
@@ -876,7 +883,7 @@ keywords = ["喂"]
         assert!(new_text.contains("at_mention = true"));
         // 改过的键生效，且整份还能被 Config::parse 接受。
         assert!(new_text.contains("accumulate = 10"));
-        let config = acb_kernel::Config::parse(&new_text).expect("补丁后配置合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("补丁后配置合法");
         let sub = &config.session("main").expect("会话在").subscriptions[0];
         assert_eq!(sub.wake.keywords, vec!["喂".to_owned(), "在吗".to_owned()]);
         assert_eq!(sub.wake.accumulate, Some(10));
@@ -890,7 +897,7 @@ keywords = ["喂"]
             {"op": "subscription", "session": "main", "connection": "qq", "room": "group/456"}
         ]));
         let (new_text, _) = super::apply_patch(&text, &ops).expect("能加");
-        let config = acb_kernel::Config::parse(&new_text).expect("合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         assert_eq!(config.session("main").expect("在").subscriptions.len(), 2);
 
         let ops = parse_ops(serde_json::json!([
@@ -898,7 +905,7 @@ keywords = ["喂"]
         ]));
         let (new_text, changes) = super::apply_patch(&new_text, &ops).expect("能删");
         assert!(changes_en(&changes)[0].contains("removed"));
-        let config = acb_kernel::Config::parse(&new_text).expect("合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         let subs = &config.session("main").expect("在").subscriptions;
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].room.to_string(), "qq:group/456");
@@ -913,7 +920,7 @@ keywords = ["喂"]
         let (new_text, _) = super::apply_patch(&text, &ops).expect("能打");
         assert!(!new_text.contains("gpt-x"), "model 键被删掉");
         assert!(new_text.contains("name = \"主力\""));
-        let config = acb_kernel::Config::parse(&new_text).expect("合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         assert_eq!(config.session("main").expect("在").model, None);
     }
 
@@ -925,7 +932,7 @@ keywords = ["喂"]
         ]));
         let (new_text, changes) = super::apply_patch(&text, &ops).expect("能加");
         assert!(changes_en(&changes)[0].contains("created"));
-        let config = acb_kernel::Config::parse(&new_text).expect("合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         assert_eq!(config.personas.len(), 2);
         assert_eq!(config.personas[1].name, "二号");
     }
@@ -941,7 +948,7 @@ keywords = ["喂"]
         assert!(new_text.contains("max_age_days = 7"));
         assert!(new_text.contains("turn_timeout_secs = 0"));
         assert_eq!(changes.len(), 3);
-        let config = acb_kernel::Config::parse(&new_text).expect("合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         assert_eq!(config.delivery_limit, 50);
         assert_eq!(config.retention.max_age_days, 7);
         assert_eq!(config.turn_timeout_secs, 0);
@@ -970,7 +977,7 @@ keywords = ["喂"]
     fn connection_patch_updates_url_and_token() {
         let text = base();
         let ops = parse_ops(serde_json::json!([
-            {"op": "connection", "id": "qq", "patch": {"url": "ws://127.0.0.1:3002", "token": null}}
+            {"op": "connection", "id": "qq", "patch": {"url": "ws://127.0.0.1:3002", "secret": null}}
         ]));
         let (new_text, changes) = super::apply_patch(&text, &ops).expect("能打");
         assert!(new_text.contains("ws://127.0.0.1:3002"));
@@ -980,7 +987,7 @@ keywords = ["喂"]
                 .iter()
                 .all(|c| c.contains("restart required"))
         );
-        let config = acb_kernel::Config::parse(&new_text).expect("合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         assert_eq!(config.connections[0].token, None);
     }
 
@@ -1004,23 +1011,23 @@ keywords = ["喂"]
         let error = super::apply_patch(
             &text,
             &parse_ops(serde_json::json!([{"op": "session", "id": "new1",
-                "create": {"harness": "ghost", "token": "t"}, "patch": {}}])),
+                "create": {"harness": "ghost", "secret": "t"}, "patch": {}}])),
         )
         .expect_err("该报错");
         let rendered = error_en(&error);
         assert!(rendered.contains("ghost"), "{rendered}");
-        // 正常新建：id/harness/token/persona 齐全，patch 随后应用。
+        // 正常新建：id/harness/secret/persona 齐全，patch 随后应用。
         let (new_text, changes) = super::apply_patch(
             &text,
             &parse_ops(serde_json::json!([
                 {"op": "session", "id": "new1",
-                 "create": {"harness": "dsh", "token": "t-new", "persona": "p", "name": "二号"},
+                 "create": {"harness": "dsh", "secret": "t-new", "persona": "p", "name": "二号"},
                  "patch": {"model": "some-model"}}
             ])),
         )
         .expect("能建");
         assert!(changes_en(&changes)[0].contains("created"));
-        let config = acb_kernel::Config::parse(&new_text).expect("合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         let session = config.session("new1").expect("新会话在");
         assert_eq!(session.harness, "dsh");
         assert_eq!(session.persona, "p");
@@ -1037,14 +1044,14 @@ keywords = ["喂"]
             &parse_ops(serde_json::json!([
                 {"op": "connection", "id": "qq2",
                  "create": {"platform": "qq", "kind": "onebot11",
-                            "url": "ws://127.0.0.1:3003", "account": "10002", "token": "t2"}},
+                            "url": "ws://127.0.0.1:3003", "account": "10002", "secret": "t2"}},
                 {"op": "harness", "id": "dsh2", "name": "二号 DSH"}
             ])),
         )
         .expect("能建");
         let rendered = changes_en(&changes);
         assert!(rendered[0].contains("created") && rendered[1].contains("created"));
-        let config = acb_kernel::Config::parse(&new_text).expect("合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         assert_eq!(config.connections.len(), 2);
         assert_eq!(config.connections[1].account, "10002");
         assert_eq!(config.connections[1].token.as_deref(), Some("t2"));
@@ -1056,7 +1063,7 @@ keywords = ["喂"]
             &parse_ops(serde_json::json!([{"op": "harness", "id": "dsh2", "name": "改名"}])),
         )
         .expect("能改");
-        let config = acb_kernel::Config::parse(&new_text).expect("合法");
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         assert_eq!(config.harnesses[1].name, "改名");
         assert_eq!(config.harnesses.len(), 2, "不重复建");
     }

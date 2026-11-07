@@ -42,7 +42,7 @@ fn config(wake_extra: &str) -> String {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = {{ secret = "t-main" }}
 
         [[sessions.subscriptions]]
         connection = "qq"
@@ -161,7 +161,7 @@ fn bridge(wake_extra: &str) -> Arc<Mutex<Bridge<MemoryStore>>> {
         )
         .expect("注册路由");
     Arc::new(Mutex::new(Bridge::with_plugins(
-        Config::parse(&config(wake_extra)).expect("配置合法"),
+        Config::parse_fixture(&config(wake_extra)).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,

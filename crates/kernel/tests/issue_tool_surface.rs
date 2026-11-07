@@ -68,7 +68,7 @@ fn bridge() -> Arc<Mutex<Bridge<MemoryStore>>> {
             Arc::new(IssueTools),
         )
         .expect("注册 issue 工具");
-    let config = Config::parse(
+    let config = Config::parse_fixture(
         r#"
         [[connections]]
         id = "qq"
@@ -90,7 +90,7 @@ fn bridge() -> Arc<Mutex<Bridge<MemoryStore>>> {
         id = "main"
         harness = "dsh"
         persona = "p"
-        token = "t-main"
+        token = { secret = "t-main" }
 
         [[sessions.subscriptions]]
         connection = "qq"

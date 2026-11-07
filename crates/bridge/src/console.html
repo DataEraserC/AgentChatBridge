@@ -1136,16 +1136,16 @@ function editConnection(id) {
   formFrame(`连接 — ${esc(id)} <span class="hint">（改了要重启桥）</span>`, `
     <div class="form-row"><label>地址</label><input type="text" id="c-url" value="${esc(c.url)}"></div>
     <div class="form-row"><label>账号</label><input type="text" id="c-account" value="${esc(c.account || "")}"></div>
-    <div class="form-row"><label>令牌</label><input type="text" id="c-token" placeholder="留空不改；填单个 - 表示清除" style="max-width:320px"></div>`,
+    <div class="form-row"><label>密钥来源名</label><input type="text" id="c-secret" placeholder="留空不改；填单个 - 表示清除" style="max-width:320px"><span class="hint">名字在 [secrets] 里声明，这里不写密钥本身</span></div>`,
     () => {
       const patch = {};
       const url = document.getElementById("c-url").value.trim();
       const account = document.getElementById("c-account").value.trim();
-      const token = document.getElementById("c-token").value;
+      const secret = document.getElementById("c-secret").value;
       if (url && url !== c.url) patch.url = url;
       if (account && account !== c.account) patch.account = account;
-      if (token === "-") patch.token = null;
-      else if (token.trim() !== "") patch.token = token.trim();
+      if (secret === "-") patch.secret = null;
+      else if (secret.trim() !== "") patch.secret = secret.trim();
       if (!Object.keys(patch).length) { showFormError("没有改动"); return false; }
       submitPatch([{ op: "connection", id, patch }]);
     });
@@ -1172,16 +1172,14 @@ function editGlobals() {
     });
 }
 
-const randToken = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
-
 function addConnection() {
   formFrame("新增连接 <span class='hint'>（保存后要重启桥才连上）</span>", `
     <div class="form-row"><label>连接 id</label><input type="text" id="nc-id" placeholder="qq2"></div>
     <div class="form-row"><label>平台</label><input type="text" id="nc-platform" value="qq"><span class="hint">平台标识（连接名参与房间路由）</span></div>
     <div class="form-row"><label>适配器</label><input type="text" id="nc-kind" value="onebot11"></div>
-    <div class="form-row"><label>地址</label><input type="text" id="nc-url" placeholder="ws://127.0.0.1:53001/ws?token=…" style="max-width:340px"></div>
+    <div class="form-row"><label>地址</label><input type="text" id="nc-url" placeholder="ws://127.0.0.1:53001/ws" style="max-width:340px"></div>
     <div class="form-row"><label>账号</label><input type="text" id="nc-account" placeholder="机器人 QQ 号"></div>
-    <div class="form-row"><label>令牌</label><input type="text" id="nc-token" placeholder="可选（OneBot access token）"></div>`,
+    <div class="form-row"><label>密钥来源名</label><input type="text" id="nc-secret" placeholder="可选；先在 [secrets] 里声明的名字"></div>`,
     () => {
       const g = (id) => document.getElementById(id).value.trim();
       const id = g("nc-id");
@@ -1191,7 +1189,7 @@ function addConnection() {
         platform: g("nc-platform"), kind: g("nc-kind"),
         url: g("nc-url"), account: g("nc-account"),
       };
-      if (g("nc-token")) create.token = g("nc-token");
+      if (g("nc-secret")) create.secret = g("nc-secret");
       return submitPatch([{ op: "connection", id, create }]);
     });
 }
@@ -1205,7 +1203,7 @@ function addSession() {
     <div class="form-row"><label>harness</label><select id="ns-harness">${harnesses.map((h) => `<option>${esc(h.id)}</option>`).join("")}</select></div>
     <div class="form-row"><label>人格</label><select id="ns-persona">${personas.map((p) => `<option>${esc(p.id)}</option>`).join("")}</select><span class="hint">必填；没有就先去建一个</span></div>
     <div class="form-row"><label>显示名</label><input type="text" id="ns-name" placeholder="可选"></div>
-    <div class="form-row"><label>接入令牌</label><input type="text" id="ns-token" value="${randToken()}" style="max-width:340px"><span class="hint">harness 连桥用；驱动要重启才能拿到新会话的令牌</span></div>
+    <div class="form-row"><label>密钥来源名</label><input type="text" id="ns-secret" placeholder="例如 dsh-dev-token" style="max-width:340px"><span class="hint">名字在 [secrets] 里声明；harness 连桥用，驱动要重启才能拿到值</span></div>
     <p class="hint">建好后去「订阅」给它加房间；驱动侧要在 start-drivers.sh 里登记这个会话 id 才会被驱动。</p>`,
     () => {
       const g = (id) => document.getElementById(id).value.trim();
@@ -1213,9 +1211,9 @@ function addSession() {
       if (!id) { showFormError("会话 id 不能为空"); return false; }
       const create = {
         harness: document.getElementById("ns-harness").value,
-        token: g("ns-token"),
+        secret: g("ns-secret"),
       };
-      if (!create.token) { showFormError("接入令牌不能为空"); return false; }
+      if (!create.secret) { showFormError("密钥来源名不能为空"); return false; }
       create.persona = document.getElementById("ns-persona").value;
       if (!create.persona) { showFormError("人格必填（配置里 persona 是必填项）"); return false; }
       if (g("ns-name")) create.name = g("ns-name");
