@@ -216,20 +216,23 @@ acbl-x86_64-unknown-linux-{gnu,musl}/
 ```sh
 sha256sum -c SHA256SUMS
 tar -xzf acbl-x86_64-unknown-linux-musl.tar.gz -C /opt
-/opt/acbl/install.sh --prefix /opt/acbl --scope user --autostart 0
+/opt/acbl/install.sh --prefix /opt/acbl --scope user --with-install-section 0
 ```
 
 `install.sh` 只做四件事：
 
 1. 校验前缀与目标架构（gnu / musl 选错时给出明确提示，不静默继续）；
 2. 把 `bin/` 与 `share/acb/` 放到位；
-3. 调 `acbctl unit install --scope user|system --autostart 0|1 --root <unit-dir>`，由 `acbctl` **渲染** `share/acb/units/` 里的模板，而不是直接复制模板；
+3. 调 `acbctl unit install --scope user|system --with-install-section 0|1 --root <unit-dir>`，由 `acbctl` **渲染** `share/acb/units/` 里的模板，而不是直接复制模板；
 4. 打印后续步骤（配置、密钥、`profile seed`、启动命令），**不执行它们**。
 
 - **unit 文件从哪来**：模板随 tar.gz 分发在 `share/acb/units/`，最终 unit 由 `acbctl unit install` 渲染。没有包管理器，就没有 `postinst`；`install.sh` 与手工执行 `acbctl unit install` 等价。
-- **是否 enable / start**：只有显式 `--autostart 1` 才写 `[Install]` 并执行 `systemctl enable`；默认只写文件 + `daemon-reload`，不启动。三种启动方式的选择权仍归部署者（§4.3）。
+- **是否 enable / start**：`acbctl unit install` 只渲染并落盘 unit，**不执行 `systemctl enable` / `daemon-reload`**（保持 installer 不触碰服务状态）。`--with-install-section 1` 决定是否渲染 `[Install]` 段；enable 由部署者显式执行：
+  - user scope：`systemctl --user daemon-reload && systemctl --user enable --now acb-launcher-user.service`
+  - system scope：`sudo systemctl daemon-reload && sudo systemctl enable --now acb-launcher.service`
+  默认（不传或 `0`）只写文件，不 enable、不 start。
 - **unit 必须是 `KillMode=process`**（§4.7.1），否则 `systemctl stop` 会连带杀掉 bridge。
-- **A-8 实现差异（明确记录，不静默改口径）**：`acbctl unit install` 只渲染并落盘 unit，**不执行 `systemctl enable` / `daemon-reload`**（保持 installer 不触碰服务状态）。`--autostart 1` 决定是否写 `[Install]` 段，实际 enable 由部署者执行；`--scope user|system` 决定 stack target 的 `WantedBy`。升级 acbl 同样不重启服务。
+- **A-8 实现说明**：`--with-install-section` 取代原先名不副实的 `--autostart`；`--scope user|system` 决定 stack target 的 `WantedBy`。升级 acbl 同样不重启服务。
 
 #### 2.5.4 升级与卸载：状态目录永不删除
 
@@ -335,7 +338,7 @@ G9 不是缺陷：**外部组件不参与 LKG 回滚是刻意设计**。桥是 A
 |---|---|---|---|---|
 | **A. 用户终端手工启动**（前台 `acb-launcher`） | **没有人**。78 后停在终端等用户处理；崩溃后用户自己重跑 | 终端输出归用户；要留存就自己重定向（如 `> log 2>&1`），轮转由用户/外部工具做 | **无**（和用户 shell 同 cgroup） | 否（只原地重启 bridge） |
 | **B. systemd 开机自启**（`enable --now acb-launcher-user.service` / 系统级） | systemd：`Restart=on-failure` 拉起异常退出；`RestartForceExitStatus=75`；`RestartPreventExitStatus=78` 停在 failed。正常 stop（退出 0）不会被重拉 | journald（stdout/stderr）或模板里的 `StandardOutput=append:` 文件；轮转由 journald / logrotate 负责 | **有**（独立 service cgroup，`KillMode=process`；stop 不连带 bridge） | 否 |
-| **C. systemd 只做进程守护、不开机自启**（装 unit 但不 `enable`，或 `ACB_UNIT_AUTOSTART=0`） | 同 B，但只有 `systemctl start` 之后才存在 | 同 B | **有**（同 B） | 否 |
+| **C. systemd 只做进程守护、不开机自启**（装 unit 但不 `enable`，或 `ACB_UNIT_INSTALL_SECTION=0`） | 同 B，但只有 `systemctl start` 之后才存在 | 同 B | **有**（同 B） | 否 |
 | **D. 无 systemd 自管**（runit / s6 / openrc / 容器 entrypoint / `acbctl run --mode=launcher`） | 用户的 init 或 `acbctl run` 父循环：普通崩溃重拉、78 停止（容器里 78 转成正常停止） | 由 init / 容器日志驱动；`acbctl run` 下是 `run.json` + launcher 自身输出；轮转由 init / runtime 负责 | **取决于 init**（runit/s6 通常有；裸前台没有） | 否 |
 
 **共同点：升级链在四种方式下都不重启 acbl。** 它只在 acbl 进程内停旧 bridge、切指针、起新 bridge。方式之间的差别只剩“acbl 自己崩溃/放弃时谁把它拉起来、日志去哪、有没有 cgroup”。
@@ -343,11 +346,11 @@ G9 不是缺陷：**外部组件不参与 LKG 回滚是刻意设计**。桥是 A
 安装器要预留的接口（避免以后返工）：
 
 - `ACB_MANAGED_BY`：`manual | systemd-user | systemd-system | container | custom-init | acbctl-run`，写进 `capabilities.json`，**只用于诊断与生成文档**，不参与升级准入。
-- `ACB_UNIT_AUTOSTART`：0/1，决定是否生成 `[Install]`（对应方式 B / C）。
+- `ACB_UNIT_INSTALL_SECTION`：0/1，决定是否渲染 `[Install]`（对应方式 B / C）；只影响渲染，不执行 enable。
 - `ACB_UNIT_SCOPE`：`user | system`，决定 unit root、`loginctl enable-linger`、以及系统级 `User=` 的必要性。
 - `ACB_LOG_TARGET`：`journal | file | inherit`，决定 unit 的 `StandardOutput=` 和安装器是否创建日志目录；日志轮转责任随 target 明确归属。
 - `ACB_UNIT_LOG_DIR` / `ACB_UNIT_ENV_FILE`：日志与密钥路径，安装器只写模板占位，不在 unit 里写死。
-- `acbctl unit install --autostart=0|1 --scope=user|system`：一次性把 A/B/C 的差异表达清楚；D 由文档与示例覆盖，不塞进同一开关。
+- `acbctl unit install --with-install-section=0|1 --scope=user|system`：一次性把 A/B/C 的差异表达清楚；D 由文档与示例覆盖，不塞进同一开关。
 
 **`restart_owner` 的结论：取消，`self` 档取消。**
 
@@ -450,7 +453,7 @@ adopt 成功后与“自己启动”走同一套观察逻辑：健康探针、�
 
 - bridge 由 `ProcessRunner` 拉起后原子写 `<state_dir>/bridge.instance.json`，含 `instance_id`、pid、`/proc/<pid>/stat` starttime、exe 路径、程序与参数；pid 只作诊断，身份由 starttime + exe + 参数 + `instance_id` 共同判定。
 - acbl 启动时读该记录：无记录但健康探针通过 → conflict(78)；pid 不在或 starttime/exe 不匹配 → 视为空缺，按 `current.json` 启动；全部匹配 → adopt，不重复拉起。
-- 两个 acbl 的互斥复用 `ActivationWriter` 对 `current.json` 的 `flock`：第二个 acbl 拿不到写者锁，直接退出 78，不会造成双实例。单独的 `adopt.lock` 暂未加。
+- 两个 acbl 的互斥复用 `ActivationWriter` 对 `current.json` 的 `flock`，并**覆盖整个决策窗口**：从启动对账、探测、决定 adopt/拉起，到 `Supervisor::new` 完成首次 start 才释放；因此第二个 acbl 不会在第一个尚未拉起 bridge 时同时判定“没有 bridge”。首次 start 后必须释放，否则后续升级提交/回滚在同一进程内重新加锁会自锁。单独的 `adopt.lock` 不再需要。
 - **TODO（B-12）**：把本地记录比对替换/补充为 bridge 自报的 `/internal/instance`；调用点在 `crates/supervisor/src/instance.rs` 与 `crates/launcher/src/main.rs` 的 detect 分支。不做 `acb_contract` 最低版本校验。
 
 #### 4.7.3 崩溃 vs 正常停止
@@ -797,7 +800,7 @@ unit 的 `ExecStart` 必须指向**系统层安装的 acbl**，不能指向 `pro
 - **A-8 已实现**：默认 `ACB_UNIT_ACBL_PREFIX=/usr/local` → `$prefix/bin/acb-launcher`；也接受显式 `ACB_UNIT_LAUNCHER_BIN`，但拒绝落在 `profile/generations/` 的路径。`acbctl unit doctor` 仍会检查 `ExecStart` 程序存在。
 - 部署校验：`acbctl unit doctor` + `test -x <静态入口>`，并额外确认 `ExecStart` 路径不在 `profile/generations/` 下。
 - payload 不再需要 `acbctl` / `acb-launcher` / `acb-supervisor`；`profile seed` 的必带清单要相应收窄（G14，仍待 B-12）。
-- **已知未改**：launcher unit 的 `WorkingDirectory` 仍沿用 `@ACB_UNIT_REPO_DIR@`，bridge 子进程继承该 cwd。静态 acbl 若安装在无仓库环境，这一项需在 C-9 改成状态目录或显式配置；A-8 不动它，避免改变 bridge 的运行时 cwd。
+- **已知未改（C-9 硬前置）**：launcher unit 的 `WorkingDirectory` 仍沿用 `@ACB_UNIT_REPO_DIR@`，bridge 子进程继承该 cwd。A-8 不动它，避免改变 bridge 的运行时 cwd；打包前必须完成 §6.5.1 的 cwd / 相对路径审计，并按审计结论二选一。
 
 ### 6.4 acbl ↔ payload 契约版本化
 
@@ -835,6 +838,28 @@ payload 与 acbl 现在是两个独立分发的单元，接口必须显式版本
 
 这直接回答“守护者为什么需要重启”：**它不需要因为 payload 换代而重启；只有在它自己的版本/启动方式变了时才重启**。
 
+### 6.5.1 C-9 硬前置：bridge 的 cwd / 相对路径审计
+
+unit 的 `WorkingDirectory` 会原样传给 bridge 子进程（launcher 不另设 `current_dir`）。打包 acbl 到无仓库环境前，必须按下面的代码事实逐项审计；**不能只写“需要改”**。
+
+**已知依赖（代码事实）**：
+
+| 依赖点 | 位置 | 相对 cwd 的行为 |
+|---|---|---|
+| `[storage].path` 默认 `state/acb.db` | `crates/kernel/src/config.rs:33-35`、`271-273`；`config.example.toml:113-115` | 注释明确“相对路径按启动时的工作目录算” |
+| `[file_relay].dir` 默认 `state/relay` | `crates/kernel/src/config.rs:52-53`、`566` | 收文件落盘位置随 cwd |
+| `[memory].worktrees_root` 默认 `state/worktrees` | `crates/kernel/src/config.rs:55-58`、`103`；`memory.rs:65-66` | `ensure_bare_repo(location)` 直接 `PathBuf::from`，相对值按 cwd 解析 |
+| `kernel.task` 工具参数 `cwd` | `crates/kernel/src/task.rs:57-84` | 相对值按 bridge cwd 解析；`create_dir_all` 同样相对 |
+| 组件 / 适配器 `path`（`.so`、wasm host、脚本） | `config.example.toml:81`、`85`、`129` | 示例写“绝对路径”，但未见启动时强制校验；相对值会落到 cwd |
+| drivers / harness 脚本 | `deploy/start-dsh.sh`、`deploy/opencode-serve.sh`、`start-drivers.sh` | 脚本自己 source env、用 `REPO` 绝对路径；若配置里给相对脚本路径，仍按 cwd 解析 |
+
+**审计结论（C-9 必须二选一并写死）**：
+
+- **方案 A：保留 `WorkingDirectory=payload 根`**。要求打包器把所有默认相对路径改成绝对路径（`/var/lib/acb` 或 `${XDG_STATE_HOME}/acb`），并在 `acbctl unit doctor` 里增加一项：配置中不得出现 `state/*` 这类相对默认值。风险是 acbl 独立安装后 payload 根可能不存在或被只读挂载。
+- **方案 B（推荐）：把 launcher unit 的 `WorkingDirectory` 改成状态根**（`@ACB_UNIT_STATE_DIR@`），acbl 启动前 `mkdir -p`。这样 `state/acb.db`、`state/relay`、`state/worktrees` 自动落到状态根，与 payload 彻底解耦。前提：本轮审计未发现 bridge 直接读 repo 根的其它相对文件，只剩上表的配置默认值与工具 `cwd` 参数。
+- **验收**：`readlink /proc/<bridge-pid>/cwd` 与预期一致；把 cwd 切到 `/tmp`、用默认配置启动 bridge，确认 db / relay / worktrees 落在状态根而不是 payload；`kernel.task` 传相对 `cwd` 时结果符合预期。
+- **状态**：A-8 只记录、不改 `WorkingDirectory`；本审计是 C-9 的硬前置，未完成前不得发布非仓库环境的 acbl 包。
+
 ---
 
 ## 7. 落地拆分（只列步骤，不改代码）
@@ -862,7 +887,7 @@ payload 与 acbl 现在是两个独立分发的单元，接口必须显式版本
 3. **75 退役、78 保留**：75 只作为兼容保留值，不再由升级路径发出；78 表示“现场坏了、需要人”（§4.2）。
 4. **`restart_owner` 取消**：不再作为升级门禁；`self` 档取消，改 `managed_by` 诊断（§4.3）。
 5. **契约版本化**：payload 声明 `acb_contract`，acbl 校验区间；不匹配拒绝切换（§6.4）。
-6. **谁启动 acbl**：三类并列，安装器参数选择——A 用户终端手工、B systemd 开机自启、C systemd 只守护不自启；无 systemd 由用户自管（D）。差异见 §4.3，接口用 `ACB_MANAGED_BY` / `ACB_UNIT_AUTOSTART` / `ACB_UNIT_SCOPE` / `ACB_LOG_TARGET` 预留。
+6. **谁启动 acbl**：三类并列，安装器参数选择——A 用户终端手工、B systemd 开机自启、C systemd 只守护不自启；无 systemd 由用户自管（D）。差异见 §4.3，接口用 `ACB_MANAGED_BY` / `ACB_UNIT_INSTALL_SECTION` / `ACB_UNIT_SCOPE` / `ACB_LOG_TARGET` 预留。
 7. **热加载**：不做自动热加载；只做控制台按钮，加载对象是 `[[component]]`，失败保留旧表（§4.6）。
 8. **drivers**：v1 作为单个组件（`drivers_acb`），理由是代码事实（§5.5）；单驱动死亡要通过“脚本整体退出”暴露给 acbl。**会话列表必须从配置/库读取（与 `[[sessions]]` 同一数据源），不得写死在 preset 脚本里**。
 9. **控制台**：短期只读；长期允许“选预设 / 开关 / 白名单字段”，不允许任意命令，前置条件见 §5.8。

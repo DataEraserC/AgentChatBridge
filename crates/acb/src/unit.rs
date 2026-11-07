@@ -65,7 +65,7 @@ const OPTIONAL_KEYS: &[&str] = &[
     "ACB_UNIT_SHELL",
     "ACB_UNIT_CONSOLE_PORT",
     "ACB_UNIT_OPENCODE_PORT",
-    "ACB_UNIT_AUTOSTART",
+    "ACB_UNIT_INSTALL_SECTION",
     "ACB_UNIT_LAUNCHER_BIN",
     "ACB_UNIT_ACBL_PREFIX",
     "ACB_UNIT_STATE_DIR",
@@ -76,7 +76,7 @@ const KEY_DEFAULTS: &[(&str, &str)] = &[
     ("ACB_UNIT_SHELL", "/run/current-system/sw/bin/bash"),
     ("ACB_UNIT_CONSOLE_PORT", "3100"),
     ("ACB_UNIT_OPENCODE_PORT", "4097"),
-    ("ACB_UNIT_AUTOSTART", "0"),
+    ("ACB_UNIT_INSTALL_SECTION", "0"),
     ("ACB_UNIT_ACBL_PREFIX", "/usr/local"),
 ];
 
@@ -163,7 +163,10 @@ pub fn install_command(args: &[String]) -> Result<ExitCode, String> {
     }
 
     let parsed = parse_install_args(args)?;
-    let units = render_all_with_autostart(parsed.autostart.as_deref(), parsed.scope.as_deref())?;
+    let units = render_all_with_install_section(
+        parsed.install_section.as_deref(),
+        parsed.scope.as_deref(),
+    )?;
     let root = parsed.root;
     fs::create_dir_all(&root).map_err(|error| format!("create {}: {error}", root.display()))?;
 
@@ -473,15 +476,15 @@ fn parse_root_arg(args: &[String], command: &str) -> Result<PathBuf, String> {
 
 struct InstallArgs {
     root: PathBuf,
-    /// `None` 表示沿用 `ACB_UNIT_AUTOSTART` 环境值；`Some("1")` 才写 `[Install]`。
-    autostart: Option<String>,
+    /// `None` 表示沿用 `ACB_UNIT_INSTALL_SECTION` 环境值；`Some("1")` 才写 `[Install]`。
+    install_section: Option<String>,
     /// `user` / `system`，决定 stack target 的 `WantedBy`。
     scope: Option<String>,
 }
 
 fn parse_install_args(args: &[String]) -> Result<InstallArgs, String> {
     let mut root = None;
-    let mut autostart = None;
+    let mut install_section = None;
     let mut scope = None;
     let mut index = 0;
     while index < args.len() {
@@ -494,29 +497,29 @@ fn parse_install_args(args: &[String]) -> Result<InstallArgs, String> {
                 let value = next_value(args, &mut index, "--scope")?;
                 scope = Some(validate_scope(&value)?);
             }
-            "--autostart" => {
-                // 允许 `--autostart 0|1`，也允许单独 `--autostart` 表示开启。
+            "--with-install-section" => {
+                // 允许 `--with-install-section 0|1`，也允许单独出现表示 1。
                 match args.get(index + 1) {
                     Some(value) if value == "0" || value == "1" => {
-                        autostart = Some(value.clone());
+                        install_section = Some(value.clone());
                         index += 1;
                     }
-                    _ => autostart = Some("1".to_string()),
+                    _ => install_section = Some("1".to_string()),
                 }
             }
-            "--no-autostart" => autostart = Some("0".to_string()),
+            "--no-install-section" => install_section = Some("0".to_string()),
             _ if arg.starts_with("--root=") => {
                 root = Some(PathBuf::from(non_empty_value(arg, "--root")?));
             }
             _ if arg.starts_with("--scope=") => {
                 scope = Some(validate_scope(&non_empty_value(arg, "--scope")?)?);
             }
-            _ if arg.starts_with("--autostart=") => {
-                let value = non_empty_value(arg, "--autostart")?;
+            _ if arg.starts_with("--with-install-section=") => {
+                let value = non_empty_value(arg, "--with-install-section")?;
                 if value != "0" && value != "1" {
-                    return Err(format!("--autostart must be 0 or 1: {value}"));
+                    return Err(format!("--with-install-section must be 0 or 1: {value}"));
                 }
-                autostart = Some(value);
+                install_section = Some(value);
             }
             other => return Err(format!("unknown argument for install: {other}")),
         }
@@ -524,7 +527,7 @@ fn parse_install_args(args: &[String]) -> Result<InstallArgs, String> {
     }
     Ok(InstallArgs {
         root: root.ok_or_else(|| "install requires --root DIR".to_string())?,
-        autostart,
+        install_section,
         scope,
     })
 }
@@ -555,12 +558,12 @@ fn non_empty_value(arg: &str, flag: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-fn render_all_with_autostart(
-    autostart: Option<&str>,
+fn render_all_with_install_section(
+    install_section: Option<&str>,
     scope: Option<&str>,
 ) -> Result<Vec<RenderedUnit>, String> {
     let mut values = resolved_values()?;
-    apply_autostart(&mut values, autostart, scope)?;
+    apply_install_section(&mut values, install_section, scope)?;
     TEMPLATES
         .iter()
         .map(|(name, template)| {
@@ -571,7 +574,7 @@ fn render_all_with_autostart(
 }
 
 fn render_all() -> Result<Vec<RenderedUnit>, String> {
-    render_all_with_autostart(None, None)
+    render_all_with_install_section(None, None)
 }
 
 /// 先收集 ACB_UNIT_*，再把 BIN_DIR / REPO_DIR 换成 profile/current 下的路径（可用时）。
@@ -705,42 +708,43 @@ pub(crate) fn values_from_env() -> Result<BTreeMap<String, String>, String> {
         validate_port(key, value)?;
     }
 
-    apply_autostart(&mut values, None, None)?;
+    apply_install_section(&mut values, None, None)?;
     Ok(values)
 }
 
-/// `ACB_UNIT_AUTOSTART` 控制是否在渲染结果里写 `[Install]`。
-/// `--autostart 0|1` 显式覆盖环境值；`scope` 只影响 stack target 的 `WantedBy`。
-fn apply_autostart(
+/// `ACB_UNIT_INSTALL_SECTION` 控制是否在渲染结果里写 `[Install]`；它只负责渲染，
+/// 不代表 `systemctl enable` 已被执行。
+/// `--with-install-section 0|1` 显式覆盖环境值；`scope` 只影响 stack target 的 `WantedBy`。
+fn apply_install_section(
     values: &mut BTreeMap<String, String>,
-    autostart: Option<&str>,
+    render_install_section: Option<&str>,
     scope: Option<&str>,
 ) -> Result<(), String> {
-    let enabled = match autostart {
+    let enabled = match render_install_section {
         Some(value) => value.to_string(),
         None => values
-            .get("ACB_UNIT_AUTOSTART")
+            .get("ACB_UNIT_INSTALL_SECTION")
             .cloned()
-            .expect("defaults cover autostart"),
+            .expect("defaults cover install section"),
     };
-    let (install_section, system_install_section) = match enabled.as_str() {
+    let (user_section, system_section) = match enabled.as_str() {
         "0" => (String::new(), String::new()),
         "1" => (
             "\n[Install]\nWantedBy=default.target".to_string(),
             "\n[Install]\nWantedBy=multi-user.target".to_string(),
         ),
-        other => return Err(format!("ACB_UNIT_AUTOSTART must be 0 or 1: {other}")),
+        other => return Err(format!("ACB_UNIT_INSTALL_SECTION must be 0 or 1: {other}")),
     };
     let stack_section = match scope {
-        Some("user") => install_section.clone(),
-        Some("system") => system_install_section.clone(),
+        Some("user") => user_section.clone(),
+        Some("system") => system_section.clone(),
         Some(other) => return Err(format!("--scope must be user or system: {other}")),
         // 未指定 scope 时沿用旧行为：stack target 跟随 user 安装段。
-        None => install_section.clone(),
+        None => user_section.clone(),
     };
-    values.insert("ACB_UNIT_AUTOSTART".to_string(), enabled);
-    values.insert("INSTALL_SECTION".to_string(), install_section);
-    values.insert("SYSTEM_INSTALL_SECTION".to_string(), system_install_section);
+    values.insert("ACB_UNIT_INSTALL_SECTION".to_string(), enabled);
+    values.insert("INSTALL_SECTION".to_string(), user_section);
+    values.insert("SYSTEM_INSTALL_SECTION".to_string(), system_section);
     values.insert("STACK_INSTALL_SECTION".to_string(), stack_section);
     Ok(())
 }
@@ -964,13 +968,22 @@ fn print_render_help() {
 }
 
 fn print_install_help() {
-    println!("Usage: acbctl unit install --root DIR [--scope user|system] [--autostart 0|1]");
+    println!(
+        "Usage: acbctl unit install --root DIR [--scope user|system] \
+         [--with-install-section 0|1]"
+    );
     println!();
     println!("  --root DIR         unit 文件写到哪里（user 通常是 ~/.config/systemd/user，");
     println!("                     system 通常是 /etc/systemd/system）");
     println!("  --scope user|system  决定 stack target 的 [Install] WantedBy");
-    println!("  --autostart 1     在 unit 里写 [Install] 段；0 或省略则不写");
-    println!("                     （acbctl 只渲染文件，不执行 systemctl enable/start）");
+    println!("  --with-install-section 1  在 unit 里渲染 [Install] 段；0 或省略则不渲染");
+    println!("                     （只渲染文件；enable/daemon-reload 由部署者执行：");
+    println!(
+        "                      systemd --user: systemctl --user enable --now acb-launcher-user.service"
+    );
+    println!(
+        "                      system scope:   sudo systemctl enable --now acb-launcher.service）"
+    );
 }
 
 fn print_uninstall_help() {

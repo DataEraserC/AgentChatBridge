@@ -329,12 +329,13 @@ export ACB_UNIT_OPENCODE_DIR="$OPENCODE_DIR"
 export ACB_UNIT_CONSOLE_PORT=3100
 export ACB_UNIT_OPENCODE_PORT=4097
 export ACB_UNIT_SHELL=/bin/bash                # NixOS 可省略（默认 /run/current-system/sw/bin/bash）
-export ACB_UNIT_AUTOSTART=1                    # 1 才会生成 [Install] 段
+export ACB_UNIT_INSTALL_SECTION=1               # 1 才渲染 [Install] 段（不执行 enable）
 export ACB_UNIT_LAUNCHER_BIN="$ACBL_BIN"       # 关键：指向静态入口，不是 profile/current/bin
 # 或用前缀：export ACB_UNIT_ACBL_PREFIX=/opt/acbl   # → /opt/acbl/bin/acb-launcher
 
 "$ACBCTL_BIN" unit install --root "$HOME/.config/systemd/user"
 "$ACBCTL_BIN" unit doctor  --root "$HOME/.config/systemd/user"
+# install 只渲染文件，不 enable/start；enable 命令见下一节。
 systemctl --user daemon-reload
 ```
 
@@ -354,7 +355,18 @@ systemctl --user enable --now acb-stack.target
 systemctl --user mask acb-bridge.service   # 如果同时还启用了 launcher
 ```
 
-`ACB_UNIT_AUTOSTART=0` 时不会生成 `[Install]`，需要手工挂接：
+`ACB_UNIT_INSTALL_SECTION=0` 时不会渲染 `[Install]`，也不会有 enable；install 只落盘，enable 由部署者执行：
+
+```sh
+# 用户级（推荐）
+systemctl --user daemon-reload
+systemctl --user enable --now acb-launcher-user.service
+# 系统级
+sudo systemctl daemon-reload
+sudo systemctl enable --now acb-launcher.service
+```
+
+若确实不想写 `[Install]`，再手工挂接：
 
 ```sh
 systemctl --user start acb-launcher-user.service
@@ -628,7 +640,7 @@ ACB 计划提供 `deploy/presets/`，预设的维度是**安装方式**，不是
 | C-4 | 非 nix 的发布产物（预编译 tarball + 校验和） | 无 nix 组合都要求用户自己装 Rust 工具链 | #3 #4 #7 #8 |
 | C-5 | Windows 支持 | 无服务托管、无 Unix 信号/权限模型；当前完全没有路径 | 新组合 |
 | C-6 | 密钥来源 provider 抽象（env/file/keyring）+ 配置只存来源类型与名字 | 当前实现是“配置里写 `${NAME}` 占位符”，不符合“配置不存密钥、不插值”的目标 | 全组合 |
-| C-7 | 启动 acbl 的方式尚未做成安装器参数 | 三类方式（手工 / systemd 自启 / systemd 只守护）与无 systemd 自管，差异落在“崩溃/78 后谁重拉、日志归属、cgroup”上；需要 `--autostart` / `--scope` / `--log-target` 等显式接口。升级不再重启 acbl，`restart_owner` 已取消 | 全组合 |
+| C-7 | 启动 acbl 的方式尚未做成安装器参数 | 三类方式（手工 / systemd 自启 / systemd 只守护）与无 systemd 自管，差异落在“崩溃/78 后谁重拉、日志归属、cgroup”上；需要 `--with-install-section` / `--scope` / `--log-target` 等显式接口。升级不再重启 acbl，`restart_owner` 已取消 | 全组合 |
 | C-8 | 控制台组件编辑（长期） | 短期只读；长期只允许“选预设 / 开关 / 白名单字段”，需要鉴权、二次确认、变更审计与失败回滚 | 全组合（长期） |
 | C-9 | acbl 的稳定分发渠道（nix-config 之外） | NixOS 由 nix-config 提供；非 NixOS 目前只有“nix profile（默认包）/ cargo / 手工替换”三条路，缺独立的 acbl 包、deb/rpm、brew tap 等稳定渠道，也缺“acbl 版本 ↔ 契约区间”的发布说明 | #3 #4 #5 #6 #7 #8 |
 
