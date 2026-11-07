@@ -1477,7 +1477,7 @@ fn migrate_one(root: &Path, id: &str) -> Result<bool, String> {
 }
 
 fn validate_payload(source: &Path) -> Result<(), String> {
-    let dirs = ["bin", "harnesses", "deploy/units/systemd"];
+    let dirs = ["bin", "harnesses", "share/acb/units"];
     let files = [
         "deploy/start-dsh.sh",
         "deploy/start-drivers.sh",
