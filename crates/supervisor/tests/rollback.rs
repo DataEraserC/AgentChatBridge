@@ -202,6 +202,7 @@ fn config(dir: &std::path::Path, lkg: Option<&str>) -> Config {
         generation: None,
         lkg: lkg.map(CommandSpec::new),
         health_url: None,
+        health_token_file: None,
         state_dir: dir.to_string_lossy().into_owned(),
         probe_interval_secs: 1,
         stable_window_secs: 60,
@@ -696,10 +697,7 @@ fn stable_window_promotes_current_to_lkg() {
         serde_json::from_slice(&std::fs::read(dir.join("lkg.json")).expect("lkg file"))
             .expect("parse lkg");
     assert_eq!(lkg_json["command"]["generation"]["id"], "gen-1");
-    assert_eq!(
-        lkg_json["command"]["generation"]["config_sha256"],
-        "abc123"
-    );
+    assert_eq!(lkg_json["command"]["generation"]["config_sha256"], "abc123");
     assert!(
         audit_events(&supervisor)
             .iter()
@@ -784,7 +782,11 @@ fn rollback_none_degrades_to_78_without_touching_current_pointer() {
     supervisor.tick();
 
     assert!(supervisor.stopped(), "rollback=none 必须停止监督");
-    assert_eq!(supervisor.exit_code(), Some(EXIT_GIVE_UP), "放弃退出码是 78");
+    assert_eq!(
+        supervisor.exit_code(),
+        Some(EXIT_GIVE_UP),
+        "放弃退出码是 78"
+    );
     assert!(supervisor.failed().is_some(), "要记录放弃原因");
     assert_eq!(supervisor.current().program, "/current", "不能切到 LKG");
     assert!(

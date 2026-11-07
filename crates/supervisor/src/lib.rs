@@ -11,9 +11,9 @@
 // `pointer` 模块要用 `flock` 保证指针单写者；只允许该模块申请 `unsafe`。
 #![deny(unsafe_code)]
 
-mod pointer;
 pub mod adopted;
 pub mod instance;
+mod pointer;
 pub mod upgrade;
 
 use std::collections::VecDeque;
@@ -31,9 +31,7 @@ use acb_supervisor_policy::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub use pointer::{
-    ActivationWriter, Projection, ReconcileOutcome, current_path, load_current,
-};
+pub use pointer::{ActivationWriter, Projection, ReconcileOutcome, current_path, load_current};
 
 pub const DEFAULT_PROBE_INTERVAL_SECS: u64 = 5;
 pub const DEFAULT_STABLE_WINDOW_SECS: u64 = 60;
@@ -188,6 +186,11 @@ pub struct Config {
     /// 桥的健康端点，如 `http://127.0.0.1:7700/healthz`。
     #[serde(default)]
     pub health_url: Option<String>,
+    /// 健康探针鉴权用的 token 文件。不配置时自动取
+    /// `$XDG_RUNTIME_DIR/acb-health.token`（无该变量则临时目录）；文件不存在
+    /// 视为 bridge 还没写出 token，退回无鉴权探测。
+    #[serde(default)]
+    pub health_token_file: Option<String>,
     #[serde(default = "default_state_dir")]
     pub state_dir: String,
     #[serde(default = "default_probe_interval")]
@@ -370,6 +373,11 @@ pub trait Probe {
 pub struct HttpProbe {
     url: String,
     timeout: Duration,
+    /// `Some` 表示读这个文件做 Bearer 鉴权；`None` 表示无鉴权。
+    token_file: Option<PathBuf>,
+    /// 显式配置的 token 文件读不到时判不健康（不退回无鉴权），只提示一次。
+    token_required: bool,
+    warned: bool,
 }
 
 impl HttpProbe {
@@ -377,17 +385,91 @@ impl HttpProbe {
         Self {
             url: url.into(),
             timeout: Duration::from_millis(500),
+            token_file: None,
+            token_required: false,
+            warned: false,
+        }
+    }
+
+    /// 自动模式：token 文件存在就带 `Authorization: Bearer`，不存在按无鉴权端点处理。
+    pub fn with_token_file(url: impl Into<String>, token_file: impl Into<PathBuf>) -> Self {
+        Self {
+            token_file: Some(token_file.into()),
+            ..Self::new(url)
+        }
+    }
+
+    /// 显式模式：token 文件缺失/不可读即判不健康并打印一次原因。不退回无鉴权，
+    /// 否则鉴权配置错误会伪装成普通的 401/连接失败。
+    pub fn require_token_file(url: impl Into<String>, token_file: impl Into<PathBuf>) -> Self {
+        Self {
+            token_required: true,
+            ..Self::with_token_file(url, token_file)
         }
     }
 }
 
 impl Probe for HttpProbe {
     fn healthy(&mut self) -> bool {
-        http_ok(&self.url, self.timeout)
+        // 每次探测都重读：bridge 重启会换 token，缓存会让探针在轮换后一直 401。
+        let token = match &self.token_file {
+            None => None,
+            Some(path) => match read_token(path) {
+                Ok(token) => Some(token),
+                Err(error) => {
+                    if self.token_required {
+                        if !self.warned {
+                            eprintln!(
+                                "acb-supervisor: cannot read health token file {}: {error}; \
+                                 refusing to probe without authentication",
+                                path.display()
+                            );
+                            self.warned = true;
+                        }
+                        return false;
+                    }
+                    // 自动模式：文件还没写出来（启动竞态），或端点本来不鉴权。
+                    None
+                }
+            },
+        };
+        http_ok(&self.url, self.timeout, token.as_deref())
     }
 }
 
-fn http_ok(url: &str, timeout: Duration) -> bool {
+/// 按 supervisor 配置构造探针；launcher / supervisor 两个入口共用。
+pub fn build_probe(config: &Config) -> Box<dyn Probe> {
+    let Some(url) = &config.health_url else {
+        return Box::new(AlwaysHealthy);
+    };
+    match &config.health_token_file {
+        Some(path) => Box::new(HttpProbe::require_token_file(url, path)),
+        None => Box::new(HttpProbe::with_token_file(url, default_health_token_file())),
+    }
+}
+
+/// bridge 写 token 的位置：`$XDG_RUNTIME_DIR/acb-health.token`；没有该变量
+/// （Windows、精简容器）时退回 `std::env::temp_dir()`，与 bridge 侧写入逻辑一致。
+pub fn default_health_token_file() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("acb-health.token")
+}
+
+fn read_token(path: &Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let token = text.trim();
+    if token.is_empty() {
+        return Err("file is empty".to_owned());
+    }
+    if token.contains('\r') || token.contains('\n') {
+        return Err("token contains a line break".to_owned());
+    }
+    Ok(token.to_owned())
+}
+
+fn http_ok(url: &str, timeout: Duration, token: Option<&str>) -> bool {
     let Some(rest) = url.strip_prefix("http://") else {
         return false;
     };
@@ -406,7 +488,12 @@ fn http_ok(url: &str, timeout: Duration) -> bool {
     };
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    // token 只进请求头，不写日志、不进配置文本。
+    let auth = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\n{auth}Connection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }

@@ -24,9 +24,9 @@ use acb_supervisor::upgrade::{
     detect_restart_owner, is_terminal_status, validate_request,
 };
 use acb_supervisor::{
-    ActivationWriter, AlwaysHealthy, CommandSpec, EXIT_GIVE_UP, EXIT_OK, EXIT_ROLLBACK, HttpProbe,
-    Parts, ProcessRunner, Probe, Projection, ReconcileOutcome, RollbackMode, Runner, Supervisor,
-    SystemClock, SystemSleeper, build_policy, load_config, load_current, now_ms,
+    ActivationWriter, CommandSpec, EXIT_GIVE_UP, EXIT_OK, EXIT_ROLLBACK, Parts, Probe,
+    ProcessRunner, Projection, ReconcileOutcome, RollbackMode, Runner, Supervisor, SystemClock,
+    SystemSleeper, build_policy, load_config, load_current, now_ms,
 };
 
 fn main() -> ExitCode {
@@ -129,10 +129,7 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_GIVE_UP as u8);
         }
     };
-    let mut probe: Box<dyn Probe> = match &config.health_url {
-        Some(url) => Box::new(HttpProbe::new(url)),
-        None => Box::new(AlwaysHealthy),
-    };
+    let mut probe: Box<dyn Probe> = acb_supervisor::build_probe(&config);
     // acbl 不拥有 bridge：启动前先确认有没有可验证的旧实例。有就接管，
     // 无法确认身份但有健康响应就报错，绝不再起一个去抢同一个端口。
     let instance_path = state_dir.join(instance::INSTANCE_FILE);
@@ -188,10 +185,14 @@ fn main() -> ExitCode {
 
     while !supervisor.stopped() {
         if shutdown::requested() {
-            // 正常停止 / 升级 acbl：acbl 只观察和恢复 bridge，不拥有它。
-            // unit 用 KillMode=process，子进程本来就不会被 cgroup 带走；
-            // 这里也不主动杀，下一任 acbl 会通过 bridge.instance.json 接管。
-            eprintln!("acb-launcher: stop requested; leaving bridge running");
+            // unit 用 KillMode=process，cgroup 不会带走子进程，必须自己停：
+            // 否则 systemctl stop / 回退到旧 unit 时，孤儿 bridge 占着端口，
+            // 下一个进程只会 EADDRINUSE 然后 78。升级路径不经过这里——
+            // 它在提交前已显式 stop_child，退出 75 由 systemd 重拉。
+            eprintln!("acb-launcher: stop requested; stopping bridge");
+            if let Err(error) = supervisor.stop_child() {
+                eprintln!("acb-launcher: cannot stop bridge: {error}");
+            }
             notifier.stopping();
             return ExitCode::from(EXIT_OK as u8);
         }
@@ -364,7 +365,10 @@ fn maybe_handle_upgrade(
         return Ok(());
     }
     if let Some(expected) = &request.expected_current_id {
-        let actual = current.generation.as_ref().map(|generation| generation.id.as_str());
+        let actual = current
+            .generation
+            .as_ref()
+            .map(|generation| generation.id.as_str());
         if actual != Some(expected.as_str()) {
             finish_request(
                 mailbox,
@@ -423,7 +427,13 @@ fn maybe_handle_upgrade(
     // 停旧之前把目标代的解析与可执行文件校验做完：任何会失败的准备动作
     // 都发生在服务还活着的时候，构建/产物不可用不能打断正在跑的版本。
     if let Err(error) = profile::validate_generation(&profile_root, state_dir, &target_id) {
-        finish_request(mailbox, &active, "aborted", "target_invalid", error.message());
+        finish_request(
+            mailbox,
+            &active,
+            "aborted",
+            "target_invalid",
+            error.message(),
+        );
         if error.is_rejected() {
             return give_up_on_rejection(supervisor, &error);
         }
@@ -442,7 +452,13 @@ fn maybe_handle_upgrade(
     //（锁 + journal + current.json + 投影），launcher 不再拼指针或调 acbctl。
     if let Err(error) = profile::activate_generation(&profile_root, state_dir, &target_id) {
         let _ = supervisor.restart_current();
-        finish_request(mailbox, &active, "aborted", "commit_failed", error.message());
+        finish_request(
+            mailbox,
+            &active,
+            "aborted",
+            "commit_failed",
+            error.message(),
+        );
         return Ok(());
     }
 
@@ -477,8 +493,12 @@ fn committed_restart_exit(mailbox: &Mailbox, active: &ActiveUpgrade, target_id: 
     if let Err(error) = mailbox.set_active_status("restarting", now_ms()) {
         eprintln!("acb-launcher: cannot mark upgrade restarting: {error}");
     }
-    let mut result =
-        UpgradeResult::new(&active.request_id, "restarting", "pointer_committed", now_ms());
+    let mut result = UpgradeResult::new(
+        &active.request_id,
+        "restarting",
+        "pointer_committed",
+        now_ms(),
+    );
     result.target_generation_id = Some(target_id.to_string());
     if let Err(error) = mailbox.write_result(&result) {
         eprintln!("acb-launcher: cannot write upgrade result: {error}");

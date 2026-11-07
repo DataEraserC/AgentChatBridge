@@ -47,7 +47,7 @@
 | 读取运行版本 | 读 `state_dir/current.json`，缺省时写入配置版本 | `main.rs:82-107` |
 | 启动对账 | 用 `ActivationWriter` 的 journal 对账，损坏不猜、退出 78 | `main.rs:66-81` |
 | 监督子进程 | **有，单个**：`ProcessRunner` 持 `Option<Child>`，spawn/kill/wait | `crates/supervisor/src/lib.rs:266-319` |
-| 健康探针 | **单个** `health_url`；没有时用 `AlwaysHealthy` | `supervisor.toml.tmpl:5`；`lib.rs:125-128` |
+| 健康探针 | **单个** `health_url`，默认读 `$XDG_RUNTIME_DIR/acb-health.token` 做 Bearer 鉴权；没有时用 `AlwaysHealthy` | `supervisor.toml.tmpl:5`；`lib.rs:375-476` |
 | 退避重启 | 全局策略：`restart_backoff_secs = [1,2,4,8,30]` | `supervisor.toml.tmpl:13-27` |
 | LKG / 回滚 | **有**，但只针对当前这一个 `CommandSpec` | `lib.rs:751-770, 906-975` |
 | 升级请求 | 认领、校验、stage、停旧、提交、退出 75（**旧模型**） | `main.rs:288-386` |
@@ -67,6 +67,15 @@ program = "@ACB_UNIT_BIN_DIR@/acb-bridge"
 args = ["--config", "@ACB_UNIT_CONFIG_FILE@"]
 health_url = "http://127.0.0.1:@ACB_UNIT_CONSOLE_PORT@/healthz"
 ```
+
+`health_url` 指向 console 的 `/healthz` 时必须带鉴权：探针自动读 bridge 写出的
+`$XDG_RUNTIME_DIR/acb-health.token`（无该变量时退回临时目录，与 bridge 写入一致），
+不必把 token 写进 supervisor 配置或 unit。
+
+unit 保持 `KillMode=process`：systemd 只给 launcher 发信号，launcher 在
+SIGTERM/SIGINT 收尾时自己 `stop_child` 停桥，避免 `systemctl stop` 或回退到
+旧 unit 时留下占端口的孤儿 bridge。launcher 被 SIGKILL（崩溃）时子进程才会
+留下，由下一任 acbl 通过 `bridge.instance.json` 接管。
 
 所以 supervisor 管的是**桥**，且只有桥。dsh / drivers / opencode 目前由 systemd 各自的 unit 拉（`deploy/units/systemd/*.service.tmpl`），launcher 完全不认识它们。
 

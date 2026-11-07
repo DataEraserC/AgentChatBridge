@@ -85,6 +85,20 @@ impl ProcessNotifier {
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+
+    /// 只校验通知进程是否存在，不 spawn。`--check` 用它把“配了通知却静默降级”
+    /// 变成启动期失败。
+    pub fn preflight() -> Result<PathBuf, String> {
+        let path = notifier_binary();
+        if path.is_file() {
+            Ok(path)
+        } else {
+            Err(format!(
+                "cannot find {BINARY_NAME} at {} (set ACB_NOTIFIER_BIN to override)",
+                path.display()
+            ))
+        }
+    }
 }
 
 impl NoticeSink for ProcessNotifier {
