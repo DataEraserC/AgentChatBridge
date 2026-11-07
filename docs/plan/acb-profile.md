@@ -78,16 +78,24 @@ acbctl profile migrate --to copy [<gen-or-label>] [--profile-dir DIR]
 - `current`：有 current 退出 0，无 current/损坏退出 1；额外打印 payload 策略。
 - `add`：校验产物布局，按显式策略创建 generation，写 `meta.json`，不自动 switch。
   `--strategy` 缺失或不支持时直接报错退出（也接受 `ACB_PROFILE_STRATEGY`），不静默降级。
-  校验项：`bin/`、`harnesses/`、`deploy/start-dsh.sh`、`deploy/start-drivers.sh`、
-  `deploy/opencode-serve.sh`、`deploy/run/supervisor.toml.tmpl`、`deploy/units/systemd/`、
-  `harnesses/dsh/src/driver.mjs`、`harnesses/dsh/dsh-mcp.patch.yml`、
-  `harnesses/opencode/plugin/index.js`、`harnesses/opencode/plugin/acb-wire.mjs`、
-  `harnesses/shared/tools.mjs`。不强制每个 bin 文件名都存在
-  （`acb-drivers` / `acb-issue-service` 尚未全部产出）。
+  校验项只覆盖 payload 自己带的东西：`bin/`、`bin/acb-bridge`、`harnesses/`、
+  `deploy/start-drivers.sh`、`harnesses/dsh/src/driver.mjs`、
+  `harnesses/dsh/dsh-mcp.patch.yml`、`harnesses/opencode/plugin/index.js`、
+  `harnesses/opencode/plugin/acb-wire.mjs`、`harnesses/shared/tools.mjs`。
+  `deploy/units/systemd/`、`deploy/run/supervisor.toml.tmpl`、`deploy/start-dsh.sh`、
+  `deploy/opencode-serve.sh` 已剥离到 acbl，不再要求。缺项错误逐条列出
+  `<相对路径> (file|directory)`。
+  校验完布局后校验 payload 根目录的 `acb-contract.json`（契约版本 / `min_acbl` /
+  声明布局 / 命令集合，详见 `docs/plan/acb-upgrade-chain.md` §6.4）；
+  没有该文件的旧 payload 默认按契约 v1 放行并打印
+  `TRANSITIONAL fallback only ... HARD-REJECT` 告警；设置 `ACB_CONTRACT_STRICT=1`
+  后缺文件按 `contract_unreadable` 拒绝。契约类拒绝（缺文件 / 不兼容 / `min_acbl` 过高 /
+  布局缺项）在 add、switch、升级预检、launcher 启动四条路径上一律退出 `78`
+  （配置级终态）；参数与用法、IO 错误仍退出 `2`。严格模式默认关闭，翻默认的时机见 §6.4。
   插件必须保持原仓库的相对结构：`harnesses/opencode/plugin/index.js` 通过
   `../../shared/tools.mjs` 引用 `harnesses/shared/tools.mjs`，不能只单独拷插件目录。
-- `switch`：只改 `current` 软链；先校验 generation 的 `root` 存在，再在 profile 根目录创建
-  临时软链并 `rename` 到 `current`。失败只删临时软链，旧 `current` 保持有效。
+- `switch`：只改 `current` 软链；先校验 generation 的 `root` 存在与契约兼容，再在 profile
+  根目录创建临时软链并 `rename` 到 `current`。失败只删临时软链，旧 `current` 保持有效。
 - `gc`：默认 `--keep 5`；保留最新 N 个 generation + current + 兄弟目录
   `../state/supervisor/lkg.json` 记录的 generation。其余删除 generation 目录
   （store 策略只删 `root` 软链不动 store；copy 策略删本地快照）。`lkg.json` 存在但解析失败时直接报错，不盲删。
@@ -139,7 +147,29 @@ config_sha256 = "..."
   `warn: profile not used; using fallback ACB_UNIT_REPO_DIR/ACB_UNIT_BIN_DIR paths`，
   不改变退出码；`current` 存在但目标损坏算 drift，退出 1。doctor 仍不读取 env 文件内容。
 
-## 5. 边界
+## 5. store pin 与 nix GC
+
+`store` 策略的 generation 只是指向 `/nix/store` 的软链，nix GC 不会因为
+`current.json` / `lkg.json` 引用了它而保留它。`profile add` / `seed` 建代后会尝试建根：
+
+- pin 位置：`<profile>/../state/pins/acb-<generation-id>`。
+- 建根命令：`nix-store --add-root <pin> --indirect -r <store-path>`。daemon 在
+  `/nix/var/nix/gcroots/auto/` 登记真正被扫描的间接根，`<pin>` 是该根指向的软链；
+  普通用户不需要 sudo，由 daemon 以 root 写入。
+- **验证通过才算 pin**：建根后执行 `nix-store --query --roots <store-path>`，输出里必须
+  出现 `<pin> -> <store-path>`，才打印
+  `pin: <generation-id> -> <pin> (verified gcroot)`。
+- 以下情况一律打印 `pin: warning: generation <id> is NOT protected from nix GC: ...`，
+  并说明具体原因与后果：
+  - 找不到 `nix-store`（非 nix 环境或不在 PATH）：保留本地 pin，不提供保护；
+  - `--add-root` 失败（daemon 不可用、store path 无效等）：保留本地 pin，不提供保护；
+  - 建根后回查不到该根：根未被扫描，不提供保护；
+  - pin 目录不可写：连本地 pin 都没有，完全不提供保护。
+- 本地 pin（`state/pins` 下的普通软链）与 `~/.local/state/nix/gcroots` **都不是** nix GC
+  扫描的位置，只能作为记录，挡不住 GC。多用户 Nix 下尤其不能把用户目录里的软链当成根。
+- `profile gc` 删除 generation 时会同时删除 pin 软链；软链删掉后对应的间接根立即失效。
+
+## 6. 边界
 
 - 不做自动 rollback 命令；LKG 记录 generation + 配置摘要，回滚决策仍由 launcher/supervisor
   与后续工具使用。安装器只在首次安装时写一次 LKG，之后运行期提升/回退完全归 launcher/supervisor。

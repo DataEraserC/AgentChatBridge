@@ -38,7 +38,8 @@
 - 为 ACB 建专用 Nix profile：
   - 用户级：`~/.local/share/acb/profile`；
   - 系统级：`/var/lib/acb/profile`。
-- **profile generation 即回滚单位**；LKG = 上一个 generation 的 store path，并建立 GC root。
+- **profile generation 即回滚单位**；LKG = 上一个 generation 的 store path，并建立**经验证的** GC root
+  （`nix-store --add-root --indirect` 后回查 `--query --roots`）。
 - 不装进用户默认 profile、不装进 Home Manager 主 profile，避免污染日常环境。
 - `nix shell` / `nix run` 明确不适合守护进程：没有 generation、可能被 GC。
 - Windows 原生不走 Nix；supervisor 改读一个 `current-path` 指针文件。
@@ -47,6 +48,7 @@
 
 - profile generation 天然提供「上一份可用版本」的回滚单位，不需要自建版本目录。
 - 专用 profile 让 ACB 的升级/回滚与用户日常环境解耦；GC root 防止旧 generation 被清掉。
+  只有回查确认被扫描的根才算保护，本地 pin / 用户目录软链不挡 GC。
 - `nix shell/run` 的临时性不适合常驻服务，必须显式排除。
 - Windows 没有 Nix profile 语义，用指针文件承载同一套「当前/LKG」概念。
 
@@ -56,7 +58,7 @@
 
 **演进路径**
 
-1. 建 profile 与 GC root；把 bridge/drivers/notifier 作为一个包集合安装。
+1. 建 profile 与经验证的 GC root；把 bridge/drivers/notifier 作为一个包集合安装。
 2. supervisor 读取 profile generation，记录 current/LKG store path。
 3. 回滚 = 切到上一个 generation + 重启；失败则保留 current 并报告。
 4. Windows 增加 `current-path` 指针文件的读写与校验，语义与 Nix generation 对齐。

@@ -4,6 +4,7 @@
 //! 完成升级 stage，不再 shell out 到 `acbctl profile add`。CLI 仍由同一份源码的
 //! `acbctl` bin 提供。
 
+pub mod contract;
 pub mod fsutil;
 mod pins;
 pub mod profile;

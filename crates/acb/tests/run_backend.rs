@@ -421,7 +421,7 @@ fn launcher_mode_renders_supervisor_toml_from_acb_unit_values() {
         ("ACB_UNIT_OPENCODE_DIR", opencode_dir.to_str().unwrap()),
         ("ACB_UNIT_CONSOLE_PORT", "3100"),
         ("ACB_UNIT_OPENCODE_PORT", "4097"),
-        ("ACB_UNIT_AUTOSTART", "0"),
+        ("ACB_UNIT_INSTALL_SECTION", "0"),
     ];
 
     let output = run_acb(
