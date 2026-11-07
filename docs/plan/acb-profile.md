@@ -78,16 +78,20 @@ acbctl profile migrate --to copy [<gen-or-label>] [--profile-dir DIR]
 - `current`：有 current 退出 0，无 current/损坏退出 1；额外打印 payload 策略。
 - `add`：校验产物布局，按显式策略创建 generation，写 `meta.json`，不自动 switch。
   `--strategy` 缺失或不支持时直接报错退出（也接受 `ACB_PROFILE_STRATEGY`），不静默降级。
-  校验项：`bin/`、`harnesses/`、`deploy/start-dsh.sh`、`deploy/start-drivers.sh`、
-  `deploy/opencode-serve.sh`、`deploy/run/supervisor.toml.tmpl`、`deploy/units/systemd/`、
-  `harnesses/dsh/src/driver.mjs`、`harnesses/dsh/dsh-mcp.patch.yml`、
-  `harnesses/opencode/plugin/index.js`、`harnesses/opencode/plugin/acb-wire.mjs`、
-  `harnesses/shared/tools.mjs`。不强制每个 bin 文件名都存在
-  （`acb-drivers` / `acb-issue-service` 尚未全部产出）。
+  校验项只覆盖 payload 自己带的东西：`bin/`、`bin/acb-bridge`、`harnesses/`、
+  `deploy/start-drivers.sh`、`harnesses/dsh/src/driver.mjs`、
+  `harnesses/dsh/dsh-mcp.patch.yml`、`harnesses/opencode/plugin/index.js`、
+  `harnesses/opencode/plugin/acb-wire.mjs`、`harnesses/shared/tools.mjs`。
+  `deploy/units/systemd/`、`deploy/run/supervisor.toml.tmpl`、`deploy/start-dsh.sh`、
+  `deploy/opencode-serve.sh` 已剥离到 acbl，不再要求。缺项错误逐条列出
+  `<相对路径> (file|directory)`。
+  校验完布局后校验 payload 根目录的 `acb-contract.json`（契约版本 / `min_acbl` /
+  声明布局 / 命令集合，详见 `docs/plan/acb-upgrade-chain.md` §6.4）；
+  没有该文件的旧 payload 按契约 v1 放行并打印 `assuming legacy acb_contract=1` 告警。
   插件必须保持原仓库的相对结构：`harnesses/opencode/plugin/index.js` 通过
   `../../shared/tools.mjs` 引用 `harnesses/shared/tools.mjs`，不能只单独拷插件目录。
-- `switch`：只改 `current` 软链；先校验 generation 的 `root` 存在，再在 profile 根目录创建
-  临时软链并 `rename` 到 `current`。失败只删临时软链，旧 `current` 保持有效。
+- `switch`：只改 `current` 软链；先校验 generation 的 `root` 存在与契约兼容，再在 profile
+  根目录创建临时软链并 `rename` 到 `current`。失败只删临时软链，旧 `current` 保持有效。
 - `gc`：默认 `--keep 5`；保留最新 N 个 generation + current + 兄弟目录
   `../state/supervisor/lkg.json` 记录的 generation。其余删除 generation 目录
   （store 策略只删 `root` 软链不动 store；copy 策略删本地快照）。`lkg.json` 存在但解析失败时直接报错，不盲删。

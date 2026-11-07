@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "contract": 1,
+  "min_acbl": "0.1.0",
+  "layout": [
+    "bin",
+    "bin/acb-bridge",
+    "harnesses",
+    "harnesses/dsh/src/driver.mjs",
+    "harnesses/dsh/dsh-mcp.patch.yml",
+    "harnesses/opencode/plugin/index.js",
+    "harnesses/opencode/plugin/acb-wire.mjs",
+    "harnesses/shared/tools.mjs",
+    "deploy/start-drivers.sh"
+  ],
+  "commands": [
+    {
+      "name": "bridge",
+      "program": "bin/acb-bridge",
+      "args": ["--config"]
+    }
+  ]
+}
