@@ -72,6 +72,11 @@ health_url = "http://127.0.0.1:@ACB_UNIT_CONSOLE_PORT@/healthz"
 `$XDG_RUNTIME_DIR/acb-health.token`（无该变量时退回临时目录，与 bridge 写入一致），
 不必把 token 写进 supervisor 配置或 unit。
 
+unit 保持 `KillMode=process`：systemd 只给 launcher 发信号，launcher 在
+SIGTERM/SIGINT 收尾时自己 `stop_child` 停桥，避免 `systemctl stop` 或回退到
+旧 unit 时留下占端口的孤儿 bridge。launcher 被 SIGKILL（崩溃）时子进程才会
+留下，由下一任 acbl 通过 `bridge.instance.json` 接管。
+
 所以 supervisor 管的是**桥**，且只有桥。dsh / drivers / opencode 目前由 systemd 各自的 unit 拉（`deploy/units/systemd/*.service.tmpl`），launcher 完全不认识它们。
 
 ### 1.3 75/78 的真实语义
