@@ -155,6 +155,7 @@ fn doctor_reports_clean_state() {
     fs::create_dir_all(&bin).expect("bin");
     fs::create_dir_all(&shim).expect("shim");
     common::write_script(&bin.join("acb-bridge"), "exit 0\n");
+    common::write_script(&bin.join("acb-launcher"), "exit 0\n");
     let values = base_values(temp.path(), &bin, &repo);
 
     let installed = install(&root, &values);
