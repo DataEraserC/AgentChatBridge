@@ -771,7 +771,7 @@ fn unit_values(repo: &Path, bin: &Path, config: &Path) -> Vec<(&'static str, Str
         ),
         ("ACB_UNIT_CONSOLE_PORT", "3100".to_string()),
         ("ACB_UNIT_OPENCODE_PORT", "4097".to_string()),
-        ("ACB_UNIT_AUTOSTART", "0".to_string()),
+        ("ACB_UNIT_INSTALL_SECTION", "0".to_string()),
     ]
 }
 

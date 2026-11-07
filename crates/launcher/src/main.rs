@@ -109,9 +109,6 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_GIVE_UP as u8);
         }
     };
-    // 启动对账用的锁不能跨 supervisor 生命周期持有：升级提交与回滚都会重新加锁，
-    // 同一进程重复 flock 同一路径会阻塞。
-    drop(writer);
     config.program = current.program.clone();
     config.args = current.args.clone();
     // generation 元数据同样以 current.json 为准；否则重启后 LKG 提升/回滚会记错代。
@@ -165,6 +162,12 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_GIVE_UP as u8);
         }
     };
+
+    // 首次 start 已由 Supervisor::new 完成；写者锁覆盖的是
+    // 对账 → 探测 → 决定接管/拉起 → 首次 start 整个临界区，两个 acbl 不会同时
+    // 判定“没有 bridge”。之后必须释放：升级提交/回滚会重新 flock 同一路径，
+    // 同一进程跨生命周期持有会自锁阻塞。
+    drop(writer);
 
     // 启动能力声明：ACB 只在 restart_owner != none 时接受升级请求。
     if let Err(error) = announce_capabilities(&mailbox, &current, &state_dir) {

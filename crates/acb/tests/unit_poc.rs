@@ -79,7 +79,7 @@ fn base_values(root: &Path) -> Vec<(String, String)> {
         ),
         ("ACB_UNIT_CONSOLE_PORT".to_string(), "3100".to_string()),
         ("ACB_UNIT_OPENCODE_PORT".to_string(), "4097".to_string()),
-        ("ACB_UNIT_AUTOSTART".to_string(), "0".to_string()),
+        ("ACB_UNIT_INSTALL_SECTION".to_string(), "0".to_string()),
     ]
 }
 
@@ -446,7 +446,7 @@ fn install_scope_selects_stack_install_section() {
             root_arg.as_str(),
             "--scope",
             "system",
-            "--autostart",
+            "--with-install-section",
             "1",
         ],
     );
@@ -468,7 +468,7 @@ fn install_scope_selects_stack_install_section() {
             root_arg.as_str(),
             "--scope",
             "user",
-            "--autostart",
+            "--with-install-section",
             "1",
         ],
     );
@@ -492,8 +492,8 @@ fn install_scope_selects_stack_install_section() {
 }
 
 #[test]
-fn autostart_defaults_off_and_enables_install_section_when_set() {
-    let temp = TempDir::new("autostart");
+fn install_section_defaults_off_and_renders_when_set() {
+    let temp = TempDir::new("install-section");
     let values = base_values(temp.path());
 
     let disabled = run_acb(&values, &[], &["unit", "render", "--print"]);
@@ -501,13 +501,13 @@ fn autostart_defaults_off_and_enables_install_section_when_set() {
     let text = stdout(&disabled);
     assert!(
         !text.contains("[Install]"),
-        "default ACB_UNIT_AUTOSTART=0 must not render [Install]"
+        "default ACB_UNIT_INSTALL_SECTION=0 must not render [Install]"
     );
     assert!(!text.contains("WantedBy=default.target"));
 
     let enabled = run_acb(
         &values,
-        &[("ACB_UNIT_AUTOSTART", "1")],
+        &[("ACB_UNIT_INSTALL_SECTION", "1")],
         &["unit", "render", "--print"],
     );
     assert_success(&enabled);
@@ -522,12 +522,12 @@ fn autostart_defaults_off_and_enables_install_section_when_set() {
 
     let invalid = run_acb(
         &values,
-        &[("ACB_UNIT_AUTOSTART", "2")],
+        &[("ACB_UNIT_INSTALL_SECTION", "2")],
         &["unit", "render", "--print"],
     );
     assert!(!invalid.status.success());
     assert!(
-        stderr(&invalid).contains("ACB_UNIT_AUTOSTART must be 0 or 1"),
+        stderr(&invalid).contains("ACB_UNIT_INSTALL_SECTION must be 0 or 1"),
         "{}",
         stderr(&invalid)
     );
