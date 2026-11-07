@@ -490,7 +490,7 @@ fn give_up_on_rejection(
 /// 此时旧进程已停、指针已生效；退出码必须只由「该退出 75」这条语义决定，
 /// 否则写盘失败会让 launcher 提前返回，没有任何机制要求 systemd 重拉。
 fn committed_restart_exit(mailbox: &Mailbox, active: &ActiveUpgrade, target_id: &str) -> i32 {
-    if let Err(error) = mailbox.set_active_status("restarting", now_ms()) {
+    if let Err(error) = mailbox.mark_restarting(target_id, now_ms()) {
         eprintln!("acb-launcher: cannot mark upgrade restarting: {error}");
     }
     let mut result = UpgradeResult::new(
@@ -668,7 +668,11 @@ mod tests {
     use acb_supervisor::upgrade::UpgradeRequest;
 
     fn temp_state_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        // 优先落在 XDG_DATA_HOME 下，测试永远碰不到真实的 profile/state。
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!(
             "acb-launcher-test-{}-{name}-{}",
             std::process::id(),
             now_ms()
@@ -736,6 +740,91 @@ mod tests {
 
         let _ = std::fs::remove_file(mailbox.requests_dir());
         let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    /// payload 目标在 claim 阶段生成不出代 id；提交后必须把它补进 active.json，
+    /// 否则 75 重拉后 `resume_active` 拿 current.json 与 `None` 比对必然不等，
+    /// 成功切换会被误判成 `restart_did_not_switch`。
+    #[test]
+    fn payload_upgrade_records_staged_generation_across_restart() {
+        // 独立 data home，避免碰到真实 profile/state。
+        let data_home = temp_state_dir("payload-upgrade");
+        let state_dir = data_home.join("acb");
+        std::fs::create_dir_all(&state_dir).expect("create state dir");
+        let mailbox = Mailbox::new(&state_dir);
+        mailbox.ensure().expect("ensure mailbox");
+        mailbox
+            .write_capabilities(&Capabilities {
+                schema: UPGRADE_SCHEMA,
+                restart_owner: "acbctl-run".to_string(),
+                launcher_pid: std::process::id(),
+                profile_dir: state_dir.join("profile").to_string_lossy().into_owned(),
+                state_dir: state_dir.to_string_lossy().into_owned(),
+                strategies: vec!["store".to_string()],
+                updated_at_ms: now_ms(),
+            })
+            .expect("write capabilities");
+        let request = UpgradeRequest::new(
+            "req-payload",
+            UpgradeTarget::Payload {
+                path: "/nix/store/payload-test".to_string(),
+                strategy: "store".to_string(),
+            },
+            now_ms(),
+        );
+        match mailbox.submit(request).expect("submit upgrade request") {
+            acb_supervisor::upgrade::SubmitOutcome::Queued { .. } => {}
+            other => panic!("expected queued request, got {other:?}"),
+        }
+        assert!(
+            mailbox
+                .claim_next(now_ms())
+                .expect("claim upgrade request")
+                .is_some(),
+            "request should be claimed"
+        );
+        let active = mailbox.read_active().expect("active upgrade");
+        assert_eq!(
+            active.target_generation_id, None,
+            "payload 目标在 claim 时还没有代 id"
+        );
+
+        assert_eq!(
+            committed_restart_exit(&mailbox, &active, "gen-staged"),
+            EXIT_ROLLBACK
+        );
+        let active = mailbox.read_active().expect("active after commit");
+        assert_eq!(active.status, "restarting");
+        assert_eq!(
+            active.target_generation_id.as_deref(),
+            Some("gen-staged"),
+            "提交后必须记录实际生成的代"
+        );
+
+        // 模拟 systemd 收到 75 后的重拉：current.json 已指向新代。
+        let current = CommandSpec {
+            program: state_dir
+                .join("gen-staged/bin/acb-bridge")
+                .to_string_lossy()
+                .into_owned(),
+            args: vec!["--config".to_string(), "/tmp/config.toml".to_string()],
+            generation: Some(acb_supervisor::GenerationRef {
+                id: "gen-staged".to_string(),
+                path: state_dir.join("gen-staged").to_string_lossy().into_owned(),
+                config_sha256: None,
+            }),
+        };
+        resume_active(&mailbox, &current, &state_dir);
+
+        let result = mailbox.read_result("req-payload").expect("upgrade result");
+        assert_ne!(result.status, "aborted", "成功切换不能记成 aborted");
+        assert_ne!(result.reason_code, "restart_did_not_switch");
+        assert_eq!(
+            mailbox.read_active().expect("active upgrade").status,
+            "observing",
+            "应当进入观察期等待 LKG"
+        );
+        let _ = std::fs::remove_dir_all(&data_home);
     }
 
     /// 启动读到不兼容契约的 generation 时，必须在拉起 bridge 之前就给出可诊断原因。
