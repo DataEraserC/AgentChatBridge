@@ -591,7 +591,7 @@ fn command_for_generation(root: &Path, meta: &Meta) -> acb_supervisor::CommandSp
 }
 
 /// 给 generation 的 store payload 建 pin。失败只告警，不让 add/switch 失败；
-/// 非 nix 环境降级为 `<profile>/../state/pins`，并说明挡不住 nix GC。
+/// 只有建根并被 nix 回查确认后才算保护，其余情况明确说明不提供保护。
 fn pin_generation(root: &Path, id: &str) {
     let generation_root = generation_dir(root, id).join("root");
     let payload = match fs::canonicalize(&generation_root) {
@@ -602,15 +602,19 @@ fn pin_generation(root: &Path, id: &str) {
         }
     };
     match pins::pin_store_path(root, id, &payload) {
-        Ok(PinOutcome::Gcroot(path)) => println!("pin: {id} -> {}", path.display()),
-        Ok(PinOutcome::Local(path)) => eprintln!(
-            "pin: warning: no writable nix gcroot; wrote local pin {} (nix GC can still collect {}; \
-             keep this generation with `profile gc --keep` or add a gcroot manually)",
-            path.display(),
-            payload.display()
-        ),
+        Ok(PinOutcome::Gcroot(path)) => {
+            println!("pin: {id} -> {} (verified gcroot)", path.display())
+        }
+        Ok(PinOutcome::Unprotected { path, reason }) => {
+            let pin = path
+                .map(|path| format!("; local pin {} kept", path.display()))
+                .unwrap_or_default();
+            eprintln!("pin: warning: generation {id} is NOT protected from nix GC: {reason}{pin}");
+        }
         Ok(PinOutcome::Skipped) => {}
-        Err(error) => eprintln!("pin: warning: {error}"),
+        Err(error) => {
+            eprintln!("pin: warning: generation {id} is NOT protected from nix GC: {error}")
+        }
     }
 }
 
@@ -721,10 +725,7 @@ fn seed_command(args: &[String]) -> Result<ExitCode, String> {
 fn write_initial_lkg(root: &Path, id: &str, state_dir: &Path) -> Result<(), String> {
     let path = state_dir.join("lkg.json");
     if path.exists() {
-        println!(
-            "lkg: {} already exists; left untouched",
-            path.display()
-        );
+        println!("lkg: {} already exists; left untouched", path.display());
         return Ok(());
     }
     let meta = load_meta(root, id)?.ok_or_else(|| format!("generation not found: {id}"))?;
@@ -1265,10 +1266,7 @@ fn verify_copy(
     Ok(ExitCode::from(if diff.clean() { 0 } else { 1 }))
 }
 
-fn load_manifest_for_verify(
-    id: &str,
-    generation_root: &Path,
-) -> Result<Option<Manifest>, String> {
+fn load_manifest_for_verify(id: &str, generation_root: &Path) -> Result<Option<Manifest>, String> {
     let path = generation_root
         .parent()
         .map(|dir| dir.join("manifest.json"))
