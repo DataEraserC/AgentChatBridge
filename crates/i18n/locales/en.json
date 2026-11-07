@@ -303,6 +303,7 @@
   "bridge.main.system_admin_configured": "system admin configured: connection {connection} account {account}; standing grant in private/console only, no automatic elevation in groups.",
   "bridge.main.notifications_enabled": "out-of-band notifications enabled (topic source: {source}; value not logged)",
   "bridge.main.notifications_disabled": "out-of-band notifications not started ({error})",
+  "bridge.main.notifications_check_failed": "out-of-band notifications are enabled but the notifier is unavailable: {error}",
   "bridge.main.endpoint_listening": "endpoint listening on {listen}",
   "bridge.main.endpoint_stopped": "error: endpoint stopped: {error}",
   "bridge.main.file_relay_disabled": "no [file_relay] configured; local file paths pass through",

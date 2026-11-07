@@ -5,6 +5,7 @@
   "layout": [
     "bin",
     "bin/acb-bridge",
+    "bin/acb-notifier",
     "harnesses",
     "harnesses/dsh/src/driver.mjs",
     "harnesses/dsh/dsh-mcp.patch.yml",

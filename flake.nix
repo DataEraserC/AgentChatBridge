@@ -60,6 +60,7 @@
       acb-payload = pkgs.runCommand "acb-payload-${version}" { } ''
         mkdir -p $out/bin $out/harnesses $out/deploy
         install -m755 ${workspace}/bin/acb-bridge $out/bin/acb-bridge
+        install -m755 ${workspace}/bin/acb-notifier $out/bin/acb-notifier
         cp -r ${./harnesses}/. $out/harnesses/
         install -m755 ${./deploy/start-drivers.sh} $out/deploy/start-drivers.sh
         install -m644 ${./deploy/acb-contract.json} $out/acb-contract.json
