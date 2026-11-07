@@ -89,6 +89,15 @@ Wants=acb-bridge.service acb-drivers.service dsh-acb.service acb-opencode-serve.
 - 只有当你**明确**要“放弃升级链、由 systemd 直接管桥”时才启用它；同时启用时必须 `systemctl --user mask acb-bridge.service`。
 - 正解是把 target 退化成 acbl 的别名（`Wants=acb-launcher-user.service`），外部组件改由可选预设或用户自己的 unit 管理，见缺口 C-1。
 
+**现行 nix-config 部署的手动启停。** 该拓扑下的 `acb-bridge.service`（`ExecStart` 指向 launcher）是 **static 单元**：不写 `[Install]`、没有 `WantedBy`，因此 `default.target` 不会包含它，也不存在 enable 状态。启动和停止都必须手动做：
+
+```sh
+systemctl --user start acb-bridge.service   # 入口是 launcher，由它拉起并守护 bridge
+systemctl --user stop  acb-bridge.service   # launcher 先停 bridge 再退出（KillMode=process）
+```
+
+**后果要明确**：用户管理器重启（注销、会话崩溃、图形会话重启）或整机重启之后，整栈**不会自动回来**，必须再执行一次 `systemctl --user start acb-bridge.service`。这是刻意选择——不启用开机自启，避免与迁移中的驱动/外部组件一起被拉起。需要自启时按 §3.6 显式加安装段并 `enable`，不要只改代码里的 `WantedBy`。
+
 ### 1.4 外部组件边界
 
 ACB 保证的部分分两个分发单元：
