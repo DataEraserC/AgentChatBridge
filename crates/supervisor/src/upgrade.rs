@@ -479,6 +479,26 @@ impl Mailbox {
         Ok(Some(active))
     }
 
+    /// 指针提交后进入 restarting，并把实际要启动的代补进 active.json。
+    ///
+    /// payload 目标在 claim 时还生成不出代 id（`generation_id()` 返回 None），
+    /// 若这里不补，重启后的 `resume_active` 拿 current.json 与 None 比对必然不等，
+    /// 成功切换会被误判成 `restart_did_not_switch`（假阴性）。
+    pub fn mark_restarting(
+        &self,
+        target_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<ActiveUpgrade>, String> {
+        let Some(mut active) = self.read_active() else {
+            return Ok(None);
+        };
+        active.status = "restarting".to_string();
+        active.target_generation_id = Some(target_id.to_string());
+        active.updated_at_ms = now_ms;
+        self.write_active(&active)?;
+        Ok(Some(active))
+    }
+
     fn read_requests(&self, dir: &Path) -> Result<Vec<(PathBuf, UpgradeRequest)>, String> {
         let mut out = Vec::new();
         let entries = match fs::read_dir(dir) {
