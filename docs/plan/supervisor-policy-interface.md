@@ -352,6 +352,10 @@ provider = "acb.supervisor.default"   # 缺省用内置
   `{"command": {"program": "...", "args": [...]}, "promoted_at_ms": 123}`。
   临时文件 + `rename` 原子替换。启动时优先读状态文件，缺失才用 `[supervisor].lkg`。
 - **什么算「健康」**：配置了 `health_url` 时 = `GET` 返回 200；未配置时 = 进程存活。
+  指向 bridge console 的 `/healthz` 默认要求控制台 token，探针会读
+  `$XDG_RUNTIME_DIR/acb-health.token` 并带 `Authorization: Bearer`；**每次探测重读**，
+  bridge 重启换 token 后自动跟上。显式配置 `health_token_file` 但文件缺失时判不健康
+  （fail-closed，不退回无鉴权）；未配置时按上述默认路径自动解析。
   健康不等于 LKG；LKG 只由稳定窗口提升。
 - **什么时候更新 LKG**：当前版本连续健康达到 `stable_window_secs`（默认 60s）后的
   那次探测，且当前命令与 LKG 不同；**先写盘成功，再更新内存指针**。写失败只记

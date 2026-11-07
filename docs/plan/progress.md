@@ -2274,9 +2274,10 @@
 - `acb-notifier` 必须与 `acb-bridge` 安装在同一目录（或显式设置
   `ACB_NOTIFIER_BIN`）。带外通知进程按 `acb-bridge` 同级路径找它。
 - `cargo build -p acb-bridge` **不会**构建 `acb-notifier`；需要同时构建
-  `acb-notifier-process`（或 `cargo build --workspace`）。nix-config 打包时
-  要把 `acb-notifier` 一并装进 bin 目录，否则 `[notifications]` 配置会在启动时
-  报 `cannot spawn acb-notifier` 并跳过该层（桥本身继续运行）。
+  `acb-notifier-process`（或 `cargo build --workspace`）。`acb-payload` 现已把
+  `bin/acb-notifier` 列为必带项，`acb-contract.json` 的 `layout` 会校验它存在；
+  `acb-bridge --check` 在 `[notifications]` 启用但找不到 notifier 时直接失败
+  （不再静默降级为“桥继续跑、通知丢失”）。
 - 其他第二进制/资源（`process-tool-fixture` 等）仍在各自 crate，不需要进
   生产包。
 - `RLIMIT_AS` 与 glibc malloc arena：每个外部 provider 一个调用线程（默认
