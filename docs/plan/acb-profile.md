@@ -139,7 +139,29 @@ config_sha256 = "..."
   `warn: profile not used; using fallback ACB_UNIT_REPO_DIR/ACB_UNIT_BIN_DIR paths`，
   不改变退出码；`current` 存在但目标损坏算 drift，退出 1。doctor 仍不读取 env 文件内容。
 
-## 5. 边界
+## 5. store pin 与 nix GC
+
+`store` 策略的 generation 只是指向 `/nix/store` 的软链，nix GC 不会因为
+`current.json` / `lkg.json` 引用了它而保留它。`profile add` / `seed` 建代后会尝试建根：
+
+- pin 位置：`<profile>/../state/pins/acb-<generation-id>`。
+- 建根命令：`nix-store --add-root <pin> --indirect -r <store-path>`。daemon 在
+  `/nix/var/nix/gcroots/auto/` 登记真正被扫描的间接根，`<pin>` 是该根指向的软链；
+  普通用户不需要 sudo，由 daemon 以 root 写入。
+- **验证通过才算 pin**：建根后执行 `nix-store --query --roots <store-path>`，输出里必须
+  出现 `<pin> -> <store-path>`，才打印
+  `pin: <generation-id> -> <pin> (verified gcroot)`。
+- 以下情况一律打印 `pin: warning: generation <id> is NOT protected from nix GC: ...`，
+  并说明具体原因与后果：
+  - 找不到 `nix-store`（非 nix 环境或不在 PATH）：保留本地 pin，不提供保护；
+  - `--add-root` 失败（daemon 不可用、store path 无效等）：保留本地 pin，不提供保护；
+  - 建根后回查不到该根：根未被扫描，不提供保护；
+  - pin 目录不可写：连本地 pin 都没有，完全不提供保护。
+- 本地 pin（`state/pins` 下的普通软链）与 `~/.local/state/nix/gcroots` **都不是** nix GC
+  扫描的位置，只能作为记录，挡不住 GC。多用户 Nix 下尤其不能把用户目录里的软链当成根。
+- `profile gc` 删除 generation 时会同时删除 pin 软链；软链删掉后对应的间接根立即失效。
+
+## 6. 边界
 
 - 不做自动 rollback 命令；LKG 记录 generation + 配置摘要，回滚决策仍由 launcher/supervisor
   与后续工具使用。安装器只在首次安装时写一次 LKG，之后运行期提升/回退完全归 launcher/supervisor。
