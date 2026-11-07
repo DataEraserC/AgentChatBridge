@@ -18,6 +18,12 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+#[cfg(all(feature = "test-fixtures", not(debug_assertions)))]
+compile_error!(
+    "acb-kernel 的 `test-fixtures` feature 仅用于测试/示例，不能在 release 构建启用；\
+     生产请使用 Config::parse / Config::load。"
+);
+
 use acb_proto::RoomId;
 use serde::Deserialize;
 use thiserror::Error;
@@ -1266,8 +1272,10 @@ impl Config {
 
     /// 测试用解析入口：密钥引用未声明时按名字自身解析。
     ///
-    /// 生产路径永远不会用它；这里只是让仓库内大量 fixture 不必各自声明来源，
+    /// 只在 `cfg(test)` 或显式启用 `test-fixtures` feature（测试/示例的 dev-dependencies
+    /// 会自动开启）时编译；生产构建下这个方法不存在，误用会编译失败。
     /// 字面量密钥仍然和 [`Config::parse`] 一样被硬拒绝。
+    #[cfg(any(test, feature = "test-fixtures"))]
     #[doc(hidden)]
     pub fn parse_fixture(text: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(text).map_err(|error| ConfigError::ParseFailed {
@@ -1285,7 +1293,8 @@ impl Config {
         Self::load_mode(base_path, config_dir, SecretMode::Strict)
     }
 
-    /// 测试用加载入口，语义同 [`Config::parse_fixture`]。
+    /// 测试用加载入口，语义同 [`Config::parse_fixture`]；同样只在测试构建里存在。
+    #[cfg(any(test, feature = "test-fixtures"))]
     #[doc(hidden)]
     pub fn load_fixture(
         base_path: &Path,
@@ -2756,7 +2765,8 @@ struct RawSecretRef {
 enum SecretMode {
     /// 生产：所有引用必须命中声明，所有声明必须能读到值。
     Strict,
-    /// 测试 fixture：未声明的引用按名字自身解析。
+    /// 测试 fixture：未声明的引用按名字自身解析。只在测试构建里存在。
+    #[cfg(any(test, feature = "test-fixtures"))]
     Fixture,
 }
 
@@ -2780,6 +2790,8 @@ struct ResolvedSecret {
 /// 加载期解析出来的密钥集合。值只留在内存里，不写回配置文本、不进数据库。
 #[derive(Clone)]
 pub struct SecretStore {
+    /// 只有测试 fixture 需要记模式；生产构建里这个字段不存在。
+    #[cfg(any(test, feature = "test-fixtures"))]
     mode: SecretMode,
     sources: BTreeMap<String, ResolvedSecret>,
 }
@@ -2826,6 +2838,7 @@ impl SecretStore {
             let value = match mode {
                 SecretMode::Strict => load_plan(&name, &plan)?,
                 // fixture 里的来源只校验 schema；引用按名字自身解析，不读真实文件/环境。
+                #[cfg(any(test, feature = "test-fixtures"))]
                 SecretMode::Fixture => String::new(),
             };
             sources.insert(
@@ -2837,7 +2850,11 @@ impl SecretStore {
                 },
             );
         }
-        Ok(Self { mode, sources })
+        Ok(Self {
+            #[cfg(any(test, feature = "test-fixtures"))]
+            mode,
+            sources,
+        })
     }
 
     /// 引用解析：返回密钥值。调用方负责按字段语义 trim。
@@ -2850,6 +2867,7 @@ impl SecretStore {
             }
             RawSecretValue::Reference(reference) => &reference.secret,
         };
+        #[cfg(any(test, feature = "test-fixtures"))]
         if self.mode == SecretMode::Fixture {
             return Ok(name.clone());
         }

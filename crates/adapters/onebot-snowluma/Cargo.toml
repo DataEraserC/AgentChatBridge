@@ -14,3 +14,6 @@ serde_json = { workspace = true }
 sha1 = "0.11"
 thiserror = { workspace = true }
 tungstenite = "0.30"
+
+[dev-dependencies]
+acb-kernel = { path = "../../kernel", features = ["test-fixtures"] }

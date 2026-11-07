@@ -1,6 +1,7 @@
 # 密钥来源抽象（Secret Sources）设计草案
 
-状态：**已实现（2026-11-07）**。设计结论已落到代码、fixture、控制台和部署脚本。
+状态：**已实现（2026-11-08）**。设计结论已落到代码、fixture、控制台和部署脚本；
+测试 fixture 入口已加编译期护栏（见 §9.3）。
 
 目标：把「密钥从哪来」从「配置文件里的 `${NAME}` 文本插值」改成可替换的
 **来源声明 + 名称引用**。至少支持 `env`（读进程环境，agenix 现在走这条）和
@@ -574,3 +575,20 @@ systemd 路径下现有 `EnvironmentFile` 仍会到桥进程；这与 file 来�
 3. **绝对路径限定**：只收绝对路径，相对路径算配置错误。
 4. **无 systemd 的目标范围**：只覆盖桥自己消费的密钥；dsh/opencode 的 API key
    仍由各自的环境/EnvironmentFile 提供。
+
+### 9.3 测试 fixture 入口的护栏
+
+`Config::parse_fixture` / `Config::load_fixture` 只为仓库内测试与示例存在，
+**生产代码不得引用**。落地方式：
+
+- `acb-kernel` 新增默认关闭的 `test-fixtures` feature；两个入口用
+  `#[cfg(any(test, feature = "test-fixtures"))]` 条件编译。
+- 生产构建（`cargo build` / `nix build`）不包含 dev-dependencies，因此 feature
+  不会打开，入口在二进制里**不存在**；生产代码误用会直接编译失败。
+- `acb-kernel` 通过自引用 dev-dependency，下游 crate 通过带
+  `features = ["test-fixtures"]` 的 dev-dependency，在测试/示例构建里自动打开；
+  不影响正常构建。
+- 额外编译期断言：若在 release 构建里显式启用 `test-fixtures`，直接触发
+  `compile_error!`。
+- 独立示例 workspace（`examples/tool-provider`、`examples/dynamic/nested-manager`）
+  明确按示例依赖打开该 feature；它们不是生产部署产物。

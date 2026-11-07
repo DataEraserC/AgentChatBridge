@@ -19,3 +19,7 @@ sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# 测试 fixture 只在测试构建里可见；生产二进制不包含该入口。
+acb-kernel = { path = "../kernel", features = ["test-fixtures"] }

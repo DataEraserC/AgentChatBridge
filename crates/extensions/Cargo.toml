@@ -12,3 +12,6 @@ acb-kernel = { path = "../kernel" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+
+[dev-dependencies]
+acb-kernel = { path = "../kernel", features = ["test-fixtures"] }
