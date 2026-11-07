@@ -135,7 +135,7 @@ acbl 是唯一的常驻者；bridge 与预设组件都在它的进程树里。**
 
 | 场景 | 来源 | 入口路径 | 更新方式 |
 |---|---|---|---|
-| **NixOS** | nix-config 提供 acbl 包与 unit | `/run/current-system/sw/bin/acb-launcher`（或模块生成的固定路径） | `nixos-rebuild switch`；随系统升级，低频 |
+| **NixOS** | 本仓库 flake 的 `acbl` package（nix-config 以 input 引用，§2.5.7）；unit 由 nix-config 生成 | `/run/current-system/sw/bin/acb-launcher`（稳定入口，不写 store 路径） | `nixos-rebuild switch`；随系统升级，低频 |
 | 非 NixOS + 有 nix | 本仓库 flake / `nix profile` | `~/.nix-profile/bin/acb-launcher` | `nix profile upgrade` |
 | 非 NixOS + 无 nix | cargo 构建 | `cargo build --release` 后复制到 `/usr/local/bin/acb-launcher` | 人工替换 + 重启 acbl |
 | 非 NixOS + 无 nix | 预编译 `tar.gz`（gnu 或 musl，C-9） | 解包到 `/opt/acbl`；入口是 `/opt/acbl/bin/acb-launcher` | 解包新 tar.gz + 重启 acbl（规格见 §2.5） |
@@ -154,7 +154,7 @@ payload 只包含会迭代的内容：
   harnesses/opencode/plugin/acb-wire.mjs
   harnesses/shared/tools.mjs
   deploy/start-drivers.sh        # 纯扇出执行器，见 §5.5
-  manifest.json                  # 含 acb_contract（§6.4）
+  acb-contract.json              # 契约声明（B-12，§2.5.7）
 ```
 
 **为什么不把 acbl 放进 payload：**
@@ -165,13 +165,18 @@ payload 只包含会迭代的内容：
 
 **迁移提示（从现有部署切到新结构）**：先安装 acbl，把 unit 的 `ACB_UNIT_LAUNCHER_BIN` 指到静态入口，再从 payload 里移除 acbl 二进制。过渡期可以保留一代“什么都带”的 payload，但 unit 必须已经指向外部 acbl。
 
-### 2.5 安装包规格（C-9，待交付）
+### 2.5 安装包规格（C-9）
 
-**状态：规格已出，实现未开始。** 只产出 `tar.gz`，没有 deb / rpm / apk / Windows 包；服务注册由安装脚本或 `acbctl` 完成，不再有包管理器 `postinst` 兜底。
+**状态：nix 包已实现（§2.5.7）；非 nix 的 `tar.gz` 规格已出，实现未开始。** 分发分两条路，不能混用：
+
+- **nix 环境**：本仓库 flake 产出 `acbl` 与 `acb-payload` 两个 package，nix-config 以 flake input 引用，**不产出 `tar.gz`**（§2.5.7）。
+- **非 nix 环境**：只产出 `tar.gz`，没有 deb / rpm / apk / Windows 包；服务注册由安装脚本或 `acbctl` 完成，不再有包管理器 `postinst` 兜底。
+
+两条路共用同一份 workspace 构建，但工件形态与安装方式不同：nix 包由 store 管理生命周期，`tar.gz` 由安装脚本管理。
 
 #### 2.5.1 制品清单
 
-只出两个制品，文件名必须带 target triple，避免用户下错：
+非 nix 环境只出两个 `tar.gz` 制品，文件名必须带 target triple，避免用户下错：
 
 | 制品 | 链接方式 | 面向 |
 |---|---|---|
@@ -265,9 +270,54 @@ tar -xzf acbl-x86_64-unknown-linux-musl.tar.gz -C /opt
 A-8（unit 入口指向静态 acbl） → B-12（契约 v1 + payload 校验收窄） → C-9（打包实现与发布）
 ```
 
-- **A-8 已实现**，规格不再被它阻塞；剩余阻塞只有 B-12 的契约字段（`acb_contract` / `/internal/instance`）。
-- C-9 还依赖 2.5.2 的构建矩阵定案（gnu 基线、musl 动态 bridge）与 2.5.5 的边界评审通过。
+- **A-8 已实现**；B-12（契约 v1 + payload 校验收窄）已合入；nix 包（§2.5.7）已实现。
+- 剩余 C-9 工作：非 nix 的 `tar.gz` 构建矩阵（gnu 基线、musl 动态 bridge）与 §2.5.5 的边界评审。
 - 发布物必须附：版本号、target triple、链接方式、最低 glibc 基线、支持的 `acb_contract` 区间、SHA256 校验和。
+
+#### 2.5.7 nix 包（NixOS 主路径）
+
+nix 环境不走 `tar.gz`。本仓库 flake 直接产出两个 package，nix-config 以 flake input 引用：
+
+| package | 内容 | 服务谁 |
+|---|---|---|
+| `acbl` | `bin/acb-launcher`、`bin/acb-supervisor`、`bin/acbctl`、`share/acb/units/`（unit 模板 + `acb-launcher.service` 静态样例） | 静态 acbl 入口，独立于 payload |
+| `acb-payload`（别名 `payload`） | `bin/acb-bridge`、`harnesses/`、`deploy/start-drivers.sh`、`acb-contract.json` | `acbctl profile seed/add` 的 payload |
+
+`acbl` 严格只含 acbl 侧内容；bridge / harnesses / drivers 一律不进 `acbl`，它们属于 `acb-payload`。
+
+```sh
+nix build .#acbl
+nix build .#acb-payload
+```
+
+nix-config 引用方式（input 形式，取 `acbl` package）：
+
+```nix
+{
+  inputs.acb.url = "github:<owner>/<repo>/<ref>";
+
+  # 在模块里：
+  # environment.systemPackages = [ inputs.acb.packages.${pkgs.system}.acbl ];
+}
+```
+
+- **unit 的 `ExecStart` 必须写 `/run/current-system/sw/bin/acb-launcher`，不写 `/nix/store/...`。** NixOS 上 `/usr/local` 不可写，`acbctl unit install` 的默认前缀（`/usr/local/bin`）只适用于普通 Linux；NixOS 的 unit 由 nix-config 模块生成，指向 `environment.systemPackages` 暴露的稳定路径。
+- **为什么不写 store 路径**：store 路径带 hash，acbl 每次升级都会变；把它写进 unit，等于每次升级都要改 unit 并重启服务，违背 §2.4 的静态入口约定。稳定路径让 unit 与 acbl 版本解耦。
+- `acbl` 里的 `acb-launcher.service` 是普通 Linux 静态样例（`/usr/local/bin`），NixOS 不直接使用；NixOS 用模块生成的 unit，仍必须是 `KillMode=process`（§4.7.1）。
+- `acb-payload` 的口径与 B-12 的 `validate_payload` 一致，`acb-contract.json` 随包产出在 payload 根，不能再依赖 nix-config 手工补齐。
+
+**两条路各自服务谁：**
+
+| 路径 | 面向 | 生命周期 |
+|---|---|---|
+| nix 包（本节） | NixOS；以及已有 nix 的非 NixOS 主机（flake input / `nix profile`） | 由 store 与系统/ profile 管理，随 `switch` / `upgrade` 更新 |
+| `tar.gz`（§2.5.1–2.5.3） | 没有 nix 的 Debian / Ubuntu / Fedora / RHEL / Alpine 等 | 由 `install.sh` 解包覆盖，人工控制更新 |
+
+同一份源码共用 workspace 构建，但两条路的产物形态与安装方式不同，不能把一个环境的工件搬到另一个环境使用。
+
+**nix 构建不跑测试的取舍（`doCheck = false`）**：nix 包用 release profile 构建，而 workspace 里多个 crate 的 dev-dependency 以 `features = ["test-fixtures"]` 引用 `acb-kernel`；release 下 `cargo check/test` 会把这个 feature 打开，命中 `crates/kernel/src/config.rs` 的守卫 `#[cfg(all(feature = "test-fixtures", not(debug_assertions)))]`。集成测试链接的是 lib，`cfg(test)` 对它不生效，只能以「release + feature」编译 lib，于是触发 `compile_error!`。因此 nix 构建只负责产出二进制，测试由本地/ CI 的 `cargo test`（debug profile）承担。
+
+> **待办（切换后的结构性改动，本次不实现）**：把 fixture 入口迁到独立的测试支持 crate，让生产 crate 永不依赖 `test-fixtures`。之后该守卫才能只针对「生产构建误开 feature」这一种情况，而不是被正常的集成测试触发。
 
 ---
 
@@ -780,7 +830,7 @@ url = "127.0.0.1:7788"
 
 ### 6.1 nix 路线：先独立构建，成功再替换
 
-- `nix build .#acb-bridge -o result` 在独立目录产出；成功后再 `profile add` → `profile switch`，失败不动当前 `current.json`。这与现有 `profile` 的 staging + 原子 rename 一致。
+- `nix build .#acb-payload -o result` 在独立目录产出；成功后再 `profile add` → `profile switch`，失败不动当前 `current.json`。这与现有 `profile` 的 staging + 原子 rename 一致。
 - ACB **不调用 `nix profile`**：`store` 策略用 gcroot pin + `/nix/store` 软链，`copy` 策略用本地快照。是否另外用 `nix profile install` 管理你自己的工具链，是用户的选择，ACB 不依赖它。
 - 如果未来要支持“nix profile 作为产物来源”，应作为新的策略（例如 `profile-nix`），不和现有 `store` / `copy` 混在一起。
 

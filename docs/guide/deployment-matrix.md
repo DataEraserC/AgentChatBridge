@@ -177,12 +177,13 @@ cp "$REPO/config.example.toml" "$CONFIG"
 acbl 是静态入口，**不放进 payload**。按系统选一种来源：
 
 ```sh
-# NixOS：通常由 nix-config 模块提供，随系统 switch 更新；这里只做检查
+# NixOS：由 nix-config 引用本仓库 flake 的 acbl package，随系统 switch 更新；
+# unit 指向 /run/current-system/sw/bin/acb-launcher（不要写 store 路径）。
 command -v acb-launcher acbctl
 
-# 非 NixOS + 有 nix：默认包已包含 acb-launcher / acbctl / acb-supervisor；
-# 还没有单独的 acbl 包（C-9）
-nix profile install "$REPO"
+# 非 NixOS + 有 nix：取 flake 的 acbl package（已含 launcher / supervisor / acbctl）
+nix build .#acbl -o result-acbl
+# 或 nix profile install "$REPO#acbl"
 
 # 非 NixOS + 无 nix：cargo 构建后复制到系统路径
 cargo build --release
@@ -196,35 +197,28 @@ export ACBCTL_BIN=$(command -v acbctl)
 
 #### A. 用 nix 构建 payload（可选来源之一）
 
-payload 只装会迭代的内容，目录如下：
+payload 只装会迭代的内容：
 
 ```text
 bin/acb-bridge
-harnesses/dsh/src/driver.mjs
-harnesses/dsh/dsh-mcp.patch.yml
-harnesses/opencode/plugin/index.js
-harnesses/opencode/plugin/acb-wire.mjs
-harnesses/shared/tools.mjs
-deploy/start-drivers.sh        # 纯扇出执行器
-manifest.json                  # 含 acb_contract，见 3.3
+harnesses/...
+deploy/start-drivers.sh
+acb-contract.json
 ```
 
 ```sh
-nix build .#acb-bridge -o result
+nix build .#acb-payload -o result
 # 非 NixOS 且没开 flake 时：
-# nix --extra-experimental-features 'nix-command flakes' build .#acb-bridge -o result
+# nix --extra-experimental-features 'nix-command flakes' build .#acb-payload -o result
 
-ls result/bin   # 只需要 acb-bridge；acbl 的二进制不在这里
+PAYLOAD=$(readlink -f result)
+ls "$PAYLOAD"   # bin harnesses deploy acb-contract.json
 
-mkdir -p "$PAYLOAD/bin"
-cp -L result/bin/acb-bridge "$PAYLOAD/bin/"
-cp -r "$REPO/harnesses" "$PAYLOAD/"
-cp -r "$REPO/deploy" "$PAYLOAD/"          # 过渡期见下方 B-12 说明
-mkdir -p "$PAYLOAD/share/acb"
-cp -r "$REPO/share/acb/units" "$PAYLOAD/share/acb/units"   # 过渡期（B-12）；unit 模板属于 acbl，这里只为通过校验
 # 配置里用了 lua provider 时再带上：
 cp -r "$REPO/examples/lua" "$PAYLOAD/lua"
 ```
+
+`acb-payload` 已按 B-12 收窄后的口径打包：不含 acbl 二进制、不含 `share/acb/units/`，`acb-contract.json` 在 payload 根。
 
 #### B. 不用 nix，用 cargo（可选来源之一）
 
@@ -234,16 +228,15 @@ cp -r "$REPO/examples/lua" "$PAYLOAD/lua"
 cd "$REPO"
 cargo build --release
 
-mkdir -p "$PAYLOAD/bin"
+mkdir -p "$PAYLOAD/bin" "$PAYLOAD/deploy"
 cp target/release/acb-bridge "$PAYLOAD/bin/"
 cp -r harnesses "$PAYLOAD/"
-cp -r deploy "$PAYLOAD/"                 # 过渡期见下方 B-12 说明
-mkdir -p "$PAYLOAD/share/acb"
-cp -r share/acb/units "$PAYLOAD/share/acb/units"   # 过渡期（B-12）
+cp deploy/start-drivers.sh "$PAYLOAD/deploy/"
+cp deploy/acb-contract.json "$PAYLOAD/acb-contract.json"
 cp -r examples/lua "$PAYLOAD/lua"        # 可选
 ```
 
-**过渡期注意（B-12）**：当前 `validate_payload` 仍要求 `share/acb/units/`、`deploy/run/supervisor.toml.tmpl`、`deploy/start-dsh.sh`、`deploy/opencode-serve.sh`（`crates/acb/src/profile.rs`）。校验收窄前，payload 需要同时复制 `deploy/` 与 `share/acb/units/` 才能通过 seed；这些文件在新结构里**不参与运行**（acbl 用自己的 unit 与预设），只是为了让校验通过。校验收窄后，payload 只需要上表列出的内容。
+**B-12 收窄后的口径**：`validate_payload` 只要求 `bin/`、`harnesses/`、`deploy/start-drivers.sh`，并校验 payload 根的 `acb-contract.json`（`crates/acb/src/profile.rs` / `contract.rs`）。`share/acb/units/`、`deploy/run/`、`deploy/start-dsh.sh`、`deploy/opencode-serve.sh` 已不属于 payload。
 
 `profile seed` 要求 `bin/` 与 `harnesses/` 存在，**只把 `result/bin` 交给 seed 会直接失败**。
 
@@ -262,11 +255,11 @@ cp -r examples/lua "$PAYLOAD/lua"        # 可选
 ```
 
 - `copy`：本地快照，任何目录都能用，**没有 nix 也能用**；第一代建议一律先用它。
-- `store`：只有 payload 位于 `/nix/store` 时才可用（靠 store 不可变做回退）。仓库根 flake **目前没有** “同时含 bin + deploy + harnesses”的 bootstrap 输出；nix-config 是自己用 `runCommand` 打了一个。手工部署如果坚持要 store，参考缺口 B-6。
+- `store`：只有 payload 位于 `/nix/store` 时才可用（靠 store 不可变做回退）。`nix build .#acb-payload` 的产物就是 store 路径，直接用作 `--payload` 即可；不再需要 nix-config 自己用 `runCommand` 打包。
 
 `profile seed` 会顺带写入初始 LKG（`$STATE_DIR/lkg.json`），已有则不动。
 
-> **契约版本（B-12）**：payload 应在 `manifest.json` 里声明 `acb_contract = N`，acbl 声明支持区间并在 `profile add` / `switch` / 启动时校验。当前代码还没有这个字段，也没有校验；落地前先按同一版仓库部署，不要指望它能拦住不兼容的 payload。
+> **契约版本（B-12，已实现）**：payload 根的 `acb-contract.json` 声明 `schema`、`contract`、`min_acbl`、`layout`、`commands`；acbl 在 `profile add` / `switch` / 启动时校验，支持区间当前为 `1..=1`。缺文件时按 `contract = 1` 过渡放行；设置 `ACB_CONTRACT_STRICT=1` 后缺文件直接拒绝。`nix build .#acb-payload` 已把该文件打进 payload 根，手工组装时不要漏。
 
 > **版本契约（B-4）**：本仓库当前代码要求显式 `--strategy`；nix-config 当前 pin 的 acb rev（`b9c7d4b`）**不认这个参数**，策略是自动推断的。所以：
 > - 现在**不要**给 nix-config 的 `ExecStartPre profile seed` 加 `--strategy`，加了会让 `ExecStartPre` 失败；
@@ -435,10 +428,9 @@ systemctl --user --no-pager status acb-launcher-user.service
 export ACBL_BIN=$(command -v acb-launcher)
 export ACBCTL_BIN=$(command -v acbctl)
 
-# 构建 + 组装 payload（§3.2 A）
-nix build .#acb-bridge -o result
-mkdir -p "$PAYLOAD/bin"; cp -L result/bin/acb-bridge "$PAYLOAD/bin/"
-cp -r deploy harnesses "$PAYLOAD/"
+# 构建 + 组装 payload（§3.2 A）：acb-payload 已按收窄口径组装好
+nix build .#acb-payload -o result
+PAYLOAD=$(readlink -f result)
 
 # 第一代 profile（§3.3）
 "$ACBCTL_BIN" profile seed "$PAYLOAD" --strategy copy \
@@ -480,13 +472,12 @@ set -a; . "$ENVFILE"; set +a
 
 ```sh
 # 装 acbl（§3.2.0）：非 NixOS + nix
-nix profile install "$REPO"
+nix profile install "$REPO#acbl"
 export ACBL_BIN=$(command -v acb-launcher)
 
-# 构建（§3.2 A）
-nix --extra-experimental-features 'nix-command flakes' build .#acb-bridge -o result
-mkdir -p "$PAYLOAD/bin"; cp -L result/bin/acb-bridge "$PAYLOAD/bin/"
-cp -r deploy harnesses "$PAYLOAD/"
+# 构建（§3.2 A）：acb-payload 已按收窄口径组装好
+nix --extra-experimental-features 'nix-command flakes' build .#acb-payload -o result
+PAYLOAD=$(readlink -f result)
 
 # seed（§3.3）
 "$ACBCTL_BIN" profile seed "$PAYLOAD" --strategy copy \
