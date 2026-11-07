@@ -9,3 +9,6 @@ description = "受信任的树外 manager：扩展宿主契约的参考实现（
 [dependencies]
 acb-i18n = { workspace = true }
 acb-kernel = { path = "../../kernel" }
+
+[dev-dependencies]
+acb-kernel = { path = "../../kernel", features = ["test-fixtures"] }

@@ -21,3 +21,13 @@ toml = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[features]
+# 仅测试/示例使用：开启后才会编译 Config::parse_fixture / load_fixture。
+# 生产构建不启用（release 下显式开启会直接编译失败），因此入口不存在。
+test-fixtures = []
+
+[dev-dependencies]
+# 自引用让本 crate 的 unit/integration tests 与 examples 看到 test-fixtures；
+# 正常 build 不包含 dev-dependencies，生产二进制里没有 fixture 入口。
+acb-kernel = { path = ".", features = ["test-fixtures"] }

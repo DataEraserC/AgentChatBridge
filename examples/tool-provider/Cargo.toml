@@ -11,7 +11,8 @@ name = "minimal-tool-provider"
 path = "src/main.rs"
 
 [dependencies]
-acb-kernel = { path = "../../crates/kernel" }
+# 示例不是生产构建，显式启用测试 fixture 入口。
+acb-kernel = { path = "../../crates/kernel", features = ["test-fixtures"] }
 serde_json = "1"
 
 # 故意不加入根 workspace：示例可以单独构建，不拖慢主仓库。

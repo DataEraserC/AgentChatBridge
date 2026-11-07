@@ -152,6 +152,7 @@ version = "0.1.0"
 dependencies = [
  "acb-adapter-api",
  "acb-i18n",
+ "acb-kernel",
  "acb-proto",
  "git2",
  "libc",
