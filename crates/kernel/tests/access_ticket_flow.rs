@@ -281,6 +281,11 @@ fn single_request_approve_and_use_once() {
         .expect("申请成功");
     assert_eq!(request["batch_id"], serde_json::Value::Null);
     assert_eq!(request["tickets"][0]["state"], "pending_approval");
+    assert_eq!(
+        request["tickets"][0]["reason"],
+        serde_json::Value::Null,
+        "旧调用没带 reason 时回复保持空值"
+    );
     let id = request["tickets"][0]["ticket"]
         .as_str()
         .expect("票据 id")
@@ -313,6 +318,10 @@ fn single_request_approve_and_use_once() {
     assert!(
         text.contains("申请者：user1（user1）"),
         "审批私信要显示触发者 id 与显示名：{text}"
+    );
+    assert!(
+        !text.contains("申请人自述"),
+        "没有 reason 时审批消息不新增分区：{text}"
     );
     let nonce = field(&text, "nonce=");
 
@@ -1017,6 +1026,150 @@ fn unverified_op_is_direct_denied_and_ticket_approval_shows_the_reason() {
             .is_some_and(|reason| reason.contains("add_type")),
         "{queried}"
     );
+}
+
+#[test]
+fn reason_is_labeled_as_applicant_statement_and_exposed() {
+    let (mut bridge, sends) = bridge_with(config());
+    bridge
+        .ingest(message("qq:group/123", "user1", "要跨群同步", true))
+        .expect("能记下来");
+    let turn = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let request = bridge
+        .tool_call(
+            &turn,
+            &sessions(),
+            "access_request",
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["send_message_to"],
+                "params": {"elements": [{"type": "text", "text": "approved"}]},
+                "reason": "  需要跨群同步\n\"紧急\" \\ 内容  "
+            }]}),
+        )
+        .expect("申请成功");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("票据 id")
+        .to_owned();
+    assert_eq!(
+        request["tickets"][0]["reason"], "需要跨群同步 \"紧急\" \\ 内容",
+        "回复里的自述要先清洗：剥控制字符、折叠空白"
+    );
+    bridge.end_turn(&turn, None).expect("收工");
+
+    let approval = approval_dm(&sends);
+    assert!(
+        approval.contains("〔申请人自述，未经验证，不代表系统结论〕"),
+        "审批消息必须明确标注自述、未验证：{approval}"
+    );
+    assert!(
+        approval.contains("\\\"紧急\\\""),
+        "引号要转义后再进消息：{approval}"
+    );
+    assert!(
+        approval.contains("\\\\ 内容"),
+        "反斜杠要转义后再进消息：{approval}"
+    );
+
+    // ticket_json 同步暴露清洗后的自述，供 access_ticket_get 查询。
+    bridge
+        .ingest(message("qq:group/123", "user1", "再开一轮", true))
+        .expect("能入库");
+    let query_turn = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let queried = bridge
+        .tool_call(
+            &query_turn,
+            &sessions(),
+            "access_ticket_get",
+            json!({"id": id}),
+        )
+        .expect("查询票据");
+    assert_eq!(queried["reason"], "需要跨群同步 \"紧急\" \\ 内容");
+    bridge.end_turn(&query_turn, None).expect("收工");
+}
+
+#[test]
+fn expired_batch_writes_one_result_record_and_wakes_once() {
+    // 本用例把 pending TTL 压到 1 秒，避免依赖可注入时钟。
+    let text = config().replace(
+        "admin_cooldown_secs = 0",
+        "admin_cooldown_secs = 0\n        pending_ttl_secs = 1",
+    );
+    let (mut bridge, _sends) = bridge_with(&text);
+    bridge
+        .ingest(message("qq:group/123", "user1", "批量申请", true))
+        .expect("能记下来");
+    let turn = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let request = bridge
+        .tool_call(
+            &turn,
+            &sessions(),
+            "access_request",
+            json!({"items": [
+                {"target": "qq:group/998", "ops": ["send_message_to"], "params": {"elements": [{"type": "text", "text": "a"}]}},
+                {"target": "qq:group/997", "ops": ["send_message_to"], "params": {"elements": [{"type": "text", "text": "b"}]}}
+            ]}),
+        )
+        .expect("批量申请成功");
+    let ids: Vec<String> = request["tickets"]
+        .as_array()
+        .expect("票据数组")
+        .iter()
+        .map(|ticket| ticket["ticket"].as_str().expect("id").to_owned())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    bridge.end_turn(&turn, None).expect("收工");
+
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("系统时间")
+        .as_millis() as i64;
+    let queued = bridge.tick_tickets(now);
+    assert_eq!(queued, 1, "同一会话+房间的整批过期只唤醒一次");
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有唤醒");
+    assert_eq!(delivery.reason, TurnReason::Wake);
+    assert_eq!(delivery.wake_reason.as_deref(), Some("ticket_result"));
+    let results: Vec<_> = delivery
+        .records
+        .iter()
+        .filter(|record| {
+            matches!(&record.kind, RecordKind::Event { event, .. } if event == "ticket_result")
+        })
+        .collect();
+    assert_eq!(results.len(), 1, "整批过期只写一条结果流水");
+    let text = text_of(&results[0].elements);
+    for id in &ids {
+        assert!(text.contains(id), "过期流水要列出批次内票据: {text}");
+    }
+    assert!(text.contains("已过期"), "{text}");
+    assert!(text.contains("approval_timeout"), "{text}");
+    assert_eq!(results[0].sender.id, "system", "过期流水由系统写，不是人");
+    bridge.end_turn(&delivery.ticket, None).expect("收工");
+
+    assert!(
+        bridge.poll_turn().expect("能轮询").is_none(),
+        "聚合唤醒不能每张票各排一轮"
+    );
+
+    // 终态与拒绝语义分开：Expired + expire_reason，没有 approver。
+    bridge
+        .ingest(message("qq:group/123", "user1", "查结果", true))
+        .expect("能入库");
+    let query = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    for id in &ids {
+        let ticket = bridge
+            .tool_call(&query, &sessions(), "access_ticket_get", json!({"id": id}))
+            .expect("查询票据");
+        assert_eq!(ticket["state"], "expired");
+        assert_eq!(ticket["expire_reason"], "approval_timeout");
+        assert_eq!(ticket["approver"], serde_json::Value::Null);
+    }
+    bridge.end_turn(&query, None).expect("收工");
 }
 
 #[test]

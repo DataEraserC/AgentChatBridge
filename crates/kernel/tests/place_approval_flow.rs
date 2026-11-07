@@ -528,7 +528,7 @@ fn routes_to_private_and_another_group_are_both_usable() {
 }
 
 #[test]
-fn unreachable_route_keeps_ticket_pending_and_never_falls_back() {
+fn explicit_route_delivers_even_without_subscription_and_never_falls_back() {
     let (mut bridge, sends) = bridge();
     let request = start_request(&mut bridge, "qq:group/127", "u1", "qq:group/999").expect("能申请");
     let id = request["tickets"][0]["ticket"]
@@ -536,23 +536,50 @@ fn unreachable_route_keeps_ticket_pending_and_never_falls_back() {
         .expect("id")
         .to_owned();
 
-    // 目标私聊没有订阅 → route_unavailable；申请房间不能收到审批消息。
+    // 显式写进 approval_route 的房间即使没有会话订阅，也允许投递：
+    // 订阅只约束「收消息要不要叫醒」，审批命令本身在订阅闸门之前由 core 接管。
     assert!(
         sent_to(&sends, "qq:group/127")
             .iter()
             .all(|text| !text.contains("[ACB 授权申请]")),
-        "路由不可达时绝不能回退到申请房间"
+        "审批投递绝不能回退到申请房间"
     );
     assert!(
-        sent_to(&sends, "qq:private/unreachable").is_empty(),
-        "未订阅目标不应该收到投递"
+        !sent_to(&sends, "qq:private/unreachable").is_empty(),
+        "显式路由目标应收到审批消息"
     );
 
     let ticket = ticket_state(&mut bridge, "qq:group/127", &id);
     assert_eq!(ticket["state"], "pending_approval");
+    assert!(ticket["announced"].as_bool().unwrap_or(false));
     assert!(
-        ticket["route_unavailable"].is_string(),
-        "路由不可达要记录原因，便于 console/审计查看: {ticket}"
+        ticket["route_unavailable"].is_null(),
+        "投递成功要回写票据: {ticket}"
+    );
+}
+
+#[test]
+fn no_carrier_keeps_ticket_pending_and_records_delivery_failure() {
+    let mut bridge = Bridge::with_outbounds(
+        Config::parse(&config()).expect("配置合法"),
+        MemoryStore::new(),
+        Outbounds::new(),
+        PluginManager::with_native_builtins(),
+    );
+    let request = start_request(&mut bridge, "qq:group/127", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    let ticket = ticket_state(&mut bridge, "qq:group/127", &id);
+    assert_eq!(ticket["state"], "pending_approval");
+    assert_eq!(ticket["announced"], false);
+    assert!(
+        ticket["route_unavailable"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("carrier is down")),
+        "载体不在位要回写投递失败: {ticket}"
     );
 }
 

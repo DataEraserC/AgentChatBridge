@@ -33,6 +33,7 @@ static EVENTS: &[Cow<'static, str>] = &[
     Cow::Borrowed("group_ban"),
     Cow::Borrowed("group_recall"),
     Cow::Borrowed("friend_recall"),
+    Cow::Borrowed("group_msg_emoji_like"),
     Cow::Borrowed("group_admin"),
     Cow::Borrowed("group_upload"),
     Cow::Borrowed("group_card"),
@@ -42,6 +43,9 @@ static EVENTS: &[Cow<'static, str>] = &[
 ];
 static EVENT_TAGS: &[Cow<'static, str>] = &[
     Cow::Borrowed("poke"),
+    Cow::Borrowed("reaction"),
+    Cow::Borrowed("reaction_add"),
+    Cow::Borrowed("reaction_remove"),
     Cow::Borrowed("notice"),
     Cow::Borrowed("request"),
 ];

@@ -269,8 +269,9 @@ ignore_speakers = []   # 这些人的发言不叫醒（但照样记账）
 
 - **上面这些是内置唤醒策略的字段**。如果 `provider` 换成 Lua / 动态库，参数写在
   `[sessions.subscriptions.wake.options]`，形状由插件自己定义（Lua 里是 `options.extra`）。
-  例如 `provider = "lua.wake_policy"` 时写 `at_mention` / `poke` / `reply` /
-  `empty_body_hold_ms` / `accumulate` / `idle_hours`，见
+  例如 `provider = "lua.wake_policy"` 时写 `at_mention` / `poke` /
+  `empty_body_hold_ms` / `accumulate` / `idle_hours`；`reply` 是例外，示例脚本读的
+  是标准字段 `wake.reply`，和内置策略一致（表情回应也走这个开关），见
   [`examples/lua/wake_policy.lua`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/examples/lua/wake_policy.lua) 和
   [插件开发](../08-plugin-development.md)。
 - **唤醒配置是按房间存的**：同一个会话订阅 QQ 房间和 Discord 房间时，QQ 房间写

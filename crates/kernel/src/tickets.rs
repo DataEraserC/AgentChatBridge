@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::grants::{AccessTarget, GrantCapability, GrantSubject, Place, truncate_target};
 
-/// `[tickets]`：审批冷却与聚合的节奏。0 = 关闭对应冷却。
+/// `[tickets]`：审批冷却、聚合与超时。0 = 关闭对应冷却。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TicketsPolicy {
@@ -24,6 +24,10 @@ pub struct TicketsPolicy {
     pub request_cooldown_secs: u64,
     /// 同一个 system admin 收到两条审批消息之间的最小间隔。
     pub admin_cooldown_secs: u64,
+    /// 是否启用审批等待超时（到点自动置 `Expired` 并写结果流水）。
+    pub auto_expire: bool,
+    /// pending 票据的等待上限（秒）；`0` 表示不做 pending 过期。
+    pub pending_ttl_secs: u64,
 }
 
 impl Default for TicketsPolicy {
@@ -31,7 +35,21 @@ impl Default for TicketsPolicy {
         Self {
             request_cooldown_secs: 60,
             admin_cooldown_secs: 30,
+            auto_expire: true,
+            pending_ttl_secs: (PENDING_TTL_MS / 1000) as u64,
         }
+    }
+}
+
+impl TicketsPolicy {
+    /// 配置换算成票据簿实际使用的 pending TTL。关闭自动过期或填 0 都表示「不过期」。
+    pub fn pending_ttl_ms(&self) -> i64 {
+        if !self.auto_expire || self.pending_ttl_secs == 0 {
+            return i64::MAX;
+        }
+        i64::try_from(self.pending_ttl_secs)
+            .unwrap_or(i64::MAX / 1000)
+            .saturating_mul(1000)
     }
 }
 
@@ -53,6 +71,8 @@ pub const MAX_OPS: usize = 8;
 pub const MAX_OP_CHARS: usize = 64;
 /// 内存里最多保留多少张票据（含终态）。
 pub const MAX_TICKETS: usize = 200;
+/// 申请人自述理由的最大字符数；超出截断并加省略号。
+pub const MAX_REASON_CHARS: usize = 500;
 /// 同一审批人在窗口内允许的 nonce 失败次数；达到后临时拒绝。
 pub const NONCE_FAILURE_LIMIT: usize = 5;
 /// nonce 失败计数的滑动窗口，与 `PENDING_TTL_MS` 对齐。
@@ -107,6 +127,8 @@ pub struct AccessTicket {
     pub ops: Vec<String>,
     /// 挂起动作的参数快照；只存内存，随票据终态释放。
     pub params: Option<Value>,
+    /// 申请人自述理由（已清洗）。只用于展示与审计，不参与授权判定。
+    pub reason: Option<String>,
     /// 申请轮次的触发者；唤醒执行结果时沿用，不继承管理员身份。
     pub origin_sender: Option<String>,
     /// 触发者的显示名，只用于审批私信与审计；不参与身份判定。
@@ -143,6 +165,9 @@ pub struct AccessTicket {
     pub result: Option<Value>,
     pub failure_reason: Option<String>,
     pub audit_ref: Option<String>,
+    /// 仅 `Expired` 有值：`approval_timeout` / `active_timeout`。
+    /// 与 `Denied` 区分：这里没有审批人，不是「有人拒绝」。
+    pub expire_reason: Option<String>,
 }
 
 /// 一次申请的全部输入。
@@ -155,6 +180,8 @@ pub struct TicketRequest {
     pub target: AccessTarget,
     pub ops: Vec<String>,
     pub params: Option<Value>,
+    /// 申请人原始自述；`insert` 时统一清洗，空值按缺省处理。
+    pub reason: Option<String>,
     pub origin_sender: Option<String>,
     pub origin_sender_name: Option<String>,
     pub capabilities: BTreeSet<GrantCapability>,
@@ -185,6 +212,8 @@ pub struct TicketReply {
     pub state: TicketState,
     pub expires_at: i64,
     pub duplicate: bool,
+    /// 申请人自述（已清洗）；旧调用没带时为 `None`。
+    pub reason: Option<String>,
 }
 
 /// 批量申请的结果：一个 batch id + N 张独立票据。
@@ -195,7 +224,7 @@ pub struct BatchReply {
 }
 
 /// 进程内的票据簿。所有方法都在 core 的全局锁内调用，不需要额外同步。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AccessTickets {
     tickets: HashMap<String, AccessTicket>,
     seq: u64,
@@ -206,13 +235,44 @@ pub struct AccessTickets {
     admin_notified_at: Option<i64>,
     /// 审批人 → 窗口内 nonce 失败时间戳；用于错 nonce 计数与临时拒绝。
     nonce_failures: HashMap<String, Vec<i64>>,
+    /// 已经置 `Expired`、但还没被周期任务写流水/唤醒的票据快照。
+    expired_unreported: Vec<AccessTicket>,
+    /// pending 票据的有效期；`i64::MAX` 表示不自动过期。
+    pending_ttl_ms: i64,
     #[cfg(test)]
     audit_log: Vec<String>,
+}
+
+impl Default for AccessTickets {
+    fn default() -> Self {
+        Self {
+            tickets: HashMap::new(),
+            seq: 0,
+            session_notified_at: HashMap::new(),
+            admin_notified_at: None,
+            nonce_failures: HashMap::new(),
+            expired_unreported: Vec::new(),
+            pending_ttl_ms: PENDING_TTL_MS,
+            #[cfg(test)]
+            audit_log: Vec::new(),
+        }
+    }
 }
 
 impl AccessTickets {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 由配置驱动 pending 过期时长；周期扫描与申请入口都会刷新。
+    pub fn set_pending_ttl_ms(&mut self, ttl_ms: i64) {
+        self.pending_ttl_ms = ttl_ms.max(1);
+    }
+
+    /// 取出本轮新过期、尚未写流水的票据快照；同时顺带跑一次惰性扫描。
+    pub fn take_expired(&mut self, now: i64) -> Vec<AccessTicket> {
+        self.sweep(now);
+        std::mem::take(&mut self.expired_unreported)
     }
 
     /// 创建或复用一张 pending 票据。返回 `Err(reason)` 时不会创建任何东西。
@@ -237,6 +297,7 @@ impl AccessTickets {
                 state: existing.state,
                 expires_at: existing.expires_at,
                 duplicate: true,
+                reason: existing.reason.clone(),
             });
         }
 
@@ -368,13 +429,14 @@ impl AccessTickets {
             target: request.target,
             ops,
             params: request.params,
+            reason: sanitize_reason(request.reason.as_deref()),
             origin_sender: request.origin_sender,
             origin_sender_name: request.origin_sender_name,
             capabilities: request.capabilities,
             unverified: request.unverified,
             seq: self.seq,
             created_at: request.now,
-            expires_at: request.now.saturating_add(PENDING_TTL_MS),
+            expires_at: request.now.saturating_add(self.pending_ttl_ms),
             state: TicketState::PendingApproval,
             request_turn: request.request_turn,
             batch_id: request.batch_id,
@@ -393,6 +455,7 @@ impl AccessTickets {
             result: None,
             failure_reason: None,
             audit_ref: None,
+            expire_reason: None,
         };
         self.audit("request", &ticket, "requested");
         let reply = TicketReply {
@@ -401,6 +464,7 @@ impl AccessTickets {
             state: ticket.state,
             expires_at: ticket.expires_at,
             duplicate: false,
+            reason: ticket.reason.clone(),
         };
         self.tickets.insert(id, ticket);
         self.prune();
@@ -1019,11 +1083,18 @@ impl AccessTickets {
     }
 
     /// 过期扫描：pending/active 到点即失效。每次请求/批准/使用前都会跑一次。
-    pub(crate) fn sweep(&mut self, now: i64) {
+    /// 新过期的票据同时进入待上报队列，由周期任务统一写流水并聚合唤醒。
+    pub(crate) fn sweep(&mut self, now: i64) -> Vec<AccessTicket> {
         let mut expired = Vec::new();
         for ticket in self.tickets.values_mut() {
             if ticket.state.live() && ticket.expires_at <= now {
+                let expire_reason = if ticket.state == TicketState::PendingApproval {
+                    "approval_timeout"
+                } else {
+                    "active_timeout"
+                };
                 ticket.state = TicketState::Expired;
+                ticket.expire_reason = Some(expire_reason.to_owned());
                 ticket.nonce.clear();
                 ticket.params = None;
                 expired.push(ticket.snapshot());
@@ -1032,12 +1103,18 @@ impl AccessTickets {
         for ticket in &expired {
             self.audit("expire", ticket, "expired");
         }
+        self.expired_unreported.extend(expired.iter().cloned());
+        if self.expired_unreported.len() > MAX_TICKETS {
+            let excess = self.expired_unreported.len() - MAX_TICKETS;
+            self.expired_unreported.drain(..excess);
+        }
         let failure_window_start = now.saturating_sub(NONCE_FAILURE_WINDOW_MS);
         self.nonce_failures.retain(|_, attempts| {
             attempts.retain(|at| *at > failure_window_start);
             !attempts.is_empty()
         });
         self.prune();
+        expired
     }
 
     /// 只保留最近的票据，避免内存无限增长；live 票据永远保留。
@@ -1066,7 +1143,7 @@ impl AccessTickets {
             .collect::<Vec<_>>()
             .join("|");
         let ops = ticket.ops.join("|");
-        let line = format!(
+        let mut line = format!(
             "[access-ticket] event={} ticket={} batch={} state={} principal={} place={} capability={} target={} ops={} session={} turn={} sender={} sender_name={} approval_ref={} approval_route={} approval_room={} approval_place={} trusted_group={} unverified={} reason=\"{}\"",
             event,
             ticket.id,
@@ -1089,6 +1166,12 @@ impl AccessTickets {
             !ticket.unverified.is_empty(),
             reason.replace('"', "'"),
         );
+        if let Some(reason) = &ticket.reason {
+            line.push_str(&format!(
+                " applicant_reason=\"{}\"",
+                escape_reason_for_display(reason)
+            ));
+        }
         eprintln!("{line}");
         #[cfg(test)]
         self.audit_log.push(line);
@@ -1139,7 +1222,44 @@ fn reply(ticket: &AccessTicket, duplicate: bool) -> TicketReply {
         state: ticket.state,
         expires_at: ticket.expires_at,
         duplicate,
+        reason: ticket.reason.clone(),
     }
+}
+
+/// 清洗申请人自述：剥控制字符、折叠空白、限长。空串按缺省处理。
+///
+/// 这是纯展示/审计字段：不参与授权判定、能力推导、op 解析或去重键。
+pub fn sanitize_reason(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let mut out = String::new();
+    let mut pending_space = false;
+    for ch in raw.chars() {
+        if ch.is_control() || ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(ch);
+    }
+    let out = out.trim().to_owned();
+    if out.is_empty() {
+        return None;
+    }
+    let mut chars = out.chars();
+    let head: String = chars.by_ref().take(MAX_REASON_CHARS).collect();
+    if chars.next().is_some() {
+        Some(format!("{head}…"))
+    } else {
+        Some(head)
+    }
+}
+
+/// 进消息/审计前的转义：反斜杠与双引号都加转义，控制字符在清洗阶段已去掉。
+pub fn escape_reason_for_display(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 pub fn normalize_ops(ops: &[String]) -> Result<Vec<String>, String> {
@@ -1212,6 +1332,7 @@ mod tests {
             target: target(),
             ops: ops.iter().map(|op| (*op).to_owned()).collect(),
             params: Some(serde_json::json!({"elements": [{"type": "text", "text": "x"}]})),
+            reason: None,
             origin_sender: Some("user1".to_owned()),
             origin_sender_name: Some("群友一".to_owned()),
             capabilities: BTreeSet::from([GrantCapability::RoomWrite]),
@@ -1266,6 +1387,94 @@ mod tests {
                 )
                 .is_none(),
             "用后即废"
+        );
+    }
+
+    #[test]
+    fn reason_is_sanitized_limited_and_escaped_for_display() {
+        let raw = format!(
+            "  第一行\n\t第二行\u{0007}  \"引号\" \\反斜杠 {}",
+            "长".repeat(MAX_REASON_CHARS + 20)
+        );
+        let mut tickets = AccessTickets::new();
+        let mut req = request(1000, &["send_message_to"]);
+        req.reason = Some(raw);
+        let reply = tickets.request(req).expect("申请");
+        let reason = reply.reason.clone().expect("保留清洗后的自述");
+        assert_eq!(
+            tickets.get(&reply.id).expect("在簿上").reason.as_deref(),
+            Some(reason.as_str())
+        );
+        assert!(!reason.contains('\n') && !reason.contains('\t'));
+        assert!(
+            reason.chars().count() <= MAX_REASON_CHARS + 1,
+            "超长理由必须截断: {}",
+            reason.chars().count()
+        );
+        assert!(reason.ends_with('…'), "截断要有省略号: {reason}");
+        assert!(reason.contains("\"引号\""));
+        assert!(reason.contains("\\反斜杠"));
+
+        let escaped = escape_reason_for_display(&reason);
+        assert!(escaped.contains("\\\"引号\\\""));
+        assert!(escaped.contains("\\\\反斜杠"));
+        assert!(
+            tickets
+                .audit_log
+                .iter()
+                .any(|line| line.contains("applicant_reason=") && line.contains("\\\"引号\\\"")),
+            "审计要带转义后的自述: {:?}",
+            tickets.audit_log
+        );
+    }
+
+    #[test]
+    fn absent_reason_stays_none_and_does_not_affect_dedupe() {
+        let mut tickets = AccessTickets::new();
+        let first = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        assert!(first.reason.is_none(), "缺省调用不带 reason");
+
+        let mut second = request(2000, &["send_message_to"]);
+        second.request_turn = "turn-2".to_owned();
+        second.reason = Some("第二次自述".to_owned());
+        let again = tickets.request(second).expect("复用");
+        assert!(again.duplicate);
+        assert_eq!(again.id, first.id);
+        assert!(
+            again.reason.is_none(),
+            "去重键不含 reason，已有票据的自述不会被新调用改写"
+        );
+        assert!(tickets.get(&first.id).expect("在簿上").reason.is_none());
+        assert!(
+            !tickets
+                .audit_log
+                .iter()
+                .any(|line| line.contains("applicant_reason=")),
+            "没有 reason 时审计行保持原样: {:?}",
+            tickets.audit_log
+        );
+    }
+
+    #[test]
+    fn expiry_is_queued_once_with_a_reason_distinct_from_denied() {
+        let mut tickets = AccessTickets::new();
+        let pending = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        let expired = tickets.take_expired(1000 + PENDING_TTL_MS);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].id, pending.id);
+        assert_eq!(expired[0].state, TicketState::Expired);
+        assert_eq!(
+            expired[0].expire_reason.as_deref(),
+            Some("approval_timeout")
+        );
+        assert!(expired[0].approver.is_none(), "过期不是有人拒绝");
+        assert!(
+            tickets.take_expired(1000 + PENDING_TTL_MS).is_empty(),
+            "同一张票据只上报一次"
         );
     }
 

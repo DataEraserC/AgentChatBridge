@@ -444,7 +444,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     let mut guard = bridge
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    guard.tick_clock(now)
+                    // 同一秒顺带扫票据过期：终态写申请房间流水，按会话+房间聚合唤醒。
+                    guard.tick_clock(now) + guard.tick_tickets(now)
                 };
                 // 启动宽限期：从未出现过的 harness 在 30s 后转 down(not_started)。
                 clock_deps.tick(now);

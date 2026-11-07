@@ -103,9 +103,10 @@ provider = "lua.timeout_log_only"
 [sessions.turn_error.options]
 ops_room = "qq:group/ops"
 
-# 唤醒：@、poke、30 条未读、3 小时未唤醒；参数都在 options 里
+# 唤醒：@、poke、30 条未读、3 小时未唤醒；reply 用标准字段，其余参数在 options 里
 [sessions.subscriptions.wake]
 provider = "lua.wake_policy"
+reply = true
 
 [sessions.subscriptions.wake.options]
 at_mention = true

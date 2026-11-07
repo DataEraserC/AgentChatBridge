@@ -1059,10 +1059,10 @@ fn shipped_examples_load_and_behave() {
     let wake_policy = ProviderId::parse("lua.wake_policy").expect("合法");
     let policy = WakePolicy {
         provider: wake_policy.clone(),
+        reply: true,
         options: serde_json::json!({
             "at_mention": true,
             "poke": true,
-            "reply": true,
             "accumulate": 30,
             "idle_hours": 3
         }),
@@ -1098,16 +1098,40 @@ fn shipped_examples_load_and_behave() {
         ..base
     };
     assert_eq!(wake.decide(&policy, &replied), WakeDecision::Wake);
-    // 没配 reply 时引用不叫醒：这是 opt-in，不是默认。
+    // 表情回应走同一条 reply 开关：add 醒，remove 不醒。
+    let reacted = WakeContext {
+        reply_to_self: true,
+        has_body: false,
+        event: Some("group_msg_emoji_like"),
+        tags: &["notice", "reaction", "reaction_add"],
+        ..base
+    };
+    assert_eq!(wake.decide(&policy, &reacted), WakeDecision::Wake);
+    let unreacted = WakeContext {
+        tags: &["notice", "reaction", "reaction_remove"],
+        ..reacted
+    };
+    assert_eq!(
+        wake.decide(&policy, &unreacted),
+        WakeDecision::Stay,
+        "撤销反应不该叫醒"
+    );
+    // 关掉 wake.reply 时引用和表情回应都不叫醒：脚本读的就是这个标准字段。
     let no_reply_policy = WakePolicy {
         provider: wake_policy.clone(),
+        reply: false,
         options: serde_json::json!({ "at_mention": true, "poke": true }),
         ..Default::default()
     };
     assert_eq!(
         wake.decide(&no_reply_policy, &replied),
         WakeDecision::Stay,
-        "未配置 reply 时引用不该叫醒"
+        "关掉 reply 时引用不该叫醒"
+    );
+    assert_eq!(
+        wake.decide(&no_reply_policy, &reacted),
+        WakeDecision::Stay,
+        "关掉 reply 时表情回应也不该叫醒"
     );
     let poked = WakeContext {
         event: Some("poke"),

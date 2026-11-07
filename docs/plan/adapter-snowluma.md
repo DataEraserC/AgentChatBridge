@@ -225,7 +225,7 @@ SnowLuma 文档站的 API 参考是**从运行时动作目录生成的 OpenAPI**
 | 17 | 表情回应 | 4 + 自定义 7 + 系统 4 | **已实现** | 回应/自定义表情/系统表情全部暴露；`move_custom_face_to_front` 与 `get_emoji_likes` 已补（后者是 `fetch_emoji_like` 的别名） |
 | 18 | 语音/媒体 | `get_record`、`fetch_ptt_text`、`get_image`、`get_file`、OCR、AI 语音 | **已实现** | 原始流式上传下载、`download_file`（1 GiB / 60 s / http(s)）已补；音乐签名是配置项不是动作 |
 | 19 | 账号/系统状态 | login / status / version / 能力查询 / 资料设置 | **部分** | 启动已调用 `get_login_info` / `get_status` / `get_version_info`；三层版本 + 兼容下限进依赖元数据。`can_send_*`、资料设置、在线状态设置已补，但 55 个批次 9 op 仍是 `Unverified`，要等实验完成才算「完全」 |
-| 20 | 事件类型 | message / message_sent / notice / request / meta | **已实现** | `group_upload` / `essence` / `notify.*`（poke/profile_like/title/group_name/input_status）按 research §2.1 字段解析；未知 notice 仍保留 Opaque |
+| 20 | 事件类型 | message / message_sent / notice / request / meta | **已实现** | `group_upload` / `essence` / `notify.*`（poke/profile_like/title/group_name/input_status）按 research §2.1 字段解析；`group_msg_emoji_like` 按实测载荷解析（表情在 `likes[0].emoji_id`，`sub_type` 分 add/remove，仅群聊）；未知 notice 仍保留 Opaque |
 | 21 | 群相册 | 9 | **已实现** | 相册/媒体列表、上传、删除、评论、点赞全部暴露；删除/上传按风险分级 |
 | 22 | QQ 空间 | 10（中文）/ 26（英文） | **已实现（Unverified）** | 批次 9 按「任何平台功能均要有」全部暴露；写操作至少 `Destructive`，全部标 `Unverified`（门槛 critical），等实机实验后再改 `Verified` |
 | 23 | 收藏/闪传/其他扩展 | 115 个 extended 里的大部分 | **已实现（外部约束除外）** | 收藏/闪传/文件集、账号资料、群待办、Ark 卡片、单条转发都已暴露；SSO / 数据库密钥 / 进程运维按 critical 处理 |
