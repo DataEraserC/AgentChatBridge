@@ -79,7 +79,7 @@ fn base_values(root: &Path) -> Vec<(String, String)> {
         ),
         ("ACB_UNIT_CONSOLE_PORT".to_string(), "3100".to_string()),
         ("ACB_UNIT_OPENCODE_PORT".to_string(), "4097".to_string()),
-        ("ACB_UNIT_AUTOSTART".to_string(), "0".to_string()),
+        ("ACB_UNIT_INSTALL_SECTION".to_string(), "0".to_string()),
     ]
 }
 
@@ -429,8 +429,71 @@ fn diff_reports_same_and_different() {
 }
 
 #[test]
-fn autostart_defaults_off_and_enables_install_section_when_set() {
-    let temp = TempDir::new("autostart");
+fn install_scope_selects_stack_install_section() {
+    let temp = TempDir::new("scope");
+    let values = base_values(temp.path());
+    let root = temp.path().join("units");
+    fs::create_dir_all(&root).expect("create unit root");
+    let root_arg = root.to_string_lossy().into_owned();
+
+    let system = run_acb(
+        &values,
+        &[],
+        &[
+            "unit",
+            "install",
+            "--root",
+            root_arg.as_str(),
+            "--scope",
+            "system",
+            "--with-install-section",
+            "1",
+        ],
+    );
+    assert_success(&system);
+    let text = fs::read_to_string(root.join("acb-stack.target")).expect("read target");
+    assert!(
+        text.contains("WantedBy=multi-user.target"),
+        "system scope must use multi-user target: {text}"
+    );
+    assert!(!text.contains("WantedBy=default.target"), "{text}");
+
+    let user = run_acb(
+        &values,
+        &[],
+        &[
+            "unit",
+            "install",
+            "--root",
+            root_arg.as_str(),
+            "--scope",
+            "user",
+            "--with-install-section",
+            "1",
+        ],
+    );
+    assert_success(&user);
+    let text = fs::read_to_string(root.join("acb-stack.target")).expect("read target");
+    assert!(text.contains("WantedBy=default.target"), "{text}");
+
+    let invalid = run_acb(
+        &values,
+        &[],
+        &[
+            "unit", "install", "--root", root_arg.as_str(), "--scope", "container",
+        ],
+    );
+    assert!(!invalid.status.success());
+    assert!(
+        stderr(&invalid).contains("--scope must be user or system"),
+        "{}",
+        stderr(&invalid)
+    );
+}
+
+#[test]
+fn install_section_defaults_off_and_renders_when_set() {
+    let temp = TempDir::new("install-section");
     let values = base_values(temp.path());
 
     let disabled = run_acb(&values, &[], &["unit", "render", "--print"]);
@@ -438,13 +501,13 @@ fn autostart_defaults_off_and_enables_install_section_when_set() {
     let text = stdout(&disabled);
     assert!(
         !text.contains("[Install]"),
-        "default ACB_UNIT_AUTOSTART=0 must not render [Install]"
+        "default ACB_UNIT_INSTALL_SECTION=0 must not render [Install]"
     );
     assert!(!text.contains("WantedBy=default.target"));
 
     let enabled = run_acb(
         &values,
-        &[("ACB_UNIT_AUTOSTART", "1")],
+        &[("ACB_UNIT_INSTALL_SECTION", "1")],
         &["unit", "render", "--print"],
     );
     assert_success(&enabled);
@@ -459,12 +522,12 @@ fn autostart_defaults_off_and_enables_install_section_when_set() {
 
     let invalid = run_acb(
         &values,
-        &[("ACB_UNIT_AUTOSTART", "2")],
+        &[("ACB_UNIT_INSTALL_SECTION", "2")],
         &["unit", "render", "--print"],
     );
     assert!(!invalid.status.success());
     assert!(
-        stderr(&invalid).contains("ACB_UNIT_AUTOSTART must be 0 or 1"),
+        stderr(&invalid).contains("ACB_UNIT_INSTALL_SECTION must be 0 or 1"),
         "{}",
         stderr(&invalid)
     );

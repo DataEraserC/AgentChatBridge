@@ -17,14 +17,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use acb::profile;
+use acb_supervisor::adopted::AdoptedRunner;
+use acb_supervisor::instance::{self, DetectOutcome};
 use acb_supervisor::upgrade::{
     ActiveUpgrade, Capabilities, Mailbox, UPGRADE_SCHEMA, UpgradeResult, UpgradeTarget,
     detect_restart_owner, is_terminal_status, validate_request,
 };
 use acb_supervisor::{
     ActivationWriter, AlwaysHealthy, CommandSpec, EXIT_GIVE_UP, EXIT_OK, EXIT_ROLLBACK, HttpProbe,
-    Parts, ProcessRunner, Projection, ReconcileOutcome, RollbackMode, Supervisor, SystemClock,
-    SystemSleeper, build_policy, load_config, load_current, now_ms,
+    Parts, ProcessRunner, Probe, Projection, ReconcileOutcome, RollbackMode, Runner, Supervisor,
+    SystemClock, SystemSleeper, build_policy, load_config, load_current, now_ms,
 };
 
 fn main() -> ExitCode {
@@ -79,6 +81,8 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_GIVE_UP as u8);
         }
     }
+    // TODO(B-12): 在这里比较 payload 声明的 `acb_contract` 与本 acbl 的支持区间；
+    // A-8 不实现最低版本校验，只保留这个调用点，避免与契约分支的改动冲突。
     let current = match load_current(&state_dir) {
         Ok(Some(current)) => {
             if current != configured {
@@ -105,9 +109,6 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_GIVE_UP as u8);
         }
     };
-    // 启动对账用的锁不能跨 supervisor 生命周期持有：升级提交与回滚都会重新加锁，
-    // 同一进程重复 flock 同一路径会阻塞。
-    drop(writer);
     config.program = current.program.clone();
     config.args = current.args.clone();
     // generation 元数据同样以 current.json 为准；否则重启后 LKG 提升/回滚会记错代。
@@ -122,15 +123,34 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_GIVE_UP as u8);
         }
     };
-    let probe: Box<dyn acb_supervisor::Probe> = match &config.health_url {
+    let mut probe: Box<dyn Probe> = match &config.health_url {
         Some(url) => Box::new(HttpProbe::new(url)),
         None => Box::new(AlwaysHealthy),
+    };
+    // acbl 不拥有 bridge：启动前先确认有没有可验证的旧实例。有就接管，
+    // 无法确认身份但有健康响应就报错，绝不再起一个去抢同一个端口。
+    let instance_path = state_dir.join(instance::INSTANCE_FILE);
+    let healthy = probe.healthy();
+    let runner: Box<dyn Runner> = match instance::detect(&instance_path, &current, healthy) {
+        DetectOutcome::Vacant => Box::new(ProcessRunner::with_instance_file(instance_path)),
+        DetectOutcome::Adopt(record) => {
+            eprintln!(
+                "acb-launcher: adopting existing bridge pid {} ({})",
+                record.pid, record.instance_id
+            );
+            Box::new(AdoptedRunner::with_instance_file(*record, instance_path))
+        }
+        DetectOutcome::Conflict(reason) => {
+            instance::write_conflict(&state_dir, &reason);
+            eprintln!("acb-launcher: refusing to start: {reason}");
+            return ExitCode::from(EXIT_GIVE_UP as u8);
+        }
     };
     let mut supervisor = match Supervisor::new(
         config,
         Parts {
             clock: Box::new(SystemClock),
-            runner: Box::new(ProcessRunner::default()),
+            runner,
             probe,
             sleeper: Box::new(SystemSleeper),
             policy,
@@ -142,6 +162,12 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_GIVE_UP as u8);
         }
     };
+
+    // 首次 start 已由 Supervisor::new 完成；写者锁覆盖的是
+    // 对账 → 探测 → 决定接管/拉起 → 首次 start 整个临界区，两个 acbl 不会同时
+    // 判定“没有 bridge”。之后必须释放：升级提交/回滚会重新 flock 同一路径，
+    // 同一进程跨生命周期持有会自锁阻塞。
+    drop(writer);
 
     // 启动能力声明：ACB 只在 restart_owner != none 时接受升级请求。
     if let Err(error) = announce_capabilities(&mailbox, &current, &state_dir) {
@@ -156,11 +182,10 @@ fn main() -> ExitCode {
 
     while !supervisor.stopped() {
         if shutdown::requested() {
-            // systemd stop：SIGTERM 已发给同一 cgroup，子进程自己排空；这里只按契约退出 0。
-            // 手动运行（没有 NOTIFY_SOCKET）时没有人替我们停子进程，自己收掉。
-            if std::env::var_os("NOTIFY_SOCKET").is_none() {
-                supervisor.shutdown();
-            }
+            // 正常停止 / 升级 acbl：acbl 只观察和恢复 bridge，不拥有它。
+            // unit 用 KillMode=process，子进程本来就不会被 cgroup 带走；
+            // 这里也不主动杀，下一任 acbl 会通过 bridge.instance.json 接管。
+            eprintln!("acb-launcher: stop requested; leaving bridge running");
             notifier.stopping();
             return ExitCode::from(EXIT_OK as u8);
         }

@@ -1,7 +1,7 @@
 [Unit]
-Description=ACB launcher (supervisor front-end, reads current.json)
+Description=ACB launcher (static acbl; observer/restorer, not bridge owner)
 After=network.target
-# launcher 层重启上限：3 次 / 60 秒。达到后停在 failed，不自动复活。
+# 退出码契约固定在单元里：75 = 提交后请求重拉，78 = 放弃自动恢复。
 StartLimitIntervalSec=60
 StartLimitBurst=3
 StartLimitAction=none
@@ -11,7 +11,8 @@ Type=notify
 NotifyAccess=main
 # supervisor 的 unhealthy_secs=60 先于 watchdog=120 触发；watchdog 只兜 launcher/监督循环本身挂死。
 WatchdogSec=120
-# 普通 Linux 安装示例；按实际路径改。
+# 普通 Linux 安装示例；acbl 是独立安装的静态入口，不随 payload/generation 换代。
+# 对应 `acbctl unit install` 的 ACB_UNIT_ACBL_PREFIX（默认 /usr/local → $prefix/bin/acb-launcher）。
 ExecStart=/usr/local/bin/acb-launcher --config /etc/acb/supervisor.toml
 WorkingDirectory=/var/lib/acb
 # 只有异常退出才拉起 launcher。子进程的退避在 supervisor 内部，不叠 systemd 的 RestartSec。
@@ -21,9 +22,11 @@ RestartSec=1
 RestartForceExitStatus=75
 # 78 = 监督器放弃自动恢复（回滚失败 / 无 LKG / 写指针失败）：不再拉起。
 RestartPreventExitStatus=78
-# systemd stop 时 SIGTERM 发给整个 cgroup；acb 默认排空约 30s，留余量。
+# acbl 只是 bridge 的观察者/恢复者，不是所有者：停/重启 acbl 时不能连带杀 bridge。
+# 必须用 process（只给主进程发信号），否则 systemd 会按 cgroup 连 bridge 一起杀掉。
+KillMode=process
+# bridge 自己排空约需 30s；只等 acbl 自身退出即可，留余量。
 TimeoutStopSec=45
-KillMode=control-group
 StandardOutput=append:/var/log/acb-launcher.log
 StandardError=append:/var/log/acb-launcher.log
 
