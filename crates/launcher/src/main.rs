@@ -208,17 +208,27 @@ fn profile_root_for(current: &CommandSpec) -> Option<PathBuf> {
 }
 
 /// 启动前的契约校验。返回 `Some(可诊断原因)` 表示必须 78 放弃启动。
-/// 没有 generation 的配置式启动（旧部署）不校验；旧 payload 缺契约文件时按 v1 放行并告警。
+/// 没有 generation 的配置式启动（旧部署）不校验；缺契约文件默认过渡放行并告警，
+/// 开启 `ACB_CONTRACT_STRICT` 后按 `contract_unreadable` 拒绝（78）。
 fn payload_contract_error(current: &CommandSpec) -> Option<String> {
     let generation = current.generation.as_ref()?;
-    match acb::contract::verify(Path::new(&generation.path)) {
+    match acb::contract::verify_with(
+        Path::new(&generation.path),
+        acb::contract::configured_missing_policy(),
+    ) {
         Ok(acb::contract::State::Declared(_)) => None,
         Ok(acb::contract::State::Legacy) => {
             eprintln!(
-                "acb-launcher: generation {} has no {}; assuming legacy acb_contract={}",
+                "WARNING: generation {} has no {}; treating it as acb_contract={}.",
                 generation.id,
                 acb::contract::CONTRACT_FILE,
                 acb::contract::CONTRACT_MIN
+            );
+            eprintln!(
+                "WARNING: TRANSITIONAL fallback only - the next minor acbl release will \
+                 HARD-REJECT such payloads. Ship {} or set {}=1 to enforce strict mode now.",
+                acb::contract::CONTRACT_FILE,
+                acb::contract::STRICT_ENV
             );
             None
         }

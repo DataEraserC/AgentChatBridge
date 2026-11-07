@@ -1517,17 +1517,23 @@ fn validate_payload(source: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// payload 契约声明校验；没有 `acb-contract.json` 的旧 payload 按契约 v1 放行，
-/// 但要打印告警，方便安装方补齐声明。
+/// payload 契约声明校验；缺文件时默认按契约 v1 放行并打印醒目告警（过渡行为），
+/// 设置 `ACB_CONTRACT_STRICT` 后改为按 `contract_unreadable` 拒绝。
 fn verify_contract(payload: &Path) -> Result<(), String> {
-    match contract::verify(payload) {
+    match contract::verify_with(payload, contract::configured_missing_policy()) {
         Ok(contract::State::Declared(_)) => Ok(()),
         Ok(contract::State::Legacy) => {
             eprintln!(
-                "profile: {} has no {}; assuming legacy acb_contract={}",
+                "WARNING: payload {} has no {}; treating it as acb_contract={}.",
                 payload.display(),
                 contract::CONTRACT_FILE,
                 contract::CONTRACT_MIN
+            );
+            eprintln!(
+                "WARNING: TRANSITIONAL fallback only - the next minor acbl release will \
+                 HARD-REJECT such payloads. Ship {} or set {}=1 to enforce strict mode now.",
+                contract::CONTRACT_FILE,
+                contract::STRICT_ENV
             );
             Ok(())
         }

@@ -87,7 +87,10 @@ acbctl profile migrate --to copy [<gen-or-label>] [--profile-dir DIR]
   `<相对路径> (file|directory)`。
   校验完布局后校验 payload 根目录的 `acb-contract.json`（契约版本 / `min_acbl` /
   声明布局 / 命令集合，详见 `docs/plan/acb-upgrade-chain.md` §6.4）；
-  没有该文件的旧 payload 按契约 v1 放行并打印 `assuming legacy acb_contract=1` 告警。
+  没有该文件的旧 payload 默认按契约 v1 放行并打印
+  `TRANSITIONAL fallback only ... HARD-REJECT` 告警；设置 `ACB_CONTRACT_STRICT=1`
+  后缺文件按 `contract_unreadable` 拒绝（add/switch 退出 2，launcher 启动退出 78）。
+  严格模式默认关闭，翻默认的时机见 §6.4。
   插件必须保持原仓库的相对结构：`harnesses/opencode/plugin/index.js` 通过
   `../../shared/tools.mjs` 引用 `harnesses/shared/tools.mjs`，不能只单独拷插件目录。
 - `switch`：只改 `current` 软链；先校验 generation 的 `root` 存在与契约兼容，再在 profile

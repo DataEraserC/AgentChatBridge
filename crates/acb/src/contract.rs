@@ -16,7 +16,9 @@
 //!   但不会因为 payload 没声明某个可选文件而拒绝它。
 //!
 //! 过渡规则：payload 没有 `acb-contract.json` 时按 [`CONTRACT_MIN`] 处理（旧 payload
-//! 仍可启动），调用方应打印告警，方便安装方补契约文件。
+//! 仍可启动），调用方应打印醒目告警。删除契约文件就能落回这条旁路，所以真正的防线
+//! 是严格模式：设置环境变量 [`STRICT_ENV`] 后，缺文件按 `contract_unreadable` 拒绝。
+//! 严格模式默认关闭，等 payload 打包普遍带上契约文件后再翻默认。
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -90,9 +92,40 @@ impl fmt::Display for Violation {
 }
 
 /// acbl 自身的版本。acbl 的三个二进制（launcher / acbctl / supervisor）同属一个
-/// workspace，版本号就是 `acb` crate 的版本。
+/// workspace，`env!("CARGO_PKG_VERSION")` 是**编译期常量**，不是运行时读二进制。
+/// 前提：三个二进制按同一版本一起发布；如果将来拆版，这里的比较方式必须改。
 pub fn acbl_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// 缺契约文件时的策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingContract {
+    /// 过渡行为：按契约 v1 放行（默认）。
+    AssumeV1,
+    /// 严格模式：缺文件即 `contract_unreadable`，激活路径退出 78。
+    Reject,
+}
+
+/// 严格模式开关。任意非空且不是 `0/false/no/off` 的值都视为开启（失败朝严格一侧倒）。
+pub const STRICT_ENV: &str = "ACB_CONTRACT_STRICT";
+
+/// 从环境变量读取缺文件策略；默认 [`MissingContract::AssumeV1`]。
+pub fn configured_missing_policy() -> MissingContract {
+    let value = std::env::var_os(STRICT_ENV).map(|value| value.to_string_lossy().into_owned());
+    missing_policy_from(value.as_deref())
+}
+
+/// 解析严格模式取值，单独抽出来方便测试。
+pub fn missing_policy_from(value: Option<&str>) -> MissingContract {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        None => MissingContract::AssumeV1,
+        Some(value) if value.is_empty() => MissingContract::AssumeV1,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => {
+            MissingContract::AssumeV1
+        }
+        Some(_) => MissingContract::Reject,
+    }
 }
 
 /// acbl 是否支持某个 payload 声明的接口版本。
@@ -122,10 +155,30 @@ pub fn load(payload_root: &Path) -> Result<Option<Contract>, Violation> {
     Ok(Some(contract))
 }
 
-/// 校验 payload 的契约声明；旧 payload（无文件）按过渡规则放行并返回 [`State::Legacy`]。
+/// 默认策略（过渡放行）下的校验，等价于 `verify_with(.., AssumeV1)`。
 pub fn verify(payload_root: &Path) -> Result<State, Violation> {
+    verify_with(payload_root, MissingContract::AssumeV1)
+}
+
+/// 校验 payload 的契约声明；缺文件时按 `missing` 策略处理。
+/// 旧 payload 走 [`MissingContract::AssumeV1`] 时返回 [`State::Legacy`]。
+pub fn verify_with(
+    payload_root: &Path,
+    missing_contract: MissingContract,
+) -> Result<State, Violation> {
     let Some(contract) = load(payload_root)? else {
-        return Ok(State::Legacy);
+        return match missing_contract {
+            MissingContract::AssumeV1 => Ok(State::Legacy),
+            MissingContract::Reject => Err(Violation::new(
+                "contract_unreadable",
+                format!(
+                    "{} is missing from payload {}; strict contract mode ({STRICT_ENV}) \
+                     requires an explicit declaration",
+                    CONTRACT_FILE,
+                    payload_root.display()
+                ),
+            )),
+        };
     };
     if contract.schema != FILE_SCHEMA {
         return Err(Violation::new(
@@ -309,6 +362,29 @@ mod tests {
         let dir = temp_payload("legacy");
         assert!(matches!(verify(&dir).expect("legacy payload"), State::Legacy));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strict_mode_rejects_missing_contract() {
+        let dir = temp_payload("strict");
+        let violation = verify_with(&dir, MissingContract::Reject)
+            .expect_err("strict mode must reject a contract-less payload");
+        assert_eq!(violation.code, "contract_unreadable");
+        assert!(violation.detail.contains("ACB_CONTRACT_STRICT"), "{}", violation.detail);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strict_switch_parsing_defaults_to_permissive() {
+        assert_eq!(missing_policy_from(None), MissingContract::AssumeV1);
+        assert_eq!(missing_policy_from(Some("")), MissingContract::AssumeV1);
+        assert_eq!(missing_policy_from(Some("0")), MissingContract::AssumeV1);
+        assert_eq!(missing_policy_from(Some("false")), MissingContract::AssumeV1);
+        assert_eq!(missing_policy_from(Some("OFF")), MissingContract::AssumeV1);
+        assert_eq!(missing_policy_from(Some("1")), MissingContract::Reject);
+        assert_eq!(missing_policy_from(Some("yes")), MissingContract::Reject);
+        // 写错的值朝严格一侧倒，避免误以为“已开启”却仍放行。
+        assert_eq!(missing_policy_from(Some("of")), MissingContract::Reject);
     }
 
     #[test]

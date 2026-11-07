@@ -474,8 +474,20 @@ payload 的固定必带项（`profile` 侧独立校验，不依赖声明）：`b
 
 - **只增不改**：新增可选字段 / 可选文件不升 `contract`；删除、改名、语义变化必须升。
 - acbl 侧固定支持 `1..=1`；`N` 与 `N-1` 并行窗口等 v2 出现时再开。
-- 过渡期：payload 没有 `acb-contract.json` 时按 `contract = 1` 放行，每个校验点打印
-  `assuming legacy acb_contract=1` 告警；契约文件随 payload 发出去后应删除该兜底。
+- acbl 版本来源：`min_acbl` 与 `env!("CARGO_PKG_VERSION")` 比较，是 `acb` crate 的
+  **编译期常量**，不是运行时去读三个二进制的版本号。前提是 acbl 的 launcher / acbctl /
+  supervisor 按同一 workspace 版本一起发布；将来若拆版，必须改成运行时读取并把版本上报
+  纳入状态文件。
+- 过渡期与旁路风险：payload 没有 `acb-contract.json` 时按 `contract = 1` 放行，每个校验点
+  打印两条 `WARNING: ... TRANSITIONAL fallback only ... HARD-REJECT` 告警。
+  **这条兜底本身就是旁路：删掉契约文件就会自动落回 legacy 放行**，所以它只适合过渡期，
+  不能当作防线。
+- 严格模式：环境变量 `ACB_CONTRACT_STRICT` 打开后，缺文件按 `contract_unreadable` 拒绝
+  （`profile add`/`switch` 报错退出 2，launcher 启动退出 78）。取值 `0/false/no/off`
+  视为关闭，其余非空值视为开启（写错也朝严格一侧倒）。**默认关闭**，不改变现有现场行为。
+- 翻默认时机：payload 打包链路已稳定产出 `acb-contract.json`、且现场全部 generation 都带
+  文件之后，把严格模式改为默认开启，并删除 legacy 放行分支；提前翻默认会让现役无契约
+  payload 升级即 78。
 - 原因码：`contract_unreadable`、`contract_schema_unsupported`、`contract_incompatible`、
   `acbl_too_old`、`contract_malformed`、`payload_missing_path`、
   `payload_missing_command`、`payload_bad_command`。
