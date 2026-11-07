@@ -356,6 +356,13 @@ fn maybe_handle_upgrade(
         }
     };
 
+    // 停旧之前把目标代的解析与可执行文件校验做完：任何会失败的准备动作
+    // 都发生在服务还活着的时候，构建/产物不可用不能打断正在跑的版本。
+    if let Err(error) = profile::validate_generation(&profile_root, state_dir, &target_id) {
+        finish_request(mailbox, &active, "aborted", "target_invalid", &error);
+        return Ok(());
+    }
+
     mailbox.set_active_status("staged", now_ms())?;
 
     if let Err(error) = supervisor.stop_child() {
