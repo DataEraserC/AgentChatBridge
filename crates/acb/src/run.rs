@@ -243,7 +243,7 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
         Mode::Launcher => {
             let state_dir = match &arguments.state_dir {
                 Some(path) => path.clone(),
-                None => default_state_dir()?,
+                None => crate::profile::default_state_dir(),
             };
             let (config_path, config_text) = match arguments.config {
                 Some(path) => {
@@ -304,7 +304,9 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
                 })?;
             let config_text = fs::read_to_string(&config_path)
                 .map_err(|error| format!("read {}: {error}", config_path.display()))?;
-            let state_dir = arguments.state_dir.unwrap_or(default_state_dir()?);
+            let state_dir = arguments
+                .state_dir
+                .unwrap_or_else(crate::profile::default_state_dir);
             let bridge = bin_dir.join("acb-bridge");
             let config_string = config_path.to_string_lossy().into_owned();
             let child_args = vec!["--config".to_string(), config_string.clone()];
@@ -362,13 +364,6 @@ fn render_supervisor_config(state_dir: &Path) -> Result<String, String> {
 
 fn toml_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn default_state_dir() -> Result<PathBuf, String> {
-    if let Some(repo) = env_path("ACB_UNIT_REPO_DIR") {
-        return Ok(repo.join("state").join("supervisor"));
-    }
-    Ok(PathBuf::from("state/supervisor"))
 }
 
 fn env_path(key: &str) -> Option<PathBuf> {

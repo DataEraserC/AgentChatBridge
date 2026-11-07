@@ -564,13 +564,6 @@ pub fn detect_restart_owner() -> String {
     "none".to_string()
 }
 
-pub fn default_state_dir() -> PathBuf {
-    std::env::var_os("ACB_STATE_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("state/supervisor"))
-}
-
 fn write_json(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)

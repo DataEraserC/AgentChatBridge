@@ -100,6 +100,7 @@ fn run_acb(values: &[(String, String)], extra_env: &[(&str, &str)], args: &[&str
         }
     }
     command.env_remove("ACB_PROFILE_DIR");
+    command.env_remove("ACB_STATE_DIR");
     for (key, value) in values {
         command.env(key, value);
     }

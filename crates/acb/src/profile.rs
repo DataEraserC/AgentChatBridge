@@ -451,11 +451,12 @@ fn switch_command(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `--state-dir` > `ACB_STATE_DIR` > profile 根目录派生的默认位置。
 fn supervisor_state_dir(options: &BTreeMap<String, String>, root: &Path) -> PathBuf {
     options
         .get("state-dir")
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_supervisor_state_dir(root))
+        .unwrap_or_else(|| state_dir_for(root))
 }
 
 /// 把 generation 写成 `current.json` 的 command，并同时更新 `profile/current`。
@@ -644,8 +645,22 @@ fn write_initial_lkg(root: &Path, id: &str, state_dir: &Path) -> Result<(), Stri
     Ok(())
 }
 
-fn default_supervisor_state_dir(root: &Path) -> PathBuf {
-    root.parent()
+/// supervisor 状态目录的唯一默认解析。
+///
+/// 默认位置是 profile 根目录的同级 `state/supervisor`，与 unit 模板里
+/// `ACB_UNIT_STATE_DIR` 的派生规则一致；`ACB_STATE_DIR` 可以显式覆盖。
+/// `seed`/`switch`/`run`/`status`/`upgrade` 都走这里，避免各自看不同的
+/// `current.json` 或 upgrade mailbox。
+pub(crate) fn default_state_dir() -> PathBuf {
+    state_dir_for(&root())
+}
+
+fn state_dir_for(profile_root: &Path) -> PathBuf {
+    if let Some(dir) = std::env::var_os("ACB_STATE_DIR").filter(|value| !value.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    profile_root
+        .parent()
         .map(|parent| parent.join("state").join("supervisor"))
         .unwrap_or_else(|| PathBuf::from("state/supervisor"))
 }
@@ -1520,11 +1535,7 @@ fn current_id(root: &Path) -> Result<Option<String>, String> {
 }
 
 fn lkg_generation_id(root: &Path) -> Result<Option<String>, String> {
-    let state_dir = root
-        .parent()
-        .map(|parent| parent.join("state").join("supervisor"))
-        .unwrap_or_else(|| PathBuf::from("state/supervisor"));
-    let path = state_dir.join("lkg.json");
+    let path = state_dir_for(root).join("lkg.json");
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
