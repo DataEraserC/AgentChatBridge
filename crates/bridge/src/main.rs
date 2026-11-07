@@ -132,8 +132,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     "{}",
                     acb_i18n::t!(
                         "bridge.main.notifications_enabled",
-                        url = notifications.url.as_deref().unwrap_or_default(),
-                        topic = notifications.topic.as_deref().unwrap_or_default()
+                        source = notifications.topic_source.as_deref().unwrap_or("<unknown>")
                     )
                 );
                 deps.set_notice_sink(std::sync::Arc::new(notifier));

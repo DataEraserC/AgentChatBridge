@@ -301,7 +301,7 @@
   "bridge.main.console_listening": "console listening on {listen} (token auth)",
   "bridge.main.endpoint_disabled": "no [endpoint] configured; harness connections are disabled",
   "bridge.main.system_admin_configured": "system admin configured: connection {connection} account {account}; standing grant in private/console only, no automatic elevation in groups.",
-  "bridge.main.notifications_enabled": "out-of-band notifications enabled: {url}/{topic}",
+  "bridge.main.notifications_enabled": "out-of-band notifications enabled (topic source: {source}; value not logged)",
   "bridge.main.notifications_disabled": "out-of-band notifications not started ({error})",
   "bridge.main.endpoint_listening": "endpoint listening on {listen}",
   "bridge.main.endpoint_stopped": "error: endpoint stopped: {error}",
