@@ -40,11 +40,10 @@ fn payload(root: &Path, name: &str) -> PathBuf {
     let dir = root.join(format!("payload-{name}"));
     fs::create_dir_all(dir.join("bin")).expect("bin");
     fs::create_dir_all(dir.join("harnesses")).expect("harnesses");
-    fs::create_dir_all(dir.join("share/acb/units")).expect("templates");
-    fs::create_dir_all(dir.join("deploy/run")).expect("run templates");
     fs::create_dir_all(dir.join("harnesses/dsh/src")).expect("dsh harness");
     fs::create_dir_all(dir.join("harnesses/opencode/plugin")).expect("opencode plugin");
     fs::create_dir_all(dir.join("harnesses/shared")).expect("shared harness");
+    fs::create_dir_all(dir.join("deploy")).expect("deploy");
     for file in [
         "harnesses/dsh/src/driver.mjs",
         "harnesses/dsh/dsh-mcp.patch.yml",
@@ -68,18 +67,26 @@ fn payload(root: &Path, name: &str) -> PathBuf {
         "export const TOOLS = []\n",
     )
     .expect("shared tools");
-    for script in ["start-dsh.sh", "start-drivers.sh", "opencode-serve.sh"] {
-        common::write_script(&dir.join("deploy").join(script), "exit 0\n");
-    }
-    fs::write(
-        dir.join("deploy/run/supervisor.toml.tmpl"),
-        "[supervisor]\nprogram = \"@ACB_UNIT_BIN_DIR@/acb-bridge\"\n",
-    )
-    .expect("run template");
-    for bin in ["acb-bridge", "acb-launcher", "acbctl"] {
+    // payload 不包含 acbl 自己的 launcher / supervisor / unit 模板，夹具也不放，
+    // 用来保证校验范围确实收窄到 payload。
+    common::write_script(&dir.join("deploy/start-drivers.sh"), "exit 0\n");
+    for bin in ["acb-bridge", "acb-launcher"] {
         common::write_script(&dir.join("bin").join(bin), "exit 0\n");
     }
     dir
+}
+
+fn write_contract(payload: &Path, contract: u32, min_acbl: &str, layout: &[&str]) {
+    let commands = r#"[{"name":"bridge","program":"bin/acb-bridge","args":["--config"]}]"#;
+    let layout = layout
+        .iter()
+        .map(|entry| format!("\"{entry}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = format!(
+        r#"{{"schema":1,"contract":{contract},"min_acbl":"{min_acbl}","layout":[{layout}],"commands":{commands}}}"#
+    );
+    fs::write(payload.join("acb-contract.json"), body).expect("contract file");
 }
 
 fn run_acb(env: &[(&str, String)], args: &[&str]) -> Output {
@@ -92,6 +99,7 @@ fn run_acb(env: &[(&str, String)], args: &[&str]) -> Output {
     command.env_remove("ACB_PROFILE_DIR");
     command.env_remove("ACB_PROFILE_STRATEGY");
     command.env_remove("ACB_STATE_DIR");
+    command.env_remove("ACB_CONTRACT_STRICT");
     for (key, value) in env {
         command.env(key, value);
     }
@@ -1011,4 +1019,178 @@ fn legacy_generation_still_switches_and_migrates_to_copy() {
         "{}",
         stderr(&back)
     );
+}
+
+#[test]
+fn add_rejects_incompatible_contract() {
+    let temp = TempDir::new("contract-incompatible");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "incompatible");
+    write_contract(&source, 2, "0.1.0", &["bin"]);
+    let env = profile_env(&profile, &config);
+
+    let output = run_acb(
+        &env,
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--label",
+            "bad",
+            "--strategy",
+            "copy",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("contract_incompatible"), "{text}");
+    assert!(
+        text.contains("payload requires acb_contract 2"),
+        "reason must name the declared contract: {text}"
+    );
+}
+
+#[test]
+fn add_rejects_payload_needing_newer_acbl() {
+    let temp = TempDir::new("contract-min-acbl");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "newer-acbl");
+    write_contract(&source, 1, "99.0.0", &["bin"]);
+    let env = profile_env(&profile, &config);
+
+    let output = run_acb(
+        &env,
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--label",
+            "bad",
+            "--strategy",
+            "copy",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("acbl_too_old"), "{text}");
+    assert!(text.contains("99.0.0"), "{text}");
+}
+
+#[test]
+fn add_names_the_missing_payload_entry() {
+    let temp = TempDir::new("contract-missing-entry");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "missing-entry");
+    fs::remove_file(source.join("deploy/start-drivers.sh")).expect("drop drivers script");
+    let env = profile_env(&profile, &config);
+
+    let output = run_acb(
+        &env,
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--label",
+            "bad",
+            "--strategy",
+            "copy",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("deploy/start-drivers.sh (file)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn add_accepts_legacy_payload_without_contract_and_warns() {
+    let temp = TempDir::new("contract-legacy");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "legacy");
+    assert!(
+        !source.join("acb-contract.json").exists(),
+        "fixture must stay contract-less"
+    );
+    let env = profile_env(&profile, &config);
+
+    let output = run_acb(
+        &env,
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--label",
+            "legacy",
+            "--strategy",
+            "copy",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("TRANSITIONAL fallback only"), "{text}");
+    assert!(text.contains("HARD-REJECT"), "{text}");
+    assert!(text.contains("ACB_CONTRACT_STRICT"), "{text}");
+}
+
+#[test]
+fn add_strict_mode_rejects_payload_without_contract() {
+    let temp = TempDir::new("contract-strict");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "strict");
+    assert!(
+        !source.join("acb-contract.json").exists(),
+        "fixture must stay contract-less"
+    );
+    let mut env = profile_env(&profile, &config);
+    env.push(("ACB_CONTRACT_STRICT", "1".to_string()));
+
+    let output = run_acb(
+        &env,
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--label",
+            "strict",
+            "--strategy",
+            "copy",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("contract_unreadable"), "{text}");
+    assert!(text.contains("ACB_CONTRACT_STRICT"), "{text}");
+}
+
+#[test]
+fn switch_rejects_contract_incompatible_generation_before_commit() {
+    let temp = TempDir::new("contract-switch");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "switch");
+    let id = add(&profile, &config, &source, "main");
+    let env = profile_env(&profile, &config);
+    let switched = run_acb(&env, &["profile", "switch", &id]);
+    assert!(switched.status.success(), "{}", stderr(&switched));
+    let before = read_link(&profile);
+
+    // 模拟 payload 被替换成声明更高契约的版本：必须在指针提交前拒绝。
+    write_contract(&generation_dir(&profile, &id).join("root"), 2, "0.1.0", &["bin"]);
+    let rejected = run_acb(&env, &["profile", "switch", &id]);
+    assert_eq!(rejected.status.code(), Some(78), "{}", stderr(&rejected));
+    assert!(stderr(&rejected).contains("contract_incompatible"), "{}", stderr(&rejected));
+    assert_eq!(read_link(&profile), before, "pointer must not move");
 }
