@@ -800,7 +800,7 @@ unit 的 `ExecStart` 必须指向**系统层安装的 acbl**，不能指向 `pro
 - **A-8 已实现**：默认 `ACB_UNIT_ACBL_PREFIX=/usr/local` → `$prefix/bin/acb-launcher`；也接受显式 `ACB_UNIT_LAUNCHER_BIN`，但拒绝落在 `profile/generations/` 的路径。`acbctl unit doctor` 仍会检查 `ExecStart` 程序存在。
 - 部署校验：`acbctl unit doctor` + `test -x <静态入口>`，并额外确认 `ExecStart` 路径不在 `profile/generations/` 下。
 - payload 不再需要 `acbctl` / `acb-launcher` / `acb-supervisor`；`profile seed` 的必带清单要相应收窄（G14，仍待 B-12）。
-- **已知未改（C-9 硬前置）**：launcher unit 的 `WorkingDirectory` 仍沿用 `@ACB_UNIT_REPO_DIR@`，bridge 子进程继承该 cwd。A-8 不动它，避免改变 bridge 的运行时 cwd；打包前必须完成 §6.5.1 的 cwd / 相对路径审计，并按审计结论二选一。
+- **已知未改（C-9 硬前置）**：launcher unit 的 `WorkingDirectory` 仍沿用 `@ACB_UNIT_REPO_DIR@`，bridge 子进程继承该 cwd。A-8 不动它，避免改变 bridge 的运行时 cwd；打包前必须完成 §6.5.1 的审计，把所有持久化路径改为从显式配置的根推导，与 cwd 解耦。
 
 ### 6.4 acbl ↔ payload 契约版本化
 
@@ -853,11 +853,13 @@ unit 的 `WorkingDirectory` 会原样传给 bridge 子进程（launcher 不另�
 | 组件 / 适配器 `path`（`.so`、wasm host、脚本） | `config.example.toml:81`、`85`、`129` | 示例写“绝对路径”，但未见启动时强制校验；相对值会落到 cwd |
 | drivers / harness 脚本 | `deploy/start-dsh.sh`、`deploy/opencode-serve.sh`、`start-drivers.sh` | 脚本自己 source env、用 `REPO` 绝对路径；若配置里给相对脚本路径，仍按 cwd 解析 |
 
-**审计结论（C-9 必须二选一并写死）**：
+**审计结论（C-9 硬性口径）**：
 
-- **方案 A：保留 `WorkingDirectory=payload 根`**。要求打包器把所有默认相对路径改成绝对路径（`/var/lib/acb` 或 `${XDG_STATE_HOME}/acb`），并在 `acbctl unit doctor` 里增加一项：配置中不得出现 `state/*` 这类相对默认值。风险是 acbl 独立安装后 payload 根可能不存在或被只读挂载。
-- **方案 B（推荐）：把 launcher unit 的 `WorkingDirectory` 改成状态根**（`@ACB_UNIT_STATE_DIR@`），acbl 启动前 `mkdir -p`。这样 `state/acb.db`、`state/relay`、`state/worktrees` 自动落到状态根，与 payload 彻底解耦。前提：本轮审计未发现 bridge 直接读 repo 根的其它相对文件，只剩上表的配置默认值与工具 `cwd` 参数。
-- **验收**：`readlink /proc/<bridge-pid>/cwd` 与预期一致；把 cwd 切到 `/tmp`、用默认配置启动 bridge，确认 db / relay / worktrees 落在状态根而不是 payload；`kernel.task` 传相对 `cwd` 时结果符合预期。
+- **原则：cwd 只是启动位置的偶然产物，不得用于推导任何持久化路径。** 所有持久化路径（`storage`、`file_relay`、`memory.worktrees_root`、组件与适配器 `path`、drivers / harness 脚本路径等）必须从一个**显式配置的根**推导，与 cwd 无关。
+- 具体做法：配置新增/复用显式的根（例如 `ACB_STATE_ROOT` 或 `[paths].root`），未配置时取安装时确定的绝对默认值；解析出的路径必须是绝对路径。`state/acb.db` 这类相对默认值要么改为从根拼出，要么在启动时直接报错，不再静默按 cwd 解析。
+- `acbctl unit doctor` 增加兜底检查：配置里出现相对持久化路径、或路径落在 payload/generation 内时报错；这只作为兜底，不能替代显式根。
+- **不采用方案 B（把 `WorkingDirectory` 换成状态根）**：它会把 `state/acb.db` 变成 `<状态根>/state/acb.db`，多套一层；同时改变现网已有的 `acb.db`、`relay/`、`worktrees/` 位置。这种变更不能静默切换，必须搬移数据或保留兼容期，代价和风险都高于“显式根推导”。保留 `WorkingDirectory` 现状也不意味着允许它参与路径推导。
+- **验收**：`readlink /proc/<bridge-pid>/cwd` 只作诊断；从 `/`、`/tmp`、payload 根分别启动 bridge，db / relay / worktrees / 组件路径的落点必须完全一致，且不落在 payload 或被只读挂载挡住；`kernel.task` 传相对 `cwd` 时仍以显式配置的根解析；doctor 能拒绝含相对持久化路径的配置。
 - **状态**：A-8 只记录、不改 `WorkingDirectory`；本审计是 C-9 的硬前置，未完成前不得发布非仓库环境的 acbl 包。
 
 ---
