@@ -379,17 +379,30 @@ fn maybe_handle_upgrade(
         return Ok(());
     }
 
-    mailbox.set_active_status("restarting", now_ms())?;
+    let exit_code = committed_restart_exit(mailbox, &active, &target_id);
+    eprintln!(
+        "acb-launcher: upgrade {} committed -> {target_id}; exiting {exit_code} for restart",
+        active.request_id
+    );
+    supervisor.request_exit(exit_code);
+    Ok(())
+}
+
+/// 指针提交成功后的收尾：写状态、写结果失败只降级为日志。
+///
+/// 此时旧进程已停、指针已生效；退出码必须只由「该退出 75」这条语义决定，
+/// 否则写盘失败会让 launcher 提前返回，没有任何机制要求 systemd 重拉。
+fn committed_restart_exit(mailbox: &Mailbox, active: &ActiveUpgrade, target_id: &str) -> i32 {
+    if let Err(error) = mailbox.set_active_status("restarting", now_ms()) {
+        eprintln!("acb-launcher: cannot mark upgrade restarting: {error}");
+    }
     let mut result =
         UpgradeResult::new(&active.request_id, "restarting", "pointer_committed", now_ms());
-    result.target_generation_id = Some(target_id.clone());
-    mailbox.write_result(&result)?;
-    eprintln!(
-        "acb-launcher: upgrade {} committed -> {target_id}; exiting {} for restart",
-        active.request_id, EXIT_ROLLBACK
-    );
-    supervisor.request_exit(EXIT_ROLLBACK);
-    Ok(())
+    result.target_generation_id = Some(target_id.to_string());
+    if let Err(error) = mailbox.write_result(&result) {
+        eprintln!("acb-launcher: cannot write upgrade result: {error}");
+    }
+    EXIT_ROLLBACK
 }
 
 fn finish_request(
@@ -545,5 +558,82 @@ fn notify(message: &str) {
     #[cfg(not(unix))]
     {
         let _ = message;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acb_supervisor::upgrade::UpgradeRequest;
+
+    fn temp_state_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "acb-launcher-test-{}-{name}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp state dir");
+        dir
+    }
+
+    /// 指针提交后的收尾写盘失败，也必须返回 75：旧进程已停、指针已生效，
+    /// 不退出 75 就没有人要求 systemd 重拉。
+    #[test]
+    fn committed_upgrade_still_exits_75_when_state_writes_fail() {
+        let state_dir = temp_state_dir("write-fail");
+        let mailbox = Mailbox::new(&state_dir);
+        mailbox.ensure().expect("ensure mailbox");
+        mailbox
+            .write_capabilities(&Capabilities {
+                schema: UPGRADE_SCHEMA,
+                restart_owner: "acbctl-run".to_string(),
+                launcher_pid: std::process::id(),
+                profile_dir: state_dir.join("profile").to_string_lossy().into_owned(),
+                state_dir: state_dir.to_string_lossy().into_owned(),
+                strategies: vec!["store".to_string()],
+                updated_at_ms: now_ms(),
+            })
+            .expect("write capabilities");
+        let request = UpgradeRequest::new(
+            "req-write-fail",
+            UpgradeTarget::Generation {
+                id: "gen-test".to_string(),
+            },
+            now_ms(),
+        );
+        mailbox.submit(request).expect("submit upgrade request");
+        assert!(
+            mailbox
+                .claim_next(now_ms())
+                .expect("claim upgrade request")
+                .is_some(),
+            "request should be claimed"
+        );
+        let active = mailbox.read_active().expect("active upgrade");
+
+        // 把 requests/ 换成普通文件：ensure() 会在 create_dir_all 上失败，
+        // 状态和结果都写不进去；与权限无关，root 下也成立。
+        std::fs::remove_dir_all(mailbox.requests_dir()).expect("remove requests dir");
+        std::fs::write(mailbox.requests_dir(), b"not a directory").expect("replace with file");
+
+        assert!(
+            mailbox.set_active_status("probe", now_ms()).is_err(),
+            "state write should fail"
+        );
+        assert!(
+            mailbox
+                .write_result(&UpgradeResult::new("probe", "probe", "probe", now_ms()))
+                .is_err(),
+            "result write should fail"
+        );
+
+        assert_eq!(
+            committed_restart_exit(&mailbox, &active, "gen-test"),
+            EXIT_ROLLBACK
+        );
+
+        let _ = std::fs::remove_file(mailbox.requests_dir());
+        let _ = std::fs::remove_dir_all(&state_dir);
     }
 }
