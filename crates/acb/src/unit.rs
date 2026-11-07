@@ -36,6 +36,14 @@ const TEMPLATES: &[(&str, &str)] = &[
         include_str!("../../../deploy/units/systemd/acb-opencode-serve.service.tmpl"),
     ),
     (
+        "acb-launcher.service",
+        include_str!("../../../deploy/units/systemd/acb-launcher.service.tmpl"),
+    ),
+    (
+        "acb-launcher-user.service",
+        include_str!("../../../deploy/units/systemd/acb-launcher-user.service.tmpl"),
+    ),
+    (
         "acb-stack.target",
         include_str!("../../../deploy/units/systemd/acb-stack.target.tmpl"),
     ),
@@ -58,6 +66,9 @@ const OPTIONAL_KEYS: &[&str] = &[
     "ACB_UNIT_CONSOLE_PORT",
     "ACB_UNIT_OPENCODE_PORT",
     "ACB_UNIT_AUTOSTART",
+    "ACB_UNIT_LAUNCHER_BIN",
+    "ACB_UNIT_STATE_DIR",
+    "ACB_UNIT_SUPERVISOR_CONFIG_FILE",
 ];
 
 const KEY_DEFAULTS: &[(&str, &str)] = &[
@@ -493,6 +504,49 @@ pub(crate) fn resolved_values() -> Result<BTreeMap<String, String>, String> {
         "ACB_UNIT_REPO_DIR".to_string(),
         repo_dir.to_string_lossy().into_owned(),
     );
+
+    // launcher 相关默认值全部从已解析的 profile/bin 派生，不写死发行版路径。
+    // state 必须落在 profile 外的稳定目录，不能跟着 generation 换。
+    let profile_dir = PathBuf::from(
+        values
+            .get("ACB_UNIT_PROFILE_DIR")
+            .expect("required key validated above"),
+    );
+    let state_root = profile_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| profile_dir.clone());
+    let state_dir = values
+        .get("ACB_UNIT_STATE_DIR")
+        .cloned()
+        .unwrap_or_else(|| {
+            state_root
+                .join("state")
+                .join("supervisor")
+                .to_string_lossy()
+                .into_owned()
+        });
+    let supervisor_config = values
+        .get("ACB_UNIT_SUPERVISOR_CONFIG_FILE")
+        .cloned()
+        .unwrap_or_else(|| {
+            Path::new(&state_dir)
+                .join("supervisor.toml")
+                .to_string_lossy()
+                .into_owned()
+        });
+    let launcher_bin = values
+        .get("ACB_UNIT_LAUNCHER_BIN")
+        .cloned()
+        .unwrap_or_else(|| {
+            bin_dir
+                .join("acb-launcher")
+                .to_string_lossy()
+                .into_owned()
+        });
+    values.insert("ACB_UNIT_STATE_DIR".to_string(), state_dir);
+    values.insert("ACB_UNIT_SUPERVISOR_CONFIG_FILE".to_string(), supervisor_config);
+    values.insert("ACB_UNIT_LAUNCHER_BIN".to_string(), launcher_bin);
     Ok(values)
 }
 
@@ -528,6 +582,7 @@ pub(crate) fn values_from_env() -> Result<BTreeMap<String, String>, String> {
 
     let autostart = values
         .get("ACB_UNIT_AUTOSTART")
+        .cloned()
         .expect("defaults cover autostart");
     let install_section = match autostart.as_str() {
         "0" => String::new(),
@@ -535,6 +590,15 @@ pub(crate) fn values_from_env() -> Result<BTreeMap<String, String>, String> {
         other => return Err(format!("ACB_UNIT_AUTOSTART must be 0 or 1: {other}")),
     };
     values.insert("INSTALL_SECTION".to_string(), install_section);
+    let system_install_section = match autostart.as_str() {
+        "0" => String::new(),
+        "1" => "\n[Install]\nWantedBy=multi-user.target".to_string(),
+        other => return Err(format!("ACB_UNIT_AUTOSTART must be 0 or 1: {other}")),
+    };
+    values.insert(
+        "SYSTEM_INSTALL_SECTION".to_string(),
+        system_install_section,
+    );
 
     Ok(values)
 }
@@ -550,7 +614,8 @@ fn validate_value(key: &str, value: &str) -> Result<(), String> {
     if value.contains('\n') || value.contains('\r') || value.contains('\0') {
         return Err(format!("{key} must not contain line breaks or NUL"));
     }
-    if (key.ends_with("_DIR") || key.ends_with("_FILE") || key == "ACB_UNIT_SHELL")
+    if (key.ends_with("_DIR") || key.ends_with("_FILE") || key.ends_with("_BIN")
+        || key == "ACB_UNIT_SHELL")
         && !value.starts_with('/')
     {
         return Err(format!("{key} must be an absolute path: {value}"));

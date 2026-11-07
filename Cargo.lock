@@ -247,6 +247,7 @@ name = "acb-supervisor"
 version = "0.1.0"
 dependencies = [
  "acb-supervisor-policy",
+ "libc",
  "serde",
  "serde_json",
  "toml",

@@ -11,15 +11,19 @@
 //!
 //! Windows 侧不实现 systemd 通知，但退出码与 `current.json` 逻辑保持平台无关。
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use acb_supervisor::upgrade::{
+    ActiveUpgrade, Capabilities, Mailbox, UPGRADE_SCHEMA, UpgradeResult, UpgradeTarget,
+    detect_restart_owner, is_terminal_status, validate_request,
+};
 use acb_supervisor::{
-    AlwaysHealthy, CommandSpec, EXIT_GIVE_UP, EXIT_OK, HttpProbe, Parts, ProcessRunner,
-    RollbackMode, Supervisor, SystemClock, SystemSleeper, build_policy, load_config, load_current,
-    now_ms, save_current,
+    ActivationWriter, AlwaysHealthy, CommandSpec, EXIT_GIVE_UP, EXIT_OK, EXIT_ROLLBACK,
+    GenerationRef, HttpProbe, Parts, ProcessRunner, Projection, ReconcileOutcome, RollbackMode,
+    Supervisor, SystemClock, SystemSleeper, build_policy, load_config, load_current, now_ms,
 };
 
 fn main() -> ExitCode {
@@ -35,6 +39,11 @@ fn main() -> ExitCode {
         }
     };
 
+    // unit 用 ACB_STATE_DIR 与 CLI/acbctl 对齐；显式环境变量优先于配置文件。
+    if let Some(dir) = std::env::var_os("ACB_STATE_DIR").filter(|value| !value.is_empty()) {
+        config.state_dir = dir.to_string_lossy().into_owned();
+    }
+
     let state_dir = PathBuf::from(&config.state_dir);
     if let Err(error) = std::fs::create_dir_all(&state_dir) {
         eprintln!(
@@ -43,13 +52,34 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(EXIT_GIVE_UP as u8);
     }
+    let mailbox = Mailbox::new(&state_dir);
+    if let Err(error) = mailbox.ensure() {
+        eprintln!("acb-launcher: cannot create upgrade mailbox: {error}");
+        return ExitCode::from(EXIT_GIVE_UP as u8);
+    }
     let configured = CommandSpec {
         program: config.program.clone(),
         args: config.args.clone(),
         generation: config.generation.clone(),
     };
+    // 启动先对账：崩溃留下的 journal 要么补完投影，要么回退投影；不猜版本。
+    let writer = match ActivationWriter::acquire(&state_dir) {
+        Ok(writer) => writer,
+        Err(error) => {
+            eprintln!("acb-launcher: cannot lock current.json writer: {error}");
+            return ExitCode::from(EXIT_GIVE_UP as u8);
+        }
+    };
+    match writer.reconcile() {
+        Ok(ReconcileOutcome::Nothing) => {}
+        Ok(outcome) => eprintln!("acb-launcher: pointer reconcile: {outcome:?}"),
+        Err(error) => {
+            eprintln!("acb-launcher: {error}");
+            return ExitCode::from(EXIT_GIVE_UP as u8);
+        }
+    }
     let current = match load_current(&state_dir) {
-        Some(current) => {
+        Ok(Some(current)) => {
             if current != configured {
                 eprintln!(
                     "acb-launcher: current.json selects {} (config says {})",
@@ -59,14 +89,28 @@ fn main() -> ExitCode {
             }
             current
         }
-        None => configured,
+        Ok(None) => {
+            // 首次安装：没有指针不是损坏，写入配置版本作为唯一真值。
+            let projection = config.generation.as_ref().and_then(Projection::discover);
+            if let Err(error) = writer.commit(&configured, projection, "acb-launcher", now_ms()) {
+                eprintln!("acb-launcher: cannot write current.json: {error}");
+                return ExitCode::from(EXIT_GIVE_UP as u8);
+            }
+            configured
+        }
+        Err(error) => {
+            // 损坏的指针不能静默换成配置版本；留在原地等人工处理。
+            eprintln!("acb-launcher: {error}");
+            return ExitCode::from(EXIT_GIVE_UP as u8);
+        }
     };
-    if let Err(error) = save_current(&state_dir, &current, now_ms()) {
-        eprintln!("acb-launcher: cannot write current.json: {error}");
-        return ExitCode::from(EXIT_GIVE_UP as u8);
-    }
+    // 启动对账用的锁不能跨 supervisor 生命周期持有：升级提交与回滚都会重新加锁，
+    // 同一进程重复 flock 同一路径会阻塞。
+    drop(writer);
     config.program = current.program.clone();
     config.args = current.args.clone();
+    // generation 元数据同样以 current.json 为准；否则重启后 LKG 提升/回滚会记错代。
+    config.generation = current.generation.clone();
     // systemd 重启由 launcher 请求；策略本身不直接起 LKG。
     config.rollback_mode = RollbackMode::External;
 
@@ -98,6 +142,12 @@ fn main() -> ExitCode {
         }
     };
 
+    // 启动能力声明：ACB 只在 restart_owner != none 时接受升级请求。
+    if let Err(error) = announce_capabilities(&mailbox, &current, &state_dir) {
+        eprintln!("acb-launcher: cannot write capabilities.json: {error}");
+    }
+    resume_active(&mailbox, &current, &state_dir);
+
     let mut notifier = Notifier::new();
     notifier.ready();
     eprintln!("acb-launcher: started {}", current.id());
@@ -114,6 +164,10 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_OK as u8);
         }
         supervisor.tick();
+        if let Err(error) = maybe_handle_upgrade(&mut supervisor, &mailbox, &state_dir) {
+            eprintln!("acb-launcher: upgrade handling failed: {error}");
+        }
+        observe_upgrade(&supervisor, &mailbox, &state_dir);
         notifier.watchdog();
         thread::sleep(Duration::from_millis(100));
     }
@@ -121,8 +175,10 @@ fn main() -> ExitCode {
     if let Some(reason) = supervisor.failed() {
         eprintln!("acb-launcher: stopped: {reason}");
     }
+    let code = supervisor.exit_code().unwrap_or(EXIT_OK);
+    finalize_active(&mailbox, code);
     notifier.stopping();
-    ExitCode::from(supervisor.exit_code().unwrap_or(EXIT_OK) as u8)
+    ExitCode::from(code as u8)
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -133,6 +189,342 @@ fn config_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// `<profile>/generations/<id>/root` 往上三层就是 profile 根。
+fn profile_root_for(current: &CommandSpec) -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("ACB_PROFILE_DIR").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let payload = Path::new(current.generation.as_ref()?.path.as_str());
+    payload.parent()?.parent()?.parent().map(Path::to_path_buf)
+}
+
+fn announce_capabilities(
+    mailbox: &Mailbox,
+    current: &CommandSpec,
+    state_dir: &Path,
+) -> Result<(), String> {
+    let capabilities = Capabilities {
+        schema: UPGRADE_SCHEMA,
+        restart_owner: detect_restart_owner(),
+        launcher_pid: std::process::id(),
+        profile_dir: profile_root_for(current)
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        state_dir: state_dir.to_string_lossy().into_owned(),
+        strategies: vec!["store".to_string(), "copy".to_string()],
+        updated_at_ms: now_ms(),
+    };
+    mailbox.write_capabilities(&capabilities)
+}
+
+/// 重启后恢复观察：`restarting` 且 current 已是目标代 → 进入 `observing`；
+/// 若 LKG 已经就是目标代，直升 `stable`。
+fn resume_active(mailbox: &Mailbox, current: &CommandSpec, state_dir: &Path) {
+    let Some(active) = mailbox.read_active() else {
+        return;
+    };
+    if active.status == "restarting" {
+        let same_target = current
+            .generation
+            .as_ref()
+            .map(|generation| generation.id.as_str())
+            == active.target_generation_id.as_deref();
+        if !same_target {
+            finish_request(
+                mailbox,
+                &active,
+                "aborted",
+                "restart_did_not_switch",
+                "launcher restarted but current.json still selects another generation",
+            );
+            return;
+        }
+        if let Err(error) = mailbox.set_active_status("observing", now_ms()) {
+            eprintln!("acb-launcher: cannot mark upgrade observing: {error}");
+            return;
+        }
+    }
+    if active.status == "restarting" || active.status == "observing" {
+        if lkg_generation(state_dir).as_deref() == active.target_generation_id.as_deref() {
+            finish_request(
+                mailbox,
+                &active,
+                "stable",
+                "stable_window_passed",
+                "target generation already holds LKG",
+            );
+        }
+    }
+}
+
+fn observe_upgrade(supervisor: &Supervisor, mailbox: &Mailbox, state_dir: &Path) {
+    let Some(active) = mailbox.read_active() else {
+        return;
+    };
+    if active.status != "observing" {
+        return;
+    }
+    let promoted = supervisor
+        .lkg()
+        .and_then(|spec| spec.generation.as_ref())
+        .map(|generation| generation.id.as_str())
+        == active.target_generation_id.as_deref()
+        || lkg_generation(state_dir).as_deref() == active.target_generation_id.as_deref();
+    if promoted {
+        finish_request(
+            mailbox,
+            &active,
+            "stable",
+            "stable_window_passed",
+            "new generation passed the stable window and became LKG",
+        );
+    }
+}
+
+/// 升级请求的唯一执行入口：认领 → 校验 → stage → 停旧 → 提交 → 退出 75。
+fn maybe_handle_upgrade(
+    supervisor: &mut Supervisor,
+    mailbox: &Mailbox,
+    state_dir: &Path,
+) -> Result<(), String> {
+    let now = now_ms();
+    let Some((request, _path)) = mailbox.claim_next(now)? else {
+        return Ok(());
+    };
+    let Some(active) = mailbox.read_active() else {
+        return Err("claimed upgrade request without active.json".to_string());
+    };
+    let current = supervisor.current().clone();
+
+    if let Err(error) = validate_request(&request) {
+        finish_request(mailbox, &active, "rejected", "invalid_request", &error);
+        return Ok(());
+    }
+    if let Some(expected) = &request.expected_current_id {
+        let actual = current.generation.as_ref().map(|generation| generation.id.as_str());
+        if actual != Some(expected.as_str()) {
+            finish_request(
+                mailbox,
+                &active,
+                "rejected",
+                "stale_current",
+                &format!(
+                    "current generation is {}, request expected {expected}",
+                    actual.unwrap_or("-")
+                ),
+            );
+            return Ok(());
+        }
+    }
+    let Some(profile_root) = profile_root_for(&current) else {
+        finish_request(
+            mailbox,
+            &active,
+            "rejected",
+            "profile_dir_unknown",
+            "set ACB_PROFILE_DIR or use a generation-backed current.json",
+        );
+        return Ok(());
+    };
+
+    let target_id = match &request.target {
+        UpgradeTarget::Generation { id } => {
+            let payload = profile_root.join("generations").join(id).join("root");
+            if !payload.is_dir() {
+                finish_request(
+                    mailbox,
+                    &active,
+                    "rejected",
+                    "target_missing",
+                    &format!("generation payload not found: {}", payload.display()),
+                );
+                return Ok(());
+            }
+            id.clone()
+        }
+        UpgradeTarget::Payload { path, strategy } => match add_generation(&profile_root, path, strategy)
+        {
+            Ok(id) => id,
+            Err(error) => {
+                finish_request(mailbox, &active, "aborted", "stage_failed", &error);
+                return Ok(());
+            }
+        },
+    };
+
+    let spec = match spec_for_generation(&profile_root, &target_id, &current) {
+        Ok(spec) => spec,
+        Err(error) => {
+            finish_request(mailbox, &active, "rejected", "target_incomplete", &error);
+            return Ok(());
+        }
+    };
+    mailbox.set_active_status("staged", now_ms())?;
+
+    if let Err(error) = supervisor.stop_child() {
+        let _ = supervisor.restart_current();
+        finish_request(mailbox, &active, "aborted", "stop_failed", &error);
+        return Ok(());
+    }
+
+    // 提交点：复用 `pointer` 的单写者（锁 + journal + current.json + 投影）。
+    // 不在这里复制任何写指针逻辑。
+    let commit = (|| -> Result<(), String> {
+        let writer = ActivationWriter::acquire(state_dir)?;
+        let projection = spec.generation.as_ref().and_then(Projection::discover);
+        writer.commit(&spec, projection, "acb-launcher", now_ms())
+    })();
+    if let Err(error) = commit {
+        let _ = supervisor.restart_current();
+        finish_request(mailbox, &active, "aborted", "commit_failed", &error);
+        return Ok(());
+    }
+
+    mailbox.set_active_status("restarting", now_ms())?;
+    let mut result =
+        UpgradeResult::new(&active.request_id, "restarting", "pointer_committed", now_ms());
+    result.target_generation_id = Some(target_id.clone());
+    mailbox.write_result(&result)?;
+    eprintln!(
+        "acb-launcher: upgrade {} committed -> {target_id}; exiting {} for restart",
+        active.request_id, EXIT_ROLLBACK
+    );
+    supervisor.request_exit(EXIT_ROLLBACK);
+    Ok(())
+}
+
+/// stage payload：只调用既有 `acbctl profile add`，不复制 profile 的落盘逻辑。
+fn add_generation(profile_root: &Path, payload: &str, strategy: &str) -> Result<String, String> {
+    let acbctl = acbctl_program()?;
+    let output = Command::new(&acbctl)
+        .args(["profile", "add", payload, "--strategy", strategy])
+        .env("ACB_PROFILE_DIR", profile_root)
+        .output()
+        .map_err(|error| format!("run {} profile add: {error}", acbctl.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "profile add failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("added "))
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("profile add printed no generation id: {}", stdout.trim()))
+}
+
+fn acbctl_program() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("ACB_ACBCTL").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    let exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
+    let sibling = exe
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("acbctl");
+    if sibling.is_file() {
+        Ok(sibling)
+    } else {
+        Err(format!(
+            "cannot find acbctl next to launcher ({}); set ACB_ACBCTL",
+            sibling.display()
+        ))
+    }
+}
+
+fn spec_for_generation(
+    profile_root: &Path,
+    target_id: &str,
+    current: &CommandSpec,
+) -> Result<CommandSpec, String> {
+    let payload = profile_root.join("generations").join(target_id).join("root");
+    let program_file = Path::new(&current.program)
+        .file_name()
+        .ok_or_else(|| format!("cannot derive program name from {}", current.program))?;
+    let program = payload.join("bin").join(program_file);
+    if !program.is_file() {
+        return Err(format!("target generation has no binary: {}", program.display()));
+    }
+    Ok(CommandSpec {
+        program: program.to_string_lossy().into_owned(),
+        args: current.args.clone(),
+        generation: Some(GenerationRef {
+            id: target_id.to_string(),
+            path: payload.to_string_lossy().into_owned(),
+            config_sha256: current
+                .generation
+                .as_ref()
+                .and_then(|generation| generation.config_sha256.clone()),
+        }),
+    })
+}
+
+fn finish_request(
+    mailbox: &Mailbox,
+    active: &ActiveUpgrade,
+    status: &str,
+    reason_code: &str,
+    reason: &str,
+) {
+    let mut result = UpgradeResult::new(&active.request_id, status, reason_code, now_ms());
+    result.reason = reason.to_string();
+    result.target_generation_id = active.target_generation_id.clone();
+    if let Err(error) = mailbox.write_result(&result) {
+        eprintln!("acb-launcher: cannot write upgrade result: {error}");
+    }
+    let _ = mailbox.archive_request(&active.request_id, true);
+    let _ = mailbox.archive_request(&active.request_id, false);
+    if let Err(error) = mailbox.clear_active() {
+        eprintln!("acb-launcher: cannot clear active upgrade: {error}");
+    }
+}
+
+fn finalize_active(mailbox: &Mailbox, exit_code: i32) {
+    let Some(active) = mailbox.read_active() else {
+        return;
+    };
+    if is_terminal_status(&active.status) {
+        return;
+    }
+    if exit_code == EXIT_ROLLBACK {
+        // `restarting` 是升级成功的半状态，下一轮 launcher 会继续观察。
+        if active.status == "restarting" {
+            return;
+        }
+        finish_request(
+            mailbox,
+            &active,
+            "rolled_back",
+            "rolled_back_to_lkg",
+            "supervisor rolled back to LKG; upgrade request is closed as failed",
+        );
+    } else if exit_code == EXIT_GIVE_UP {
+        finish_request(
+            mailbox,
+            &active,
+            "failed",
+            "gave_up",
+            "supervisor gave up (78); no automatic restart",
+        );
+    }
+}
+
+fn lkg_generation(state_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(state_dir.join("lkg.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("command")?
+        .get("generation")?
+        .get("id")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// SIGTERM/SIGINT → 正常停止（退出 0）。handler 只写原子位，不做任何 I/O。

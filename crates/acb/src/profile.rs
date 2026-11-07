@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::fsutil::{now_ms, sha256_hex, write_atomic};
+use crate::pins::{self, PinOutcome};
 
 const SCHEMA: u32 = 1;
 const DEFAULT_KEEP: usize = 5;
@@ -380,7 +381,7 @@ fn add_command(args: &[String]) -> Result<ExitCode, String> {
     let root = profile_root(&options);
     let label = options.get("label").cloned();
     let version = options.get("version").cloned();
-    let strategy = required_strategy(&options)?;
+    let strategy = required_strategy(&options, "acbctl profile add <path>")?;
     let config = config_identity(options.get("config").map(PathBuf::from).as_deref())?;
     let meta = add_generation(
         &root,
@@ -396,7 +397,7 @@ fn add_command(args: &[String]) -> Result<ExitCode, String> {
 
 /// 工作模式必须显式配置：CLI `--strategy` 或 `ACB_PROFILE_STRATEGY`。
 /// 不做源路径嗅探，也不在不支持的模式下静默降级。
-fn required_strategy(options: &BTreeMap<String, String>) -> Result<Strategy, String> {
+fn required_strategy(options: &BTreeMap<String, String>, usage: &str) -> Result<Strategy, String> {
     let value = options
         .get("strategy")
         .cloned()
@@ -406,9 +407,10 @@ fn required_strategy(options: &BTreeMap<String, String>) -> Result<Strategy, Str
                 .map(|value| value.to_string_lossy().into_owned())
         })
         .ok_or_else(|| {
-            "profile strategy is required: pass --strategy store|copy (or set ACB_PROFILE_STRATEGY); \
-             there is no auto-detection"
-                .to_string()
+            format!(
+                "profile strategy is required: `{usage}` must pass --strategy store|copy \
+                 (or set ACB_PROFILE_STRATEGY); there is no auto-detection"
+            )
         })?;
     parse_strategy(value.trim())
 }
@@ -424,9 +426,12 @@ fn parse_strategy(value: &str) -> Result<Strategy, String> {
 }
 
 fn switch_command(args: &[String]) -> Result<ExitCode, String> {
-    let (positional, options) = parse_options(args, &["profile-dir"])?;
+    let (positional, options) = parse_options(args, &["profile-dir", "state-dir"])?;
     if positional.len() != 1 {
-        return Err("usage: acbctl profile switch <gen-or-label>".to_string());
+        return Err(
+            "usage: acbctl profile switch <gen-or-label> [--state-dir DIR] [--profile-dir DIR]"
+                .to_string(),
+        );
     }
     let root = profile_root(&options);
     let id = resolve_target(&root, &positional[0])?;
@@ -437,9 +442,80 @@ fn switch_command(args: &[String]) -> Result<ExitCode, String> {
             target.display()
         ));
     }
-    atomic_switch(&root, &id)?;
-    println!("switched current -> {id}");
+    let state_dir = supervisor_state_dir(&options, &root);
+    // 先建 pin 再提交指针：避免 switch 成功后 store 路径被 GC 收走。
+    pin_generation(&root, &id);
+    // current.json 是执行真值，profile/current 只是投影；两者由同一个写入器提交。
+    commit_profile_switch(&root, &id, &state_dir, "acbctl-profile-switch")?;
+    println!("switched current -> {id} (current.json committed at {})", state_dir.display());
     Ok(ExitCode::SUCCESS)
+}
+
+fn supervisor_state_dir(options: &BTreeMap<String, String>, root: &Path) -> PathBuf {
+    options
+        .get("state-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_supervisor_state_dir(root))
+}
+
+/// 把 generation 写成 `current.json` 的 command，并同时更新 `profile/current`。
+fn commit_profile_switch(
+    root: &Path,
+    id: &str,
+    state_dir: &Path,
+    updated_by: &str,
+) -> Result<(), String> {
+    let meta = load_meta(root, id)?.ok_or_else(|| format!("generation not found: {id}"))?;
+    let command = command_for_generation(root, &meta);
+    let projection = acb_supervisor::Projection {
+        link: root.join("current"),
+        target: PathBuf::from("generations").join(id).join("root"),
+    };
+    let writer = acb_supervisor::ActivationWriter::acquire(state_dir)?;
+    writer
+        .commit(&command, Some(projection), updated_by, now_ms())
+        .map_err(|error| format!("commit current.json: {error}"))
+}
+
+fn command_for_generation(root: &Path, meta: &Meta) -> acb_supervisor::CommandSpec {
+    let generation_root = generation_dir(root, &meta.id).join("root");
+    let mut args = Vec::new();
+    if let Some(config) = &meta.config {
+        args.push("--config".to_string());
+        args.push(config.path.clone());
+    }
+    acb_supervisor::CommandSpec {
+        program: generation_root
+            .join("bin/acb-bridge")
+            .to_string_lossy()
+            .into_owned(),
+        args,
+        generation: Some(meta.generation_ref(root)),
+    }
+}
+
+/// 给 generation 的 store payload 建 pin。失败只告警，不让 add/switch 失败；
+/// 非 nix 环境降级为 `<profile>/../state/pins`，并说明挡不住 nix GC。
+fn pin_generation(root: &Path, id: &str) {
+    let generation_root = generation_dir(root, id).join("root");
+    let payload = match fs::canonicalize(&generation_root) {
+        Ok(payload) => payload,
+        Err(error) => {
+            eprintln!("pin: warning: resolve {}: {error}", generation_root.display());
+            return;
+        }
+    };
+    match pins::pin_store_path(root, id, &payload) {
+        Ok(PinOutcome::Gcroot(path)) => println!("pin: {id} -> {}", path.display()),
+        Ok(PinOutcome::Local(path)) => eprintln!(
+            "pin: warning: no writable nix gcroot; wrote local pin {} (nix GC can still collect {}; \
+             keep this generation with `profile gc --keep` or add a gcroot manually)",
+            path.display(),
+            payload.display()
+        ),
+        Ok(PinOutcome::Skipped) => {}
+        Err(error) => eprintln!("pin: warning: {error}"),
+    }
 }
 
 fn gc_command(args: &[String]) -> Result<ExitCode, String> {
@@ -489,6 +565,9 @@ fn gc_command(args: &[String]) -> Result<ExitCode, String> {
         }
         let dir = generation_dir(&root, id);
         fs::remove_dir_all(&dir).map_err(|error| format!("remove {}: {error}", dir.display()))?;
+        for pin in pins::unpin(&root, id) {
+            println!("unpinned {}", pin.display());
+        }
         println!("removed {id}");
         removed += 1;
     }
@@ -514,8 +593,9 @@ fn seed_command(args: &[String]) -> Result<ExitCode, String> {
             let Some(payload) = positional.first() else {
                 return Err(repair_error(&detail, "no payload argument provided"));
             };
-            let strategy = required_strategy(&options)?;
-            return repair_seed(&root, Path::new(payload), &detail, strategy);
+            let strategy = required_strategy(&options, "acbctl profile seed <path>")?;
+            let state_dir = supervisor_state_dir(&options, &root);
+            return repair_seed(&root, Path::new(payload), &detail, strategy, &state_dir);
         }
         println!(
             "seed skipped: profile already has {} generation(s)",
@@ -530,15 +610,12 @@ fn seed_command(args: &[String]) -> Result<ExitCode, String> {
                 .to_string(),
         );
     };
-    let strategy = required_strategy(&options)?;
+    let strategy = required_strategy(&options, "acbctl profile seed <path>")?;
     let config = config_identity(None)?;
+    let state_dir = supervisor_state_dir(&options, &root);
     let meta = add_generation(&root, Path::new(payload), None, config, None, strategy)?;
-    atomic_switch(&root, &meta.id)?;
-    println!("seeded {} and switched current", meta.id);
-    let state_dir = options
-        .get("state-dir")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_supervisor_state_dir(&root));
+    commit_profile_switch(&root, &meta.id, &state_dir, "acbctl-profile-seed")?;
+    println!("seeded {} and committed current.json", meta.id);
     write_initial_lkg(&root, &meta.id, &state_dir)?;
     Ok(ExitCode::SUCCESS)
 }
@@ -555,19 +632,7 @@ fn write_initial_lkg(root: &Path, id: &str, state_dir: &Path) -> Result<(), Stri
         return Ok(());
     }
     let meta = load_meta(root, id)?.ok_or_else(|| format!("generation not found: {id}"))?;
-    let generation_root = generation_dir(root, id).join("root");
-    let mut command = serde_json::json!({
-        "program": generation_root.join("bin/acb-bridge").to_string_lossy(),
-        "args": [],
-        "generation": {
-            "id": id,
-            "path": generation_root.to_string_lossy(),
-        }
-    });
-    if let Some(config) = &meta.config {
-        command["args"] = serde_json::json!(["--config", config.path]);
-        command["generation"]["config_sha256"] = serde_json::json!(config.sha256);
-    }
+    let command = command_for_generation(root, &meta);
     let record = serde_json::json!({"command": command, "promoted_at_ms": now_ms()});
     let text = serde_json::to_string_pretty(&record)
         .map_err(|error| format!("serialize lkg.json: {error}"))?
@@ -637,11 +702,12 @@ fn repair_seed(
     payload: &Path,
     detail: &str,
     strategy: Strategy,
+    state_dir: &Path,
 ) -> Result<ExitCode, String> {
     let config = config_identity(None)?;
     let meta = add_generation(root, payload, None, config, None, strategy)
         .map_err(|error| repair_error(detail, &error))?;
-    atomic_switch(root, &meta.id)?;
+    commit_profile_switch(root, &meta.id, state_dir, "acbctl-profile-seed-repair")?;
     println!("seed repaired current -> {} (was: {detail})", meta.id);
     Ok(ExitCode::SUCCESS)
 }
@@ -762,6 +828,8 @@ fn add_generation(
         let _ = fs::remove_dir_all(&gen_dir);
         return Err(error);
     }
+    // store payload 随时可能被 nix GC 回收；add 成功后立刻建 pin（失败只告警）。
+    pin_generation(root, &meta.id);
     Ok(meta)
 }
 
@@ -1288,6 +1356,10 @@ fn migrate_one(root: &Path, id: &str) -> Result<bool, String> {
         }),
     });
     write_meta(&gen_dir.join("meta.json"), &meta)?;
+    // payload 已是本地快照，store pin 不再需要；留着只会延长 store 路径寿命。
+    for pin in pins::unpin(root, id) {
+        println!("unpinned {}", pin.display());
+    }
     println!(
         "migrated {id} -> copy ({} files, {} bytes)",
         manifest.files.len(),
@@ -1467,41 +1539,6 @@ fn lkg_generation_id(root: &Path) -> Result<Option<String>, String> {
 }
 
 #[cfg(unix)]
-fn atomic_switch(root: &Path, id: &str) -> Result<(), String> {
-    let current = root.join("current");
-    let old_target = fs::read_link(&current).ok();
-    let target = PathBuf::from("generations").join(id).join("root");
-    let temp = root.join(format!(".current.tmp-{}-{}", std::process::id(), nonce()));
-    let _ = fs::remove_file(&temp);
-    std::os::unix::fs::symlink(&target, &temp)
-        .map_err(|error| format!("create temporary current symlink: {error}"))?;
-
-    if let Err(error) = fs::rename(&temp, &current) {
-        let _ = fs::remove_file(&temp);
-        // rename 失败时旧 current 通常会保留；极端情况下补回原指向。
-        if fs::symlink_metadata(&current).is_err() {
-            if let Some(old_target) = old_target {
-                let restore = root.join(format!(
-                    ".current.restore-{}-{}",
-                    std::process::id(),
-                    nonce()
-                ));
-                if std::os::unix::fs::symlink(&old_target, &restore).is_ok() {
-                    let _ = fs::rename(&restore, &current);
-                }
-            }
-        }
-        return Err(format!("switch current -> {id}: {error}"));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn atomic_switch(_root: &Path, _id: &str) -> Result<(), String> {
-    Err("profile switch requires Unix symlinks".to_string())
-}
-
-#[cfg(unix)]
 fn symlink(source: &Path, target: &Path) -> Result<(), String> {
     std::os::unix::fs::symlink(source, target).map_err(|error| {
         format!(
@@ -1515,13 +1552,6 @@ fn symlink(source: &Path, target: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn symlink(_source: &Path, _target: &Path) -> Result<(), String> {
     Err("profile generation requires Unix symlinks".to_string())
-}
-
-fn nonce() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
 }
 
 fn allocate_id(

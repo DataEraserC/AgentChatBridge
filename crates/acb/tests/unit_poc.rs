@@ -10,11 +10,13 @@ use std::time::{Duration, SystemTime};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-const UNIT_NAMES: [&str; 5] = [
+const UNIT_NAMES: [&str; 7] = [
     "dsh-acb.service",
     "acb-bridge.service",
     "acb-drivers.service",
     "acb-opencode-serve.service",
+    "acb-launcher.service",
+    "acb-launcher-user.service",
     "acb-stack.target",
 ];
 
@@ -448,10 +450,11 @@ fn autostart_defaults_off_and_enables_install_section_when_set() {
     let text = stdout(&enabled);
     assert_eq!(
         text.matches("[Install]").count(),
-        1,
-        "only acb-stack.target may carry [Install]"
+        3,
+        "stack target and both launcher units carry [Install]"
     );
     assert!(text.contains("[Install]\nWantedBy=default.target"));
+    assert!(text.contains("[Install]\nWantedBy=multi-user.target"));
 
     let invalid = run_acb(
         &values,
