@@ -112,6 +112,12 @@ fn main() -> ExitCode {
     config.args = current.args.clone();
     // generation 元数据同样以 current.json 为准；否则重启后 LKG 提升/回滚会记错代。
     config.generation = current.generation.clone();
+    // 契约校验必须在 supervisor 拉起 bridge 之前：不兼容就以 78 终止，
+    // 不出现「旧 bridge 已停、新 bridge 未起」的半启动。
+    if let Some(error) = payload_contract_error(&current) {
+        eprintln!("acb-launcher: refusing to start generation: {error}");
+        return ExitCode::from(EXIT_GIVE_UP as u8);
+    }
     // systemd 重启由 launcher 请求；策略本身不直接起 LKG。
     config.rollback_mode = RollbackMode::External;
 
@@ -199,6 +205,25 @@ fn profile_root_for(current: &CommandSpec) -> Option<PathBuf> {
     }
     let payload = Path::new(current.generation.as_ref()?.path.as_str());
     payload.parent()?.parent()?.parent().map(Path::to_path_buf)
+}
+
+/// 启动前的契约校验。返回 `Some(可诊断原因)` 表示必须 78 放弃启动。
+/// 没有 generation 的配置式启动（旧部署）不校验；旧 payload 缺契约文件时按 v1 放行并告警。
+fn payload_contract_error(current: &CommandSpec) -> Option<String> {
+    let generation = current.generation.as_ref()?;
+    match acb::contract::verify(Path::new(&generation.path)) {
+        Ok(acb::contract::State::Declared(_)) => None,
+        Ok(acb::contract::State::Legacy) => {
+            eprintln!(
+                "acb-launcher: generation {} has no {}; assuming legacy acb_contract={}",
+                generation.id,
+                acb::contract::CONTRACT_FILE,
+                acb::contract::CONTRACT_MIN
+            );
+            None
+        }
+        Err(violation) => Some(format!("generation {}: {violation}", generation.id)),
+    }
 }
 
 fn announce_capabilities(
@@ -635,5 +660,35 @@ mod tests {
 
         let _ = std::fs::remove_file(mailbox.requests_dir());
         let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    /// 启动读到不兼容契约的 generation 时，必须在拉起 bridge 之前就给出可诊断原因。
+    #[test]
+    fn startup_rejects_generation_with_incompatible_contract() {
+        let payload = temp_state_dir("payload-contract").join("root");
+        std::fs::create_dir_all(payload.join("bin")).expect("payload bin");
+        std::fs::write(payload.join("bin/acb-bridge"), b"#!/bin/sh\n").expect("bridge");
+        std::fs::write(
+            payload.join("acb-contract.json"),
+            r#"{"schema":1,"contract":2,"min_acbl":"0.1.0","layout":[],
+                "commands":[{"name":"bridge","program":"bin/acb-bridge","args":["--config"]}]}"#,
+        )
+        .expect("contract file");
+        let current = CommandSpec {
+            program: payload
+                .join("bin/acb-bridge")
+                .to_string_lossy()
+                .into_owned(),
+            args: vec!["--config".to_string(), "/tmp/config.toml".to_string()],
+            generation: Some(acb_supervisor::GenerationRef {
+                id: "gen-test".to_string(),
+                path: payload.to_string_lossy().into_owned(),
+                config_sha256: None,
+            }),
+        };
+        let error = payload_contract_error(&current).expect("contract 2 must be rejected");
+        assert!(error.contains("contract_incompatible"), "{error}");
+        assert!(error.contains("gen-test"), "{error}");
+        let _ = std::fs::remove_dir_all(payload.parent().expect("payload parent"));
     }
 }

@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::contract;
 use crate::fsutil::{now_ms, sha256_hex, write_atomic};
 use crate::pins::{self, PinOutcome};
 
@@ -440,6 +441,7 @@ fn switch_command(args: &[String]) -> Result<ExitCode, String> {
             target.display()
         ));
     }
+    verify_generation_contract(&root, &id)?;
     let state_dir = supervisor_state_dir(&options, &root);
     // 先建 pin 再提交指针：避免 switch 成功后 store 路径被 GC 收走。
     pin_generation(&root, &id);
@@ -504,6 +506,8 @@ fn resolve_generation_command(
 ) -> Result<acb_supervisor::CommandSpec, String> {
     let meta = load_meta(profile_root, generation_id)?
         .ok_or_else(|| format!("generation not found: {generation_id}"))?;
+    // 契约不兼容要在停旧之前失败；resolve 是 launcher 的升级预检入口。
+    verify_generation_contract(profile_root, generation_id)?;
     let payload = generation_dir(profile_root, generation_id).join("root");
     let command = match acb_supervisor::load_current(state_dir)? {
         Some(current) => {
@@ -1479,12 +1483,12 @@ fn migrate_one(root: &Path, id: &str) -> Result<bool, String> {
 }
 
 fn validate_payload(source: &Path) -> Result<(), String> {
-    let dirs = ["bin", "harnesses", "deploy/units/systemd"];
+    // payload 只校验它自己该带的东西：acbl 的 launcher / supervisor / unit 模板
+    // 已剥离到 acbl 包，不再出现在 generation 里。
+    let dirs = ["bin", "harnesses"];
     let files = [
-        "deploy/start-dsh.sh",
+        "bin/acb-bridge",
         "deploy/start-drivers.sh",
-        "deploy/opencode-serve.sh",
-        "deploy/run/supervisor.toml.tmpl",
         "harnesses/dsh/src/driver.mjs",
         "harnesses/dsh/dsh-mcp.patch.yml",
         "harnesses/opencode/plugin/index.js",
@@ -1494,23 +1498,51 @@ fn validate_payload(source: &Path) -> Result<(), String> {
     let mut missing = Vec::new();
     for relative in dirs {
         if !source.join(relative).is_dir() {
-            missing.push(relative.to_string());
+            missing.push(format!("{relative} (directory)"));
         }
     }
     for relative in files {
         if !source.join(relative).is_file() {
-            missing.push(relative.to_string());
+            missing.push(format!("{relative} (file)"));
         }
     }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "generation payload {} missing required paths: {}",
+    if !missing.is_empty() {
+        return Err(format!(
+            "generation payload {} missing required entries: {}",
             source.display(),
             missing.join(", ")
-        ))
+        ));
     }
+    verify_contract(source)?;
+    Ok(())
+}
+
+/// payload 契约声明校验；没有 `acb-contract.json` 的旧 payload 按契约 v1 放行，
+/// 但要打印告警，方便安装方补齐声明。
+fn verify_contract(payload: &Path) -> Result<(), String> {
+    match contract::verify(payload) {
+        Ok(contract::State::Declared(_)) => Ok(()),
+        Ok(contract::State::Legacy) => {
+            eprintln!(
+                "profile: {} has no {}; assuming legacy acb_contract={}",
+                payload.display(),
+                contract::CONTRACT_FILE,
+                contract::CONTRACT_MIN
+            );
+            Ok(())
+        }
+        Err(violation) => Err(format!(
+            "generation payload {} rejected: {violation}",
+            payload.display()
+        )),
+    }
+}
+
+/// generation 的 payload 契约校验；`add` / `switch` / 升级预检都走这里，
+/// 保证「不兼容的目标代」在停旧之前就被拒。
+fn verify_generation_contract(root: &Path, id: &str) -> Result<(), String> {
+    let payload = generation_dir(root, id).join("root");
+    verify_contract(&payload).map_err(|error| format!("generation {id}: {error}"))
 }
 
 fn config_identity(explicit: Option<&Path>) -> Result<Option<ConfigIdentity>, String> {

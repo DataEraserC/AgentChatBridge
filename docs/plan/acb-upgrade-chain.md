@@ -428,6 +428,60 @@ ACB 只有在 `restart_owner != "none"` 时才展示/接受升级入口；acbl �
 - copy 快照里如果遇到 Windows 不支持的符号链接，`add` 直接失败并报具体路径；
   不自动改成复制目标内容。
 
+### 6.4 acbl ↔ payload 契约版本化（B-12 已实现）
+
+acbl 与 payload 是两个独立分发的单元，接口必须显式版本化。**声明权威在 payload 根目录的
+`acb-contract.json`**，而不是 acbl 生成的 `meta.json` / `manifest.json`：只有 payload
+自己知道它实际包含什么、需要多新的 acbl。`meta.json` 仍只记 acbl 侧的 generation 元数据。
+
+```json
+{
+  "schema": 1,
+  "contract": 1,
+  "min_acbl": "0.1.0",
+  "layout": ["bin", "bin/acb-bridge", "harnesses", "...", "deploy/start-drivers.sh"],
+  "commands": [{ "name": "bridge", "program": "bin/acb-bridge", "args": ["--config"] }]
+}
+```
+
+| 字段 | 含义 | 校验与失败原因码 |
+|---|---|---|
+| `schema` | 契约文件自身的格式版本 | 必须为 `1`，否则 `contract_schema_unsupported` |
+| `contract` | acbl ↔ payload 接口版本 | acbl 只支持 `1..=1`（v1）；越界 → `contract_incompatible` |
+| `min_acbl` | payload 需要的最低 acbl 版本（点分数字；acbl 三个二进制同版本） | 高于当前 acbl → `acbl_too_old`；非数字 → `contract_malformed` |
+| `layout` | payload 自述包含的相对路径 | 声明了却不存在 → `payload_missing_path`；绝对路径或 `..` → `contract_malformed` |
+| `commands` | payload 自述的命令集合 | 必须含 `bridge`，程序为 `bin/acb-bridge` 且首个参数 `--config`，否则 `payload_bad_command` |
+
+payload 的固定必带项（`profile` 侧独立校验，不依赖声明）：`bin/`、`bin/acb-bridge`、
+`harnesses/`、`deploy/start-drivers.sh`、`harnesses/dsh/src/driver.mjs`、
+`harnesses/dsh/dsh-mcp.patch.yml`、`harnesses/opencode/plugin/index.js`、
+`harnesses/opencode/plugin/acb-wire.mjs`、`harnesses/shared/tools.mjs`。
+**不再校验** `deploy/units/systemd/`、`deploy/run/supervisor.toml.tmpl`、
+`deploy/start-dsh.sh`、`deploy/opencode-serve.sh`：这些已剥离到 acbl 或已废弃。
+缺项错误逐条列出 `<相对路径> (file|directory)`，指明缺了哪一项。
+
+校验点：
+
+1. `profile add`：缺布局条目 → 拒绝 add 并列出缺项；契约不兼容 / `min_acbl` 过高 →
+   拒绝 add，错误里带原因码与声明值。
+2. `profile switch` 与升级预检（`resolve_generation_command`，launcher 在停旧进程之前调用）：
+   同上 → 拒绝切换，保留当前 generation，不进入 staging、不写指针。
+3. launcher 启动读到 `current.json` 指向的 generation：不兼容 → 打印
+   `acbl-launcher: refusing to start generation: generation <id>: reason_code=...` 并退出 `78`。
+   校验在 supervisor 拉起 bridge **之前**完成，因此不会出现“旧 bridge 已停、新 bridge 未起”。
+
+兼容规则（v1 定稿）：
+
+- **只增不改**：新增可选字段 / 可选文件不升 `contract`；删除、改名、语义变化必须升。
+- acbl 侧固定支持 `1..=1`；`N` 与 `N-1` 并行窗口等 v2 出现时再开。
+- 过渡期：payload 没有 `acb-contract.json` 时按 `contract = 1` 放行，每个校验点打印
+  `assuming legacy acb_contract=1` 告警；契约文件随 payload 发出去后应删除该兜底。
+- 原因码：`contract_unreadable`、`contract_schema_unsupported`、`contract_incompatible`、
+  `acbl_too_old`、`contract_malformed`、`payload_missing_path`、
+  `payload_missing_command`、`payload_bad_command`。
+- 参考声明模板 `deploy/acb-contract.json`，打包时原样拷到 payload 根；校验实现见
+  `crates/acb/src/contract.rs`。
+
 ## 7. 安全与权限
 
 ### 7.1 谁能发起
@@ -710,6 +764,12 @@ systemd、容器 runtime 本身不写 ACB 文件，因此不作为事件 produce
   `ACB_UNIT_LAUNCHER_BIN`、`ACB_UNIT_STATE_DIR`、`ACB_UNIT_SUPERVISOR_CONFIG_FILE`；
   默认值从 `ACB_UNIT_PROFILE_DIR` / `ACB_UNIT_BIN_DIR` 派生，不写死 NixOS 路径，
   也不引用 `/run/current-system` 或 `ACB_UNIT_SHELL`。
+- **契约版本化（B-12）**（`crates/acb/src/contract.rs`）
+  - payload 根 `acb-contract.json` 声明 `schema` / `contract` / `min_acbl` / `layout` / `commands`；
+    参考模板 `deploy/acb-contract.json`。
+  - 校验点：`profile add`、`profile switch` / 升级预检、launcher 启动（78 前、拉起 bridge 前）。
+  - payload 布局校验收窄：只查 payload 自身内容，不再要求 acbl 侧的 unit / run 模板与脚本；
+    缺项错误逐条列出。字段与原因码见 §6.4。
 
 ### 尚未接通
 
@@ -720,6 +780,9 @@ systemd、容器 runtime 本身不写 ACB 文件，因此不作为事件 produce
 - 事件流水（§9）未接入；当前只有 `supervisor.log` 的原始审计和升级请求结果文件。
 - 回滚到 LKG 后如果保护性停止，需要外部再拉起一次以运行 LKG；`78` 仍是
   “不再拉起”的终态，不是回滚动作本身。
+- 契约 v1 暂不包含 `state/supervisor/bridge.json` 与 `GET /internal/instance`：bridge
+  侧还没实现实例身份，写进必带项会让现有 payload 全部判死。等 adopt（A-8）落地后
+  以新增字段（不升 `contract`）扩展。
 
 ## 12. 期望 `profile.rs` 后续提供的接口（本次未改）
 
