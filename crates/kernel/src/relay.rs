@@ -21,8 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// 单个收下文件的大小上限。fs::copy 不占桥的内存，这个上限主要防磁盘被塞满。
-pub const MAX_PUBLISH_BYTES: u64 = 128 * 1024 * 1024;
+/// 单个收下文件的默认大小上限。fs::copy 不占桥的内存，这个上限主要防磁盘被塞满；
+/// 可用 `[file_relay].max_publish_bytes` 调高，默认对齐平台的文件上传上限（4 GiB）。
+pub const DEFAULT_MAX_PUBLISH_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// 收下的文件保留多久。桥启动时清一次过期的；漏网的等下次重启再清。
 const KEEP_FOR: Duration = Duration::from_secs(24 * 3600);
 
@@ -53,15 +54,21 @@ pub enum RelayError {
 pub struct FileRelay {
     root: PathBuf,
     base: String,
+    max_publish_bytes: u64,
 }
 
 impl FileRelay {
     /// 建一个中继。不在这里建目录：建目录失败不该拦住桥启动，
     /// 等真要收文件时再报「目录建不了」这种具体错误。
-    pub fn new(dir: impl Into<PathBuf>, public_base: impl Into<String>) -> Self {
+    pub fn new(
+        dir: impl Into<PathBuf>,
+        public_base: impl Into<String>,
+        max_publish_bytes: u64,
+    ) -> Self {
         Self {
             root: dir.into(),
             base: public_base.into().trim_end_matches('/').to_owned(),
+            max_publish_bytes,
         }
     }
 
@@ -88,11 +95,11 @@ impl FileRelay {
         if !meta.is_file() {
             return Err(RelayError::NotAFile(source.to_owned()));
         }
-        if meta.len() > MAX_PUBLISH_BYTES {
+        if meta.len() > self.max_publish_bytes {
             return Err(RelayError::TooBig {
                 path: source.to_owned(),
                 size: meta.len(),
-                limit: MAX_PUBLISH_BYTES,
+                limit: self.max_publish_bytes,
             });
         }
 
@@ -433,7 +440,7 @@ mod tests {
     #[test]
     fn sweep_removes_entries_older_than_the_retention_window() {
         let temp = TempDir::new("sweep");
-        let relay = FileRelay::new(temp.0.join("store"), "http://x");
+        let relay = FileRelay::new(temp.0.join("store"), "http://x", DEFAULT_MAX_PUBLISH_BYTES);
         let source = temp.0.join("a.bin");
         fs::write(&source, b"bytes").expect("能写源文件");
         relay.publish(&source).expect("能收下");
@@ -448,7 +455,7 @@ mod tests {
         use std::sync::{Arc, Barrier};
 
         let temp = TempDir::new("concurrent");
-        let relay = FileRelay::new(temp.0.join("store"), "http://x");
+        let relay = FileRelay::new(temp.0.join("store"), "http://x", DEFAULT_MAX_PUBLISH_BYTES);
         let source = temp.0.join("payload.bin");
         let bytes = vec![b'x'; 256 * 1024];
         fs::write(&source, &bytes).expect("能写源文件");
@@ -505,7 +512,11 @@ mod tests {
     #[allow(non_snake_case)]
     fn 收下的文件能按URL取回来() {
         let temp = TempDir::new("roundtrip");
-        let relay = FileRelay::new(temp.0.join("store"), "http://10.89.0.1:3131");
+        let relay = FileRelay::new(
+            temp.0.join("store"),
+            "http://10.89.0.1:3131",
+            DEFAULT_MAX_PUBLISH_BYTES,
+        );
 
         let source = temp.0.join("一张 图.png");
         fs::write(&source, b"png-bytes").expect("能写源文件");
@@ -528,7 +539,7 @@ mod tests {
     #[test]
     fn 瞎编的token和带路径的文件名都取不到东西() {
         let temp = TempDir::new("traversal");
-        let relay = FileRelay::new(temp.0.join("store"), "http://x");
+        let relay = FileRelay::new(temp.0.join("store"), "http://x", DEFAULT_MAX_PUBLISH_BYTES);
         assert!(relay.lookup("not-hex", "a.png").is_none());
         assert!(
             relay
@@ -545,7 +556,7 @@ mod tests {
     #[test]
     fn 文件太大和不是文件都收不下() {
         let temp = TempDir::new("limits");
-        let relay = FileRelay::new(temp.0.join("store"), "http://x");
+        let relay = FileRelay::new(temp.0.join("store"), "http://x", 1);
 
         let dir = temp.0.join("其实是个目录");
         fs::create_dir_all(&dir).expect("能建目录");
@@ -553,15 +564,35 @@ mod tests {
 
         let big = temp.0.join("big.bin");
         fs::write(&big, vec![0_u8; 4096]).expect("能写");
-        // 把上限人为调小来测，不用真写 128 MiB。
-        let limit_check = fs::metadata(&big).expect("元数据在").len();
-        assert!(limit_check < MAX_PUBLISH_BYTES);
-        let too_big = RelayError::TooBig {
-            path: big.clone(),
-            size: limit_check,
-            limit: 1,
-        };
-        assert!(too_big.to_string().contains("file too large"));
+        let error = relay.publish(&big).expect_err("超过配置上限应当拒绝");
+        match &error {
+            RelayError::TooBig { size, limit, .. } => {
+                assert_eq!(*size, 4096);
+                assert_eq!(*limit, 1);
+            }
+            other => panic!("期望 TooBig，实际 {other:?}"),
+        }
+        let text = error.to_string();
+        assert!(
+            text.contains("[file_relay].max_publish_bytes"),
+            "超限文案要指向配置项：{text}"
+        );
+    }
+
+    #[test]
+    fn 配置的上限决定能收多大的文件() {
+        let temp = TempDir::new("limit-config");
+        let source = temp.0.join("payload.bin");
+        fs::write(&source, vec![0_u8; 4096]).expect("能写");
+
+        let small = FileRelay::new(temp.0.join("small"), "http://x", 1);
+        assert!(matches!(
+            small.publish(&source),
+            Err(RelayError::TooBig { .. })
+        ));
+
+        let large = FileRelay::new(temp.0.join("large"), "http://x", 8192);
+        assert!(large.publish(&source).is_ok(), "调高上限后应当能收下");
     }
 
     #[test]

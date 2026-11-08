@@ -96,7 +96,7 @@ src 内测试模块单列。
 
 | 位置 | 问题 | 影响 | 建议动作 | 优先级 |
 |---|---|---|---|---|
-| `crates/kernel/src/engine.rs:4145,4366`（`begin_tool_call` → `relay_elements` → `FileRelay::publish`） | **持全局 Bridge 锁做 `fs::copy`**（单文件上限 128 MiB） | 一次大文件中继会阻塞入库、开轮、控制台；文件大或磁盘慢时表现为整桥卡顿 | **已修（c912a63）**：锁内只登记 `PreparedSend` / `PreparedPlatformCall`，endpoint / route worker 锁外先 `relay()` 再执行；publish 用临时文件 + rename | 已修 |
+| `crates/kernel/src/engine.rs:4145,4366`（`begin_tool_call` → `relay_elements` → `FileRelay::publish`） | **持全局 Bridge 锁做 `fs::copy`**（单文件上限默认 4 GiB，`[file_relay].max_publish_bytes` 可调） | 一次大文件中继会阻塞入库、开轮、控制台；文件大或磁盘慢时表现为整桥卡顿 | **已修（c912a63）**：锁内只登记 `PreparedSend` / `PreparedPlatformCall`，endpoint / route worker 锁外先 `relay()` 再执行；publish 用临时文件 + rename | 已修 |
 | `crates/kernel/src/engine.rs:3041,4392`（`platform_call` 参数中继） | 同上 | 同上 | 同上（同一提交） | 已修 |
 | `crates/bridge/src/console.rs:706`（以及 `:852` 的 `lock`） | 持全局锁执行 SQLite 读（feedback/history 等） | 慢查询或大库会阻塞 ingest；控制台高频轮询放大 | 控制台查询先 clone 所需状态或使用只读连接；至少避免在锁内做多页查询 | P2 |
 | `crates/kernel/src/outbound.rs:734-762` | `OutboundHandle` 的每连接 `Mutex` 覆盖 `send/call` 全程（含网络 I/O） | 单连接串行是刻意设计；但慢平台/挂死平台会让该连接所有发送与 `platform_call` 排队，直到适配器超时 | 保持串行语义；给适配器层补明确超时与“连接不可用”状态（process/dynamic 已有部分） | P2 |

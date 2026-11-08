@@ -280,7 +280,7 @@ core 再补上触发记录的水位编号（消息还带平台消息号、事件
 `/home/.../a.png`，平台 stat 不到，报一个裸 ENOENT。解决不靠路径映射（每个环境要单独配
 一遍，docker/podman/windows × 各家 OneBot 配不完），靠**桥自带文件服务**：
 
-- 连接配置里加了 `[file_relay]`（`listen` / `public_base` / `dir`）就启用：
+- 连接配置里加了 `[file_relay]`（`listen` / `public_base` / `dir` / `max_publish_bytes`）就启用：
   `send_message` 的元素和 `platform_call` 的 params 里，凡是**本机真实存在**的绝对路径，
   桥收下文件、换成 `http://<public_base>/f/<token>/<文件名>` 交给平台。
 - 没配就完全不碰路径，行为同以前。`http(s)://`、`base64://`、本机不存在的路径（可能是

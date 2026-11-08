@@ -389,7 +389,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // 两边各持一个 FileRelay 实例，共享同一个目录，token 目录就是事实来源。
     match &config.file_relay {
         Some(relay_config) => {
-            let relay = Arc::new(FileRelay::new(&relay_config.dir, &relay_config.public_base));
+            let relay = Arc::new(FileRelay::new(
+                &relay_config.dir,
+                &relay_config.public_base,
+                relay_config.max_publish_bytes,
+            ));
             let removed = relay.sweep_expired();
             if removed > 0 {
                 println!(

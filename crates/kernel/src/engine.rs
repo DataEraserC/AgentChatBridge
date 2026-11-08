@@ -796,7 +796,13 @@ impl<S: Store> Bridge<S> {
         let relay = config
             .file_relay
             .as_ref()
-            .map(|cfg| crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base));
+            .map(|cfg| {
+                crate::relay::FileRelay::new(
+                    &cfg.dir,
+                    &cfg.public_base,
+                    cfg.max_publish_bytes,
+                )
+            });
         // 启动时把房间政策落一条审计：某群何时被放开必须可查。
         audit_grants_config(None, &config.grants);
         let policy: Arc<dyn Policy> = Arc::new(CorePolicy::new());
@@ -1926,7 +1932,13 @@ impl<S: Store> Bridge<S> {
         self.relay = config
             .file_relay
             .as_ref()
-            .map(|cfg| crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base));
+            .map(|cfg| {
+                crate::relay::FileRelay::new(
+                    &cfg.dir,
+                    &cfg.public_base,
+                    cfg.max_publish_bytes,
+                )
+            });
         // 依赖表跟配置走：新增的登记为 unknown，移除的直接删掉。
         self.deps.retain_config(&config);
         self.plugins
@@ -10568,9 +10580,7 @@ fn relay_elements(
                     ErrorCode::BadRequest,
                     format!(
                         "[bad_params] file {} exists locally, but the bridge cannot accept it: \
-                         {error}. The platform cannot get this file. Check that [file_relay].dir \
-                         is writable; small files (up to 1 MiB after base64) can also be inlined \
-                         by writing the url as base64://...",
+                         {error}",
                         local.display()
                     ),
                 ));
@@ -10608,8 +10618,7 @@ fn relay_params(
                             ErrorCode::BadRequest,
                             format!(
                                 "[bad_params] file {} in params exists locally, but the bridge \
-                                 cannot accept it: {error}. Small files can be inlined with \
-                                 base64:// instead.",
+                                 cannot accept it: {error}",
                                 local.display()
                             ),
                         )

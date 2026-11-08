@@ -112,7 +112,7 @@ runtime 策略分片仍按上面的普通合并规则处理。手工排查时可
 
 大部分改动在**当前这轮对话结束后的下一轮**生效——正在进行的对话不会被腰斩，改完不用重启：
 会话/订阅/唤醒、人格、记忆挂载、保留策略、`delivery_limit`、`default_on_turn_error`、
-`turn_timeout_secs`，以及 `file_relay.public_base` / `dir`。
+`turn_timeout_secs`，以及 `file_relay.public_base` / `dir` / `max_publish_bytes`。
 
 「启动时才知道」的参数改完必须重启桥：`[endpoint]`、`[console]`、`[[connections]]`
 （连接守护线程持有旧连接信息）、`storage.path`、`worktrees_root`、`[[plugins]]` 的增删
@@ -466,7 +466,12 @@ mode = "file-server"                                  # 目前只有这一种
 listen = "0.0.0.0:3131"                               # 平台要能连到这个地址
 public_base = "http://host.containers.internal:3131"  # 平台那边访问桥用的地址
 dir = "state/relay"                                   # 不写就用 state/relay
+max_publish_bytes = "4 GiB"                            # 单个文件上限，默认 4 GiB
 ```
+
+每次发布都会把文件整份复制到 `dir` 并保留 24 小时。上限抬到 4 GiB 后，最坏磁盘占用
+约为「24 小时内并发发布数 × 上限」；桥目前没有总量配额，磁盘紧张时请把 `dir` 放在
+容量足够的卷上，或按需要调低 `max_publish_bytes`。
 
 按你的 OneBot 部署方式选 `public_base`：
 

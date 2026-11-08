@@ -74,6 +74,10 @@ listen = "127.0.0.1:7700"
 # listen = "0.0.0.0:3131"
 # public_base = "http://host.containers.internal:3131"
 # dir = "state/relay"                      # 不写就用 state/relay
+# max_publish_bytes = "4 GiB"              # 单个文件上限，默认 4 GiB；写整数即字节数
+#                                          # 也认 "4096 MiB" / "1.5 GiB" / "1500 MB"
+#                                          # 每次发布整份复制到 dir 并保留 24 小时，
+#                                          # 并发发大文件时磁盘峰值 = 并发数 × 上限
 
 # 动态库插件（ADR-0026 / 0027）：一个 .so/.dylib 可以是平台适配器，也可以是策略 provider。
 # 插件自己的 manifest 决定它是哪一种；这里的 kind 只用于校验适配器。

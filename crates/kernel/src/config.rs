@@ -58,6 +58,117 @@ pub const DEFAULT_TURN_TIMEOUT_SECS: u64 = 0;
 /// `[file_relay].dir` 不写时的默认值。跟 [storage].path 一样相对启动目录。
 pub const DEFAULT_RELAY_DIR: &str = "state/relay";
 
+/// `[file_relay].max_publish_bytes` 识别的大小单位（大小写不敏感）。
+/// `KB`/`MB`/`GB`/`TB` 按十进制，`KiB`/`MiB`/`GiB`/`TiB` 按二进制。
+const FILE_RELAY_SIZE_UNITS: &[(&str, u64)] = &[
+    ("", 1),
+    ("b", 1),
+    ("kb", 1000),
+    ("kib", 1024),
+    ("mb", 1000 * 1000),
+    ("mib", 1024 * 1024),
+    ("gb", 1000 * 1000 * 1000),
+    ("gib", 1024 * 1024 * 1024),
+    ("tb", 1000_u64.pow(4)),
+    ("tib", 1024_u64.pow(4)),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ByteSizeParseError {
+    Expected,
+    TooLarge,
+}
+
+fn parse_file_relay_max_publish_bytes(value: Option<toml::Value>) -> Result<u64, ConfigError> {
+    let Some(value) = value else {
+        return Ok(crate::relay::DEFAULT_MAX_PUBLISH_BYTES);
+    };
+    match value {
+        toml::Value::Integer(bytes) => {
+            let bytes = u64::try_from(bytes).map_err(|_| ConfigError::BadFileRelayMaxPublish {
+                value: bytes.to_string(),
+                detail: acb_i18n::t!("kernel.config.file_relay_size_expected"),
+            })?;
+            if bytes == 0 {
+                return Err(ConfigError::BadFileRelayMaxPublish {
+                    value: bytes.to_string(),
+                    detail: acb_i18n::t!("kernel.config.file_relay_size_expected"),
+                });
+            }
+            Ok(bytes)
+        }
+        toml::Value::String(text) => parse_byte_size(&text).map_err(|kind| {
+            ConfigError::BadFileRelayMaxPublish {
+                value: text.clone(),
+                detail: match kind {
+                    ByteSizeParseError::Expected => {
+                        acb_i18n::t!("kernel.config.file_relay_size_expected")
+                    }
+                    ByteSizeParseError::TooLarge => {
+                        acb_i18n::t!("kernel.config.file_relay_size_too_large")
+                    }
+                },
+            }
+        }),
+        other => Err(ConfigError::BadFileRelayMaxPublish {
+            value: other.to_string(),
+            detail: acb_i18n::t!("kernel.config.file_relay_size_expected"),
+        }),
+    }
+}
+
+/// 解析 `"4 GiB"` / `"4096 MiB"` / `"1.5 GiB"` / `"4096"` 这类写法。
+/// 小数按整数字节向下取整；不接受 0、负数、未知单位和溢出。
+fn parse_byte_size(text: &str) -> Result<u64, ByteSizeParseError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(ByteSizeParseError::Expected);
+    }
+    let split_at = text
+        .find(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split_at);
+    let unit = unit.trim().to_ascii_lowercase();
+    let multiplier = FILE_RELAY_SIZE_UNITS
+        .iter()
+        .find(|(candidate, _)| *candidate == unit)
+        .map(|(_, multiplier)| *multiplier)
+        .ok_or(ByteSizeParseError::Expected)?;
+
+    let number = number.trim();
+    let (int_part, frac_part) = number.split_once('.').unwrap_or((number, ""));
+    if int_part.is_empty()
+        || !int_part.chars().all(|c| c.is_ascii_digit())
+        || !frac_part.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(ByteSizeParseError::Expected);
+    }
+
+    let int: u128 = int_part.parse().map_err(|_| ByteSizeParseError::TooLarge)?;
+    let frac: u128 = if frac_part.is_empty() {
+        0
+    } else {
+        frac_part
+            .parse()
+            .map_err(|_| ByteSizeParseError::TooLarge)?
+    };
+    let scale = 10_u128
+        .checked_pow(frac_part.len() as u32)
+        .ok_or(ByteSizeParseError::TooLarge)?;
+    let scaled = int
+        .checked_mul(scale)
+        .and_then(|value| value.checked_add(frac))
+        .ok_or(ByteSizeParseError::TooLarge)?;
+    let bytes = scaled
+        .checked_mul(multiplier as u128)
+        .ok_or(ByteSizeParseError::TooLarge)?
+        / scale;
+    if bytes == 0 {
+        return Err(ByteSizeParseError::Expected);
+    }
+    u64::try_from(bytes).map_err(|_| ByteSizeParseError::TooLarge)
+}
+
 /// 没配 worktree 根目录时的默认值：工作目录下的 `state/worktrees`。
 /// 来源：实现默认。放 `state/` 是因为那里已经在 .gitignore 里。
 /// 每个「会话 × 记忆」的 worktree 按 `根/记忆id/会话id` 分层，路径固定才谈得上幂等。
@@ -572,6 +683,11 @@ pub struct FileRelayConfig {
     pub public_base: String,
     /// 收下的文件落盘位置。
     pub dir: String,
+    /// 单个文件写入中继目录的上限（字节）。默认 4 GiB，对齐平台的文件上传上限。
+    ///
+    /// 支持整数字节或人类可读写法（`"4 GiB"`、`"4096 MiB"`、`"1.5 GiB"`）。
+    /// 每次发布都会整份复制到 `dir` 并保留 24 小时；调高后要注意并发发布时的磁盘峰值。
+    pub max_publish_bytes: u64,
 }
 
 /// `FileRelayConfig.mode` 当前唯一合法值。
@@ -1152,6 +1268,8 @@ pub enum ConfigError {
     UnknownHarness { session: String, harness: String },
     #[error("{}", acb_i18n::t!("kernel.config.bad_listen", address = address, detail = detail))]
     BadListen { address: String, detail: String },
+    #[error("{}", acb_i18n::t!("kernel.config.file_relay_max_publish_bytes", value = value, detail = detail))]
+    BadFileRelayMaxPublish { value: String, detail: String },
     #[error("{}", acb_i18n::t!("kernel.config.empty_connection_id"))]
     EmptyConnectionId,
     #[error("{}", acb_i18n::t!("kernel.config.duplicate_connection", connection = connection))]
@@ -1671,11 +1789,14 @@ impl Config {
                         detail: acb_i18n::t!("kernel.config.file_relay_public_base"),
                     });
                 }
+                let max_publish_bytes =
+                    parse_file_relay_max_publish_bytes(raw.max_publish_bytes)?;
                 Some(FileRelayConfig {
                     mode,
                     listen: address,
                     public_base,
                     dir: raw.dir.unwrap_or_else(|| DEFAULT_RELAY_DIR.to_owned()),
+                    max_publish_bytes,
                 })
             }
             None => None,
@@ -3489,6 +3610,8 @@ struct RawFileRelay {
     listen: String,
     public_base: String,
     dir: Option<String>,
+    /// 整数按字节；字符串支持 `"4 GiB"` / `"4096 MiB"` / `"1.5 GiB"`。
+    max_publish_bytes: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4196,6 +4319,64 @@ mod tests {
         );
         let error = Config::parse_fixture(&text).expect_err("应当报错");
         assert!(error.to_string().contains("file_relay.mode"), "{error}");
+    }
+
+    /// 写入侧上限缺省对齐平台的文件上传上限（4 GiB），不是旧的 128 MiB。
+    #[test]
+    fn file_relay_max_publish_bytes_defaults_to_4_gib() {
+        let text = format!(
+            "{}\n[file_relay]\nlisten = \"0.0.0.0:3131\"\npublic_base = \"http://10.89.0.1:3131\"",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse_fixture(&text).expect("能解析");
+        let relay = config.file_relay.expect("应解析出 file_relay");
+        assert_eq!(
+            relay.max_publish_bytes,
+            crate::relay::DEFAULT_MAX_PUBLISH_BYTES
+        );
+        assert_eq!(relay.max_publish_bytes, 4 * 1024 * 1024 * 1024);
+    }
+
+    /// 人类可读写法与整数字节都认；小数按字节向下取整。
+    #[test]
+    fn file_relay_max_publish_bytes_accepts_human_readable_sizes() {
+        let cases = [
+            ("\"4 GiB\"", 4 * 1024 * 1024 * 1024),
+            ("\"4096 MiB\"", 4 * 1024 * 1024 * 1024),
+            ("\"1.5 GiB\"", 1_610_612_736),
+            ("\"1500 MB\"", 1_500_000_000),
+            ("\"2048\"", 2048),
+            ("2048", 2048),
+        ];
+        for (literal, expected) in cases {
+            let text = format!(
+                "{}\n[file_relay]\nlisten = \"0.0.0.0:3131\"\npublic_base = \"http://10.89.0.1:3131\"\nmax_publish_bytes = {literal}",
+                config_with(ONE_CONNECTION, ONE_SESSION)
+            );
+            let config = Config::parse_fixture(&text).unwrap_or_else(|error| {
+                panic!("{literal} 应当能解析：{error}");
+            });
+            let relay = config.file_relay.expect("应解析出 file_relay");
+            assert_eq!(relay.max_publish_bytes, expected, "{literal}");
+        }
+    }
+
+    /// 写不出来的值（未知单位、0、非数字）要在启动时报错并指出配置键。
+    #[test]
+    fn file_relay_max_publish_bytes_rejects_bad_values() {
+        for literal in ["\"banana\"", "\"0\"", "\"4 gibberish\"", "0"] {
+            let text = format!(
+                "{}\n[file_relay]\nlisten = \"0.0.0.0:3131\"\npublic_base = \"http://10.89.0.1:3131\"\nmax_publish_bytes = {literal}",
+                config_with(ONE_CONNECTION, ONE_SESSION)
+            );
+            let error = Config::parse_fixture(&text)
+                .expect_err(&format!("{literal} 应当报错"));
+            let message = error.to_string();
+            assert!(
+                message.contains("[file_relay].max_publish_bytes"),
+                "{literal} 的报错要指向配置键：{message}"
+            );
+        }
     }
 
     /// 连接级风险策略已移除：任何 `[connections.policy.risk]` 都启动失败并指向 grants。
