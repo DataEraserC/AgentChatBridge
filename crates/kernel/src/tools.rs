@@ -150,7 +150,7 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
     },
     ToolCatalogEntry {
         name: "tasks",
-        purpose: "查后台任务（list/get）",
+        purpose: "查后台任务（list/get/wait）",
         when: "异步任务有结果时",
     },
     ToolCatalogEntry {
@@ -609,6 +609,11 @@ pub struct TasksToolArgs {
     pub offset: Option<usize>,
     #[serde(default)]
     pub id: Option<String>,
+    /// `op=wait` 的单次等待时长（毫秒）。由调用方按所在 harness 和任务大小自选；
+    /// 桥只按 `[tasks].wait_max_ms`（缺省 45 秒）截断，截断会在返回里注明。
+    /// **不用于 op=get**——get 永远立即返回。
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
 }
 
 /// 一条反馈（ADR-0021）。

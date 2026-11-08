@@ -219,6 +219,25 @@ impl PreparedWait {
     }
 }
 
+/// 已经校验、等锁外 sleep 的一次 `tasks op=wait`。
+///
+/// 任务收工由后台线程落库；这里只负责「到点回来再看一眼」，不持锁。
+pub(crate) struct PreparedTaskWait {
+    session: String,
+    id: String,
+    timeout: Duration,
+    /// 调用方要求的等待时长；被服务端上限截断时用来说明差异。
+    requested_ms: u64,
+    /// 是否发生了截断。
+    truncated: bool,
+}
+
+impl PreparedTaskWait {
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
 /// 等着开轮次的（会话，房间）。
 #[derive(Debug, Clone)]
 struct Pending {
@@ -380,31 +399,36 @@ pub(crate) struct PreparedTask {
     pub params: Value,
 }
 
-/// 后台任务状态。任务记录只活在本进程，重启后清空（持久化留给后续阶段）。
+/// 后台任务状态。记录落库（`tasks` 表），重启后仍可查。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
-    Queued,
+    /// 已受理，还没开始执行。
+    Pending,
     Running,
     Succeeded,
     Failed,
+    /// 已经发出去了，但没等到平台回话——可能成功、也可能失败，只能靠对账确认。
+    Unknown,
 }
 
 impl TaskStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Queued => "queued",
+            Self::Pending => "pending",
             Self::Running => "running",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
+            Self::Unknown => "unknown",
         }
     }
 
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
-            "queued" => Self::Queued,
+            "pending" | "queued" => Self::Pending,
             "running" => Self::Running,
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
+            "unknown" => Self::Unknown,
             _ => return None,
         })
     }
@@ -456,6 +480,10 @@ pub struct TaskRecord {
     pub event_id: Option<u64>,
     pub event_woke: Vec<String>,
     pub event_error: Option<String>,
+    /// 平台回执编号。发送成功后才有；`unknown` 状态下留空，供对账回填。
+    pub platform_id: Option<String>,
+    /// 幂等键。发送类调用在提交时生成并随记录落库，超时后重发可以带上同一把键避免重复。
+    pub idempotency_key: Option<String>,
 }
 
 /// 一次直接唤醒请求的结果。
@@ -508,6 +536,8 @@ pub(crate) enum ToolCallStart {
     Send(PreparedSend),
     /// 锁外等待新消息，再回锁里取结果。
     Wait(PreparedWait),
+    /// 锁外等任务收工，再回锁里取记录。
+    TaskWait(PreparedTaskWait),
 }
 
 /// 某个房间的一个订阅者，判定唤醒时要的东西。
@@ -575,8 +605,7 @@ pub struct Bridge<S: Store> {
     pending_manager_reloads: Vec<String>,
     /// manager 重载失败的原因，按 namespace 记录。
     manager_errors: HashMap<String, String>,
-    /// 后台任务记录，按创建时间从旧到新；超过上限丢最旧的。
-    tasks: VecDeque<TaskRecord>,
+    /// 后台任务记录已迁到存储层（`tasks` 表），这里只留 id 序号。
     /// 任务 id 序号；和票前缀一起保证进程内唯一。
     task_seq: u64,
     /// 直接唤醒审计，按时间从旧到新；超过上限丢最旧的。
@@ -836,7 +865,6 @@ impl<S: Store> Bridge<S> {
             plugin_errors: HashMap::new(),
             pending_manager_reloads: Vec::new(),
             manager_errors: HashMap::new(),
-            tasks: VecDeque::new(),
             task_seq: 0,
             wake_audit: VecDeque::new(),
             wake_rates: HashMap::new(),
@@ -1282,10 +1310,10 @@ impl<S: Store> Bridge<S> {
         session: &str,
         handler: &str,
         params: &Value,
-    ) -> String {
+    ) -> Result<String, BridgeError> {
         self.task_seq = self.task_seq.saturating_add(1);
         let id = format!("task-{}-{}", self.ticket_prefix, self.task_seq);
-        self.tasks.push_back(TaskRecord {
+        let record = TaskRecord {
             id: id.clone(),
             session: session.to_owned(),
             room: room.clone(),
@@ -1296,7 +1324,7 @@ impl<S: Store> Bridge<S> {
                 .and_then(Value::as_str)
                 .unwrap_or("always")
                 .to_owned(),
-            status: TaskStatus::Queued,
+            status: TaskStatus::Pending,
             created_at: now_millis(),
             started_at: None,
             finished_at: None,
@@ -1306,17 +1334,25 @@ impl<S: Store> Bridge<S> {
             event_id: None,
             event_woke: Vec::new(),
             event_error: None,
-        });
-        while self.tasks.len() > TASK_KEEP {
-            self.tasks.pop_front();
-        }
-        id
+            platform_id: None,
+            idempotency_key: None,
+        };
+        self.store.task_create(&record)?;
+        self.store.task_prune(TASK_KEEP)?;
+        Ok(id)
     }
 
     pub(crate) fn mark_task_running(&mut self, task_id: &str) {
-        if let Some(record) = self.tasks.iter_mut().find(|record| record.id == task_id) {
-            record.status = TaskStatus::Running;
-            record.started_at = Some(now_millis());
+        match self.store.task_find(task_id) {
+            Ok(Some(mut record)) => {
+                record.status = TaskStatus::Running;
+                record.started_at = Some(now_millis());
+                if let Err(error) = self.store.task_update(&record) {
+                    eprintln!("task {task_id} 状态落库失败：{error}");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("task {task_id} 读取失败：{error}"),
         }
     }
 
@@ -1328,7 +1364,7 @@ impl<S: Store> Bridge<S> {
         delivery_error: Option<String>,
     ) {
         let mut finished = None;
-        if let Some(record) = self.tasks.iter_mut().find(|record| record.id == task_id) {
+        if let Ok(Some(mut record)) = self.store.task_find(task_id) {
             record.status = if error.is_some() || delivery_error.is_some() {
                 TaskStatus::Failed
             } else {
@@ -1338,8 +1374,12 @@ impl<S: Store> Bridge<S> {
             record.result = result;
             record.error = error;
             record.delivery_error = delivery_error;
+            if let Err(storage_error) = self.store.task_update(&record) {
+                eprintln!("task {task_id} 收工落库失败：{storage_error}");
+            }
             finished = Some((
                 record.id.clone(),
+                record.session.clone(),
                 record.room.clone(),
                 record.status,
                 record.handler.clone(),
@@ -1350,7 +1390,7 @@ impl<S: Store> Bridge<S> {
             ));
         }
 
-        let Some((id, room, status, handler, result, error, delivery_error, wake_on_raw)) =
+        let Some((id, session, room, status, handler, result, error, delivery_error, wake_on_raw)) =
             finished
         else {
             return;
@@ -1404,7 +1444,7 @@ impl<S: Store> Bridge<S> {
             "delivery_error": delivery_error,
         });
         let mut draft = RecordDraft::event(
-            room,
+            room.clone(),
             Sender {
                 id: "acb.task".into(),
                 name: "task".into(),
@@ -1432,10 +1472,13 @@ impl<S: Store> Bridge<S> {
         // “任务失败 → 路由再触发任务 → 再失败”的循环。
         match self.ingest_inner(draft, true) {
             Ok(Ingest::Recorded { id: event_id, woke }) => {
-                if let Some(record) = self.tasks.iter_mut().find(|record| record.id == id) {
+                if let Ok(Some(mut record)) = self.store.task_find(&id) {
                     record.event_id = Some(event_id);
                     record.event_woke = woke;
                     record.event_error = None;
+                    if let Err(error) = self.store.task_update(&record) {
+                        eprintln!("task {id} 事件落库失败：{error}");
+                    }
                 }
             }
             Ok(Ingest::NotSubscribed { room }) => {
@@ -1457,11 +1500,38 @@ impl<S: Store> Bridge<S> {
                 self.set_task_event_error(&id, error.to_string());
             }
         }
+
+        // 桥内唤醒：只看「发起任务的会话」，不经过 lua.wake_policy，也不看别的订阅者。
+        // 关掉开关时这里什么都不做，行为与旧版完全一致。
+        // 该会话若正在跑一轮，enqueue 只把它排进 pending；poll_turn_for 要等这一轮
+        // 收工才会取走——结果自然并进下一轮，不会抢断当前轮。
+        if self.config.tasks.wake_on_completion
+            && matches!(status, TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Unknown)
+        {
+            let reason = acb_i18n::t!(
+                "kernel.engine.task_wake_reason",
+                id = id,
+                handler = handler,
+                status = status.as_str()
+            );
+            self.enqueue(
+                session,
+                room,
+                TurnReason::Wake,
+                Some(reason),
+                None,
+                now_millis(),
+                0,
+            );
+        }
     }
 
     fn set_task_event_error(&mut self, task_id: &str, error: String) {
-        if let Some(record) = self.tasks.iter_mut().find(|record| record.id == task_id) {
+        if let Ok(Some(mut record)) = self.store.task_find(task_id) {
             record.event_error = Some(error);
+            if let Err(storage_error) = self.store.task_update(&record) {
+                eprintln!("task {task_id} 事件错误落库失败：{storage_error}");
+            }
         }
     }
 
@@ -1483,21 +1553,12 @@ impl<S: Store> Bridge<S> {
             })?),
             None => None,
         };
-        let records: Vec<&TaskRecord> = self
-            .tasks
-            .iter()
-            .rev()
-            .filter(|record| record.session == session)
-            .filter(|record| wanted.is_none_or(|status| record.status == status))
-            .collect();
-        let total = records.len();
-        let limit = limit.clamp(1, TASK_LIST_LIMIT);
-        let tasks: Vec<Value> = records
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(task_json)
-            .collect();
+        let records = self
+            .store
+            .task_list(session, wanted.map(TaskStatus::as_str), offset, limit.clamp(1, TASK_LIST_LIMIT))
+            .map_err(internal)?;
+        let total = records.1;
+        let tasks: Vec<Value> = records.0.iter().map(task_json).collect();
         let mut response = json!({
             "session": session,
             "total": total,
@@ -1518,17 +1579,16 @@ impl<S: Store> Bridge<S> {
     /// 按 id 查一条任务记录；只允许查询本会话的任务。
     pub fn task_get(&self, session: &str, task_id: &str) -> Result<Value, ToolError> {
         let record = self
-            .tasks
-            .iter()
-            .rev()
-            .find(|record| record.id == task_id && record.session == session)
+            .store
+            .task_get(session, task_id)
+            .map_err(internal)?
             .ok_or_else(|| {
                 ToolError::new(
                     ErrorCode::BadRequest,
                     acb_i18n::t!("kernel.engine.task_not_found", id = task_id),
                 )
             })?;
-        Ok(task_json(record))
+        Ok(task_json(&record))
     }
 
     fn require_extension_admin(
@@ -2952,7 +3012,7 @@ impl<S: Store> Bridge<S> {
                     );
                     return Ok(());
                 };
-                let task_id = self.create_task_record(room, &session, &handler, &params);
+                let task_id = self.create_task_record(room, &session, &handler, &params)?;
                 self.pending_route_actions
                     .push(PreparedRouteAction::Task(PreparedTask {
                         task_id,
@@ -3209,12 +3269,13 @@ impl<S: Store> Bridge<S> {
 
     /// 排空/健康探针的快照。
     pub fn drain_snapshot(&self) -> Value {
+        let open = self.store.task_open().unwrap_or_default();
         json!({
             "state": if self.draining { "draining" } else { "ready" },
             "active_turns": self.active.len(),
             "queued_turns": self.pending.len(),
-            "queued_tasks": self.tasks.iter().filter(|task| task.status == TaskStatus::Queued).count(),
-            "running_tasks": self.tasks.iter().filter(|task| task.status == TaskStatus::Running).count(),
+            "queued_tasks": open.iter().filter(|task| task.status == TaskStatus::Pending).count(),
+            "running_tasks": open.iter().filter(|task| task.status == TaskStatus::Running).count(),
             "pending_route_actions": self.pending_route_actions.len(),
             "plugin_errors": self.plugin_errors.len() + self.manager_errors.len(),
             "schema_version": crate::storage::SCHEMA_VERSION,
@@ -3225,9 +3286,10 @@ impl<S: Store> Bridge<S> {
     /// 排空超时后还剩什么。只用于日志/运维，不用于恢复。
     pub fn drain_leftovers(&self) -> Value {
         let tasks: Vec<Value> = self
-            .tasks
+            .store
+            .task_open()
+            .unwrap_or_default()
             .iter()
-            .filter(|task| matches!(task.status, TaskStatus::Queued | TaskStatus::Running))
             .map(|task| {
                 json!({
                     "id": task.id,
@@ -4079,6 +4141,7 @@ impl<S: Store> Bridge<S> {
                     limit,
                     offset,
                     id,
+                    wait_ms: _,
                 } = parsed;
                 match op.as_str() {
                     "list" => self.task_list(
@@ -4091,7 +4154,13 @@ impl<S: Store> Bridge<S> {
                         let id = id.ok_or_else(|| op_requires("tasks", &op, "id"))?;
                         self.task_get(&turn_session, &id)
                     }
-                    other => Err(unknown_op("tasks", other, &["list", "get"])),
+                    // 和 wait_message 一样，阻塞等待必须走 endpoint 的锁外路径。
+                    "wait" => Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        "[bad_params] tasks op=wait 必须经真实 endpoint 调用（需要在锁外等待）；\
+                         直接调用请用 op=get 查当前状态。",
+                    )),
+                    other => Err(unknown_op("tasks", other, &["list", "get", "wait"])),
                 }
             }
             // 反馈：诚实报告「这里卡住了」。这是出口，不是抱怨箱（ADR-0021）。
@@ -4485,6 +4554,38 @@ impl<S: Store> Bridge<S> {
                     columns,
                 }))
             }
+            "tasks" => {
+                let op = args.get("op").and_then(Value::as_str).unwrap_or("");
+                let wait_ms = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(0);
+                if op == "get" && wait_ms > 0 {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        "[bad_params] tasks op=get 立即返回当前状态；要等结果请用 op=wait。",
+                    ));
+                }
+                if op != "wait" {
+                    let value = self.tool_call(ticket, sessions, tool, args)?;
+                    return Ok(ToolCallStart::Done(value));
+                }
+                let parsed: TasksToolArgs = parse(args)?;
+                let ctx = self.turn_ctx(ticket, tool)?;
+                let Some(id) = parsed.id else {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        "[bad_params] tasks op=wait 需要 id；批量查看请用 op=list。",
+                    ));
+                };
+                let cap = self.config.tasks.wait_max_ms.max(1);
+                let requested = parsed.wait_ms.unwrap_or(cap);
+                let effective = requested.min(cap);
+                Ok(ToolCallStart::TaskWait(PreparedTaskWait {
+                    session: ctx.session,
+                    id,
+                    timeout: Duration::from_millis(effective),
+                    requested_ms: requested,
+                    truncated: requested > cap,
+                }))
+            }
             // 其余工具不碰外部 I/O（读流水/记忆/笔记都在本地），保持原路径。
             _ => {
                 let value = self.tool_call(ticket, sessions, tool, args)?;
@@ -4759,6 +4860,48 @@ impl<S: Store> Bridge<S> {
             "records": [],
             "note": "这段时间没有新消息。不要空转重试；可以继续处理手上的事，或稍后再拉一次。",
         }))
+    }
+
+    /// `tasks op=wait` 的一次轮询。收工（succeeded / failed / unknown）
+    /// 就返回整条记录；还在跑就返回 `None`，endpoint 继续在锁外等。
+    pub(crate) fn poll_task_wait(
+        &self,
+        prepared: &PreparedTaskWait,
+    ) -> Result<Option<Value>, ToolError> {
+        let record = self.task_record(prepared)?;
+        if matches!(
+            record.status,
+            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Unknown
+        ) {
+            Ok(Some(task_json(&record)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 等待到点还没收工：返回当前记录（状态仍是 pending / running），并标明
+    /// 「仍在进行」；被服务端上限截断时把请求值与实际等待值一并说明。
+    pub(crate) fn finish_task_wait(&self, prepared: &PreparedTaskWait) -> Result<Value, ToolError> {
+        let mut value = task_json(&self.task_record(prepared)?);
+        value["still_running"] = json!(true);
+        if prepared.truncated {
+            value["wait_truncated"] = json!(true);
+            value["requested_wait_ms"] = json!(prepared.requested_ms);
+            value["wait_ms"] = json!(prepared.timeout.as_millis() as u64);
+        }
+        Ok(value)
+    }
+
+    fn task_record(&self, prepared: &PreparedTaskWait) -> Result<TaskRecord, ToolError> {
+        self.store
+            .task_get(&prepared.session, &prepared.id)
+            .map_err(internal)?
+            .ok_or_else(|| {
+                ToolError::new(
+                    ErrorCode::BadRequest,
+                    acb_i18n::t!("kernel.engine.task_not_found", id = prepared.id),
+                )
+            })
     }
 
     /// 直连 `tool_call` 的 `platform_call` 路径：校验 + 执行 + 结算，仍在调用方锁里。
@@ -10037,6 +10180,8 @@ fn task_json(record: &TaskRecord) -> Value {
         "event_id": record.event_id,
         "event_woke": record.event_woke,
         "event_error": record.event_error,
+        "platform_id": record.platform_id,
+        "idempotency_key": record.idempotency_key,
     })
 }
 

@@ -554,26 +554,44 @@ path 例如 echo/manifest.toml。`,
   },
   {
     name: "tasks",
-    description: `本会话后台任务记录单入口：op=list 列出（最新在前），op=get 按 id 查详情。
-后台任务（route 的 task 动作）会记录任务 id、handler、状态、开始/结束时间、结果摘要、
-错误、wake_on 和合成事件信息。任务可能在本轮结束后才完成；即使你没有收到唤醒，
-也可以回来用 tasks 查询。list 的 status 可过滤 queued / running / succeeded / failed。`,
+    description: `本会话后台任务记录单入口：op=list 列出（最新在前），op=get 按 id 立即查当前状态，
+op=wait 按 id 等到出结果或超时。
+
+状态：pending（已受理未执行）/ running / succeeded / failed / unknown。
+unknown 表示动作已经发出去了，但没等到平台回话——可能成也可能败，用 fetch_records 或
+平台回执对账，不要盲目重发。
+
+op=get 永远立即返回，不阻塞；op=wait 阻塞到收工或 wait_ms 到点。
+wait_ms 由你自己按所在 harness 和任务大小选：opencode 单次工具调用有 60 秒硬超时，
+超过会先被 harness 掐断；dsh 目前没有工具级死线（整轮超时也已关闭）。桥侧只设一个
+可配的服务端上限（[tasks].wait_max_ms，缺省 45 秒），超过会被截断，返回里会带
+wait_truncated / requested_wait_ms / wait_ms 说明，不会静默。
+wait 到点返回的记录带 still_running=true，可以再等一次，不要一次死等到底。
+任务可能在本轮结束后才完成；即使你没有收到唤醒，也可以回来用 tasks 查询。
+
+如果收到 sender 为 acb.task、tags 含 task.* 的合成事件，表示某个后台任务已经收工；
+用它事件文本里的任务 id 调 tasks op=get 取详情。`,
     schema: {
       type: "object",
       properties: {
         op: {
           type: "string",
-          enum: ["list", "get"],
-          description: "list 列表；get 按 id 查详情",
+          enum: ["list", "get", "wait"],
+          description: "list 列表；get 立即查当前状态；wait 等到收工或超时",
         },
         status: {
           type: "string",
-          enum: ["queued", "running", "succeeded", "failed"],
+          enum: ["pending", "running", "succeeded", "failed", "unknown"],
           description: "list 用：只看某个状态",
         },
         limit: { type: "integer", description: "list 用：最多返回几条，默认 20，上限 100" },
         offset: { type: "integer", description: "list 用：从第几条开始（翻页）" },
-        id: { type: "string", description: "get 用：tasks 返回的任务 id" },
+        id: { type: "string", description: "get / wait 用：tasks 返回的任务 id" },
+        wait_ms: {
+          type: "integer",
+          description:
+            "wait 用：最多等多久（毫秒），自行按 harness 与任务大小决定；桥侧 [tasks].wait_max_ms 会截断并注明",
+        },
       },
       required: ["op"],
       additionalProperties: false,

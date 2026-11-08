@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT,
     Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft, Recorded, SessionMap, SessionMaps,
-    StorageError, TopicStatus, Transcript, Watermarks,
+    StorageError, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript, Watermarks,
 };
 
 /// 这个程序认识的库结构版本。改表就加一。
@@ -36,7 +36,8 @@ use super::{
 /// 9 → 10：`records` 加 `suppressed`；被抑制的记录只进流水，不投递/不唤醒/不计未读，
 ///         语义落在记录上，之后新加的订阅者也不会看到它。
 /// 10 → 11：`feedback` 加 `replies` JSON；维护方回复与通知原会话（T7c）。
-pub const SCHEMA_VERSION: i64 = 11;
+/// 11 → 12：加 `tasks` 表——后台任务与出站尝试记录落盘，重启后仍可按 id 查。
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"
@@ -139,6 +140,33 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 
 CREATE INDEX IF NOT EXISTS feedback_by_status ON feedback (status, last_at DESC);
+
+-- 后台任务与出站尝试（异步执行的地基）。发送类调用执行前先写 running，
+-- 成功补 platform_id，超时留 unknown；重启后仍能按 id 查。
+CREATE TABLE IF NOT EXISTS tasks (
+    id              TEXT    PRIMARY KEY,
+    session         TEXT    NOT NULL,
+    connection      TEXT    NOT NULL,
+    room_key        TEXT    NOT NULL,
+    handler         TEXT    NOT NULL,   -- 工具/op 名；尝试记录也是它
+    params_summary  TEXT    NOT NULL,   -- 参数摘要，给人看
+    wake_on         TEXT    NOT NULL,   -- never | error | always
+    status          TEXT    NOT NULL,   -- queued | running | succeeded | failed | unknown
+    result          TEXT,               -- JSON
+    error           TEXT,
+    delivery_error  TEXT,
+    event_id        INTEGER,
+    event_woke      TEXT    NOT NULL DEFAULT '[]',  -- JSON 数组
+    event_error     TEXT,
+    platform_id     TEXT,               -- 平台回执编号
+    idempotency_key TEXT,               -- 发送类调用的幂等键
+    created_at      INTEGER NOT NULL,
+    started_at      INTEGER,
+    finished_at     INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS tasks_by_session ON tasks (session, created_at DESC);
+CREATE INDEX IF NOT EXISTS tasks_open ON tasks (status, created_at);
 "#;
 
 /// 库里的家底，启动时打给人看。
@@ -1672,5 +1700,282 @@ fn parse_status(text: &str) -> Option<TopicStatus> {
         "open" => Some(TopicStatus::Open),
         "closed" => Some(TopicStatus::Closed),
         _ => None,
+    }
+}
+
+/// 一行 `tasks` 记录的原始列。先取出来，再统一把 JSON / 房间路径转成强类型，
+/// 免得在 `query_map` 的闭包里处理错误类型。
+struct TaskRow {
+    id: String,
+    session: String,
+    connection: String,
+    room_key: String,
+    handler: String,
+    params_summary: String,
+    wake_on: String,
+    status: String,
+    result: Option<String>,
+    error: Option<String>,
+    delivery_error: Option<String>,
+    event_id: Option<i64>,
+    event_woke: String,
+    event_error: Option<String>,
+    platform_id: Option<String>,
+    idempotency_key: Option<String>,
+    created_at: i64,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
+}
+
+impl TaskRow {
+    fn into_record(self) -> Result<TaskRecord, StorageError> {
+        let Some(status) = TaskStatus::parse(&self.status) else {
+            return Err(backend(format!(
+                "任务记录 {} 的状态无法识别：{}",
+                self.id, self.status
+            )));
+        };
+        let room = RoomId::new(&self.connection, &self.room_key).map_err(|error| {
+            backend(format!("任务记录 {} 的房间无法还原：{error}", self.id))
+        })?;
+        let result = match self.result {
+            Some(text) => Some(
+                serde_json::from_str(&text)
+                    .map_err(|error| backend(format!("任务记录 {} 的结果 JSON 坏了：{error}", self.id)))?,
+            ),
+            None => None,
+        };
+        let event_woke: Vec<String> = serde_json::from_str(&self.event_woke).unwrap_or_default();
+        Ok(TaskRecord {
+            id: self.id,
+            session: self.session,
+            room,
+            handler: self.handler,
+            params_summary: self.params_summary,
+            wake_on: self.wake_on,
+            status,
+            created_at: self.created_at,
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            result,
+            error: self.error,
+            delivery_error: self.delivery_error,
+            event_id: self.event_id.map(|value| value.max(0) as u64),
+            event_woke,
+            event_error: self.event_error,
+            platform_id: self.platform_id,
+            idempotency_key: self.idempotency_key,
+        })
+    }
+}
+
+fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
+    Ok(TaskRow {
+        id: row.get(0)?,
+        session: row.get(1)?,
+        connection: row.get(2)?,
+        room_key: row.get(3)?,
+        handler: row.get(4)?,
+        params_summary: row.get(5)?,
+        wake_on: row.get(6)?,
+        status: row.get(7)?,
+        result: row.get(8)?,
+        error: row.get(9)?,
+        delivery_error: row.get(10)?,
+        event_id: row.get(11)?,
+        event_woke: row.get(12)?,
+        event_error: row.get(13)?,
+        platform_id: row.get(14)?,
+        idempotency_key: row.get(15)?,
+        created_at: row.get(16)?,
+        started_at: row.get(17)?,
+        finished_at: row.get(18)?,
+    })
+}
+
+impl Tasks for SqliteStore {
+    fn task_create(&mut self, record: &TaskRecord) -> Result<bool, StorageError> {
+        let changed = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO tasks (
+                    id, session, connection, room_key, handler, params_summary, wake_on, status,
+                    result, error, delivery_error, event_id, event_woke, event_error,
+                    platform_id, idempotency_key, created_at, started_at, finished_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+                 )",
+                params![
+                    record.id,
+                    record.session,
+                    record.room.connection,
+                    record.room.key(),
+                    record.handler,
+                    record.params_summary,
+                    record.wake_on,
+                    record.status.as_str(),
+                    record.result.as_ref().map(|value| value.to_string()),
+                    record.error,
+                    record.delivery_error,
+                    record.event_id.map(|value| value as i64),
+                    serde_json::to_string(&record.event_woke).unwrap_or_else(|_| "[]".to_owned()),
+                    record.event_error,
+                    record.platform_id,
+                    record.idempotency_key,
+                    record.created_at,
+                    record.started_at,
+                    record.finished_at,
+                ],
+            )
+            .map_err(io_error)?;
+        Ok(changed > 0)
+    }
+
+    fn task_update(&mut self, record: &TaskRecord) -> Result<bool, StorageError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE tasks SET
+                    session = ?2, connection = ?3, room_key = ?4, handler = ?5,
+                    params_summary = ?6, wake_on = ?7, status = ?8, result = ?9, error = ?10,
+                    delivery_error = ?11, event_id = ?12, event_woke = ?13, event_error = ?14,
+                    platform_id = ?15, idempotency_key = ?16, created_at = ?17,
+                    started_at = ?18, finished_at = ?19
+                 WHERE id = ?1",
+                params![
+                    record.id,
+                    record.session,
+                    record.room.connection,
+                    record.room.key(),
+                    record.handler,
+                    record.params_summary,
+                    record.wake_on,
+                    record.status.as_str(),
+                    record.result.as_ref().map(|value| value.to_string()),
+                    record.error,
+                    record.delivery_error,
+                    record.event_id.map(|value| value as i64),
+                    serde_json::to_string(&record.event_woke).unwrap_or_else(|_| "[]".to_owned()),
+                    record.event_error,
+                    record.platform_id,
+                    record.idempotency_key,
+                    record.created_at,
+                    record.started_at,
+                    record.finished_at,
+                ],
+            )
+            .map_err(io_error)?;
+        Ok(changed > 0)
+    }
+
+    fn task_get(&self, session: &str, id: &str) -> Result<Option<TaskRecord>, StorageError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, session, connection, room_key, handler, params_summary, wake_on, status,
+                        result, error, delivery_error, event_id, event_woke, event_error,
+                        platform_id, idempotency_key, created_at, started_at, finished_at
+                   FROM tasks WHERE session = ?1 AND id = ?2",
+                params![session, id],
+                row_to_task,
+            )
+            .optional()
+            .map_err(io_error)?;
+        row.map(TaskRow::into_record).transpose()
+    }
+
+    fn task_find(&self, id: &str) -> Result<Option<TaskRecord>, StorageError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, session, connection, room_key, handler, params_summary, wake_on, status,
+                        result, error, delivery_error, event_id, event_woke, event_error,
+                        platform_id, idempotency_key, created_at, started_at, finished_at
+                   FROM tasks WHERE id = ?1",
+                params![id],
+                row_to_task,
+            )
+            .optional()
+            .map_err(io_error)?;
+        row.map(TaskRow::into_record).transpose()
+    }
+
+    fn task_list(
+        &self,
+        session: &str,
+        status: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<TaskRecord>, usize), StorageError> {
+        let filter = status.unwrap_or("");
+        let total: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE session = ?1 AND (?2 = '' OR status = ?2)",
+                params![session, filter],
+                |row| row.get(0),
+            )
+            .map_err(io_error)?;
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT id, session, connection, room_key, handler, params_summary, wake_on, status,
+                        result, error, delivery_error, event_id, event_woke, event_error,
+                        platform_id, idempotency_key, created_at, started_at, finished_at
+                   FROM tasks WHERE session = ?1 AND (?2 = '' OR status = ?2)
+                  ORDER BY created_at DESC, id DESC
+                  LIMIT ?3 OFFSET ?4",
+            )
+            .map_err(io_error)?;
+        let rows = statement
+            .query_map(
+                params![session, filter, limit as i64, offset as i64],
+                row_to_task,
+            )
+            .map_err(io_error)?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.map_err(io_error)?.into_record()?);
+        }
+        Ok((items, total.max(0) as usize))
+    }
+
+    fn task_open(&self) -> Result<Vec<TaskRecord>, StorageError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT id, session, connection, room_key, handler, params_summary, wake_on, status,
+                        result, error, delivery_error, event_id, event_woke, event_error,
+                        platform_id, idempotency_key, created_at, started_at, finished_at
+                   FROM tasks WHERE status IN ('pending', 'queued', 'running')
+                  ORDER BY created_at ASC, id ASC",
+            )
+            .map_err(io_error)?;
+        let rows = statement.query_map([], row_to_task).map_err(io_error)?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.map_err(io_error)?.into_record()?);
+        }
+        Ok(items)
+    }
+
+    fn task_prune(&mut self, keep: usize) -> Result<u64, StorageError> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+            .map_err(io_error)?;
+        if total <= keep as i64 {
+            return Ok(0);
+        }
+        let removed = total - keep as i64;
+        self.conn
+            .execute(
+                "DELETE FROM tasks WHERE id IN (
+                    SELECT id FROM tasks ORDER BY created_at ASC, id ASC LIMIT ?1
+                 )",
+                params![removed],
+            )
+            .map_err(io_error)?;
+        Ok(removed as u64)
     }
 }

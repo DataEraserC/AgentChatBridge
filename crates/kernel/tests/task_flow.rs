@@ -135,6 +135,10 @@ impl TaskHandler for EchoTask {
 }
 
 fn bridge(wake_extra: &str) -> Arc<Mutex<Bridge<MemoryStore>>> {
+    build_bridge(&config(wake_extra))
+}
+
+fn build_bridge(text: &str) -> Arc<Mutex<Bridge<MemoryStore>>> {
     let id = ProviderId::parse("test.task").expect("合法");
     let mut plugins = PluginManager::with_native_builtins();
     plugins
@@ -161,7 +165,7 @@ fn bridge(wake_extra: &str) -> Arc<Mutex<Bridge<MemoryStore>>> {
         )
         .expect("注册路由");
     Arc::new(Mutex::new(Bridge::with_plugins(
-        Config::parse_fixture(&config(wake_extra)).expect("配置合法"),
+        Config::parse_fixture(text).expect("配置合法"),
         MemoryStore::new(),
         Box::new(NoopOutbound),
         plugins,
@@ -483,4 +487,75 @@ fn task_get_is_scoped_to_the_current_session() {
 
     shutdown.store(true, Ordering::Relaxed);
     drain.join().expect("drain 线程能收工");
+}
+
+/// 开关关闭 / 打开两种行为：默认不改变现有唤醒语义；打开后只叫发起任务的会话，
+/// 同房间的其它订阅者不被叫醒。
+#[test]
+fn task_completion_wakes_only_the_initiator_when_switch_is_on() {
+    let text = format!(
+        r#"{}
+
+[[sessions]]
+id = "other"
+harness = "dsh"
+persona = "p"
+token = {{ secret = "t-other" }}
+
+[[sessions.subscriptions]]
+connection = "qq"
+room = "group/1"
+
+[sessions.subscriptions.wake]
+provider = "acb.wake.default"
+
+[tasks]
+wake_on_completion = true
+"#,
+        config("")
+    );
+    let bridge = build_bridge(&text);
+    let (queue, receiver) = EventQueue::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker = RouteWorker::spawn(Arc::clone(&bridge), Arc::clone(&shutdown));
+    let drain = {
+        let bridge = Arc::clone(&bridge);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            drain_events(bridge, receiver, shutdown, ControlRegistry::new(), worker)
+        })
+    };
+
+    let _ = queue.submit(message("/task ok", false));
+    let done = wait_for_status(&bridge, "succeeded", Duration::from_secs(3));
+    let task_id = done["id"].as_str().expect("任务 id").to_owned();
+
+    // 没有任何新的入站消息，仍然能开出一轮——这就是任务完成唤醒。
+    let delivery = lock(&bridge)
+        .poll_turn()
+        .expect("能开轮")
+        .expect("任务完成应给发起会话排一轮");
+    assert_eq!(delivery.session, "main", "只唤醒发起任务的会话");
+    let reason = delivery.wake_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains(&task_id),
+        "唤醒原因应带上任务 id，实际：{reason}"
+    );
+    assert!(
+        delivery
+            .records
+            .iter()
+            .any(|record| record.sender.id == "acb.task"),
+        "唤醒的那一轮应能看到 acb.task 合成事件"
+    );
+    lock(&bridge).end_turn(&delivery.ticket, None).expect("收工");
+
+    // 同房间的另一个订阅者不该被这条任务完成叫醒。
+    assert!(
+        lock(&bridge).poll_turn().expect("能开轮").is_none(),
+        "非发起会话不能被任务完成唤醒"
+    );
+
+    shutdown.store(true, Ordering::Relaxed);
+    drop(drain);
 }

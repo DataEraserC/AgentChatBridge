@@ -8,7 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use acb_kernel::{
     Cursor, Deliveries, Element, Feedbacks, Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft,
-    RoomId, Sender, StorageError, Store, TopicStatus, Transcript, Watermarks, unread,
+    RoomId, Sender, StorageError, Store, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript,
+    Watermarks, unread,
 };
 
 const AT: i64 = 1_793_000_000_000;
@@ -1036,4 +1037,130 @@ fn corrupted_database_fails_loudly_and_is_not_replaced() {
     // 原文件不能被悄悄清空或替换成新库。
     let after = std::fs::read(db.path()).expect("文件还在");
     assert_eq!(after, garbage, "损坏的原始文件应当保持原样");
+}
+
+fn task_record(session: &str, id: &str, created_at: i64) -> TaskRecord {
+    TaskRecord {
+        id: id.to_owned(),
+        session: session.to_owned(),
+        room: room("qq:group/1"),
+        handler: "exec".to_owned(),
+        params_summary: "printf ok".to_owned(),
+        wake_on: "always".to_owned(),
+        status: TaskStatus::Pending,
+        created_at,
+        started_at: None,
+        finished_at: None,
+        result: None,
+        error: None,
+        delivery_error: None,
+        event_id: None,
+        event_woke: Vec::new(),
+        event_error: None,
+        platform_id: None,
+        idempotency_key: None,
+    }
+}
+
+#[test]
+fn task_records_survive_a_restart_and_stay_in_their_session() {
+    let db = TempDb::new("tasks-restart");
+    let id = "task-1";
+    {
+        let mut store = acb_kernel::SqliteStore::open(db.path()).expect("能打开");
+        let mut record = task_record("main", id, AT);
+        assert!(store.task_create(&record).expect("可写"));
+        assert!(
+            !store.task_create(&record).expect("重复 id"),
+            "同一个 id 只建一次，不能悄悄覆盖"
+        );
+
+        record.status = TaskStatus::Running;
+        record.started_at = Some(AT + 1);
+        record.platform_id = Some("12345".into());
+        record.idempotency_key = Some("idem-1".into());
+        assert!(store.task_update(&record).expect("可写"));
+
+        // 另一个会话的任务也在同一张表里，查询必须按会话隔离。
+        assert!(
+            store
+                .task_create(&task_record("other", "task-2", AT + 2))
+                .expect("可写")
+        );
+    }
+
+    let store = acb_kernel::SqliteStore::open(db.path()).expect("能再打开");
+    let back = store.task_get("main", id).expect("可读").expect("任务还在");
+    assert_eq!(back.status, TaskStatus::Running, "状态推进要落库");
+    assert_eq!(back.started_at, Some(AT + 1));
+    assert_eq!(back.platform_id.as_deref(), Some("12345"));
+    assert_eq!(back.idempotency_key.as_deref(), Some("idem-1"));
+    assert_eq!(back.params_summary, "printf ok");
+
+    assert!(
+        store
+            .task_get("other", id)
+            .expect("可读")
+            .is_none(),
+        "跨会话不该看到别人的任务"
+    );
+    assert_eq!(
+        store.task_find(id).expect("可读").expect("按 id 不限会话").session,
+        "main"
+    );
+
+    let (items, total) = store.task_list("main", None, 0, 10).expect("可列");
+    assert_eq!(total, 1);
+    assert_eq!(items[0].id, id);
+    assert_eq!(
+        store.task_list("other", None, 0, 10).expect("可列").1,
+        1,
+        "会话各自计数"
+    );
+}
+
+#[test]
+fn open_tasks_are_pending_and_prune_keeps_the_newest() {
+    let db = TempDb::new("tasks-prune");
+    let mut store = acb_kernel::SqliteStore::open(db.path()).expect("能打开");
+    for index in 0..5 {
+        let id = format!("task-{index}");
+        let mut record = task_record("main", &id, AT + index);
+        match index {
+            1 => record.status = TaskStatus::Succeeded,
+            2 => record.status = TaskStatus::Unknown,
+            _ => {}
+        }
+        store.task_create(&record).expect("可写");
+    }
+
+    let open = store.task_open().expect("可读");
+    assert_eq!(open.len(), 3, "只有 pending / running 算未收工");
+    assert!(
+        open.iter().all(|task| task.status == TaskStatus::Pending),
+        "pending 不能因为筛选条件漏掉"
+    );
+    assert_eq!(
+        store
+            .task_get("main", "task-2")
+            .expect("可读")
+            .expect("还在")
+            .status,
+        TaskStatus::Unknown,
+        "unknown 也要原样读回来"
+    );
+
+    assert_eq!(store.task_prune(2).expect("可删"), 3);
+    let (left, total) = store.task_list("main", None, 0, 10).expect("可列");
+    assert_eq!(total, 2);
+    assert_eq!(left[0].id, "task-4", "留最新的");
+    assert_eq!(left[1].id, "task-3");
+    drop(store);
+
+    let store = acb_kernel::SqliteStore::open(db.path()).expect("能再打开");
+    assert_eq!(
+        store.task_list("main", None, 0, 10).expect("可列").1,
+        2,
+        "裁掉的记录不能因为重启又冒出来"
+    );
 }

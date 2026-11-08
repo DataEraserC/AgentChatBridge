@@ -241,7 +241,7 @@ fn drain_leftovers_are_reportable() {
     let leftovers = lock(&bridge).drain_leftovers();
     let tasks = leftovers["tasks"].as_array().expect("tasks");
     assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0]["status"], "queued");
+    assert_eq!(tasks[0]["status"], "pending");
     assert!(
         tasks[0]["id"]
             .as_str()

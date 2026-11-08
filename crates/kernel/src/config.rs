@@ -208,6 +208,8 @@ pub struct Config {
     pub grants: crate::grants::GrantsConfig,
     /// 一次性票据的申请冷却与审批聚合节奏。
     pub tickets: crate::tickets::TicketsPolicy,
+    /// 后台任务的运行策略（完成唤醒、wait 上限）。
+    pub tasks: TasksConfig,
     /// 依赖表的失败阈值与观察窗口。
     pub deps: DepsConfig,
     /// 插件 LKG 的失败阈值与观察窗口。
@@ -693,6 +695,32 @@ pub struct FileRelayConfig {
 /// `FileRelayConfig.mode` 当前唯一合法值。
 pub const FILE_RELAY_MODE_FILE_SERVER: &str = "file-server";
 
+/// 后台任务的运行策略。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TasksConfig {
+    /// 任务收工后，是否由桥直接给**发起该任务的会话**排一轮唤醒。
+    ///
+    /// 默认 false：与旧行为一致——任务只落记录、发合成事件，叫不叫醒由订阅的
+    /// wake 策略决定。打开后不走 `lua.wake_policy`，也不叫醒同房间的其它订阅者。
+    pub wake_on_completion: bool,
+    /// `tasks op=wait` 单次等待的服务端上限（毫秒）。调用方给的 `wait_ms`
+    /// 超过它会被截断到它，并在返回里说明；不写死具体值，由现场配置决定。
+    pub wait_max_ms: u64,
+}
+
+/// `[tasks].wait_max_ms` 的默认上限。刻意低于 opencode 的单次工具调用硬超时（60 秒），
+/// 但桥不感知 harness，只提供这个可配天花板。
+pub const DEFAULT_TASK_WAIT_MAX_MS: u64 = 45_000;
+
+impl Default for TasksConfig {
+    fn default() -> Self {
+        Self {
+            wake_on_completion: false,
+            wait_max_ms: DEFAULT_TASK_WAIT_MAX_MS,
+        }
+    }
+}
+
 /// 一张人格卡：纯文本人设。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Persona {
@@ -1167,6 +1195,8 @@ pub enum ConfigError {
         session: String,
         field: &'static str,
     },
+    #[error("{}", acb_i18n::t!("kernel.config.tasks_wait_max_ms", value = value))]
+    TasksWaitMaxMs { value: u64 },
     #[error("{}", acb_i18n::t!("kernel.config.duplicate_session", session = session))]
     DuplicateSession { session: String },
     #[error("{}", acb_i18n::t!("kernel.config.duplicate_room", session = session, room = room))]
@@ -2102,6 +2132,20 @@ impl Config {
             });
         }
 
+        let tasks = match raw.tasks {
+            Some(raw) => {
+                let wait_max_ms = raw.wait_max_ms.unwrap_or(DEFAULT_TASK_WAIT_MAX_MS);
+                if wait_max_ms == 0 {
+                    return Err(ConfigError::TasksWaitMaxMs { value: wait_max_ms });
+                }
+                TasksConfig {
+                    wake_on_completion: raw.wake_on_completion,
+                    wait_max_ms,
+                }
+            }
+            None => TasksConfig::default(),
+        };
+
         let config = Self {
             personas,
             memories,
@@ -2118,6 +2162,7 @@ impl Config {
             queues,
             grants,
             tickets,
+            tasks,
             deps,
             lkg,
             provider_calls,
@@ -2825,6 +2870,7 @@ struct RawConfig {
     grants: Option<crate::grants::GrantsConfig>,
     #[serde(default)]
     tickets: Option<crate::tickets::TicketsPolicy>,
+    tasks: Option<RawTasks>,
     deps: Option<RawDeps>,
     lkg: Option<RawLkg>,
     provider_calls: Option<RawProviderCalls>,
@@ -3614,6 +3660,16 @@ struct RawFileRelay {
     max_publish_bytes: Option<toml::Value>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct RawTasks {
+    /// 任务完成时是否直接唤醒发起会话。缺省 false。
+    #[serde(default)]
+    wake_on_completion: bool,
+    /// `tasks op=wait` 的服务端上限（毫秒）。缺省 45 秒。
+    #[serde(default)]
+    wait_max_ms: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RawSubscription {
     /// 走哪条连接收发。
@@ -4050,6 +4106,30 @@ mod tests {
 
         let canonical = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("旧写法");
         assert_eq!(canonical.connections[0].kind, "onebot11");
+    }
+
+    #[test]
+    fn tasks_policy_defaults_and_overrides() {
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        assert!(!config.tasks.wake_on_completion, "默认关闭，保持旧行为");
+        assert_eq!(config.tasks.wait_max_ms, DEFAULT_TASK_WAIT_MAX_MS);
+
+        let text = format!(
+            "{}\n[tasks]\nwake_on_completion = true\nwait_max_ms = 20000",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        let config = Config::parse_fixture(&text).expect("覆盖值能解析");
+        assert!(config.tasks.wake_on_completion);
+        assert_eq!(config.tasks.wait_max_ms, 20_000);
+
+        let bad = format!(
+            "{}\n[tasks]\nwait_max_ms = 0",
+            config_with(ONE_CONNECTION, ONE_SESSION)
+        );
+        assert!(
+            Config::parse_fixture(&bad).is_err(),
+            "0 会让 op=wait 立刻返回，应当直接报错"
+        );
     }
 
     #[test]

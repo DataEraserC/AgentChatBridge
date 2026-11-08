@@ -593,6 +593,43 @@ pub fn run_connection<S: Store>(
                                 };
                                 vec![tool_reply(id, result)]
                             }
+                            Ok(ToolCallStart::TaskWait(prepared)) => {
+                                // 同样不持锁：任务收工由后台线程落库，这里只按轮询间隔回来看。
+                                let deadline = Instant::now() + prepared.timeout();
+                                let mut outcome: Option<
+                                    Result<serde_json::Value, acb_proto::ToolError>,
+                                > = None;
+                                loop {
+                                    {
+                                        let guard = lock(bridge);
+                                        match guard.poll_task_wait(&prepared) {
+                                            Ok(Some(value)) => {
+                                                outcome = Some(Ok(value));
+                                                break;
+                                            }
+                                            Ok(None) => {}
+                                            Err(error) => {
+                                                outcome = Some(Err(error));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let now = Instant::now();
+                                    if now >= deadline {
+                                        break;
+                                    }
+                                    let remaining = deadline.saturating_duration_since(now);
+                                    std::thread::sleep(remaining.min(POLL_INTERVAL));
+                                }
+                                let result = match outcome {
+                                    Some(result) => result,
+                                    None => {
+                                        let guard = lock(bridge);
+                                        guard.finish_task_wait(&prepared)
+                                    }
+                                };
+                                vec![tool_reply(id, result)]
+                            }
                             Err(error) => vec![tool_reply(id, Err(error))],
                         }
                     }

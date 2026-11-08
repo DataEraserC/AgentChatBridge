@@ -83,7 +83,7 @@ pub use route_worker::RouteWorker;
 pub use storage::{
     Counts, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks,
     MIN_KEPT, MemoryStore, Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft, Recorded,
-    SCHEMA_VERSION, SessionMap, SessionMaps, SqliteStore, StorageError, Store, TopicStatus,
+    SCHEMA_VERSION, SessionMap, SessionMaps, SqliteStore, StorageError, Store, Tasks, TopicStatus,
     Transcript, Watermarks, unread,
 };
 pub use task::{TaskHandler, TaskOutcome};

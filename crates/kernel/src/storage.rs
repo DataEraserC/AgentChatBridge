@@ -22,6 +22,8 @@ use acb_proto::{Element, Record, RecordKind, RoomId, Sender};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::engine::{TaskRecord, TaskStatus};
+
 /// 存储层错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StorageError {
@@ -605,10 +607,51 @@ pub trait Feedbacks {
 /// 来源：实现默认。
 pub const FEEDBACK_CAP: usize = 5000;
 
-/// 六样东西合起来。桥只依赖这一个约束，换后端只换实现。
-pub trait Store: Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks {}
+/// 后台任务与出站尝试的持久记录。
+///
+/// 这些记录原先只活在进程里，重启即失；异步执行要求它们落盘，否则「稍后取结果」
+/// 在重启后就是悬空引用。一次发送尝试也复用这张表：执行前先写 `running`，
+/// 成功补 `platform_id`，超时留 `unknown`——查询入口仍是 `tasks`。
+pub trait Tasks {
+    /// 写入一条新记录。id 已存在返回 `false`（调用方不该复用 id）。
+    fn task_create(&mut self, record: &TaskRecord) -> Result<bool, StorageError>;
 
-impl<T> Store for T where T: Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks {}
+    /// 整条覆盖写。id 不存在返回 `false`。
+    fn task_update(&mut self, record: &TaskRecord) -> Result<bool, StorageError>;
+
+    /// 按 id 取。限定在本会话内，避免跨会话看到别人的任务。
+    fn task_get(&self, session: &str, id: &str) -> Result<Option<TaskRecord>, StorageError>;
+
+    /// 按 id 取，不限会话。只给调度层做状态推进用；对外查询仍走 [`Tasks::task_get`]。
+    fn task_find(&self, id: &str) -> Result<Option<TaskRecord>, StorageError>;
+
+    /// 列本会话的任务，`status` 给了就只列那个状态；按创建时间倒序。
+    /// 返回（本页，总数）。
+    fn task_list(
+        &self,
+        session: &str,
+        status: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<TaskRecord>, usize), StorageError>;
+
+    /// 还没收工的任务（queued / running），给停机接管与统计用。
+    fn task_open(&self) -> Result<Vec<TaskRecord>, StorageError>;
+
+    /// 只留最新的 `keep` 条，返回删掉的条数。
+    fn task_prune(&mut self, keep: usize) -> Result<u64, StorageError>;
+}
+
+/// 七样东西合起来。桥只依赖这一个约束，换后端只换实现。
+pub trait Store:
+    Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks + Tasks
+{
+}
+
+impl<T> Store for T where
+    T: Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks + Tasks
+{
+}
 
 mod sqlite;
 
@@ -628,11 +671,100 @@ pub struct MemoryStore {
     /// 反馈 id → 去重指纹。只给内存实现用：合并时得知道哪条是同一条。
     feedback_keys: HashMap<i64, String>,
     next_feedback: i64,
+    /// 任务/尝试记录，按创建顺序追加；查询时按时间倒序。
+    tasks: Vec<TaskRecord>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+impl Tasks for MemoryStore {
+    fn task_create(&mut self, record: &TaskRecord) -> Result<bool, StorageError> {
+        if self.tasks.iter().any(|task| task.id == record.id) {
+            return Ok(false);
+        }
+        self.tasks.push(record.clone());
+        Ok(true)
+    }
+
+    fn task_update(&mut self, record: &TaskRecord) -> Result<bool, StorageError> {
+        let Some(slot) = self.tasks.iter_mut().find(|task| task.id == record.id) else {
+            return Ok(false);
+        };
+        *slot = record.clone();
+        Ok(true)
+    }
+
+    fn task_get(&self, session: &str, id: &str) -> Result<Option<TaskRecord>, StorageError> {
+        Ok(self
+            .tasks
+            .iter()
+            .find(|task| task.session == session && task.id == id)
+            .cloned())
+    }
+
+    fn task_find(&self, id: &str) -> Result<Option<TaskRecord>, StorageError> {
+        Ok(self
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .cloned())
+    }
+
+    fn task_list(
+        &self,
+        session: &str,
+        status: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<TaskRecord>, usize), StorageError> {
+        let mut matched: Vec<&TaskRecord> = self
+            .tasks
+            .iter()
+            .filter(|task| task.session == session)
+            .filter(|task| status.map_or(true, |value| task.status.as_str() == value))
+            .collect();
+        matched.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        let total = matched.len();
+        let page = matched
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect();
+        Ok((page, total))
+    }
+
+    fn task_open(&self) -> Result<Vec<TaskRecord>, StorageError> {
+        Ok(self
+            .tasks
+            .iter()
+            .filter(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
+            .cloned()
+            .collect())
+    }
+
+    fn task_prune(&mut self, keep: usize) -> Result<u64, StorageError> {
+        if self.tasks.len() <= keep {
+            return Ok(0);
+        }
+        let removed = self.tasks.len() - keep;
+        let mut ordered = std::mem::take(&mut self.tasks);
+        ordered.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.tasks = ordered.split_off(removed);
+        Ok(removed as u64)
     }
 }
 
