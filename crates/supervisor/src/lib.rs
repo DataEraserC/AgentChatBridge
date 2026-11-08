@@ -8,13 +8,18 @@
 //! 采样进程/健康/失败 → 构造 `Snapshot` → 调策略 → 执行 `fail / hold / rollback`。
 //! 即时触发（进程退出）走内置策略，不在故障路径上等待外部策略。
 
-// `pointer` 模块要用 `flock` 保证指针单写者；只允许该模块申请 `unsafe`。
+// 只有 `pointer`（flock 单写者）和 `component_runtime`（进程组信号）申请 `unsafe`。
 #![deny(unsafe_code)]
 
 pub mod adopted;
+pub mod component;
+pub mod component_runtime;
+pub mod component_state;
 pub mod instance;
 mod pointer;
 pub mod upgrade;
+
+pub use component::{Component, ComponentError, ComponentTable, ConfigFile, PresetRegistry};
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -209,23 +214,51 @@ pub struct Config {
     pub policy: PolicySettings,
 }
 
-#[derive(Debug, Deserialize)]
-struct ConfigFile {
-    supervisor: Config,
+/// 读 `supervisor.toml` 的 `[supervisor]` 段；组件表同时解析并校验，
+/// 非法组件声明会让启动失败（`[[component]]` 缺失时行为与旧版一致）。
+pub fn load_config(path: &Path) -> Result<Config, String> {
+    load_config_parts(path)
+        .map(|(file, _components)| file.supervisor)
+        .map_err(|error| error.to_string())
 }
 
-pub fn load_config(path: &Path) -> Result<Config, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read supervisor config {}: {error}", path.display()))?;
-    let file: ConfigFile = toml::from_str(&text)
-        .map_err(|error| format!("cannot parse supervisor config: {error}"))?;
+/// 读完整配置文件：`[supervisor]` + `[[component]]`，并在解析期校验组件表。
+pub fn load_config_file(path: &Path) -> Result<ConfigFile, ComponentError> {
+    load_config_parts(path).map(|(file, _components)| file)
+}
+
+/// 只读组件表（`acbctl component list/status` 用）；同样做完整校验。
+pub fn load_components(path: &Path) -> Result<ComponentTable, ComponentError> {
+    load_config_parts(path).map(|(_file, components)| components)
+}
+
+/// launcher 一次拿到 `[supervisor]` 与已校验的组件表。
+pub fn load_supervisor_config(path: &Path) -> Result<(Config, ComponentTable), ComponentError> {
+    load_config_parts(path).map(|(file, components)| (file.supervisor, components))
+}
+
+fn load_config_parts(path: &Path) -> Result<(ConfigFile, ComponentTable), ComponentError> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        ComponentError::new(
+            "component_config_unreadable",
+            format!("cannot read supervisor config {}: {error}", path.display()),
+        )
+    })?;
+    let presets = component::load_presets_for(path)?;
+    let (file, components) = component::parse_config_file(&text, &presets)?;
     if file.supervisor.program.trim().is_empty() {
-        return Err("supervisor.program must not be empty".to_owned());
+        return Err(ComponentError::new(
+            "supervisor_program_empty",
+            "supervisor.program must not be empty",
+        ));
     }
     if file.supervisor.policy.on_policy_error != "hold" {
-        return Err("supervisor.policy.on_policy_error only supports \"hold\"".to_owned());
+        return Err(ComponentError::new(
+            "supervisor_policy_invalid",
+            "supervisor.policy.on_policy_error only supports \"hold\"",
+        ));
     }
-    Ok(file.supervisor)
+    Ok((file, components))
 }
 
 pub trait Clock {
