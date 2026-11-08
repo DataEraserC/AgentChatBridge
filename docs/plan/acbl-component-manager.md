@@ -1,11 +1,11 @@
 # acbl 定位升级：从升级执行器到组件管理者
 
-状态：2026-11-07 设计稿（第七轮结构修正）。**只写文档，不改代码、不重启、不提交。**
+状态：2026-11-08 设计稿（第九轮：`supervisor.toml` 所有权定稿 + 探针契约核对）。**只写文档，不改代码、不重启、不提交。**
 
 结构前提：
 
 - **acbl 独立安装，不进 payload。** payload 只装会迭代的内容：`acb-bridge`、drivers、插件、harness 适配层。
-- **NixOS 上 acbl 由 nix-config 提供与维护**，随 `nixos-rebuild switch` 更新，属于低频变更。nix-config 里保留 acbl 不是技术债，是设计。
+- **NixOS 上 acbl 由 nix-config 提供与维护**，随 `nixos-rebuild switch` 更新，属于低频变更。nix-config 里保留 acbl 不是技术债，是设计；但**只保留 acbl 这一个包**，不声明任何 ACB 单元（§2.4.1）。
 - 因此**升级链只切 payload、只重启 bridge；acbl 全程不动**。
 - 代价：acbl 与 payload 之间的接口（命令行参数、状态目录约定、健康探测方式、启动/停止契约、环境变量）必须**版本化**，当作稳定契约维护（§6.4）。
 
@@ -22,7 +22,7 @@
 
 ## 0. 结论摘要
 
-1. **结构变了：acbl 与 payload 分开分发。** payload 只有 `bin/acb-bridge`、`harnesses/`、drivers 扇出脚本与插件；acbl（`acb-launcher` / `acbctl` / `acb-supervisor` / 预设 / unit 模板）单独安装，NixOS 上由 nix-config 提供（§2.4）。
+1. **结构变了：acbl 与 payload 分开分发。** payload 只有 `bin/acb-bridge`、`harnesses/`、drivers 扇出脚本与插件；acbl（`acb-launcher` / `acbctl` / `acb-supervisor` / 预设 / unit 模板）单独安装，NixOS 上由 nix-config 提供**且只提供这一个包**，不声明任何 ACB 单元（§2.4 / §2.4.1）。
 2. **升级不重启 acbl。** acbl 在原进程里完成：停旧 bridge → 提交 `current.json` → 按新指针在同一进程树里起新 bridge。旧模型里的 `restarting` 状态和“退出 75 等外部重拉”一起退役。
 3. **75 收窄为兼容保留值，78 保留。** 75 不再由升级路径发出；78 仍表示“配置/指针/journal 不可恢复，放弃自动恢复”。acbl 自身崩溃由 init 重拉，不用退出码表达（§4.2）。
 4. **`restart_owner` 取消作为升级门禁，`self` 档取消。** 升级只要求“有一个活着的 acbl 在消费信箱”，不要求“有人会重拉 acbl”。`capabilities.json` 里的同类字段降级为 `managed_by` 诊断信息（§4.3）。
@@ -31,7 +31,7 @@
 7. **presets 是“怎么起”，不是“装什么”，且按安装方式拆分。** 预设放在 `deploy/presets/<component>/<component>_<source>.sh`（如 `dsh_nix` / `dsh_npm` / `opencode_nix`），由清单 `presets.toml` 登记成“带开关的服务列表”；同一组件只能启用一个来源。预设**随 acbl 安装分发**，不随 payload；组件本体（dsh / opencode / node）仍由用户安装（§5）。
 8. **谁启动 acbl：三类并列，由安装器显式选择**——用户终端手工、systemd 开机自启、systemd 只守护不自启；无 systemd 时由用户自管。区别只在于“acbl 崩溃/78 后由谁重拉、日志归谁、有无 cgroup”（§4.3），不做环境探测。
 9. **组件表不做自动热加载**，只提供控制台“重新加载组件表”按钮；失败保留旧表，不允许停一半（§4.6）。
-10. **acbl 是观察者 + 恢复者，不是 bridge 的所有者。** acbl 停止、崩溃、升级期间 bridge 继续运行；新 acbl 启动先探测身份再接管，禁止盲目再起一个（§4.7）。
+10. **acbl 是观察者 + 恢复者，不是 bridge 的所有者（目标态，尚未实现）。** 契约目标是 acbl 停止、崩溃、升级期间 bridge 继续运行；新 acbl 启动先探测身份再接管，禁止盲目再起一个（§4.7）。**当前实测仍是 owner 模型：launcher 退出会连带停 bridge，升级走 75 → systemd 重拉**；adopt 的落地差距见 §4.8。组件侧同理，按 §5.5 分两步。
 
 ---
 
@@ -125,7 +125,7 @@ acbl 是唯一的常驻者；bridge 与预设组件都在它的进程树里。**
 
 | 类别 | 谁提供产物 | 谁定义怎么起 | 升级语义 |
 |---|---|---|---|
-| **acbl 自身** | ACB 包，独立安装（NixOS 由 nix-config） | 安装时确定（unit / init / 手工） | 低频：系统 switch 或替换二进制后重启 acbl |
+| **acbl 自身** | ACB 包，独立安装（NixOS 由 nix-config，且只提供包） | 运行时由 acbl 生成 unit（§4.9）/ init / 手工启动 | 低频：系统 switch 或替换二进制后重启 acbl |
 | **核心组件** `bridge` | payload generation（ACB 构建） | ACB（supervisor 核心） | 有：LKG、回滚、升级链 |
 | **预设组件** `dsh` / `drivers` / `opencode` | dsh / opencode 由用户安装；drivers 的实现来自 payload | ACB 提供预设清单与启动脚本；用户可启用、覆盖、禁用 | 无：不参与 LKG，不触发升级链 |
 | **自定义组件** | 用户 | 用户写命令与声明 | 无 |
@@ -136,7 +136,7 @@ acbl 是唯一的常驻者；bridge 与预设组件都在它的进程树里。**
 - **payload 负责**：提供 `bin/acb-bridge`、harness 适配层、drivers 扇出脚本与插件，并声明契约版本（§6.4）。
 - **ACB 升级链负责**：payload 的版本切换、LKG、升级信箱、回滚。
 - **用户负责**：外部组件的安装、升级、配置内容、密钥（组件自己的 env 文件）。
-- **acbl 不做**：安装外部组件、解析它们的配置文件、替它们做版本回滚、调用 `nix` / `systemctl` / `npm`。
+- **acbl 不做**：安装外部组件、解析它们的配置文件、替它们做版本回滚、调用 `nix` / `npm`。**`systemctl` 是唯一例外**：只有 `acbctl unit install/remove` 这个显式运维动作可以 `daemon-reload`（§4.9）；正常监督与升级路径绝不调用 systemctl。
 
 ### 2.4 acbl 的安装与分发（静态入口）
 
@@ -144,7 +144,7 @@ acbl 是唯一的常驻者；bridge 与预设组件都在它的进程树里。**
 
 | 场景 | 来源 | 入口路径 | 更新方式 |
 |---|---|---|---|
-| **NixOS** | 本仓库 flake 的 `acbl` package（nix-config 以 input 引用，§2.5.7）；unit 由 nix-config 生成 | `/run/current-system/sw/bin/acb-launcher`（稳定入口，不写 store 路径） | `nixos-rebuild switch`；随系统升级，低频 |
+| **NixOS** | 本仓库 flake 的 `acbl` package（nix-config 以 input 引用，§2.5.7）；**目标态 unit 由 acbl 运行时生成（§4.9）**，nix-config 不声明 ACB 单元（§2.4.1） | `/run/current-system/sw/bin/acb-launcher`（稳定入口，不写 store 路径） | `nixos-rebuild switch`；随系统升级，低频 |
 | 非 NixOS + 有 nix | 本仓库 flake / `nix profile` | `~/.nix-profile/bin/acb-launcher` | `nix profile upgrade` |
 | 非 NixOS + 无 nix | cargo 构建 | `cargo build --release` 后复制到 `/usr/local/bin/acb-launcher` | 人工替换 + 重启 acbl |
 | 非 NixOS + 无 nix | 预编译 `tar.gz`（gnu 或 musl，C-9） | 解包到 `/opt/acbl`；入口是 `/opt/acbl/bin/acb-launcher` | 解包新 tar.gz + 重启 acbl（规格见 §2.5） |
@@ -162,7 +162,7 @@ payload 只包含会迭代的内容：
   harnesses/opencode/plugin/index.js
   harnesses/opencode/plugin/acb-wire.mjs
   harnesses/shared/tools.mjs
-  deploy/start-drivers.sh        # 纯扇出执行器，见 §5.5
+  deploy/start-drivers.sh        # 纯扇出执行器，见 §5.10
   acb-contract.json             # 契约声明（§6.4，B-12 已实现）
 ```
 
@@ -173,6 +173,59 @@ payload 只包含会迭代的内容：
 3. 回滚 payload 时不应该把监管者也回滚到旧版本——旧 acbl 可能不认识新的状态目录/契约，反而制造故障。
 
 **迁移提示（从现有部署切到新结构）**：先安装 acbl，把 unit 的 `ACB_UNIT_LAUNCHER_BIN` 指到静态入口，再从 payload 里移除 acbl 二进制。过渡期可以保留一代“什么都带”的 payload，但 unit 必须已经指向外部 acbl。
+
+#### 2.4.1 nix-config 的职责边界（硬约束）
+
+**nix-config 只提供 `acbl` 这一个包，以及它自身需要的、与 ACB 无关的系统配置；不得声明任何 ACB 相关 service / target / timer。**
+
+| 项 | 现状（2026-11-08） | 目标态 |
+|---|---|---|
+| nix-config 提供 | `acbl` package + 与 ACB 无关的系统配置 | 不变，且**仅此一项** |
+| ACB 相关单元 | 声明了 `acb-bridge.service`、`acb-stack.target`、`dsh-acb`、`acb-drivers`、`acb-opencode-serve` 共五个定义 | **全部移除**（操作顺序见 §5.8） |
+| unit 来源 | nix-config 模块生成 | **acbl 运行时生成**（§4.9），落盘位置由 `--scope` 决定 |
+| 是否 enable | 随 `nixos-rebuild switch` 生效 | 安装只落盘，**默认不 enable**（launcher 不自启，§4.3） |
+
+- **“不写死”与“不自启”是两个维度**：来源（谁生成 unit）归 acbl；时机（是否 enable）由部署者决定。因此允许“安装但不启用”——`acbctl unit install` 落盘后保持 disabled，部署者需要时显式 `systemctl --user start acb-launcher`。
+- **组件不生成独立 unit**：dsh / drivers / opencode / 侧车都是 acbl 的子进程（§5），systemd 只看见 acbl 一个服务。
+- 例外仅限“ACB 无关的系统配置”（user lingering、cgroup 配额、网络、防火墙等）；任何引用 ACB 二进制、状态目录、端口或组件名的单元定义都属于越界。
+- 目标态与现状之间靠 §5.8 的三段迁移连接；在此之前，nix-config 里的五个定义仍是**现状**，不是契约的一部分。
+
+#### 2.4.2 `supervisor.toml` 所有权：归 acbl（方案 A，定稿）
+
+**定论：`supervisor.toml` 归 acbl，位置 `state/supervisor/supervisor.toml`，acbl 是唯一写者。** nix-config 只保留 `acbl` 包与临时 unit，**不再渲染 supervisor 配置**。
+
+| 项 | 迁移期（现状） | 目标态 |
+|---|---|---|
+| 配置文件位置 | nix store 里的只读渲染产物 | `state/supervisor/supervisor.toml`（acbl 写） |
+| unit 的 `--config` | 真实生效路径 | **降级为过渡兼容**，仅用于读取与比对；目标态不传 |
+| 组件开关写回 | 做不到（store 只读） | acbl 直接写自己的配置文件 |
+
+**过渡期语义必须写死**：外部只读配置下组件开关无法写回，`component enable` / `component disable`（以及控制台的等价写操作）**必须报错或明确拒绝**，不能假装成功。拒绝时给非 0 退出码与明确原因（如 `config_read_only`），并打印当前配置文件的来源路径。
+
+**派生规则（替代原来由 nix 传常量）**：
+
+| 字段 | 推导来源 |
+|---|---|
+| `program` / `args` | 优先读 `current.json`；无记录时按 profile 当前代推导 `bin/acb-bridge` + `--config <generation config>` |
+| `health_url` | 从 bridge 配置的 `[console] listen` 推导 host:port，再拼 `/healthz` |
+| `health_token_file` | 沿用自动路径规则（`$XDG_RUNTIME_DIR/acb-health.token`，见 §1.2） |
+| `state_dir` | 按 XDG 推导（与现有 `run.rs` 一致） |
+
+**推导结果必须在日志 / journal 里写明来源**（`current.json` / profile 当前代 / bridge `[console].listen` / 默认 XDG 路径），禁止静默：推导错误是“监管者启动错对象”，没有对照物就查不出来。
+
+**首次切换的等价性要求**：acbl 生成的配置必须与迁移前的外部配置**语义等价**。实现阶段必须拿现场那份 store 文件逐字段比对（`program` / `args` / `health_url` / `state_dir` / policy），提供一次性 dry-run 输出 diff；不允许“看起来一样”就切。
+
+**迁移顺序（与 §5.8「先搬后删」同构）**：
+
+1. acbl 先能自持有配置并等价运行（此阶段允许 `--config` 存在，用于比对，不用于生效）；
+2. 再删 nix-config 的 supervisor 渲染；
+3. 最后删 unit 里的 `--config` 传参。
+
+**风险**：先删传参再验证等价，等于在**启动入口**上做无对照实验——推导一旦写错，故障表现是“监管者起不来”，而此时已经没有旧配置可回退比对。
+
+**P1 已实现的事实**（写入契约以固定现状）：`[[component]]` 全字段解析、`deny_unknown_fields`、默认值（探针 `5s × 5`、`restart` 默认 `on-failure`、`max_attempts = 5`、退避 `1/2/4/8/30`）、`acbctl component list/status` 只读、空表零回归。
+
+**未决项（显式保留，不在此裁定）**：依赖目标目前**同时允许 `bridge` 与 `stack`**（§5.4 把 bridge 当隐式节点、stack 当伪目标），是否收窄为只允许 `stack` 尚未决定；收窄会改变 `acb-drivers` / `acb-opencode-serve` 的现有映射写法（§5.4 / §5.9）。
 
 ### 2.5 安装包规格（C-9）
 
@@ -313,9 +366,9 @@ nix-config 引用方式（input 形式，取 `acbl` package）：
 }
 ```
 
-- **unit 的 `ExecStart` 必须写 `/run/current-system/sw/bin/acb-launcher`，不写 `/nix/store/...`。** NixOS 上 `/usr/local` 不可写，`acbctl unit install` 的默认前缀（`/usr/local/bin`）只适用于普通 Linux；NixOS 的 unit 由 nix-config 模块生成，指向 `environment.systemPackages` 暴露的稳定路径。
+- **unit 的 `ExecStart` 必须写 `/run/current-system/sw/bin/acb-launcher`，不写 `/nix/store/...`。** NixOS 上 `/usr/local` 不可写，`acbctl unit install` 的默认前缀（`/usr/local/bin`）只适用于普通 Linux；NixOS 的稳定路径由 `environment.systemPackages` 暴露。**目标态 unit 由 acbl 运行时生成（§4.9）**；过渡期（§5.8 阶段 A）仍可能由 nix-config 生成，阶段 B 删除（§2.4.1）。
 - **为什么不写 store 路径**：store 路径带 hash，acbl 每次升级都会变；把它写进 unit，等于每次升级都要改 unit 并重启服务，违背 §2.4 的静态入口约定。稳定路径让 unit 与 acbl 版本解耦。
-- `acbl` 里的 `acb-launcher.service` 是普通 Linux 静态样例（`/usr/local/bin`），NixOS 不直接使用；NixOS 用模块生成的 unit，仍必须是 `KillMode=process`（§4.7.1）。
+- `acbl` 里的 `acb-launcher.service` 是普通 Linux 静态样例（`/usr/local/bin`），NixOS 不直接使用；NixOS 目标态同样由 `acbctl unit install` 渲染生成（§4.9），**不再从 nix-config 模块产出**，且仍必须是 `KillMode=process`（§4.7.1）。
 - `acb-payload` 的口径与 B-12 的 `validate_payload` 一致，`acb-contract.json` 随包产出在 payload 根，不能再依赖 nix-config 手工补齐。
 
 **两条路各自服务谁：**
@@ -593,247 +646,517 @@ supervisor 目前是 owner 模型：`ProcessRunner` 持有 `Child`，`stop()` �
 | 未做 | M1（setsid）、M2（日志重定向）、M5（`capabilities.json` 字段）、M6（`/internal/instance`）、M9（配置项）、M10（Windows） | M6 属 adopt 后续；M10 属 C-5 |
 实现阶段的验证：`kill -9` acbl 后 bridge 仍在 7700 响应；新 acbl 启动后 adopt、不产生第二个进程；bridge 属于别的 generation 时 acbl 拒绝接管并 78；`systemctl stop acb-launcher` 后 bridge 仍健康。
 
+### 4.9 acbl 运行时注册 systemd 单元（新增能力，未实现）
+
+**定论：unit 由 acbl 生成，不由 nix-config 声明；安装与启用是两件事。** 能力现状为零——今天 unit 仍由 nix-config 模块产出（§2.4.1）。
+
+| 动作 | 行为 | 明确不做 |
+|---|---|---|
+| `acbctl unit install [--scope user\|system] [--with-install-section 0\|1]` | 用编进 acbctl 的模板（`crates/acb/src/unit.rs:24-48`）渲染出 `acb-launcher.service`（含可选 `[Install]`），原子写入 unit root；内容带生成标记 `# Generated by acbctl; do not edit` | **不 enable、不 start**；不改 `nixos-rebuild` 产物 |
+| `acbctl unit remove` | 只删除带生成标记、且登记在 acbl 状态目录的 unit；先 `disable` 若它曾被 enable | 不碰 nix-config、不碰用户手写 unit |
+| `acbctl unit status` | 输出 unit 路径、`generated_by=acbl`、`enabled/active`、落盘时间与模板版本 | 不改任何状态 |
+
+- **只有这三个命令可以调用 `systemctl`（仅 `daemon-reload` 与 `disable`）**，且必须由运维显式触发；launcher 正常监督、升级、adopt 路径一律不碰 systemd（§2.3）。
+- **幂等与漂移**：重复 install 内容一致则不写、不做 `daemon-reload`；发现同名 unit 但没有生成标记 → `unit_conflict`，拒绝覆盖（防止盖掉 nix-config 回退期的旧单元）。
+- **`[Install]` 只影响渲染**：`--with-install-section 1` 允许部署者之后 `enable`；默认 `0`，对应“允许安装但不启用”。这与“nix-config 不写死”互不影响：来源归 acbl，时机归部署者。
+- **升级 acbl 不自动重写 unit**：稳定入口（§2.4）不变时 unit 内容不变；模板版本变化由 `unit status` 暴露，运维显式重跑 install。
+- **作用域限制**：`--scope system` 需要 root；`user` 作用于当前用户 `.config/systemd/user`。acbl 不自动选择 scope，也不做环境探测（§4.3）。
+- **与组件的关系**：组件**没有**自己的 unit（§2.4.1）。即使某组件不适合 acbl 进程模型，也不在 v1 里改成 systemd 托管；那会重新引入两套生命周期。
+
 ---
 
-## 5. presets 的形态
+## 5. 组件管理契约 v1（可评审稿）
 
-### 5.1 目录与命名：按安装方式细分
+状态：契约稿，**组件管理目前 0 实现**。本节把设计意图固化成可评审的 v1 契约；实现另起分支，按 §5.11 分阶段落地。
 
-预设的维度是**安装方式**，不是组件名。同一个 dsh 有 nix / npm / guix / scoop 四种来源，就对应四个预设脚本：
+### 5.0 基线事实与目标差距
 
-> **归属：预设随 acbl 安装分发，不随 payload。** 仓库里的源目录是 `deploy/presets/`；安装后位于 acbl 包的只读共享目录（例如 `share/acb/presets/`），运行时不从 generation 里读。payload 只带 drivers 实际执行的扇出脚本与 harness 实现。
+| 事实（本轮实测） | 现状 | 契约处理 |
+|---|---|---|
+| `supervisor.toml` 只解析 `[supervisor]`；`crates/supervisor/src/lib.rs` 无 components | 组件表写进去也不会生效 | v1 新增 `[[component]]`，实现方必须按 §5.1 完整解析 |
+| 仓库无 `deploy/presets/`、无 `presets.toml`；`acbctl` 无 component / preset 子命令 | 预设体系不存在 | 本节定义目录、清单与只读命令 `acbctl component ...` |
+| serde 默认忽略未知字段 | 往 `supervisor.toml` 写 `[[component]]` 会被**静默忽略** | 强制所有清单结构 `#[serde(deny_unknown_fields)]`，启动 / 重载时校验；未知字段报 `component_unknown_field` 并拒绝启动 |
+| 三个组件现在是 nix-config 的 systemd user 单元 | `dsh-acb`：无 bridge 依赖、`PartOf=acb-stack.target`、`Restart=always`；`acb-drivers`：`Requires=bridge`、`After=bridge+dsh`、`PartOf=bridge+stack`；`acb-opencode-serve`：`After/Wants=bridge`、`PartOf=stack` | 按 §5.10 映射成组件表；迁移按 §5.8 先 mask 再启用；最终五个定义全部从 nix-config 移除（§2.4.1） |
+| nix-config 仍声明 5 个 ACB 定义 | `acb-bridge.service`、`acb-stack.target`、`dsh-acb`、`acb-drivers`、`acb-opencode-serve` | 目标态 nix-config 只留 `acbl` 包；unit 由 acbl 运行时生成（§4.9） |
+| snowluma 侧车（rootless podman compose）无人管理 | 用户管理器重启后容器消失，桥侧重试 43 次才连回 | **v1 最小形态**：`type = "oneshot"` + 预设脚本，按配置的 `file` / `compose_bin` 做 `up -d` / `down`；只到“拉起 / 关闭 / 端口探活”（§5.10.2） |
+| `acb-opencode-serve` 的启动脚本在 payload（`deploy/opencode-serve.sh`） | 与“预设随 acbl 分发”冲突 | **定论：v1 把 opencode 启动脚本移入 acbl 预设**（`presets/opencode/opencode_<source>.sh`），payload 不再携带；B-12 已把它移出必带项 |
+| launcher 不自启（无 `[Install]` / `WantedBy`，不 enable） | 用户管理器重启后整栈不会自动恢复 | 明确接受：由部署者显式启动 acbl；见 §5.4、§5.8 |
+| 实测：bridge 冷启动到可服务 23–25s；探针 5s × 连续 10 次阈值安全；launcher 退出会连带停 bridge；payload 升级仍走 75 → systemd 重拉 | 当前是 owner 模型 | 组件契约以这套基线为兼容起点；§4.7 的 adopt 是目标态、尚未实现，orphan 语义按 §5.5 分两步落地 |
 
-```text
-deploy/presets/
-  README.md
-  presets.toml              # “带开关的服务列表”清单
-  dsh/
-    dsh_nix.sh              # 用 nix（nix-config / llm-agents 等）装出来的 dsh
-    dsh_npm.sh              # npm 安装
-    dsh_guix.sh             # guix 安装
-    dsh_scoop.sh            # Windows / scoop 安装
-  opencode/
-    opencode_nix.sh
-    opencode_npm.sh
-  drivers/
-    drivers_acb.sh          # 指向 payload 里的扇出脚本，只有这一个来源
-```
+### 5.1 清单格式：`[[component]]`
 
-命名规则：
+**位置**：`supervisor.toml`（目标态由 acbl 自持有于 `state/supervisor/supervisor.toml`，见 §2.4.2）。bridge 继续用 `[supervisor]`；`[[component]]` 是可选顶层数组，没有它时行为与今天完全一致。不引入第二个 `components.toml`：一个文件只有一个写者，避免启用状态与 bridge 配置分叉。
 
-- 预设 id = `<component>_<source>`，脚本文件名与 id 一致。
-- `source` 词表固定：`nix` / `npm` / `guix` / `scoop` / `homebrew` / `distro` / `container` / `acb`；不认识的来源报错，不允许自由发挥。
-- 每个 `.sh` 只负责**怎么起**（解析二进制路径、设端口、等就绪），不负责安装。
-- 预设与 `presets.toml` 属于 **acbl 安装包**，版本随 acbl 走；新增预设要走 ACB 仓库 PR，不通过 payload 换代下发。
-- 用户自写的组件不放进 `deploy/presets/`，直接写组件表；那属于 `source = "custom"`。
+**未知字段硬要求**：`Component` / `process` / `readiness` / `restart` / `depends` / `log` 全部 `deny_unknown_fields`。解析失败时报 `components[i].<field>`，acbl **拒绝启动**，不允许“写错字段但静默跑”。
 
-### 5.2 清单：带开关的服务列表
+字段（必填标 *）：
 
-`deploy/presets/presets.toml` 把脚本登记成条目；运行时开关在组件表里：
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `name`* | string | — | 组件名，全局唯一；不得为 `bridge`（保留给 `[supervisor]`）；`[a-z][a-z0-9-]*` |
+| `enabled` | bool | 预设的 `default_enabled`（内置一律 false）；自定义组件为 false | 同一组件只允许一个 `enabled = true`；`type = "oneshot"` 且 `file` 为空时一律不启用 |
+| `type` | `"simple" \| "oneshot"`（预留 `"notify"`） | 预设的 `type`（内置默认 `simple`） | 可省略并继承预设；显式写则必须与预设一致。`simple` = 前台常驻（对应 `Type=simple`），dsh / opencode / drivers；`oneshot` = 一次性命令（对应 `Type=oneshot` + `RemainAfterExit=yes` 语义），snowluma；`notify` 预留第三值（acbl / bridge 已在用 sd_notify），**v1 不实现**；见 §5.3 |
+| `file` | string | `""` | 仅 `type = "oneshot"`：compose 文件绝对路径；**空 = 不启用**，路径只能来自配置，禁止写死在预设脚本 |
+| `compose_bin` | string[] | `[]` | 仅 `type = "oneshot"` 且必填（空 = 未配置，报错）：目标机真实可用的 compose 工具；`podman-compose` 与 `podman compose` 是不同工具，**不设默认值、不自动回退、不猜** |
+| `stop_action` | `"down" \| "leave_running"` | `"leave_running"` | 仅 `type = "oneshot"`：停止时关闭项目还是保持运行；理由见 §5.10.2 |
+| `preset` | string | — | 引用 `presets.toml` 的 `id`；与 `command` 二选一 |
+| `command` | string[] | — | 自定义组件的可执行文件 + 参数；不接受 shell 字符串 |
+| `args` | string[] | `[]` | 追加给预设脚本的位置参数；用 `command` 时忽略 |
+| `env` | map<string,string> | `{}` | 按 key 合并到预设 / 自定义环境，最后覆盖 |
+| `[component.process]` | table | — | 进程执行参数：`cwd`、`env_file`、`kill_mode = "process" \| "group"`（默认 `group`，仅 `type = "simple"` 生效） |
+| `[component.readiness]` | table | 见 §5.3 | 探针：`kind = "tcp" \| "http" \| "process"`、`host`、`port`、`path`、`interval_secs`、`failures_threshold`、`success_threshold`、`startup_grace_secs`；**`type = "oneshot"` 必须配探针**，缺失解析期拒绝；`simple` 缺省退回 `process` |
+| `[component.restart]` | table | `policy = "on-failure"` | `policy`、`max_attempts`（默认 5）、`backoff_secs`（默认 `[1,2,4,8,30]`）、`backoff_cap_secs`（默认 60）；达到上限 → `failed` 终态；见 §5.3 |
+| `[component.depends]` | table | `{}` | `after` / `requires` / `part_of` / `wants`，见 §5.4 |
+| `[component.log]` | table | `target = "file"` | `target`、`path`；见 §5.6 |
 
-```toml
-schema = 1
-
-[[preset]]
-id = "dsh_nix"
-component = "dsh"
-source = "nix"
-script = "dsh/dsh_nix.sh"
-description = "dsh 由 nix 提供（nix-config 的 dsh.nix / llm-agents 类 flake）"
-default_enabled = false
-
-[preset.process]
-cwd = "@ACB_UNIT_STATE_DIR@"
-env_file = "@ACB_UNIT_ENV_FILE@"
-env = { DSH_PORT = "3080" }
-kill_mode = "group"
-
-[preset.health]
-kind = "http"
-url = "http://127.0.0.1:3080/healthz"
-startup_grace_secs = 20
-
-[preset.restart]
-policy = "on-failure"
-backoff_secs = [1, 2, 4, 8, 30]
-max_consecutive_failures = 5
-
-[[preset]]
-id = "opencode_npm"
-component = "opencode"
-source = "npm"
-script = "opencode/opencode_npm.sh"
-description = "opencode v2 由 npm 安装"
-default_enabled = false
-```
-
-字段规则：
-
-- `id` 全局唯一；`component` 决定互斥组；`source` 只用于展示与解释，**不驱动任何安装动作**。
-- `script` 相对 **acbl 预设根**（仓库里是 `deploy/presets/`，安装后是 acbl 包的共享目录），必须存在且可执行；缺失在启动/重载校验时报错。
-- 变量替换复用现有 `@ACB_UNIT_*@` 白名单（如 `@ACB_UNIT_STATE_DIR@` / `@ACB_UNIT_ENV_FILE@` / `@ACB_UNIT_OPENCODE_PORT@`），不做任意 shell 展开；未知变量报错。
-- 清单里只登记“存在哪些预设”，不记录“当前启用哪个”；启用状态在 `supervisor.toml`。
-
-### 5.3 运行配置：组件表与互斥
-
-`supervisor.toml` 增加可选的组件表（bridge 仍用现有 `[supervisor]` 字段，保持兼容）：
+`source` / `script` 不是 `[[component]]` 字段：它们属于预设条目，组件只引用 `preset`；状态输出里显示派生的 `source`（预设来源或 `custom`）。用户在 `[[component]]` 写 `source` / `script` 按未知字段报错。
 
 ```toml
-# 每个组件只启用一个来源
 [[component]]
 name = "dsh"
 preset = "dsh_nix"
 enabled = true
 env = { DSH_BIN = "/run/current-system/sw/bin/dsh" }
+[component.depends]
+part_of = ["stack"]
+[component.readiness]
+kind = "tcp"
+host = "127.0.0.1"
+port = 3080
 
-[[component]]
-name = "opencode"
-preset = "opencode_npm"
-enabled = true
-env = { ACB_OPENCODE_BIN = "/usr/local/bin/opencode2" }
-
-# 用户自写：不引用 preset，直接给命令
 [[component]]
 name = "my-sidecar"
 enabled = true
-[component.process]
 command = ["/usr/local/bin/my-sidecar", "--port", "7788"]
+[component.process]
 cwd = "/var/lib/my-sidecar"
 kill_mode = "group"
-[component.health]
+[component.readiness]
 kind = "tcp"
-url = "127.0.0.1:7788"
+host = "127.0.0.1"
+port = 7788
+
+[[component]]
+name = "snowluma"
+type = "oneshot"
+preset = "snowluma_oneshot"
+enabled = true
+file = "/absolute/path/to/snowluma-compose.yml"   # 空 = 不启用
+compose_bin = ["podman-compose"]                   # 或 ["podman", "compose"]，按目标机实际
+stop_action = "leave_running"
+[component.depends]
+part_of = ["stack"]
+[component.readiness]
+kind = "tcp"
+host = "127.0.0.1"
+port = 53001
 ```
 
-规则：
+校验错误码（启动 / 重载共用）：`component_unknown_field`、`component_duplicate_name`、`component_reserved_name`、`component_missing_preset_or_command`、`component_preset_unknown`、`component_preset_component_mismatch`、`component_multiple_sources`、`component_dependency_unknown`、`component_dependency_cycle`、`component_script_missing`、`component_script_not_executable`、`component_env_unknown_var`、`component_readiness_required`（oneshot 未配探针）、`component_readiness_invalid`；oneshot 专属：`component_oneshot_file_missing`（`file` 为空却启用）、`component_oneshot_file_not_found`、`component_oneshot_compose_bin_missing`、`component_oneshot_compose_bin_not_found`、`component_oneshot_stop_action_invalid`。
 
-- `component.name` 与预设的 `component` 必须一致；不一致报错（防止把 dsh 的预设挂到 opencode 名下）。
-- **同一组件只能启用一个来源**：同一个 `component` 出现两个 `enabled = true` 的条目 → 启动/重载校验失败，报错列出所有候选（如 `dsh_nix` / `dsh_npm`）。
-- 未启用的来源可以同时存在（`enabled = false`），方便切换；切换 = 改 `preset` 字段（外加必要覆盖），由重载按钮或重启 acbl 生效。
-- `preset` 与 `process.command` 二选一；同时给报错；用 `process.command` 即 `source = "custom"`，同样受“一组一件”约束。
-- `enabled` 缺省取预设的 `default_enabled`（内置预设一律 `false`）。
-- 覆盖语义：`env` 按 key 合并；`process` / `health` / `restart` 三张表整体覆盖。
-- 组件名全局唯一；与 `bridge` 冲突直接报错；未知字段拒绝。
+与 `[supervisor]` 的关系：
 
-### 5.4 与 launcher 托管清单的对应
+- `[supervisor]` 仍是唯一的核心组件（bridge）：健康探针（`health_url` + `health_token_file`）、LKG、升级链只作用于它；**bridge 探针不在 `[[component]]` 里**，两套探针 v1 并存（§5.3）。
+- 组件重启策略不能突破 acbl 的全局风暴上限（例如 60s 内总重启次数）；`[component.restart]` 只收紧，不放大。
+- 组件不参与 `current.json` / `lkg.json` / 升级请求；见 §5.9。
+- 组件 `name = "bridge"` 直接拒绝，避免两套生命周期。
 
-| 层 | 文件 | 谁写 | 作用 |
-|---|---|---|---|
-| acbl 包 | acbl 安装目录（`bin/` + `share/acb/presets/`） | ACB 发布 / nix-config | 监管者本体、`acbctl`、unit 模板、预设清单与脚本 |
-| payload | `profile/generations/<id>/root/` | ACB 构建 | `bin/acb-bridge`、`harnesses/`、drivers 扇出脚本、插件；根目录含 `acb-contract.json` |
-| 预设清单 | `<acbl>/share/acb/presets/presets.toml` | acbl 包（仓库源 `deploy/presets/`） | 有哪些“组件 × 安装来源”的预设、默认开关 |
-| 预设脚本 | `<acbl>/share/acb/presets/<component>/<component>_<source>.sh` | acbl 包 / 用户 PR | “怎么起”的实现 |
-| 运行选择 | `supervisor.toml` 的 `[[component]]` | 用户/部署工具/控制台（长期） | 启用哪个来源、覆盖哪些字段 |
-| 运行时状态 | `state/components/<name>.json` | acbl | starting/healthy/restarting/failed、pid、最近错误 |
-| 日志 | `log_dir/<name>.log` | acbl 重定向 | 每组件独立，避免混在 launcher 日志里 |
-| 升级信箱 | `state/upgrade/*` | 现有机制 | 只针对 bridge，不扩展到组件 |
+### 5.2 预设布局与脚本契约
 
-### 5.5 drivers 到底是什么（代码核实）
+目录（随 acbl 安装，不随 payload）：
 
-`acb-drivers.service` 跑的是 `deploy/start-drivers.sh`。它不是“第 4 个服务”那么简单，而是**按会话扇出的桥—dsh 适配器**：
+```text
+deploy/presets/
+  presets.toml
+  dsh/dsh_nix.sh  dsh/dsh_npm.sh ...
+  opencode/opencode_nix.sh  opencode/opencode_npm.sh
+  drivers/drivers_acb.sh     # 只指向 payload 的执行体
+  snowluma/snowluma_oneshot.sh  # type = "oneshot"：只做 up -d / down
+```
 
-| 事实 | 证据 |
+命名：`id = <component>_<source>`，脚本路径 `presets/<component>/<component>_<source>.sh`。`source` 词表固定：`nix` / `npm` / `guix` / `scoop` / `homebrew` / `distro` / `container` / `acb`；未知来源报错。同一组件同一时刻只能启用一个来源。
+
+`type = "oneshot"` 的预设（v1 只有 `snowluma_oneshot`）不描述“怎么常驻一个前台脚本”，而是“用配置里给出的 compose 工具与文件，对项目执行 `up -d` / `down`”。脚本只做三件事：校验 `file` 与 `compose_bin`、执行 `<compose_bin...> -f <file> up -d`、按 `stop_action` 决定停止时是否 `down`。命令名不猜：`podman-compose` 与 `podman compose` 是两个不同工具，配置写哪个就用哪个，找不到即报错。**`oneshot` 不适用本节的“前台常驻”契约**：脚本执行完即退出 0，不 `wait`、不接管 PID，见 §5.10.2。
+
+`presets.toml` 只登记“存在哪些预设”与默认值，不记录启用状态：
+
+```toml
+schema = 1
+[[preset]]
+id = "dsh_nix"
+component = "dsh"
+type = "simple"
+source = "nix"
+script = "dsh/dsh_nix.sh"
+description = "dsh 由 nix 提供"
+default_enabled = false
+[preset.process]
+cwd = "@ACB_UNIT_STATE_DIR@"
+env_file = "@ACB_UNIT_ENV_FILE@"
+kill_mode = "group"
+[preset.readiness]
+kind = "tcp"
+host = "127.0.0.1"
+port = 3080
+interval_secs = 5
+failures_threshold = 5
+startup_grace_secs = 60
+[preset.restart]
+policy = "on-failure"
+backoff_secs = [1, 2, 4, 8, 30]
+backoff_cap_secs = 60
+max_attempts = 5
+```
+
+**脚本调用契约**（预设脚本与自定义 `command` 统一适用）：
+
+| 项 | 约定 |
 |---|---|
-| 单元先要桥：`After=acb-bridge.service`、`Wants=acb-bridge.service` | `share/acb/units/acb-drivers.service.tmpl:4-5` |
-| 每个驱动进程做三件事：连桥（环回口）+ 起本地 MCP 端点 + 驱动一个 dsh 会话 | `deploy/start-drivers.sh:4-6` |
-| 会话写死在脚本里，一条会话一个进程：`dsh-qas:3101`、`dsh-dev:3103`、`dsh-snowluma-test:3104`、`dsh-group2:3102`（格式 `会话 id : MCP 端口 : preset 名`） | `deploy/start-drivers.sh:69-74` |
-| 每个进程的启动环境：`ACB_ENDPOINT=127.0.0.1:7700`（桥）、`ACB_TOKEN`（该会话的接入 token）、`ACB_HARNESS=dsh`、`ACB_PRESET`、`ACB_MCP_PORT`、`DSH_BASE_URL=http://127.0.0.1:3080` | `deploy/start-drivers.sh:84-94` |
-| 会话 token 由 `acbctl secrets resolve --session` 解析，脚本里不写死 | `deploy/start-drivers.sh:61-64` |
-| 一条会话的 token 解析失败就跳过该会话，其它照起 | `deploy/start-drivers.sh:78-82` |
-| 扇出后只 `wait`，没有 per-driver 重启/健康 | `deploy/start-drivers.sh:96-97` |
-| dsh 本体是另一个进程：`start-dsh.sh` 以 `exec "$DSH_BIN" … --port 3080` 常驻 | `deploy/start-dsh.sh:34` |
-| bridge 是 7700 的接入端；opencode 是独立的 4097 serve，与 drivers 无直接关系 | `deploy/opencode-serve.sh:21`；`supervisor.toml.tmpl` |
+| 调用 | 直接 exec，不经过 shell 字符串拼接。预设脚本收到 `$1 = component name`，其后是 `args` 数组 |
+| 注入环境 | `ACB_COMPONENT`、`ACB_PRESET_ID`（自定义为空）、`ACB_COMPONENT_STATE_DIR`、`ACB_COMPONENT_LOG_FILE`、`ACB_ENV_FILE`；`component.env` 最后覆盖 |
+| 变量替换 | `presets.toml` 只允许 `@ACB_UNIT_*@` 白名单（`STATE_DIR` / `ENV_FILE` / `OPENCODE_PORT` 等）；未知变量报错，不做任意 shell 展开 |
+| 前台 | 必须前台常驻，**禁止 `&` / daemonize / `nohup` / 自建 session**；脚本的子进程必须留在同一进程组并被 `wait` |
+| 退出码 | 0 = 收到 SIGTERM 后正常退出；非 0 = 失败，交给重启策略；禁止用 75 / 78 |
+| 信号 | SIGTERM / SIGINT：在 `stop_timeout_secs`（默认 45）内转发给子进程并退出；SIGHUP 忽略（v1 不支持热重载） |
+| 日志 | stdout/stderr 由 acbl 重定向到 `ACB_COMPONENT_LOG_FILE`，脚本不要自己再起日志文件 |
+| 边界 | 不得调用 `systemctl` / `nix` / `sudo`；不得写 `profile/`、`current.json`、`lkg.json`、`upgrade/`；只允许写自己的 `state/components/<name>/` |
 
-分工：
+为什么禁止 daemonize：acbl 的停止、孤儿判定、双实例防护全部依赖“组件是 acbl 的直接子进程 / 可识别的 session”。脚本自己 fork 脱离后，acbl 既杀不到也认不出，退化成 systemd 时代的 `PartOf` 猜谜。
 
-- **bridge**：唯一的 ACB 核心，管会话/路由/存储；driver 通过 `ACB_ENDPOINT=127.0.0.1:7700` 反向接入。
-- **dsh**：外部 harness 本体（3080），driver 通过 `DSH_BASE_URL` 操作它。
-- **drivers**：桥与 dsh 之间的会话级适配层；**一会话一驱动进程**，不是 harness、不是桥。
-- **opencode**：另一个独立 harness，不走 drivers。
+### 5.3 就绪与健康
 
-为什么 v1 作为**单个组件**：
+区分两个概念：
 
-1. 所有驱动共享同一份输入（**应当**来自配置/库的会话列表、token 来源、dsh 地址、MCP 端口段），一条变更就要整体重启，拆成 4 个组件不会带来独立重启收益。
-2. 脚本本身是 fan-out + `wait`，systemd 视角已经是“一个 unit 管 N 个进程”；把它包成一个组件与现状一致，改动最小。
-3. 拆成每会话组件需要新增“会话 → 组件”的映射、每会话健康探针和依赖，属于后续能力（§8 开放问题）。
+- **启动完成（ready）**：readiness 条件首次满足。
+- **可服务（healthy）**：readiness 连续满足 `success_threshold` 次（默认 3 次 × 5s = 15s）。
 
-代价与备注：单组件下**单个驱动死掉不会被 acbl 发现**（`wait` 不会因一个子进程退出而返回）。v1 用两个缓解手段：
+**探针按组件配置**，位于 `[[component]]` 的 `[component.readiness]`：
 
-- 健康探针至少探一个代表端口（或桥的会话状态）；
-- 预设脚本改成“任一驱动退出就整体退出”，让 acbl 的组件重启策略接管（脚本级修复，不改 acbl 模型）。
+| 字段 | 类型 | 默认 | 适用 |
+|---|---|---|---|
+| `kind` | `"tcp" \| "http" \| "process"` | `process` | `simple` 缺省 `process`；`type = "oneshot"` 必须显式给出且不能为 `process` |
+| `host` | string | `127.0.0.1` | tcp / http |
+| `port` | u16 | — | tcp / http 必填 |
+| `path` | string | `/healthz` | 仅 http |
+| `interval_secs` | u64 | 5 | 全部 |
+| `failures_threshold` | u32 | 5 | 全部 |
+| `success_threshold` | u32 | 3 | 全部 |
+| `startup_grace_secs` | u64 | 60 | 全部 |
 
-**已定约束：会话列表不得写死在脚本里。** 当前 `start-drivers.sh:69-74` 把 4 条会话（`dsh-qas:3101` 等）写死在随 payload 分发的脚本里，改一个会话就要改脚本、动版本，与“配置单一数据源、能进库的进库”的原则冲突。改造后：
+完整示例（opencode）：
 
-- 会话来源必须是**配置/库**，并且与现有会话定义（`config.toml` 的 `[[sessions]]` / 运行库里的会话记录）**同一数据源**，不另建一套驱动专用清单；
-- 脚本退化为**纯扇出执行器**：只负责“读会话列表 → 每条会话起一个驱动进程 → 等待”，不再内置任何会话 id、端口或 preset 名；
-- MCP 端口与 preset 名从会话定义或派生规则得到，仍由同一份配置决定，不在脚本里维护第二份。
+```toml
+[[component]]
+name = "opencode"
+type = "simple"
+preset = "opencode_nix"
+enabled = true
 
-在 v1 组件化里的位置：**不阻塞单组件形态**（单组件只要求“一个组件管 N 个驱动进程”），但属于 `drivers` 组件的改造范围——组件化落地时必须同批完成，不能把写死的会话表带进 preset 脚本。
+[component.readiness]
+kind = "tcp"
+host = "127.0.0.1"
+port = 4097
+interval_secs = 5
+failures_threshold = 5
+```
 
-### 5.6 失败与重启策略由谁定
+**TOML 写法确认**：`[[component]]` 创建数组表元素，紧随其后的 `[component.readiness]` 会挂到**最近一个** `[[component]]` 元素上，这是合法 TOML，不会产生歧义。约束是它必须出现在对应 `[[component]]` 之后、下一个 `[[component]]` 之前；如果跑到数组表之前，语义就变成“给数组键本身加子表”，解析失败。内联写法 `readiness = { kind = "tcp", host = "127.0.0.1", port = 4097 }` 同样可解析，文档统一用子表写法。
 
-- **预设给默认值**：它最了解自己要多久就绪、失败后重试是否安全（例如 opencode 首次初始化慢，`startup_grace_secs` 要大）。
-- **用户可覆盖**：`restart.policy`、退避、上限、健康检查方式。
-- **acbl 强制全局上限**：无论组件怎么配，acbl 都保留一个全局重启风暴保护（例如 60s 内总重启次数上限），避免多个组件的退避叠加把机器打满。
-- **acbl 不替组件做业务判断**：组件 `failed` 后只记录并暴露状态；是否重新启用由用户或控制台操作。
+**`type = "oneshot"` 必须配探针**：缺少 `[component.readiness]`、或 `kind` 不是 `tcp` / `http` → 解析期拒绝，报 `component_readiness_required`（fail-closed）。`type = "simple"` 可以不配，缺省退回 `kind = "process"` 的进程存活判定。
 
-### 5.7 内置服务列表（v1 建议）
+三种探针：
 
-这就是用户说的“带开关的服务列表”：每个组件一行，来源可切换，同一时刻只有一个开关亮。
+| kind | 判定 | 适用 |
+|---|---|---|
+| `process` | 子进程存活（`waitpid` 未返回） | 仅 `type = "simple"`；无端点脚本兜底 |
+| `tcp` | 连接 `host:port` 成功 | dsh（3080）、opencode（4097）、drivers 代表端口、snowluma（53001） |
+| `http` | `GET http://host:port/path` 返回 2xx | 有健康端点的组件；**v1 不带鉴权** |
 
-| 组件 | 可选预设 id | 来源 | 现状脚本 | 关键参数 | 备注 |
-|---|---|---|---|---|---|
-| `dsh` | `dsh_nix` | nix | `deploy/start-dsh.sh`（偏 nix 实现） | `DSH_BIN`、端口 3080 | 脚本自己 source `deploy/acb.env`，预设改为显式 `env_file` |
-| `dsh` | `dsh_npm` | npm | 待补 | `DSH_BIN`、端口 3080 | 需要 npm 全局安装路径 |
-| `dsh` | `dsh_guix` | guix | 待补 | `DSH_BIN` | 路径来自 guix profile |
-| `dsh` | `dsh_scoop` | scoop | 待补 | `DSH_BIN` | Windows；受 C-5 限制 |
-| `opencode` | `opencode_nix` | nix | `deploy/opencode-serve.sh`（偏 nix 实现） | `ACB_OPENCODE_BIN`、4097、密码 | 脚本内部 `serve &`，必须 `kill_mode = "group"` |
-| `opencode` | `opencode_npm` | npm | 待补 | 同上 | npm 安装的 `opencode2` |
-| `drivers` | `drivers_acb` | acb | `deploy/start-drivers.sh` | `NODE`、会话列表（改造后从配置/库读取） | fan-out，必须 `kill_mode = "group"`；说明见 §5.5 |
+**`http` 探针 v1 不带鉴权**：需要 Basic Auth 的服务（如 opencode `/api/info`）v1 先用 `tcp`；等 `ACB_ENV_FILE` / `secrets resolve` 到位后再支持带凭据的探针。**禁止把 token 写进组件配置**（配置会进 store、会被审计）。
 
-- 只有 `drivers_acb` 的**执行体**是 ACB 自己的脚本（`source = acb`），它位于 payload；预设条目本身仍在 acbl 包里，只负责指向 payload 的扇出脚本。其余组件的预设都只是“按某个安装来源找二进制并起服务”。
-- 现有三个脚本里的 nix 默认路径（`opencode-serve.sh:16,25`、`start-drivers.sh:17`）要改成“显式变量优先、找不到就报错”，与矩阵的 A-1/A-2/A-7 一致。drivers 脚本随 payload，dsh / opencode 预设随 acbl，二者改动落在不同分发单元。
-- 每个组件同一时刻只能启用一个来源；用户切换来源就是换 `preset` 字段，必要时补一个 `env` 覆盖。
+**bridge 的探针不在组件表内**：仍是 `[supervisor]` 的 `health_url` + 可选 `health_token_file`（缺省自动读 `$XDG_RUNTIME_DIR/acb-health.token`，见 §1.2 与 `lib.rs:193`）。两套探针 v1 并存，原因是 bridge 探针绑 LKG 提升，合并会牵动升级链；**将来是否统一是明确的未决项**，v1 不做。
 
-### 5.8 控制台：短期只读，长期受限编辑
+**drivers 没有健康端点**，v1 判定方式写死为：
 
-**短期（v1）：只读展示。** 控制台只展示，不提供写入：
+1. 脚本级：`start-drivers.sh` 改成“任一 driver 子进程退出 → 脚本整体退出”，让 acbl 的重启策略能看见单进程死亡（否则 `wait` 永不返回，死一个驱动无人知道）。
+2. 组件级：`readiness = tcp`，探**配置里声明的最低 MCP 端口**（如 3101）；没有会话时退回 `process` 存活判定。
+3. 不新增 per-driver 组件、不做 per-driver 健康（见 §5.9）。
 
-- 有哪些预设（来自 `presets.toml`）：`id` / `component` / `source` / `description` / `default_enabled`；
-- 当前启用哪个：来自 `supervisor.toml` 的组件表；
-- 健康如何：来自 `state/components/<name>.json`（状态、pid、重启次数、最近错误、启动时间）。
+阈值与 bridge 现有参数的关系：
 
-**长期：允许编辑，但边界写死。**
+- bridge：探针 5s、连续 10 次成功才进稳定窗口（约 50s，与 `stable_window_secs = 60` 对齐）；冷启动 23–25s，`startup_grace` 必须 ≥ 30s，推荐 60s。
+- 组件：`interval_secs = 5`、`failures_threshold = 5`（即 **5s × 5 = 25s**）；`startup_grace_secs` 默认 60s（覆盖 23–25s 冷启动并留余量）；`success_threshold` 默认 3 次。
+- **组件用 5s × 5，与 bridge 的 5s × 10 有意不同**：bridge 的 10 次绑定 LKG 提升，误判代价是回滚；组件没有 LKG、重启便宜，5 次足够，且受全局风暴上限约束。
 
-允许的动作只有三类：
+失败语义：`startup_grace` 内未 ready → `failed`（按 `restart.policy` 处理）；ready 后连续失败达阈值 → `unhealthy` → 按策略重启。
 
-1. **从预设集合里选择**：每个组件一个下拉框，只能选 `presets.toml` 里登记的 `id`；
-2. **开关**：启用/停用某个组件；
-3. **覆盖有限字段**：白名单字段（例如 `env` 里允许的 key、`cwd`、`health.url`、端口），逐项校验；不在白名单的字段一律拒绝。
+**restart 语义按 `type` 分挂**——这是本契约最容易静默失效的地方：
 
-明确**不允许**：
+- `type = "simple"`（**默认**）：脚本必须前台常驻（§5.2 的约束不变：禁 `&`、禁 daemonize、禁自建 session）；「活着」= 进程存在；重启判定挂在**进程退出**上。
+- `type = "oneshot"`：脚本是**一次性命令**，允许正常 exit 0（`up -d` 就是这种）；「活着」**只由 probe 判定**；重启判定挂在**探针连续失败**上。**不能用退出码判断 oneshot 的存活**——按 `on-failure` 的老定义会得到“exit 0 → 不重启 → 永不守护”，但容器其实还在后台跑，这是静默失效。
+- `type = "notify"`：**预留第三值**（acbl / bridge 已在用 sd_notify），v1 不实现；预留位置就是这个枚举，命名向 systemd 靠拢，避免以后发明新词。
 
-- 填写任意命令 / 任意脚本路径 / 上传脚本；
-- 新增预设（新增预设只能改仓库、走 PR）；
-- 修改 bridge 的 `[supervisor]`、profile、LKG、升级请求；
-- 修改密钥与环境文件内容；
-- 修改插件、wake / delivery 等业务策略；
-- 修改 systemd unit、日志路径、acbl 启动方式。
+**关键前提**：acbl 记录自己是否主动停止组件（`stop_intent`），因此能区分“我让它停的”和“它自己退出的”。这是 acbl 相对 systemd 的优势，也是 `stopped_early` 能成立的原因。
 
-长期编辑必须具备的前置：
+`simple` 的重启判定挂在进程退出：
 
-- **鉴权**：控制台管理员 token + 角色校验（与现有 `POST /api/upgrade` 同级），未授权直接 403；
-- **二次确认**：展示 diff（启用/停用、来源切换、字段变化），用户确认后才提交；
-- **变更审计**：记录谁、何时、旧值/新值、结果（成功/回滚/失败），密钥类字段脱敏；
-- **服务端校验**：多来源互斥、白名单字段、脚本存在性、变量可替换；不依赖前端；
-- **失败回滚**：与 §4.6 的重载语义一致，校验失败不动运行中的组件，应用失败回滚到旧表；
-- **并发控制**：同一时间只允许一个编辑/重载任务。
+| 值 | 行为 |
+|---|---|
+| `always` | 任何**非 acbl 主动停止**的退出都重拉（含 exit 0）；`max_attempts` 用尽 → `failed` |
+| `on-failure`（**默认**） | 非 0 退出 / 被信号杀死 → 重拉；**exit 0 且非 acbl 主动停止 → 不重拉，进入 `stopped_early`，并在 `component status` 可见**；`max_attempts` 用尽 → `failed` |
+| `never` | 只在 acbl 启动时拉起一次；之后退出只记状态，不重拉 |
 
-### 5.9 安全边界
+`oneshot` 的重启判定挂在探针：
 
-- 预设脚本在 acbl 的权限下运行；不引入 setuid、不调用 `sudo`。
-- 组件表只能由部署者写（`supervisor.toml` 在 state 目录）；控制台长期只允许“选预设 / 开关 / 白名单字段”，不允许任意命令（§5.8）。
-- 用户自写组件时，`command` 必须是可执行文件路径或脚本路径，不接受 shell 字符串拼接；参数走 `args` 数组。
+| 值 | 行为 |
+|---|---|
+| `always` | **探针连续失败**（5s × 5 次）即重跑脚本，受 `max_attempts` 约束；脚本 exit 0 不算失败 |
+| `on-failure` | 与 `always` 在本契约里**没有实际差异**：oneshot 不看退出码、只看探针；acbl 主动停止对两者都抑制后续拉起（与 systemd `stop` 一致）。保留该值只为配置语义一致；要“停止干预”只能用 `never` |
+| `never` | 只在 acbl 启动时跑一次；之后无论探针如何都不再干预（snowluma 用这一档） |
+
+**与 systemd 的有意偏离（刻意的，不是疏忽，不要“修正”）**：systemd 对 `Type=oneshot` **忽略 `Restart=`**；本契约**不忽略**，`restart` 在 `oneshot` 下依然生效，判定挂在探针连续失败上。理由：oneshot 组件唯一的存活依据是探针——`up -d` 之后容器在后台跑、脚本本身早就退出；若跟随 systemd 忽略重启，`podman compose down` 之后就是永久静默死亡。因此这里的 `Restart` 语义与 systemd 不同，后来者不得把它改回“忽略”。
+
+`stopped_early` **只属于 `simple`**：`oneshot` 正常 exit 0 是常态（`up -d` 就该退出 0），不算 early stop，也不产生 `stopped_early`；它的存活只看探针。
+
+- **有界重试**：`max_attempts` 默认 5、`backoff_secs` 默认 `[1,2,4,8,30]`、`backoff_cap_secs` 默认 60；达到上限进入终态 `failed`，写 `component_failed`，不再自动拉起；`acbctl component status` 显示已尝试次数与 `last_error`。
+- **默认 `on-failure` 而不是 `always`**：组件不在 LKG 里，崩溃后**没有可回退的版本**；无限重启会把“配置写错 / 二进制缺失”伪装成“服务不稳定”，日志刷满还定位不到根因。有界重试 + `failed` / `stopped_early` 才能把问题停在可诊断的位置。
+- **`never` 的语义**：只负责“开头那一下”——acbl 启动时 `spawn` / `up -d` 一次，之后不干预；退出只记状态，探针失败也不重拉。**snowluma 这类 oneshot 用 `never`**：acbl 只负责开头的 `up -d`，容器是否活着归 podman / 用户；由于 `down` 无差别，自动重拉反而可能误伤（§5.10.2）。
+
+**与 LKG 的边界（硬约束，跨章节一致）**：
+
+- 组件失败**绝不触发 78**、**绝不写 `current.json`**、**绝不参与 profile 回滚**、**绝不影响 bridge 的健康判定与 LKG 提升**。
+- 组件状态只在 `acbctl component status` 与 `state/components/<name>.json` 里体现；bridge 的 10 次阈值 / 60s 稳定窗口 / LKG 与组件无关。
+- **组件版本不纳入 LKG 的后果**：组件升级、组件回滚都不在 v1；组件崩到 `failed` 后 acbl **不代劳**，用户按 `last_error` 与日志自行处理。下次 acbl 启动是否再试由策略决定：`never` 仍只试一次，`on-failure` / `always` 重新计数。
+
+### 5.4 顺序与级联
+
+| systemd | 组件表 | 语义 |
+|---|---|---|
+| `After=a b` | `depends.after = ["a","b"]` | 只保证启动顺序；a/b 失败不阻止本组件启动 |
+| `Requires=a` | `depends.requires = ["a"]` | 硬依赖：a 未 ready 则不启动本组件（`blocked`）；a 停止 / 失败则连带停止本组件 |
+| `PartOf=a` | `depends.part_of = ["a"]` | 停止传播：a 停 → 本组件停；不隐含启动依赖 |
+| `Wants=a` | `depends.wants = ["a"]` | 软依赖：尽量先起 a；a 失败仍启动本组件（opencode 对 bridge 用这个） |
+
+- 启动按 `after` / `requires` / `wants` 的拓扑序；环 → `component_dependency_cycle`，拒绝启动。
+- 停止按启动序的**逆序**；`part_of` 目标停止时级联；每个组件 `stop_timeout_secs` 默认 45s，超时后按 `kill_mode` 杀进程组。
+- `type = "oneshot"` 不适用“杀进程组”：`stop_action = "down"` 时执行配置里的 `down`，超过 `stop_timeout_secs` 只记事件、不强杀容器；`leave_running` 时停止是空操作并立即成功（§5.10.2）。
+- bridge 是隐式节点：`requires = ["bridge"]` 必须等 bridge ready；`after = ["bridge"]` 只排序。`acb-drivers` = `requires=["bridge"]` + `after=["bridge","dsh"]` + `part_of=["bridge","stack"]`；`acb-opencode-serve` = `wants=["bridge"]` + `after=["bridge"]` + `part_of=["stack"]`。
+- `stack` 是伪目标，代表 acbl 自身：`part_of = ["stack"]` 在显式整栈停止时生效；**默认 `systemctl stop acb-launcher` 不触发组件停止**（与 §4.7 的 bridge 独立生命周期一致）。当前实现仍是 owner 模型（launcher 退出连带停子进程），adopt 落地后才是契约态。
+- **未决**：依赖目标是否从「`bridge` + `stack` 两者」收窄为「只允许 `stack`」。v1 暂时两者都允许（bridge 是隐式节点、stack 是伪目标）；收窄会改变 `acb-drivers` / `acb-opencode-serve` 的映射写法，待裁定（§2.4.2 / §5.9）。
+- launcher 不自启的后果：用户管理器重启后，组件与 bridge 都不会自动回来；部署者必须显式 `start acb-launcher`（§5.8 不把它当作可自动检测的问题）。
+
+### 5.5 孤儿、身份与 adopt
+
+组件复用 §4.7 的 instance / adopt 思路，但**不能假设 bridge 那套已经实现**；`type = "oneshot"` 是例外（无 PID、无进程组、容器归属不可知，见 §5.10.2）。下表是契约 v1 定稿的**目标语义**；P0–P3 仍按 owner 模型运行，P4 才补齐：
+
+| 场景 | 契约目标（v1 定稿） | 当前差距 |
+|---|---|---|
+| 组件自身崩溃（acbl 在跑） | acbl 按 `restart.policy` 重拉；写 `component_restarting` 事件 | 未实现 |
+| acbl 崩溃 / 被重启 | 组件用独立 session 启动，**不随 acbl 退出**；新 acbl 读 `state/components/<name>.json` 的 `instance_id` + 探针，匹配则 adopt | 当前 launcher 退出会连带停 bridge，组件同理会死；adopt 未实现 |
+| 端口被未知进程占用 | 标 `conflict`，**不盲起**；只影响该组件，不把整栈打 78 | 未实现 |
+| launcher 不在时组件死亡 | 无人拉起（无守护窗口，§4.7.5） | 与 bridge 同 |
+
+身份文件 `state/components/<name>.json`：`schema`、`instance_id`、`pid`、`started_at_ms`、`preset_id`、`config_sha256`、`ports`。**pid 只作诊断**，身份以 `instance_id + config_sha256` 为准；pid 复用不能作为 adopt 依据。
+
+**`type = "oneshot"` 不写进程身份**：没有进程可核对，`instance_id` / `pid` / `started_at_ms` 不适用，也不做 adopt。`state/components/<name>.json` 只记 `last_run_at_ms`、`last_result`、`attempts`、`probe_url`（以及 `phase`），存活以 probe 为唯一依据（§5.3）。
+
+`KillMode=process` 的泛化：
+
+- acbl 的 unit 必须 `KillMode=process`（§4.7.1），否则 systemd stop 会连带杀组件。
+- acbl 自己停止组件时，按 `kill_mode = "group"` 杀**组件自己的进程组**，而不是整个 acbl cgroup。
+- 组件脚本禁止自建 session；需要多进程的（drivers、opencode `serve &`）必须留在脚本的进程组里，由 `kill_mode = "group"` 统一收尾。
+
+**分两步落地**：先用现有 owner 模型把组件表跑通（组件随 acbl 退出），再做 session 脱离 + adopt；契约从 v1 起就写死“组件生命周期独立于 acbl”，实现分阶段补齐，不能把 owner 模型写成契约。
+
+### 5.6 日志与可观测性
+
+- 每个组件一个 append 文件：`${ACB_LOG_DIR:-<state>/logs}/<name>.log`，保留现在每单元一个文件的排障体验；`[component.log] target = "file" | "journald"`，默认 `file`。
+- v1 **不做内置轮转**；交给 logrotate / 外部工具，文档给出推荐配置。理由：轮转涉及保留策略与磁盘配额，属于部署决策。
+- 组件日志不混进 `supervisor.log`；acbl 只把生命周期事件写进自己的 journal / 事件流。
+- `acbctl component status <name>` 必须直接给出日志路径与最近错误。
+
+### 5.7 状态与审计
+
+- 状态文件：`state/components/<name>.json`（原子写），字段：`phase`（`starting` / `ready` / `unhealthy` / `restarting` / `stopped_early` / `failed` / `stopped` / `blocked` / `conflict`）、`restart_policy`、`attempts`、`pid`、`instance_id`、`restarts`、`last_error`、`ready_at_ms`、`failed_at_ms`、`log_path`；oneshot 额外记 `last_run_at_ms`、`last_result`、`probe_url`。
+- **`stopped_early` 只属于 `type = "simple"`**：非 acbl 主动停止的 exit 0。它表示“进程没了，但按 `on-failure` 不重启”，必须在 `component status` 与日志里可见，**不能静默**；这是 acbl 知道自己是否主动停止（`stop_intent`）才成立的状态（§5.3）。`type = "oneshot"` 正常 exit 0 是常态，不产生 `stopped_early`。
+- **`failed` 是终态**：`restart.policy` 用尽 `max_attempts`（或 `never` 下首次失败）后进入；**不触发 78、不写 `current.json`、不参与 LKG**（§5.3）。只有 acbl 重启或运维显式重载组件表才重新计数；`acbctl component status` 必须显示 `attempts` 与 `last_error`。
+- 事件（写入 §9 的事件流）：`component_starting`、`component_ready`、`component_unhealthy`、`component_restarting`、`component_stopped_early`、`component_failed`、`component_stopped`、`component_blocked`、`component_adopted`、`component_conflict`；`component_restarting` 带 `attempt`，`component_stopped_early` 带 `exit_code`，`component_failed` 带 `attempts` 与 `last_error`。
+- `acbctl` v1 只读入口：`component list`、`component status [name]`、`component logs <name>`（打印路径，不流式跟随）。写操作留给控制台长期项（§5.12）。
+- 退出码：0 成功；2 未知组件；3 配置文件 / 组件表校验失败。
+
+### 5.8 迁移与防双起（操作顺序保证）
+
+**定论：先搬、后删、最后补注册能力。** 顺序不可交换，尤其不能“先删单元再搬脚本”——那是整栈裸奔，详见本节末尾。
+
+#### 阶段 A：搬（组件先由 acbl 跑通，nix-config 五个定义暂不动）
+
+1. `systemctl --user disable --now dsh-acb acb-drivers acb-opencode-serve`。
+2. `systemctl --user mask dsh-acb acb-drivers acb-opencode-serve`；`ss -ltnp` 确认 3080 / 3101 / 4097 无监听。
+3. 在 `supervisor.toml` 写 `[[component]]`（先全部 `enabled = false`），用现有 unit 重启 acbl；确认 `deny_unknown_fields` 校验通过。
+4. 按 §5.11 顺序逐个 `enabled = true`，每开一个看 `component status` 与日志，再开下一个。
+5. **A 的验收（B 的前置）**：三个端口由 acbl 的子进程提供；三个 systemd 组件单元处于 inactive + masked；`acb-bridge.service` / `acb-stack.target` 仍在，但只负责启动 acbl。
+6. 回退 A：acbl 组件全部 `enabled = false` 并重启 acbl → `systemctl --user unmask ...` → 确认端口释放后 `enable --now`。
+
+**snowluma 与其它三个组件的不同**：它本来就没有 nix-config 单元，所以没有 `disable/mask` 步骤；“搬”对它等于**首次纳入**——在 A 的其余组件跑通后，先确认 compose 项目当前只有 ACB 使用，再按 §5.10.2 配置 `file` / `compose_bin` / `stop_action`，用 `up -d` 交给 acbl；若已有手工容器，推荐维护窗口先 `down` 一次，避免 `down` 语义误伤。它同样不能在三个组件搬完前先删任何 nix-config 定义。
+
+#### 阶段 B：删（移除 nix-config 的五个定义）
+
+1. 从 nix-config 删除 `acb-bridge.service`、`acb-stack.target`、`dsh-acb`、`acb-drivers`、`acb-opencode-serve` 五个定义，`nixos-rebuild switch`。
+2. **B 的验收**：`systemctl --user list-unit-files | grep -E 'acb|dsh-acb'` 为空；`systemctl --user list-units --all | grep acb` 为空；acbl 仍在运行并继续托管桥与组件。
+3. 若 B 删除 `acb-bridge.service` 后需要重启主机：**必须人工启动 acbl**（`acb-launcher`），整栈靠它起；这一窗口没有自动拉起，是“launcher 不自启”的已知代价。
+4. 回退 B：从 git 恢复 nix-config 五个定义 → `nixos-rebuild switch` → `enable --now`；回退前先停 acbl 的组件，避免双起。
+
+#### 阶段 C：补注册能力（acbl 生成自己的 unit）
+
+1. 实现 §4.9 的 `acbctl unit install/remove/status`；模板来自 acbl 包，不来自 nix-config。
+2. `acbctl unit install --scope user --with-install-section 0`（默认不 enable）；`systemctl --user cat acb-launcher.service` 能看到生成标记。
+3. **C 的验收**：unit 文件不在 nix store、不在 nix-config 模块产物里；`systemctl --user is-enabled` = `disabled`；显式 `start` 能拉起 acbl；用户管理器重启后整栈不会自动恢复（预期行为）。
+4. 回退 C：`acbctl unit remove`；若已 enable 则先 `disable`。不触碰 nix-config。
+
+**配置所有权迁移（§2.4.2）与本节的顺序同构**：acbl 先自持有 `state/supervisor/supervisor.toml` 并跑出等价行为，再删 nix-config 的渲染，最后删 unit 的 `--config`。它不阻塞 A/B/C，但**不能抢跑**——先删 `--config` 等于在启动入口上做无对照实验。
+
+#### 为什么不能先删再搬
+
+- 删掉 `acb-bridge.service` / `acb-stack.target` 后，**没有任何东西会启动 acbl**；删掉三个组件单元后，**也没有任何东西会启动组件**。此时脚本还不在 acbl 侧，整栈从“systemd 托管”直接掉到“无人托管”，用户管理器一重启就全没了（snowluma 今晚已经演示过这个后果，见 §5.10.2）。
+- 回退成本也最高：没有 acbl 的组件表可关，只能靠 git 恢复 nix-config + 重新 switch，期间端口可能被残留进程占住，双起风险最大。
+- **这里的正确性靠操作顺序保证，不是自动检测能兜住的**：systemd 与 acbl 都可能在对方不知情时启动；v1 不做跨管理器仲裁、不自动杀进程。双起唯一的正证据是**端口 + 身份**：端口被未知进程占用 → 该组件 `conflict`，不启动。
+- 迁移不删除 `state/`、不碰 profile / LKG。
+
+### 5.9 不在 v1 范围
+
+- 组件版本不纳入 LKG、不参与回滚；组件升级 / 组件升级请求 / 组件 generation 全部不在 v1。
+- 组件自动重启只到“有界重试 + `failed` 终态”：没有组件级回滚、没有版本回退、`failed` 后 acbl 不自动代劳，需用户按日志介入（§5.3 / §5.7）。
+- Windows 服务注册（C-5）、容器内 PID 1 语义。
+- per-driver 组件化（一会话一组件）、per-driver 健康与重启。
+- 控制台写入（§5.12 长期项）、自动轮转、组件级鉴权。
+- launcher 自启（明确不做：不加 `[Install]` / `WantedBy`）。
+- 自动迁移检测 / 跨 systemd 仲裁。
+- snowluma（`type = "oneshot"`）只到“拉起 / 关闭 / 端口探活”：容器日志采集、容器健康检查、per-container 组件化、`down` 之外的容器编排都不在 v1（§5.10.2）。
+- bridge 探针与组件探针是否统一：**未决**；v1 保持 `[supervisor]` 的 `health_url` + `health_token_file` 与 `[component.readiness]` 两套并存，合并牵动 LKG 与升级链（§5.3）。
+- 依赖目标是否收窄为只允许 `stack`：**未决**；当前 §5.4 同时接受 `bridge`（隐式节点）与 `stack`（伪目标），收窄涉及现有映射改写（§2.4.2）。
+
+**仍不在 v1 的补充（2026-11-08）：**
+
+- acbl 运行时注册 systemd 单元（§4.9）：能力不在组件契约 v1 内交付，作为迁移阶段 C 单独排期（§5.8）。
+- nix-config 中五个 ACB 定义的移除：是迁移操作（§5.8 阶段 B），不是本契约的实现项。
+
+### 5.10 内置组件映射（v1）
+
+| 组件 | preset | 依赖 | readiness | restart | 日志 | 备注 |
+|---|---|---|---|---|---|---|
+| `dsh` | `dsh_nix`（默认 false） | `part_of=["stack"]` | `tcp 127.0.0.1:3080` | `on-failure` | `dsh.log` | 无 bridge 依赖，最简单，先做 |
+| `drivers` | `drivers_acb` | `requires=["bridge"]`、`after=["bridge","dsh"]`、`part_of=["bridge","stack"]` | `tcp` 最低 MCP 端口；无会话时 `process` | `on-failure` | `drivers.log` | 执行体在 payload，预设只指向 |
+| `opencode` | `opencode_nix` / `opencode_npm` | `wants=["bridge"]`、`after=["bridge"]`、`part_of=["stack"]` | `tcp 127.0.0.1:4097` | `on-failure` | `opencode.log` | 脚本从 payload 移入 acbl 预设；`serve &` → `kill_mode="group"` |
+| `snowluma` | `snowluma_oneshot`（`type="oneshot"`） | `part_of=["stack"]` | `tcp 127.0.0.1:53001` | `never` | `snowluma.log` | `file`/`compose_bin` 只来自配置；无 PID adopt、`down` 无差别，见 §5.10.2 |
+
+- `drivers_acb` 是 `source = "acb"`：预设条目随 acbl，执行体 `deploy/start-drivers.sh` 随 payload。理由：它扇出的是 payload 的 harness / driver 实现，与 payload 同版本；其它组件的“怎么起”与 payload 无关。
+- `opencode` 的 `opencode_<source>.sh` 必须吸收现有 `deploy/opencode-serve.sh` 的逻辑（端口 4097、密码、`serve &` 的进程组收尾），并显式变量优先、找不到二进制报错（对应 A-1/A-2/A-7）。
+- `dsh` 的会话列表、MCP 端口与 preset 名仍由配置 / 库单一来源提供；`start-drivers.sh` 退化为纯扇出执行器。
+
+#### 5.10.1 现有脚本的代码事实（迁移依据）
+
+这些事实决定了 §5.10 的映射，不是可选项：
+
+| 事实 | 证据 | 对契约的影响 |
+|---|---|---|
+| drivers 是单脚本扇出，会话写死在数组里 | [start-drivers.sh](file:///home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/deploy/start-drivers.sh#L69-L74)（4 条：`dsh-qas:3101`、`dsh-dev:3103`、`dsh-snowluma-test:3104`、`dsh-group2:3102`） | v1 仍是单组件；**会话表必须迁到配置 / 库**（与 `[[sessions]]` 同源），不留在预设脚本 |
+| 每个驱动连 `ACB_ENDPOINT=127.0.0.1:7700` | [start-drivers.sh](file:///home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/deploy/start-drivers.sh#L85) | `requires = ["bridge"]` 的真实原因：桥没起，驱动连不上 |
+| token 由 `acbctl secrets resolve --session` 运行时解析 | [start-drivers.sh](file:///home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/deploy/start-drivers.sh#L63) | 预设脚本不携带密钥；只注入 `ACB_ENV_FILE` / `ACB_COMPONENT_*` |
+| 脚本以 `wait` 收尾，不返回 | [start-drivers.sh](file:///home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/deploy/start-drivers.sh#L97) | 任一驱动死亡对 acbl 不可见；v1 必须先改成“任一子进程退出即整体退出”（§5.3） |
+| dsh 直接 `exec` 前台常驻，端口 3080 | [start-dsh.sh](file:///home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/deploy/start-dsh.sh#L34) | 天然满足前台契约，readiness 用 `tcp 3080` |
+| opencode 用 `serve ... &` + `trap` + `wait`，端口默认 4097 | [opencode-serve.sh](file:///home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/deploy/opencode-serve.sh#L21-L60) | 必须 `kill_mode = "group"`；脚本从 payload 移入 acbl 预设 |
+
+#### 5.10.2 snowluma 侧车（rootless podman compose，`type = "oneshot"`，v1 最小形态）
+
+**现状**：`deploy/snowluma-compose.yml` 是原样拷贝，靠 compose 工具手工起；`restart: unless-stopped` 只在容器引擎内部有效。用户管理器重启 / podman socket 丢失后容器消失，桥侧表现为反复重连（今晚实测重试 43 次才连回）。它目前**无人管理**——dsh / drivers / opencode 至少还有 systemd 单元，它连单元都没有。
+
+**v1 形态**：作为 `type = "oneshot"` 组件 + 预设脚本 `snowluma_oneshot.sh`，命令固定为配置里给出的形态：
+
+```text
+<compose_bin...> -f <file> up -d     # 启动 / 幂等拉起
+<compose_bin...> -f <file> down      # 仅 stop_action = "down" 时
+```
+
+- **路径只来自配置**：`[[component]]` 的 `file`，默认空 = 不启用；**禁止写死在预设脚本里**。
+- **命令名不假设**：`compose_bin` 必填，按目标机实际写——`["podman-compose"]` 与 `["podman", "compose"]` 是两个不同工具；为空报 `component_oneshot_compose_bin_missing`，找不到报 `component_oneshot_compose_bin_not_found`，**不设默认值、不自动回退、不猜**。
+- 预设脚本只做三件事：校验 `file` / `compose_bin`、执行 `up -d`、按 `stop_action` 决定停止动作。**这是 §5.2 前台契约的唯一例外**：oneshot 脚本执行完即退出 0，不常驻、不 `wait`；进程死亡不等于组件失败，状态由端口探活决定。
+
+**能力上限（必须写死，不许包装成更强的承诺）**：
+
+- acbl **无法判断容器是谁启动的**。`up -d` 幂等，重复执行不会产生第二个项目；`down` 会**无差别关闭该 compose 项目**。
+- 因此停止语义只能定义为「**按策略关闭**」，**不得声称“只关自己启动的实例”**。`stop_action = "down"` 就是关闭整个项目，包括别人手工起的同名项目。
+- **不能做 PID adopt、不能杀进程组、不能读容器内进程身份**；§5.5 的 instance / adopt 对 oneshot 组件不适用。身份只有“配置的 `file` + compose project 名 + 端口”。
+- readiness **只能 `tcp`**，当前端口 `53001`；没有 HTTP 健康端点，也不进容器。起没起、能不能连，就是唯一判据。
+- `restart.policy` 的语义退化为“策略允许时，端口探活失败就重跑 `up -d`”，不是“重启子进程”；snowluma 默认 `never`，探活失败只记状态、不重拉，避免 `down`/`up -d` 的自动误伤。
+
+**`stop_action` 取舍**：
+
+| 值 | 行为 | 适用 |
+|---|---|---|
+| `leave_running`（**默认，推荐**） | acbl 停止 / 崩溃 / 重启时不执行 `down`，容器继续运行；下次启动 `up -d` 幂等接上 | 优先保 QQ 侧可用性；acbl 重启是低频但不可预测，`down` + `up -d` 会让容器冷启动并中断会话；`up -d` 本身很便宜 |
+| `down` | acbl 显式停止时执行 `down`，项目被关闭 | 需要“停 acbl = 停整栈”的维护窗口；代价是中断 QQ 侧，且会关掉同项目里别人起的容器 |
+
+默认选 `leave_running` 的理由：launcher 崩溃 / 升级重启不是日常路径，但每次 `down` 都会真实打断会话；而 `up -d` 幂等，重启后不需要额外拉起。代价是 acbl 停止后容器可能继续跑——这是有意接受的“acbl 不是容器所有者”。
+
+**权限边界（硬约束，保留）**：
+
+- rootless podman 属于**启动它的那个用户**的命名空间。acbl 只有在**同一 UID、user scope、能访问 `$XDG_RUNTIME_DIR/podman/podman.sock`** 时才能调用；system scope、换用户、在容器内运行 acbl 都**进不去**（`podman ps` 都可能被拒），此时只能报错，**不允许降级到 root podman**。
+- acbl 不进容器命名空间、不 exec 进容器、不管卷、镜像与网络；容器实际守护者是 podman，compose 只是前端。
+- 停止不靠杀进程组；`leave_running` 时脚本不发任何停止命令，`down` 时只执行配置里那一条。
+
+**定位：过渡方案。** 如果 snowluma 将来提供官方 systemd 单元或 podman quadlet，应换成那个（由 systemd / podman 负责守护），本预设只用于填补“无人管理导致会话重启后侧车消失”的空档。
+
+**与 §5.8 迁移顺序的关系**：snowluma 本来就没有 nix-config 单元，所以“搬”对它等于“**首次纳入**”，没有 `mask` 步骤；但同样受“先搬后删”约束——三个组件没在 acbl 侧跑通前，不把 snowluma 的启动责任从手工 compose 切走。首次纳入前先确认该项目是否只有 ACB 使用；若已有手工容器，推荐在维护窗口先 `down` 一次，再由 acbl `up -d`，避免 `down` 语义误伤无法辨认的实例。
+
+**v1 范围只到“拉起 / 关闭 / 端口探活”**：不做容器日志采集（`podman logs` 仍归用户）、不做容器健康检查、不做版本 / LKG、不做 per-container 组件化。
+
+### 5.11 分阶段实施与验收
+
+| 阶段 | 范围 | 验收标准 |
+|---|---|---|
+| **P0 解析与校验** | `deny_unknown_fields`、`[[component]]` 解析、`component list/status`；不 spawn | 无 `[[component]]` 时行为与今天一致；未知字段直接报错；不产生任何子进程 |
+| **P1 `dsh`** | 预设 `dsh_nix`、`tcp` readiness、`on-failure`、`part_of=["stack"]` | 冷启动 ≤60s ready；kill dsh → 按退避重启；`component status` 与 `dsh.log` 可用；停 acbl 后 dsh 按当前 owner 模型退出 |
+| **P2 `drivers`** | `requires` / `after` / `part_of`、`kill_mode="group"`、扇出脚本“任一子进程退出即整体退出” | bridge 未 ready 时 `blocked`；bridge 起来后启动；kill 任一 driver → 整体重启；无孤儿 |
+| **P3 `opencode`** | 脚本移入 acbl 预设、`serve &` 分组收尾、`wants` bridge | 4097 被占 → `conflict` 不盲起；停 acbl → opencode 停止；重启后不出现双实例 |
+| **P4 adopt** | 组件 session 脱离 + 身份文件 + adopt / conflict | kill acbl → 组件继续跑；新 acbl adopt，不产生第二个；与 §4.7 的 bridge adopt 同批验收 |
+| **P5 snowluma（v1 oneshot）** | `type = "oneshot"`、`file` / `compose_bin` / `stop_action`、`up -d` / `down`、`tcp 53001`、`restart.policy = "never"` | `file` 为空不启用；`compose_bin` 缺失报错且不猜；`leave_running` 与 `down` 两种策略行为符合定义；停 acbl 不误伤；探活失败只记状态、不自动重拉 |
+
+每阶段都**不**改 LKG / 升级链；组件 `failed` 不触发 78，也不写 `current.json`。P0–P4 全部验收通过，是 §5.8 阶段 B（删 nix-config）的前置；P5 属 v1，但没有 nix-config 依赖，可与 B 并行。
+
+**当前实现进度**：P1 已落地——`[[component]]` 全字段解析、`deny_unknown_fields`、默认值（探针 `5s × 5`、`restart` 默认 `on-failure`、`max_attempts = 5`、退避 `1/2/4/8/30`）、`acbctl component list/status` 只读、空表零回归（§2.4.2）。
+
+### 5.12 控制台：短期只读，长期受限编辑
+
+**短期（v1）：只读展示。** 展示预设集合（`presets.toml`）、当前启用项（`supervisor.toml`）、状态与日志路径（`state/components/<name>.json`）。
+
+**长期：允许编辑，但边界写死。** 只允许三类动作：
+
+1. 从预设集合里选择（只能选 `presets.toml` 登记的 `id`）；
+2. 启用 / 停用组件；
+3. 覆盖白名单字段（如 `env` 允许的 key、`cwd`、`readiness` 的 `host` / `port` / `interval_secs` / `failures_threshold`），逐项校验。
+
+明确**不允许**：任意命令 / 脚本路径 / 上传脚本；新增预设（只能走仓库 PR）；修改 `[supervisor]`、profile、LKG、升级请求；修改密钥与环境文件内容；修改业务策略、systemd unit、日志路径、acbl 启动方式。
+
+长期编辑的前置：鉴权（管理员 token + 角色校验，未授权 403）、二次确认（展示 diff）、变更审计（谁/何时/旧值/新值/结果，密钥脱敏）、服务端校验（多来源互斥、白名单、脚本存在性、变量可替换）、失败回滚（校验失败不动运行组件，应用失败回滚旧表）、并发控制（同一时间一个编辑 / 重载任务）。
+
+### 5.13 取舍汇总
+
+| 取舍 | 选择 | 被否方案 | 理由 |
+|---|---|---|---|
+| 组件表位置 | `supervisor.toml` 的 `[[component]]` | 独立 `components.toml` | 一个文件一个写者；启用状态与 bridge 配置不会分叉 |
+| 组件生命周期归谁 | acbl 托管，systemd 只启停 acbl | systemd 直接管三个组件 | 两套生命周期与 `PartOf` 靠猜，停止 / 孤儿 / 双起无法统一 |
+| drivers 粒度 | 单组件管 N 个驱动进程 | 一会话一组件 | 共享同一份输入，拆开无独立重启收益；映射与健康成本高 |
+| opencode 脚本位置 | 移入 acbl 预设 | 留在 payload | “预设随 acbl”是结构前提；B-12 已把它移出 payload 必带项 |
+| launcher 自启 | 不自启，显式 start | enable / `WantedBy` | 用户明确不自启；代价是管理器重启后整栈不自动恢复，已在 §5.0/§5.8 写明 |
+| 组件失败阈值 | 5 次 × 5s | 复用 bridge 的 10 次 | 组件没有 LKG，重启廉价；10 次只属于 bridge 的稳定窗口 |
+| orphan 语义 | 先 owner 模型跑通，再 session 脱离 + adopt | 一次性做完 adopt | P1/P2 不被 P4 阻塞；契约先写目标态，实现分阶段 |
+| 迁移防双起 | 操作顺序保证 + 端口 / 身份冲突检测 | 自动检测 / 自动杀进程 | 跨 systemd 与 acbl 的仲裁不可靠，自动杀进程风险更高 |
+| nix-config 职责 | 只提供 `acbl` 包，不声明任何 ACB 单元 | 继续在 nix-config 声明 service / target | 用户硬约束；两套来源必然分叉（§2.4.1） |
+| unit 来源与时机 | 来源归 acbl（运行时生成），时机归部署者（默认不 enable） | 写死 nix-config + 随 switch 生效 | 来源与时机是两件事，混在一起就无法“装了但不自启”（§4.9） |
+| 迁移顺序 | 搬 → 删 → 补注册能力 | 先删再搬 / 一步到位 | 先删 = 整栈裸奔，回退成本最高（§5.8） |
+| snowluma 侧车 | v1 纳入，`type = "oneshot"`，只到拉起 / 关闭 / 端口探活 | 继续手工 compose 或等官方 unit | 填补无人管理空档；但 acbl 无法判断容器归属、`down` 无差别，能力上限写死（§5.10.2） |
+| 组件自动重启 | `restart.policy` 默认 `on-failure` + 有界 `max_attempts` → `failed` | 默认 `always` / 无限重试 | 组件不在 LKG，崩溃无可回退版本；无限重启会把配置错误伪装成不稳定（§5.3） |
+| oneshot 的重启 | snowluma 用 `never`，只负责开头一次 `up -d`；`always`/`on-failure` 在本契约无差异 | `always` 自动重跑 `up -d` | `down` 无差别，自动重拉可能误伤别人起的项目（§5.10.2） |
 
 ---
 
@@ -969,7 +1292,7 @@ unit 的 `WorkingDirectory` 会原样传给 bridge 子进程（launcher 不另�
 
 | 步骤 | 内容 | 依赖 | 验证 |
 |---|---|---|---|
-| P0 | **拆分分发**：acbl 独立包（NixOS 由 nix-config 提供）+ payload 收窄 + `acb-contract.json` 声明与校验（B-12 已实现） | 无 | acbl 不在 generation 里；unit 指向静态入口；不兼容 payload 被拒绝切换；旧 payload 在过渡期仍能启动 |
+| P0 | **拆分分发**：acbl 独立包（NixOS 由 nix-config 只提供包）+ payload 收窄 + `acb-contract.json` 声明与校验（B-12 已实现） | 无 | acbl 不在 generation 里；unit 指向静态入口；不兼容 payload 被拒绝切换；旧 payload 在过渡期仍能启动 |
 | P1 | 组件表 schema + `supervisor.toml` 解析（bridge 之外的 `[[component]]`） | P0 | 配置文件能加载；非法字段报错；不启动任何新组件时行为与现在一致 |
 | P2 | supervisor 多组件 Runner：每组件独立 `Option<Child>`、进程组、独立停止 | P1 | 起 2 个假组件，kill 一个不影响另一个；脚本后台孙进程随组停止 |
 | P3 | 每组件健康探针 + 退避 + 独立状态文件 | P2 | 组件失败重试到上限后标 failed，acbl 不退出；`state/components/*.json` 可读 |
@@ -978,6 +1301,8 @@ unit 的 `WorkingDirectory` 会原样传给 bridge 子进程（launcher 不另�
 | P6 | `acbctl status` 展示组件表；日志分流；控制台只读展示 | P3 | 状态里能看到每个组件的 pid/健康/重启次数/最近错误 |
 | P7 | systemd 适配器与自定义 init 文档对齐（三种启动方式） | P2 | 78 仍由外部单元识别；升级不再用 75；组件失败不触发 75/78；安装器参数覆盖 A/B/C |
 | P8 | 控制台“重新加载组件表”按钮 + 校验/回滚语义 | P1 P4 | 非法新表不动运行中组件；变更失败回滚；返回逐组件结果并写审计 |
+| P9 | acbl 运行时 unit 注册（§4.9）：`acbctl unit install/remove/status`，生成标记、漂移拒绝、默认不 enable | P7 | unit 由 acbl 生成且不在 nix store；重复 install 幂等；无标记同名 unit 报 `unit_conflict`；`is-enabled` 保持 disabled |
+| P10 | nix-config 清理（操作，非代码）：按 §5.8 阶段 B 删除五个定义 | P0–P4 全部验收 + P9 可用 | nix-config 仅剩 `acbl` 包；`list-unit-files` 无 ACB 单元；整栈由 acbl 托管 |
 
 ---
 
@@ -992,9 +1317,13 @@ unit 的 `WorkingDirectory` 会原样传给 bridge 子进程（launcher 不另�
 5. **契约版本化（B-12 已实现）**：声明在 payload 根 `acb-contract.json`；acbl 只支持 `contract = 1`，三处校验点分别拒绝 add / 拒绝切换 / 启动退 78（§6.4）。
 6. **谁启动 acbl**：三类并列，安装器参数选择——A 用户终端手工、B systemd 开机自启、C systemd 只守护不自启；无 systemd 由用户自管（D）。差异见 §4.3，接口用 `ACB_MANAGED_BY` / `ACB_UNIT_INSTALL_SECTION` / `ACB_UNIT_SCOPE` / `ACB_LOG_TARGET` 预留。
 7. **热加载**：不做自动热加载；只做控制台按钮，加载对象是 `[[component]]`，失败保留旧表（§4.6）。
-8. **drivers**：v1 作为单个组件（`drivers_acb`），理由是代码事实（§5.5）；单驱动死亡要通过“脚本整体退出”暴露给 acbl。**会话列表必须从配置/库读取（与 `[[sessions]]` 同一数据源），不得写死在 preset 脚本里**。
-9. **控制台**：短期只读；长期允许“选预设 / 开关 / 白名单字段”，不允许任意命令，前置条件见 §5.8。
+8. **drivers**：v1 作为单个组件（`drivers_acb`），理由是代码事实（§5.10.1）；单驱动死亡要通过“脚本整体退出”暴露给 acbl。**会话列表必须从配置/库读取（与 `[[sessions]]` 同一数据源），不得写死在 preset 脚本里**。
+9. **控制台**：短期只读；长期允许“选预设 / 开关 / 白名单字段”，不允许任意命令，前置条件见 §5.12。
 10. **bridge 生命周期独立于 acbl**：acbl 是观察者 + 恢复者；acbl 停止 / 崩溃 / 升级期间 bridge 继续运行；重启后先探测身份再 adopt，禁止盲起；systemd unit 用 `KillMode=process`（§4.7）。
+11. **nix-config 只提供 acbl 包**：不得声明任何 ACB 相关 service / target / timer；五个现有定义全部移除（§2.4.1）。unit 由 acbl 运行时生成（§4.9），**安装与 enable 分离**，默认不 enable。
+12. **迁移顺序固定为“搬 → 删 → 补注册能力”**：先让组件在 acbl 侧跑通，再删 nix-config，最后落盘 acbl 自己的 unit；禁止先删后搬（§5.8）。
+13. **snowluma 侧车进 v1，但只做最小形态**：`type = "oneshot"` + 预设脚本，`file` / `compose_bin` 只来自配置，`stop_action` 默认 `leave_running`；能力上限是“拉起 / 关闭 / 端口探活”，不做 PID adopt、不声称只关自己启动的实例（§5.10.2）。
+14. **组件重启默认 `on-failure` + 有界重试**（`max_attempts`、退避上限，用尽进 `failed` 终态），不是 `always`；`never` 只负责 acbl 启动时拉一次；组件失败不触发 78、不写 `current.json`、不参与 LKG（§5.3 / §5.7）。
 
 **仍待决：**
 
@@ -1016,3 +1345,5 @@ unit 的 `WorkingDirectory` 会原样传给 bridge 子进程（launcher 不另�
 **acbl 是独立安装的静态监管者，payload 是它监管的迭代内容：升级只切 payload、只重启 bridge，acbl 全程不动。** 因此不需要 `restart_owner`，也不需要“退出 75 等外部重拉”；75 退役为兼容值，78 保留。要变成组件管理者，缺的仍是多组件表、进程组、每组件健康/重启策略和预设装载；预设按安装方式拆分并随 acbl 安装，同一组件只能启用一个来源。代价是 acbl↔payload 的接口必须版本化：payload 根 `acb-contract.json` 声明 `contract` / `min_acbl` / `layout` / `commands`，acbl 只支持 `1..=1`（B-12 已实现），否则两个独立分发单元会悄悄失配。
 
 **acbl 还是 bridge 的观察者与恢复者，不是所有者：** bridge 的生命周期独立于 acbl，acbl 停止 / 崩溃 / 升级期间 bridge 继续服务，新 acbl 启动先按身份端点探测再 adopt，禁止盲起第二个实例；无守护窗口是被接受的代价（§4.7）。分发上分两条路：nix 环境用本仓库 flake 的 `acbl` package（§2.5.7），非 nix 环境出 `tar.gz`——gnu 制品钉死最低 glibc 基线，musl 制品里的 acbl 全静态，但 **bridge 在 musl 上必须是动态链接**（`.so` 插件靠 `dlopen`，静态 musl 不支持动态加载），所以 acbl 与 payload 必须按同一 libc 家族配对交付（§2.5）。
+
+**nix-config 的边界同时收紧：只提供 `acbl` 包，不声明任何 ACB 单元。** 现有 `acb-bridge.service`、`acb-stack.target`、`dsh-acb`、`acb-drivers`、`acb-opencode-serve` 五个定义最终全部删除；acbl 新增运行时 unit 注册（§4.9），但“生成 unit”与“enable”分离——默认只落盘不启用。迁移只能按“搬 → 删 → 补注册能力”的顺序，先删后搬等于让整栈失去所有启动者（§5.8）。
