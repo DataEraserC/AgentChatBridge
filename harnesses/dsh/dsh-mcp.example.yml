@@ -25,7 +25,7 @@
 #   ① web 的 patch 提供 LLM provider（含 apiKey，环境相关，**不进仓库**）。
 #      缺它会报 no adapter registered for provider "new-api-..."（NO_ADAPTER）。
 #   ② 仓库的 patch 提供 agent preset。
-#      缺它会报 Unknown agent preset: acb-dsh，session 连 resume 都做不到。
+#      缺它会报 Unknown agent preset: acb-dsh-qas，session 连 resume 都做不到。
 #
 # 必须用 `dsh-real` 而不是 PATH 里的 `dsh`：后者是 dsh-seed-profile 的包装器，
 # 会按模板重建 profile，把 --patch 注入的东西洗掉。
@@ -40,42 +40,44 @@
 #
 #   - id: agent-preset-registry          # 改已有条目，这样写没问题
 #     config:
-#       default: acb-dsh
+#       default: acb-dsh-qas
 #
-# 但**新增**条目不能这么写。只写 - id: preset-acb-dsh 而该条目不存在时，dsh 会报
-#   patch: entry "preset-acb-dsh" not found
+# 但**新增**条目不能这么写。只写 - id: preset-acb-dsh-qas 而该条目不存在时，dsh 会报
+#   patch: entry "preset-acb-dsh-qas" not found
 # 然后**静默忽略**这一条——看起来 patch 成功了，实际什么都没加。
 #
 # 新增必须写成没有 id 的 insert，insert 的值就是新条目列表：
 #
 #   - insert:
-#       - id: preset-acb-dsh
+#       - id: preset-acb-dsh-qas
 #         name: '@deepseek-ai/dsh-agent-preset'
 #         config:
-#           id: acb-dsh
+#           id: acb-dsh-qas
 #           order: 10
 #           plugins: [...]
 #
 # 验证 patch 是否正确，用 --dump-config 空跑（只打印组合后的配置树，不启动服务）：
 #
-#   dsh-real --profile nix-web-acb --patch <文件> --dump-config | grep preset-acb-dsh
+#   dsh-real --profile nix-web-acb --patch <文件> --dump-config | grep preset-acb-dsh-qas
 #
 # ---------------------------------------------------------------------------
-# 两个 driver 进程（常驻，不是 dsh spawn），各自连桥 + 各自端口
+# 每个 dsh 会话一个常驻 driver 进程（不是 dsh spawn），各自连桥 + 各自端口
 # ---------------------------------------------------------------------------
 #
-#   # 会话一（token = config.toml 里 dsh 会话的 token）
+#   # 会话一（token = config.toml 里 dsh-qas 会话的 token）
 #   ACB_ENDPOINT=127.0.0.1:7700 ACB_TOKEN=ea0e40... ACB_HARNESS=dsh \
-#     ACB_PRESET=acb-dsh ACB_MCP_PORT=3101 \
+#     ACB_PRESET=acb-dsh-qas ACB_MCP_PORT=3101 \
 #     DSH_BASE_URL=http://127.0.0.1:3080 \
 #     node harnesses/dsh/src/driver.mjs
 #
-#   # 会话二（token = dsh-group2 会话的 token）
+#   # 会话四（token = dsh-group2 会话的 token）
 #   ACB_ENDPOINT=127.0.0.1:7700 ACB_TOKEN=3f7a1c... ACB_HARNESS=dsh \
-#     ACB_PRESET=acb-dsh-group2 ACB_MCP_PORT=3102 \
+#     ACB_PRESET=acb-dsh-group2 ACB_MCP_PORT=3104 \
 #     DSH_BASE_URL=http://127.0.0.1:3080 \
 #     node harnesses/dsh/src/driver.mjs
 #
+# preset 与端口的唯一规则：preset = acb-<会话 id>，端口 = 3101 + [[sessions]] 下标，
+# 实际值用 `acbctl sessions --config <config>` 查看。
 # driver 建 dsh session 时传 agentPreset（ACB_PRESET），于是：
-#   - dsh 会话 dsh         → agentPreset=acb-dsh        → 只看到 3101 那套工具
-#   - dsh 会话 dsh-group2  → agentPreset=acb-dsh-group2 → 只看到 3102 那套工具
+#   - dsh 会话 dsh-qas     → agentPreset=acb-dsh-qas     → 只看到 3101 那套工具
+#   - dsh 会话 dsh-group2  → agentPreset=acb-dsh-group2  → 只看到 3104 那套工具
