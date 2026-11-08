@@ -73,13 +73,14 @@ fn main() -> ExitCode {
 
     let state_dir = PathBuf::from(&config.state_dir);
     let owned_path = acb::supervisor_owner::owned_config_path(&state_dir);
+    let components_dir = acb_supervisor::component_state::state_root(&state_dir).join("components");
     if external_requested && path != owned_path {
         eprintln!(
             "acb-launcher: using external config {} (migration mode): \
-             this file stays read-only; component state is written under {}/components \
+             this file stays read-only; component state is written under {} \
              and is not written back to it",
             path.display(),
-            state_dir.display()
+            components_dir.display()
         );
         match acb::supervisor_owner::seed_if_missing(&state_dir, &path, &config, &config_text) {
             Ok(acb::supervisor_owner::SeedOutcome::Existing) => {}

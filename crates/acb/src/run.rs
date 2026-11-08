@@ -278,11 +278,14 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
                 None => PathBuf::from(&config.state_dir),
             };
             if external {
+                let components_dir =
+                    acb_supervisor::component_state::state_root(&effective_state_dir)
+                        .join("components");
                 eprintln!(
                     "acbctl run: using external config {} (migration mode): \
-                     this file stays read-only; component state is written under {}/components",
+                     this file stays read-only; component state is written under {}",
                     config_path.display(),
-                    effective_state_dir.display()
+                    components_dir.display()
                 );
             }
             let config_sha = sha256_hex(config_text.as_bytes());
