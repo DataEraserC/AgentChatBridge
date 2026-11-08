@@ -14,8 +14,9 @@ use acb_kernel::{
     DeliveryRequest, DependencyRegistry, Element, ErrorCode, EventQueue, ExtensionPoint, Feedbacks,
     Ingest, ManagerManifest, ManagerPlugin, MemoryStore, NoteKey, NoteKind, Notes, NoticeEvent,
     NoticeSink, Outbound, OutboundError, PLUGIN_API_VERSION, PluginError, PluginManager,
-    ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision,
-    ReceiveProvider, ReceiveRequest, RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision,
+    ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, QuoteUnavailable,
+    ReceiveDecision, ReceiveProvider, ReceiveRequest, RecordDraft, RoomId, RouteAction,
+    RouteContext, RouteDecision,
     RoutePolicy, RouteProvider, RouteWorker, SendContext, SendHook, Sender, Sent, Transcript,
     TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest, TurnFailure, TurnReason,
     WakeContext, WakeDecision, WakePolicy, WakeProvider, WakeVerdict, Watermarks, drain_events,
@@ -3528,11 +3529,15 @@ fn quotes_carry_the_local_watermark_number() {
     let quote_ref = quoted.quote_ref.as_ref().expect("引用了就该有 quote_ref");
     assert_eq!(quote_ref.platform_id, "p-100");
     assert_eq!(quote_ref.id, Some(1), "翻成的是本房间的 #1");
+    let excerpt = quote_ref.excerpt.as_ref().expect("同房间取得到内容");
+    assert_eq!(excerpt.sender.name, "老王");
+    assert_eq!(excerpt.text, "只发子网");
+    assert!(quote_ref.unavailable.is_none(), "取到了就不该再给原因");
     assert_eq!(quoted.quote_of(), Some("p-100"));
 }
 
-/// 引用一条本房间没有的消息（被清理了、或者别的房间的）：只能给平台编号，
-/// 不能编一个编号出来。
+/// 引用一条哪个房间都没有的消息（被清理了）：只能给平台编号，
+/// 不能编一个编号出来，也不能编内容。
 #[test]
 fn a_quote_outside_the_room_has_no_local_id() {
     let (mut bridge, _sends) = bridge();
@@ -3560,6 +3565,58 @@ fn a_quote_outside_the_room_has_no_local_id() {
         .expect("查不到也要留个说法");
     assert_eq!(quote_ref.platform_id, "gone");
     assert_eq!(quote_ref.id, None);
+    assert!(quote_ref.excerpt.is_none(), "查不到就不能编内容");
+    assert_eq!(quote_ref.unavailable, Some(QuoteUnavailable::Missing));
+}
+
+/// 引用一条**别的房间**的消息：能看出它确实存在，但内容一律不投。
+#[test]
+fn a_quote_from_another_room_is_marked_unavailable_without_content() {
+    // 别的房间没被订阅，走 ingest 会被挡在门外；直接预置进流水，模拟「桥里确实有这条，
+    // 但它不在当前会话的可见范围」。
+    let mut store = MemoryStore::new();
+    store
+        .append(message("qq:group/456", "10001", "别的房间的话", false).with_platform_id("p-200"))
+        .expect("能记下来");
+    let mut bridge = Bridge::new(
+        acb_kernel::Config::parse_fixture(config()).expect("配置合法"),
+        store,
+        Box::new(Recorder {
+            sends: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let reply = RecordDraft::message(
+        room_of("qq:group/123"),
+        Sender {
+            id: "10002".to_owned(),
+            name: "小李".to_owned(),
+            role: None,
+        },
+        AT,
+        vec![Element::Quote {
+            message_id: "p-200".to_owned(),
+        }],
+        true,
+    );
+    bridge
+        .ingest(reply.with_platform_id("p-201"))
+        .expect("能记下来");
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
+    let quote_ref = delivery.records[0]
+        .quote_ref
+        .as_ref()
+        .expect("查不到也要留个说法");
+    assert_eq!(quote_ref.id, None);
+    assert!(
+        quote_ref.excerpt.is_none(),
+        "别的房间的内容不能因为「想看引用」就投给这个会话"
+    );
+    assert_eq!(
+        quote_ref.unavailable,
+        Some(QuoteUnavailable::OtherRoom),
+        "要能区分「别的房间」和「根本没有」"
+    );
 }
 
 /// get_history 里也能专门要这一列：不对齐的时候不用再手算。

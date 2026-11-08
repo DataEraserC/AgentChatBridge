@@ -18,6 +18,6 @@ pub use frame::{
     Delivery, ErrorCode, Frame, LogLevel, MemoryInfo, Omitted, PersonaInfo, PromptFragment,
     SessionInfo, SessionMapRef, ToolError, TurnFailure, TurnReason,
 };
-pub use record::{QuoteRef, Record, RecordKind, Sender, SenderRole};
+pub use record::{QuoteExcerpt, QuoteRef, QuoteUnavailable, Record, RecordKind, Sender, SenderRole};
 pub use room::RoomId;
 pub use ticket::Ticket;

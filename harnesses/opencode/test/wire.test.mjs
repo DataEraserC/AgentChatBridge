@@ -393,11 +393,27 @@ test("桥算好了引用对齐就并排显示，模型不用自己映射平台�
     id: 621,
     at_self: true,
     elements: [{ type: "quote", message_id: "-1179324851" }, { type: "text", text: "对的对的" }],
-    quote_ref: { platform_id: "-1179324851", id: 117 },
+    quote_ref: {
+      platform_id: "-1179324851",
+      id: 117,
+      excerpt: { sender: { id: "10002", name: "小李" }, text: "只发子网" },
+    },
   }
   const text = renderTurn({ ...delivery(), records: [record] }, { now: Date.now() })
-  assert.match(text, /\[引用 #117\]/, `该用本房间编号：${text}`)
+  assert.match(text, /\[引用 #117 小李：只发子网\]/, `引用要带实际内容：${text}`)
   assert.ok(!text.includes("-1179324851"), `平台编号不该再出现在正文里：${text}`)
+})
+
+test("引用内容跨房间时不越权，明确说是看不到", () => {
+  const record = {
+    ...delivery().records[0],
+    id: 623,
+    elements: [{ type: "quote", message_id: "elsewhere" }, { type: "text", text: "看这个" }],
+    quote_ref: { platform_id: "elsewhere", unavailable: "other_room" },
+  }
+  const text = renderTurn({ ...delivery(), records: [record] }, { now: Date.now() })
+  assert.match(text, /\[引用（内容不可取：引的是其他房间的消息，当前会话看不到）\]/)
+  assert.ok(!text.includes("elsewhere"), `不能把别的房间的编号当成本房间编号：${text}`)
 })
 
 test("引用的是本房间没有的消息时要说实话，不能瞎给编号", () => {
@@ -405,10 +421,11 @@ test("引用的是本房间没有的消息时要说实话，不能瞎给编号",
     ...delivery().records[0],
     id: 622,
     elements: [{ type: "quote", message_id: "gone" }, { type: "text", text: "？" }],
-    quote_ref: { platform_id: "gone" },
+    quote_ref: { platform_id: "gone", unavailable: "missing" },
   }
   const text = renderTurn({ ...delivery(), records: [record] }, { now: Date.now() })
-  assert.match(text, /\[引用 #gone，本房间历史里没有这条\]/)
+  assert.match(text, /\[引用（内容不可取：本房间历史里没有这条，可能已被清理）\]/)
+  assert.ok(!text.includes("#gone"), `不能拿平台编号冒充本房间编号：${text}`)
 })
 
 test("被撤回的消息在轮次里明确标记", () => {
@@ -471,7 +488,7 @@ test("内容元素都摊得开，平台内容原样摊给模型", () => {
   assert.match(text, /\[图片 https:\/\/x\/1\.png\]/)
   assert.match(text, /@10001/)
   assert.match(text, /@全体成员/)
-  assert.match(text, /\[引用 #9\]/)
+  assert.match(text, /\[引用（内容不可取：桥没有解析这条引用）\]/)
   assert.match(text, /\[表情 14\]/)
   // 桥不解释平台语义，但原始载荷必须送到模型眼前，不能只剩一句占位。
   assert.match(text, /qq 平台特有内容/)
@@ -501,14 +518,19 @@ test("平台载荷过长会截断，但绝不整段吞掉", () => {
   assert.ok(text.length < 1000, `不能把上下文撑爆：${text.length}`)
 })
 
-test("事件记录里的原始载荷不摊开，只给流水编号让 agent 自己查", () => {
+test("事件记录里的原始载荷不摊开，但给一句可读摘要", () => {
   // 未解析事件的降级存法（ADR-0004 补充裁定 2026-10-31）：载荷存流水，
-  // 投递不塞上下文。渲染要给编号 + 查法，否则模型不知道细节去哪找；
-  // 但只有本轮工具面里真的有 fetch_records 时才推荐它，避免 unknown tool。
+  // 投递不塞上下文。但空白占位读不懂，至少要给事件类型、来自谁、关键字段；
+  // 原始载荷落点仍然保留，只有本轮工具面里真的有 fetch_records 时才推荐它。
   const record = {
     id: 87,
     room: { connection: "qq", path: ["group", "158296748"] },
-    kind: { kind: "event", event: "group_msg_emoji_like", tags: ["notice", "reaction"] },
+    kind: {
+      kind: "event",
+      event: "group_msg_emoji_like",
+      tags: ["notice", "reaction"],
+      payload: { notice_type: "group_msg_emoji_like", sub_type: "add", emoji_id: "5", user_id: 10002 },
+    },
     sender: { id: "10002", name: "小明" },
     at: Date.now(),
     elements: [
@@ -519,8 +541,13 @@ test("事件记录里的原始载荷不摊开，只给流水编号让 agent 自�
   const text = renderTurn({ ...delivery(), records: [record] }, { now: Date.now() })
 
   assert.match(text, /#87/)
+  assert.match(text, /平台事件 group_msg_emoji_like/)
+  assert.match(text, /来自 小明/)
+  assert.match(text, /关键字段 sub_type=add/, `关键字段要写成人话：${text}`)
+  assert.match(text, /原始载荷已存流水（#87）/)
   assert.ok(!text.includes("fetch_records"), `工具面没有 fetch_records 时不能推荐：${text}`)
   assert.ok(!text.includes("emoji_id"), `原始载荷不该进上下文：${text}`)
+  assert.ok(!text.includes("user_id"), `纯编号字段不该堆进摘要：${text}`)
 
   const withTool = renderTurn(
     { ...delivery(), records: [record] },

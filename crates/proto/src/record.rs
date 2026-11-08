@@ -31,6 +31,28 @@ pub struct Sender {
     pub role: Option<SenderRole>,
 }
 
+/// 被引用消息的一小段摘要。只在「本房间能取到」时出现。
+///
+/// 引用可能指向别的房间（当前会话看不到）或已被清理；这两种情况一律不给内容，
+/// 只通过 [`QuoteRef::unavailable`] 说明是哪一种。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuoteExcerpt {
+    /// 被引用消息的发送者（本房间记录里的那个）。
+    pub sender: Sender,
+    /// 被引用消息的纯文本摘要（已压成一行并截断）。
+    pub text: String,
+}
+
+/// 引用内容取不到的原因。只解释，不给内容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuoteUnavailable {
+    /// 这个平台编号在同连接的其它房间里存在——当前会话看不到那边的消息。
+    OtherRoom,
+    /// 本连接任何房间都没有这条：被清理了，或者从没入库。
+    Missing,
+}
+
 /// 这条消息引用的是本房间里的哪条记录。
 ///
 /// 平台只告诉引用对象自己的消息编号（`-1179324851` 这种），模型手上拿的是本房间的
@@ -43,6 +65,12 @@ pub struct QuoteRef {
     /// 本房间的水位编号；`None` = 这个房间里查不到（不在这轮历史里，或被清理了）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
+    /// 本房间能看到的被引用消息摘要。`None` = 取不到（原因见 `unavailable`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<QuoteExcerpt>,
+    /// 取不到内容时的原因；`id` 有值时为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<QuoteUnavailable>,
 }
 
 /// 这条记录是消息还是事件。
@@ -303,6 +331,15 @@ mod tests {
         record.quote_ref = Some(QuoteRef {
             platform_id: "-1179324851".into(),
             id: Some(621),
+            excerpt: Some(QuoteExcerpt {
+                sender: Sender {
+                    id: "10001".into(),
+                    name: "老王".into(),
+                    role: None,
+                },
+                text: "只发子网".into(),
+            }),
+            unavailable: None,
         });
 
         assert_eq!(record.quote_of(), Some("-1179324851"));
@@ -310,15 +347,23 @@ mod tests {
         let value = serde_json::to_value(&record).expect("可序列化");
         assert_eq!(value["quote_ref"]["platform_id"], "-1179324851");
         assert_eq!(value["quote_ref"]["id"], 621);
+        assert_eq!(value["quote_ref"]["excerpt"]["sender"]["name"], "老王");
+        assert_eq!(value["quote_ref"]["excerpt"]["text"], "只发子网");
+        assert!(
+            value["quote_ref"].get("unavailable").is_none(),
+            "取到了内容就不该再给原因"
+        );
     }
 
-    /// 查不到的引用也要说实话：`id` 缺省，不编一个 0 出来。
+    /// 查不到的引用也要说实话：`id` 缺省，不编一个 0 出来；原因单独给。
     #[test]
     fn unresolved_quote_ref_has_no_id() {
         let mut record = sample();
         record.quote_ref = Some(QuoteRef {
             platform_id: "gone".into(),
             id: None,
+            excerpt: None,
+            unavailable: Some(QuoteUnavailable::Missing),
         });
         let value = serde_json::to_value(&record).expect("可序列化");
         assert_eq!(value["quote_ref"]["platform_id"], "gone");

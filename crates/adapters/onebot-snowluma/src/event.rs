@@ -214,9 +214,15 @@ fn notice(
             .map(|sub| sub != "remove")
             .unwrap_or(true);
         let body = match (added, emoji.is_empty()) {
-            (true, false) => format!("[表情回应] 给消息 {target} 加了 {emoji}"),
+            (true, false) => format!(
+                "[表情回应] 给消息 {target} 加了 {}",
+                crate::emoji::describe_face(&emoji)
+            ),
             (true, true) => format!("[表情回应] 给消息 {target} 加了表情"),
-            (false, false) => format!("[表情撤销] 给消息 {target} 撤了 {emoji}"),
+            (false, false) => format!(
+                "[表情撤销] 给消息 {target} 撤了 {}",
+                crate::emoji::describe_face(&emoji)
+            ),
             (false, true) => format!("[表情撤销] 给消息 {target} 撤了表情"),
         };
         let mut elements = vec![Element::text(body.clone())];
@@ -986,7 +992,7 @@ mod tests {
                     && tags.iter().any(|tag| tag == "reaction")
                     && tags.iter().any(|tag| tag == "reaction_add")
                     && summary.as_deref()
-                        == Some("[表情回应] 给消息 592852179 加了 0123456789abcdef0123456789abcdef")
+                        == Some("[表情回应] 给消息 592852179 加了 表情 0123456789abcdef0123456789abcdef（未知）")
                     && !*body
         ));
         match &draft.elements[2] {
@@ -1029,7 +1035,7 @@ mod tests {
             acb_proto::RecordKind::Event { tags, summary, .. }
                 if tags.iter().any(|tag| tag == "reaction_remove")
                     && !tags.iter().any(|tag| tag == "reaction_add")
-                    && summary.as_deref() == Some("[表情撤销] 给消息 592852179 撤了 5")
+                    && summary.as_deref() == Some("[表情撤销] 给消息 592852179 撤了 流泪（5）")
         ));
     }
 

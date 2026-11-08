@@ -564,24 +564,69 @@ export function renderTurn(delivery, { now = Date.now(), tools = null } = {}) {
  *
  * **消息**里的 opaque（合并转发、卡片、embed）照旧原样摊开——「桥不解释」
  * 不等于「模型看不见」（ADR-0004）。
- * **事件**里的 opaque 是未解析事件的原始载荷（无解析实现的降级存法，
+ * **事件**里的 opaque 是平台事件的原始载荷（无解析实现的降级存法，
  * ADR-0004 补充裁定 2026-10-31）：不在投递里摊开——事件载荷动辄几十个字段，
- * 塞上下文纯烧 token，绝大多数轮次根本用不上。投递只给流水编号，agent
- * 真想看细节时用 fetch_records 按编号拉完整记录。
+ * 塞上下文纯烧 token，绝大多数轮次根本用不上。投递只给一句可读摘要（事件类型、
+ * 来自谁、关键字段）加流水编号；agent 真想看细节时用 fetch_records 按编号拉完整记录。
  */
 function deliverableElements(record, { showFetchHint = false } = {}) {
   const elements = record.elements ?? []
   if (record.kind?.kind !== "event") return elements
+  const pointer = showFetchHint
+    ? `原始载荷已存流水，想看用 fetch_records 查 #${record.id}`
+    : `原始载荷已存流水（#${record.id}），需要时按编号回看`
+  const summary = eventSummary(record, pointer)
   return elements.map((element) =>
-    element.type === "opaque"
-      ? {
-          type: "text",
-          text: showFetchHint
-            ? `[未解析的平台事件，原始载荷已存流水，想看用 fetch_records 查 #${record.id}]`
-            : `[未解析的平台事件，原始载荷已存流水（#${record.id}），需要时按编号回看]`,
-        }
-      : element,
+    element.type === "opaque" ? { type: "text", text: summary } : element,
   )
+}
+
+/**
+ * 未摊开的平台事件 → 可读摘要。
+ *
+ * 只说三件模型立刻用得上的事：事件类型、来自谁、几个关键字段；原始载荷仍然只给
+ * 流水编号作为兜底。纯编号字段（`*_id`）不再重复堆进来——抬头已经有发送者，
+ * 正文里也常有目标，堆一串 id 只会把可读性拉回去。
+ */
+const EVENT_NOISE_FIELDS = new Set([
+  "post_type",
+  "notice_type",
+  "message_type",
+  "time",
+  "self_id",
+  "raw_message",
+  "message",
+])
+const MAX_EVENT_FIELDS = 5
+const MAX_EVENT_FIELD_CHARS = 40
+
+function eventSummary(record, pointer) {
+  const parts = []
+  const type = record.kind?.event
+  if (type) parts.push(`平台事件 ${type}`)
+  const who = record.sender?.name || record.sender?.id
+  if (who) parts.push(`来自 ${who}`)
+  const fields = eventKeyFields(record.kind?.payload)
+  if (fields.length) parts.push(`关键字段 ${fields.join("、")}`)
+  return parts.length ? `[${parts.join("，")}；${pointer}]` : `[${pointer}]`
+}
+
+function eventKeyFields(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return []
+  const fields = []
+  for (const [key, value] of Object.entries(payload)) {
+    if (EVENT_NOISE_FIELDS.has(key) || key === "id" || key.endsWith("_id")) continue
+    if (value === null || typeof value === "object") continue
+    const text = oneLine(value)
+    if (!text) continue
+    const shown =
+      text.length > MAX_EVENT_FIELD_CHARS
+        ? `${text.slice(0, MAX_EVENT_FIELD_CHARS)}…`
+        : text
+    fields.push(`${key}=${shown}`)
+    if (fields.length >= MAX_EVENT_FIELDS) break
+  }
+  return fields
 }
 
 /** 桥给的发送者身份 → 中文标签。判不出（空/不认识）返回空串。 */
@@ -624,14 +669,7 @@ export function renderElements(elements, { quoteRef } = {}) {
         break
       case "quote": {
         const ref = quoteRef && quoteRef.platform_id === element.message_id ? quoteRef : null
-        if (ref && ref.id != null) {
-          parts.push(`[引用 #${ref.id}]`)
-        } else if (ref) {
-          // 桥说这个房间里查不到——可能被清理了，也可能引的是别的房间的消息。
-          parts.push(`[引用 #${element.message_id ?? "?"}，本房间历史里没有这条]`)
-        } else {
-          parts.push(`[引用 #${element.message_id ?? "?"}]`)
-        }
+        parts.push(renderQuote(ref))
         break
       }
       case "image":
@@ -671,7 +709,37 @@ export function renderElements(elements, { quoteRef } = {}) {
 }
 
 /**
- * 平台特有内容 → 「可以怎么取」的一句话提示。
+ * 引用段 → 给人看的一句。
+ *
+ * 桥能取到被引消息时，带上本房间编号、发送者和正文摘要；取不到时只说实话，
+ * 不拿平台编号冒充本房间编号。原因分三种：别的房间（越权，看不到）、本房间没有
+ * （被清理或没入库）、桥根本没解析这条引用。
+ */
+function renderQuote(ref) {
+  if (!ref) return "[引用（内容不可取：桥没有解析这条引用）]"
+  if (ref.id == null) {
+    return ref.unavailable === "other_room"
+      ? "[引用（内容不可取：引的是其他房间的消息，当前会话看不到）]"
+      : "[引用（内容不可取：本房间历史里没有这条，可能已被清理）]"
+  }
+  const excerpt = ref.excerpt
+  if (!excerpt) return `[引用 #${ref.id}]`
+  const who = excerpt.sender?.name || excerpt.sender?.id || ""
+  const text = oneLine(excerpt.text)
+  if (who && text) return `[引用 #${ref.id} ${who}：${text}]`
+  if (who) return `[引用 #${ref.id} ${who}]`
+  if (text) return `[引用 #${ref.id}：${text}]`
+  return `[引用 #${ref.id}]`
+}
+
+/** 压成一行：投递里的每条记录只占一行，换行会把别人的话串到一起。 */
+function oneLine(value) {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+/** 平台特有内容 → 「可以怎么取」的一句话提示。
  *
  * 不主动展开正文（投递体积不可控、会撞平台限流、可能把别人的私聊带进不该看的群），
  * 也不指望模型自己去翻能力目录（它常常跳过这一步）。把动作写在内容旁边最省事。

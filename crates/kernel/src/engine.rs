@@ -22,8 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acb_proto::element::flatten_text;
 use acb_proto::{
-    Delivery, Element, ErrorCode, MemoryInfo, PersonaInfo, PromptFragment, QuoteRef, Record,
-    RecordKind, RoomId, Sender, SessionInfo, Ticket, ToolError, TurnFailure, TurnReason,
+    Delivery, Element, ErrorCode, MemoryInfo, PersonaInfo, PromptFragment, QuoteExcerpt, QuoteRef,
+    QuoteUnavailable, Record, RecordKind, RoomId, Sender, SessionInfo, Ticket, ToolError,
+    TurnFailure, TurnReason,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -5025,20 +5026,42 @@ impl<S: Store> Bridge<S> {
     /// 平台给的是它自己的编号（`-1179324851`），模型手上是 `#621`。以前这一步得模型
     /// 自己做，做不了就只能猜；现在两个号码并排给出来。
     ///
-    /// 查不到也留一个 `id: None` 的 `quote_ref`——「这个房间里没有那条」本身就是信息
-    /// （被清理了，或者引用的是别的平台/别的房间的消息），比什么都不给强。
+    /// 查得到时顺带摘一小段被引消息的发送者与正文——只看**本房间**的流水。查不到时
+    /// 留一个 `id: None` 的 `quote_ref`，并说明是「别的房间」还是「本房间没有」：
+    /// 两种都只能降级，绝不把别的房间的内容拿过来充数。
     fn fill_quote_refs(&self, room: &RoomId, records: &mut [Record]) {
         for record in records.iter_mut() {
             let Some(platform_id) = record.quote_of().map(str::to_owned) else {
                 continue;
             };
-            let id = self
-                .store
-                .located(room, &platform_id)
-                .ok()
-                .flatten()
-                .map(|found| found.id);
-            record.quote_ref = Some(QuoteRef { platform_id, id });
+            let found = self.store.located(room, &platform_id).ok().flatten();
+            record.quote_ref = Some(match found {
+                Some(found) => QuoteRef {
+                    platform_id,
+                    id: Some(found.id),
+                    excerpt: Some(QuoteExcerpt {
+                        sender: found.sender.clone(),
+                        text: quote_excerpt(&found),
+                    }),
+                    unavailable: None,
+                },
+                None => {
+                    let elsewhere = self
+                        .store
+                        .exists_elsewhere(room, &platform_id)
+                        .unwrap_or(false);
+                    QuoteRef {
+                        platform_id,
+                        id: None,
+                        excerpt: None,
+                        unavailable: Some(if elsewhere {
+                            QuoteUnavailable::OtherRoom
+                        } else {
+                            QuoteUnavailable::Missing
+                        }),
+                    }
+                }
+            });
         }
     }
 
@@ -9881,6 +9904,25 @@ fn column_set(given: Option<&[String]>) -> Result<Vec<&'static str>, ToolError> 
         return Ok(DEFAULT_COLUMNS.to_vec());
     }
     Ok(columns)
+}
+
+/// 被引用消息的一句话摘要：纯文本压成一行，过长截断。
+///
+/// 只用于投递里的引用提示，不是完整正文；完整内容仍在流水里。
+const QUOTE_EXCERPT_CHARS: usize = 120;
+
+fn quote_excerpt(record: &Record) -> String {
+    let one_line = flatten_text(&record.elements)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if one_line.chars().count() > QUOTE_EXCERPT_CHARS {
+        let mut out: String = one_line.chars().take(QUOTE_EXCERPT_CHARS).collect();
+        out.push('…');
+        out
+    } else {
+        one_line
+    }
 }
 
 /// 把一条记录按指定列序列化。

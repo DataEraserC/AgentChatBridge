@@ -94,6 +94,6 @@ pub use tools::{
 
 /// 协议类型顺手转出去：下游（接入点、适配器）依赖 kernel 一个 crate 就够。
 pub use acb_proto::{
-    Delivery, Element, ErrorCode, Frame, Omitted, PersonaInfo, Record, RecordKind, RoomId, Sender,
-    SenderRole, Ticket, ToolError, TurnFailure, TurnReason,
+    Delivery, Element, ErrorCode, Frame, Omitted, PersonaInfo, QuoteExcerpt, QuoteUnavailable,
+    Record, RecordKind, RoomId, Sender, SenderRole, Ticket, ToolError, TurnFailure, TurnReason,
 };

@@ -703,6 +703,24 @@ impl Transcript for SqliteStore {
         }
     }
 
+    fn exists_elsewhere(&self, room: &RoomId, platform_id: &str) -> Result<bool, StorageError> {
+        if platform_id.is_empty() {
+            return Ok(false);
+        }
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM records
+                 WHERE connection = ?1 AND platform_id = ?2 AND room_key <> ?3
+                 LIMIT 1",
+                params![room.connection, platform_id, room.key()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io_error)?;
+        Ok(found.is_some())
+    }
+
     fn add_labels(
         &mut self,
         room: &RoomId,

@@ -12,6 +12,7 @@
 //! 反向 WS 要桥当服务端，还没做。
 
 pub mod catalog;
+pub mod emoji;
 pub mod event;
 pub mod factory;
 pub mod forward;

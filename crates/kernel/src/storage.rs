@@ -249,6 +249,25 @@ pub trait Transcript {
     /// （ADR-0024）。同一编号出现两条时给最新的那条——平台会复用编号，取最近的才合理。
     fn located(&self, room: &RoomId, platform_id: &str) -> Result<Option<Record>, StorageError>;
 
+    /// 同一个连接里，**别的房间**有没有这条平台消息。
+    ///
+    /// 只为解释「引用内容为什么取不到」：跨房间的内容一律不投给模型，这里只回答
+    /// 有没有，不返回任何内容。默认实现按房间逐个查；SQLite 走更轻的定向查询。
+    fn exists_elsewhere(&self, room: &RoomId, platform_id: &str) -> Result<bool, StorageError> {
+        if platform_id.is_empty() {
+            return Ok(false);
+        }
+        for other in self.rooms()? {
+            if &other != room
+                && other.connection == room.connection
+                && self.located(&other, platform_id)?.is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// 给房间里平台编号为 `platform_id` 的最新一条记录追加标签。
     /// 找不到就返回 `false`；已有标签不重复添加。
     fn add_labels(
