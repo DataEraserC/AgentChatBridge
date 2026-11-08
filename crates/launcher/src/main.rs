@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use acb::profile;
 use acb_supervisor::adopted::AdoptedRunner;
+use acb_supervisor::component_runtime::ComponentManager;
 use acb_supervisor::instance::{self, DetectOutcome};
 use acb_supervisor::upgrade::{
     ActiveUpgrade, Capabilities, Mailbox, UPGRADE_SCHEMA, UpgradeResult, UpgradeTarget,
@@ -26,16 +27,39 @@ use acb_supervisor::upgrade::{
 use acb_supervisor::{
     ActivationWriter, CommandSpec, EXIT_GIVE_UP, EXIT_OK, EXIT_ROLLBACK, Parts, Probe,
     ProcessRunner, Projection, ReconcileOutcome, RollbackMode, Runner, Supervisor, SystemClock,
-    SystemSleeper, build_policy, load_config, load_current, now_ms,
+    SystemSleeper, build_policy, load_current, now_ms,
 };
 
 fn main() -> ExitCode {
-    let Some(path) = config_path() else {
-        eprintln!("usage: acb-launcher --config /path/to/supervisor.toml");
-        return ExitCode::from(2);
+    let (path, external_requested) = match config_path() {
+        Some(path) => (path, true),
+        None => {
+            // 没有 --config：acbl 自己渲染并维护 state/supervisor/supervisor.toml。
+            let state_dir = acb::profile::default_state_dir();
+            let source = if std::env::var_os("ACB_STATE_DIR").is_some() {
+                "ACB_STATE_DIR"
+            } else {
+                "XDG default"
+            };
+            match acb::supervisor_owner::ensure_owned_config(&state_dir, source) {
+                Ok(path) => (path, false),
+                Err(error) => {
+                    eprintln!("acb-launcher: cannot render self-owned config: {error}");
+                    return ExitCode::from(EXIT_GIVE_UP as u8);
+                }
+            }
+        }
     };
-    let mut config = match load_config(&path) {
-        Ok(config) => config,
+    let config_text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("acb-launcher: cannot read config {}: {error}", path.display());
+            return ExitCode::from(EXIT_GIVE_UP as u8);
+        }
+    };
+    let config_sha = acb::fsutil::sha256_hex(config_text.as_bytes());
+    let (mut config, components) = match acb_supervisor::load_supervisor_config(&path) {
+        Ok(loaded) => loaded,
         Err(error) => {
             eprintln!("acb-launcher: {error}");
             return ExitCode::from(EXIT_GIVE_UP as u8);
@@ -48,6 +72,35 @@ fn main() -> ExitCode {
     }
 
     let state_dir = PathBuf::from(&config.state_dir);
+    let owned_path = acb::supervisor_owner::owned_config_path(&state_dir);
+    if external_requested && path != owned_path {
+        eprintln!(
+            "acb-launcher: using external config {} (migration mode): \
+             this file stays read-only; component state is written under {}/components \
+             and is not written back to it",
+            path.display(),
+            state_dir.display()
+        );
+        match acb::supervisor_owner::seed_if_missing(&state_dir, &path, &config, &config_text) {
+            Ok(acb::supervisor_owner::SeedOutcome::Existing) => {}
+            Ok(acb::supervisor_owner::SeedOutcome::Created { path }) => {
+                eprintln!("acb-launcher: seeded self-owned config {}", path.display());
+            }
+            Ok(acb::supervisor_owner::SeedOutcome::Skipped { differences }) => {
+                eprintln!(
+                    "acb-launcher: WARN not seeding self-owned config: external config differs:"
+                );
+                for difference in differences {
+                    eprintln!("acb-launcher: WARN - {difference}");
+                }
+            }
+            Err(error) => {
+                eprintln!("acb-launcher: WARN cannot seed self-owned config: {error}");
+            }
+        }
+    } else {
+        eprintln!("acb-launcher: using self-owned config {}", path.display());
+    }
     if let Err(error) = std::fs::create_dir_all(&state_dir) {
         eprintln!(
             "acb-launcher: cannot create state dir {}: {error}",
@@ -133,6 +186,7 @@ fn main() -> ExitCode {
     // acbl 不拥有 bridge：启动前先确认有没有可验证的旧实例。有就接管，
     // 无法确认身份但有健康响应就报错，绝不再起一个去抢同一个端口。
     let instance_path = state_dir.join(instance::INSTANCE_FILE);
+    let instance_path_for_state = instance_path.clone();
     let healthy = probe.healthy();
     let runner: Box<dyn Runner> = match instance::detect(&instance_path, &current, healthy) {
         DetectOutcome::Vacant => Box::new(ProcessRunner::with_instance_file(instance_path)),
@@ -172,6 +226,34 @@ fn main() -> ExitCode {
     // 同一进程跨生命周期持有会自锁阻塞。
     drop(writer);
 
+    // P2：组件状态由内核自己落盘；enabled 默认 false，因此升级后现场一个组件
+    // 都不会起。初始化失败只告警，不影响 bridge 启动。
+    let instance_id = instance::read_record(&instance_path_for_state)
+        .ok()
+        .flatten()
+        .map(|record| record.instance_id);
+    let mut component_manager = match ComponentManager::new(
+        &state_dir,
+        &components,
+        &config_sha,
+        instance_id.as_deref(),
+        now_ms(),
+    ) {
+        Ok(manager) => {
+            if manager.enabled_count() > 0 {
+                eprintln!(
+                    "acb-launcher: {} enabled component(s) will be supervised",
+                    manager.enabled_count()
+                );
+            }
+            Some(manager)
+        }
+        Err(error) => {
+            eprintln!("acb-launcher: WARN cannot initialize component manager: {error}");
+            None
+        }
+    };
+
     // 启动能力声明：ACB 只在 restart_owner != none 时接受升级请求。
     if let Err(error) = announce_capabilities(&mailbox, &current, &state_dir) {
         eprintln!("acb-launcher: cannot write capabilities.json: {error}");
@@ -185,6 +267,11 @@ fn main() -> ExitCode {
 
     while !supervisor.stopped() {
         if shutdown::requested() {
+            // 组件先按逆依赖序停，再停 bridge；否则依赖 bridge 的组件会先看到
+            // 一个已经消失的 endpoint。
+            if let Some(manager) = component_manager.as_mut() {
+                manager.stop_all(now_ms());
+            }
             // unit 用 KillMode=process，cgroup 不会带走子进程，必须自己停：
             // 否则 systemctl stop / 回退到旧 unit 时，孤儿 bridge 占着端口，
             // 下一个进程只会 EADDRINUSE 然后 78。升级路径不经过这里——
@@ -201,8 +288,17 @@ fn main() -> ExitCode {
             eprintln!("acb-launcher: upgrade handling failed: {error}");
         }
         observe_upgrade(&supervisor, &mailbox, &state_dir);
+        if let Some(manager) = component_manager.as_mut() {
+            manager.tick(now_ms());
+        }
         notifier.watchdog();
         thread::sleep(Duration::from_millis(100));
+    }
+
+    // 升级 75 / 回滚 / 正常失败都走这里：先停组件，避免 systemd 重拉后
+    // 旧组件还活着而新 launcher 又起一份。
+    if let Some(manager) = component_manager.as_mut() {
+        manager.stop_all(now_ms());
     }
 
     if let Some(reason) = supervisor.failed() {
