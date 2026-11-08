@@ -321,7 +321,9 @@ fn converge_shutdown(
     if let Some(pid) = supervisor.child_pid() {
         roots.push(pid);
     }
-    let snapshot = proctree::Snapshot::capture_roots(&roots);
+    // 后代树之外再反查 unit cgroup：组件崩掉后 sidecar 会被 reparent 到 systemd，
+    // 但不会离开 unit cgroup（见 proctree 模块注释）。
+    let snapshot = proctree::Snapshot::capture_unit(&roots);
     // `leave_running` 的 oneshot 是使用者明确要求保留的，不能兜底误杀。
     let protect = component_manager
         .as_ref()
