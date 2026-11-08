@@ -17,6 +17,12 @@ const MANAGED_HEADER: &str = "# acb-managed:";
 const MANIFEST_NAME: &str = "acb-units.manifest.json";
 const MANIFEST_VERSION: u32 = 1;
 
+/// `acbctl unit install-user` 落盘的单元名与现役 nix-config 单元同名：
+/// 用户目录优先，安装后遮蔽 `/etc/systemd/user` 下的 nix 版本。
+const USER_UNIT_NAME: &str = "acb-bridge.service";
+const USER_UNIT_TEMPLATE: &str =
+    include_str!("../../../share/acb/units/acb-bridge-user.service.tmpl");
+
 /// 模板在编译期嵌入二进制，部署时不依赖仓库目录仍然存在。
 const TEMPLATES: &[(&str, &str)] = &[
     (
@@ -69,7 +75,12 @@ const OPTIONAL_KEYS: &[&str] = &[
     "ACB_UNIT_LAUNCHER_BIN",
     "ACB_UNIT_ACBL_PREFIX",
     "ACB_UNIT_STATE_DIR",
+    "ACB_UNIT_WORK_DIR",
     "ACB_UNIT_SUPERVISOR_CONFIG_FILE",
+    "ACB_UNIT_ENDPOINT_LISTEN",
+    "ACB_UNIT_CONSOLE_LISTEN",
+    "ACB_UNIT_RELAY_LISTEN",
+    "ACB_UNIT_SYSTEM_UNIT_DIR",
 ];
 
 const KEY_DEFAULTS: &[(&str, &str)] = &[
@@ -78,6 +89,10 @@ const KEY_DEFAULTS: &[(&str, &str)] = &[
     ("ACB_UNIT_OPENCODE_PORT", "4097"),
     ("ACB_UNIT_INSTALL_SECTION", "0"),
     ("ACB_UNIT_ACBL_PREFIX", "/usr/local"),
+    ("ACB_UNIT_ENDPOINT_LISTEN", "127.0.0.1:7700"),
+    ("ACB_UNIT_CONSOLE_LISTEN", "0.0.0.0:3100"),
+    ("ACB_UNIT_RELAY_LISTEN", "0.0.0.0:3131"),
+    ("ACB_UNIT_SYSTEM_UNIT_DIR", "/etc/systemd/user"),
 ];
 
 struct RenderedUnit {
@@ -232,6 +247,244 @@ pub fn uninstall_command(args: &[String]) -> Result<ExitCode, String> {
     println!("removed {MANIFEST_NAME}");
     print_reload_hint();
     Ok(ExitCode::SUCCESS)
+}
+
+/// 安装/启用 acbl 自己的 user 单元（`~/.config/systemd/user/acb-bridge.service`）。
+///
+/// 与 `unit install` 的区别：只写这一个单元、自动 `daemon-reload` 并 `enable`，
+/// 且 `ExecStart` 从 acbctl 自身安装前缀推导，不依赖 nix 的 `/run/current-system`。
+pub fn install_user_command(args: &[String]) -> Result<ExitCode, String> {
+    if is_help(args) {
+        print_install_user_help();
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(other) = args.first() {
+        return Err(format!("unknown argument for install-user: {other}"));
+    }
+
+    let values = resolved_user_unit_values()?;
+    let content = substitute("acb-bridge-user.service", USER_UNIT_TEMPLATE, &values)?;
+    let system_unit_dir = PathBuf::from(
+        values
+            .get("ACB_UNIT_SYSTEM_UNIT_DIR")
+            .expect("defaults cover system unit dir"),
+    );
+    let root = user_unit_dir()?;
+    fs::create_dir_all(&root).map_err(|error| format!("create {}: {error}", root.display()))?;
+    let target = root.join(USER_UNIT_NAME);
+
+    if let Ok(existing) = fs::read_to_string(&target) {
+        if !is_managed(&existing) {
+            return Err(format!(
+                "refusing to overwrite {}: no `{MANAGED_HEADER}` header; \
+                 remove the file manually if it is not acbctl's",
+                target.display()
+            ));
+        }
+    }
+
+    if let Some(fragment) = shadowing_unit_fragment(&root, &system_unit_dir) {
+        print_shadow_warning(&fragment, &root);
+    }
+
+    let status = write_if_changed(&target, &content)?;
+    println!("{} {}", status.as_str(), target.display());
+    upsert_manifest_entry(&root, USER_UNIT_NAME, &content)?;
+
+    let changed = !matches!(status, WriteStatus::Unchanged);
+    if changed {
+        systemctl_user(&["daemon-reload"])?;
+        println!("daemon-reload: systemd --user");
+    }
+    if !unit_is_enabled(USER_UNIT_NAME) {
+        systemctl_user(&["enable", USER_UNIT_NAME])?;
+        println!("enabled {USER_UNIT_NAME}");
+    } else if !changed {
+        println!("unchanged {USER_UNIT_NAME} (already enabled)");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn uninstall_user_command(args: &[String]) -> Result<ExitCode, String> {
+    if is_help(args) {
+        print_uninstall_user_help();
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(other) = args.first() {
+        return Err(format!("unknown argument for uninstall-user: {other}"));
+    }
+
+    let root = user_unit_dir()?;
+    let target = root.join(USER_UNIT_NAME);
+    if let Ok(existing) = fs::read_to_string(&target) {
+        if !is_managed(&existing) {
+            return Err(format!(
+                "refusing to remove {}: no `{MANAGED_HEADER}` header",
+                target.display()
+            ));
+        }
+    }
+
+    if unit_loaded(USER_UNIT_NAME) {
+        match systemctl_user(&["stop", USER_UNIT_NAME]) {
+            Ok(()) => println!("stopped {USER_UNIT_NAME}"),
+            Err(error) => println!("warn: {error}"),
+        }
+    }
+    match systemctl_user(&["disable", USER_UNIT_NAME]) {
+        Ok(()) => println!("disabled {USER_UNIT_NAME}"),
+        Err(error) => println!("note: {error}"),
+    }
+    match fs::remove_file(&target) {
+        Ok(()) => println!("removed {}", target.display()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            println!("missing {}", target.display());
+        }
+        Err(error) => return Err(format!("remove {}: {error}", target.display())),
+    }
+    remove_manifest_entry(&root, USER_UNIT_NAME)?;
+    match systemctl_user(&["daemon-reload"]) {
+        Ok(()) => println!("daemon-reload: systemd --user"),
+        Err(error) => println!("warn: {error}"),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// systemd 的 user 单元目录：`$XDG_CONFIG_HOME/systemd/user` 优先，否则 `~/.config/systemd/user`。
+fn user_unit_dir() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(dir);
+        if path.is_absolute() {
+            return Ok(path.join("systemd").join("user"));
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| "HOME is not set; cannot resolve ~/.config/systemd/user".to_string())?;
+    Ok(PathBuf::from(home).join(".config/systemd/user"))
+}
+
+fn systemctl_user(args: &[&str]) -> Result<(), String> {
+    let output = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .output()
+        .map_err(|error| format!("cannot run systemctl: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "systemctl --user {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        ))
+    }
+}
+
+fn unit_is_enabled(name: &str) -> bool {
+    Command::new("systemctl")
+        .args(["--user", "is-enabled", name])
+        .output()
+        .map(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "enabled"
+        })
+        .unwrap_or(false)
+}
+
+fn unit_loaded(name: &str) -> bool {
+    let Ok(output) = Command::new("systemctl")
+        .args(["--user", "show", "-p", "LoadState", "--value", name])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let state = String::from_utf8_lossy(&output.stdout);
+    let state = state.trim();
+    !state.is_empty() && state != "not-found"
+}
+
+/// 找当前会被 systemd 加载的同名单元；只要不在本次安装目录里就算冲突来源。
+fn shadowing_unit_fragment(root: &Path, system_unit_dir: &Path) -> Option<PathBuf> {
+    if let Some(fragment) = unit_fragment_path(USER_UNIT_NAME) {
+        let path = PathBuf::from(&fragment);
+        if !is_inside(&path, root) {
+            return Some(path);
+        }
+    }
+    let system_unit = system_unit_dir.join(USER_UNIT_NAME);
+    if system_unit.exists() {
+        return Some(system_unit);
+    }
+    None
+}
+
+fn is_inside(path: &Path, root: &Path) -> bool {
+    let canonical = |candidate: &Path| {
+        candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.to_path_buf())
+    };
+    canonical(path).starts_with(canonical(root))
+}
+
+fn unit_fragment_path(name: &str) -> Option<String> {
+    let output = Command::new("systemctl")
+        .args(["--user", "show", "-p", "FragmentPath", "--value", name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+fn print_shadow_warning(fragment: &Path, root: &Path) {
+    println!(
+        "warn: 检测到同名单元 {USER_UNIT_NAME} 由 nix-config 提供：{}",
+        fragment.display()
+    );
+    println!(
+        "      当前生效的是 nix 版本；安装到 {} 后，用户目录版本优先级更高，",
+        root.display()
+    );
+    println!("      会遮蔽 nix 版本。请随后从 nix-config 删除该单元定义，避免双重来源。");
+}
+
+fn upsert_manifest_entry(root: &Path, name: &str, content: &str) -> Result<(), String> {
+    let mut manifest = read_manifest(root)?.unwrap_or(Manifest {
+        version: MANIFEST_VERSION,
+        files: BTreeSet::new(),
+        hashes: BTreeMap::new(),
+    });
+    manifest.files.insert(name.to_string());
+    manifest.hashes.insert(
+        name.to_string(),
+        crate::fsutil::sha256_hex(content.as_bytes()),
+    );
+    write_manifest_if_changed(root, &manifest)
+}
+
+fn remove_manifest_entry(root: &Path, name: &str) -> Result<(), String> {
+    let Some(mut manifest) = read_manifest(root)? else {
+        return Ok(());
+    };
+    manifest.files.remove(name);
+    manifest.hashes.remove(name);
+    if manifest.files.is_empty() {
+        let path = root.join(MANIFEST_NAME);
+        match fs::remove_file(&path) {
+            Ok(()) => println!("removed {MANIFEST_NAME}"),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("remove {}: {error}", path.display())),
+        }
+        Ok(())
+    } else {
+        write_manifest_if_changed(root, &manifest)
+    }
 }
 
 /// 只读已装文件和 manifest 元数据；不读 env 文件内容。
@@ -577,8 +830,25 @@ fn render_all() -> Result<Vec<RenderedUnit>, String> {
     render_all_with_install_section(None, None)
 }
 
+/// 从哪里取 launcher 路径。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LauncherSource {
+    /// 沿用既有 `unit render|install`：`ACB_UNIT_LAUNCHER_BIN` 或 `ACB_UNIT_ACBL_PREFIX`。
+    Configured,
+    /// `unit install-user`：从 acbctl 自身的安装前缀推导，避免写死 NixOS 路径。
+    CurrentExe,
+}
+
 /// 先收集 ACB_UNIT_*，再把 BIN_DIR / REPO_DIR 换成 profile/current 下的路径（可用时）。
 pub(crate) fn resolved_values() -> Result<BTreeMap<String, String>, String> {
+    resolve_values(LauncherSource::Configured)
+}
+
+fn resolved_user_unit_values() -> Result<BTreeMap<String, String>, String> {
+    resolve_values(LauncherSource::CurrentExe)
+}
+
+fn resolve_values(source: LauncherSource) -> Result<BTreeMap<String, String>, String> {
     let mut values = values_from_env()?;
     let fallback_bin = values.get("ACB_UNIT_BIN_DIR").map(PathBuf::from);
     let bin_dir = crate::profile::resolve_bin_dir(fallback_bin.as_deref())?;
@@ -622,6 +892,10 @@ pub(crate) fn resolved_values() -> Result<BTreeMap<String, String>, String> {
                 .to_string_lossy()
                 .into_owned()
         });
+    let work_dir = values
+        .get("ACB_UNIT_WORK_DIR")
+        .cloned()
+        .unwrap_or_else(|| state_root.to_string_lossy().into_owned());
 
     // launcher 是独立安装的静态 acbl，不随 ACB generation 换代。
     // 前缀默认 /usr/local（对应 C-9 的 /usr/local/bin/acb-launcher 软链），
@@ -630,20 +904,45 @@ pub(crate) fn resolved_values() -> Result<BTreeMap<String, String>, String> {
         .get("ACB_UNIT_ACBL_PREFIX")
         .cloned()
         .unwrap_or_else(|| "/usr/local".to_owned());
-    let launcher_bin = resolve_launcher_bin(
-        &acbl_prefix,
-        values.get("ACB_UNIT_LAUNCHER_BIN").map(String::as_str),
-        &profile_dir,
-        &bin_dir,
-    )?;
+    let launcher_bin = match source {
+        LauncherSource::Configured => resolve_launcher_bin(
+            &acbl_prefix,
+            values.get("ACB_UNIT_LAUNCHER_BIN").map(String::as_str),
+            &profile_dir,
+            &bin_dir,
+        )?,
+        LauncherSource::CurrentExe => match values.get("ACB_UNIT_LAUNCHER_BIN") {
+            Some(explicit) => explicit.clone(),
+            None => launcher_bin_from_current_exe()?,
+        },
+    };
     values.insert("ACB_UNIT_ACBL_PREFIX".to_string(), acbl_prefix);
     values.insert("ACB_UNIT_STATE_DIR".to_string(), state_dir);
+    values.insert("ACB_UNIT_WORK_DIR".to_string(), work_dir);
     values.insert(
         "ACB_UNIT_SUPERVISOR_CONFIG_FILE".to_string(),
         supervisor_config,
     );
     values.insert("ACB_UNIT_LAUNCHER_BIN".to_string(), launcher_bin);
     Ok(values)
+}
+
+/// 从 acbctl 自身路径推导同包装的 launcher。
+///
+/// `/run/current-system/sw/bin/acbctl` 的父目录是符号链接目录，先 `canonicalize`
+/// 解析到真实安装前缀，再取同目录的 `acb-launcher`；不写死任何系统路径。
+fn launcher_bin_from_current_exe() -> Result<String, String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("cannot locate acbctl executable: {error}"))?;
+    launcher_bin_for_exe(&exe)
+}
+
+fn launcher_bin_for_exe(exe: &Path) -> Result<String, String> {
+    let exe = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
+    let bin_dir = exe
+        .parent()
+        .ok_or_else(|| format!("cannot derive bin dir from {}", exe.display()))?;
+    Ok(bin_dir.join("acb-launcher").to_string_lossy().into_owned())
 }
 
 /// 解析静态 acbl 的安装路径，并拒绝任何落在 profile/generation 里的
@@ -993,6 +1292,62 @@ fn print_uninstall_help() {
     println!("profile、LKG 与状态目录永不删除。");
 }
 
+fn print_install_user_help() {
+    println!("Usage: acbctl unit install-user");
+    println!();
+    println!("写入 ~/.config/systemd/user/acb-bridge.service（$XDG_CONFIG_HOME 优先），");
+    println!("然后 systemctl --user daemon-reload 并 enable（WantedBy=default.target）。");
+    println!("ExecStart 从 acbctl 自身安装前缀推导同目录的 acb-launcher。");
+    println!();
+    println!("若检测到 nix-config 提供的同名单元，会提示：用户目录优先级更高，");
+    println!("安装后会遮蔽 nix 版本；请随后删除 nix-config 里的定义，避免双重来源。");
+}
+
+fn print_uninstall_user_help() {
+    println!("Usage: acbctl unit uninstall-user");
+    println!();
+    println!("停止并 disable acb-bridge.service，删除本工具管理的用户单元文件，");
+    println!("最后 systemctl --user daemon-reload。");
+}
+
 fn print_doctor_help() {
     println!("Usage: acbctl unit doctor --root DIR");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_is_sibling_of_canonical_exe() {
+        let root = std::env::temp_dir().join(format!(
+            "acb-unit-user-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let bin = root.join("prefix").join("bin");
+        fs::create_dir_all(&bin).expect("create bin");
+        let exe = bin.join("acbctl");
+        fs::write(&exe, b"fake").expect("write exe");
+
+        assert_eq!(
+            PathBuf::from(launcher_bin_for_exe(&exe).expect("derive launcher")),
+            bin.join("acb-launcher")
+        );
+
+        // /run/current-system/sw/bin 这类符号链接目录要先解析到真实前缀。
+        let linked = root.join("sw").join("bin");
+        fs::create_dir_all(linked.parent().expect("sw parent")).expect("create sw");
+        std::os::unix::fs::symlink(&bin, &linked).expect("symlink bin");
+        assert_eq!(
+            PathBuf::from(launcher_bin_for_exe(&linked.join("acbctl")).expect("derive launcher")),
+            bin.join("acb-launcher")
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
 }

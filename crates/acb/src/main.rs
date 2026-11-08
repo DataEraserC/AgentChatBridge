@@ -50,6 +50,8 @@ fn run() -> Result<ExitCode, String> {
                 Some("render") => unit::render_command(&rest[1..]),
                 Some("install") => unit::install_command(&rest[1..]),
                 Some("uninstall") => unit::uninstall_command(&rest[1..]),
+                Some("install-user") => unit::install_user_command(&rest[1..]),
+                Some("uninstall-user") => unit::uninstall_user_command(&rest[1..]),
                 Some("doctor") => unit::doctor_command(&rest[1..]),
                 Some("-h" | "--help" | "help") => {
                     print_unit_help();
@@ -111,6 +113,8 @@ Usage:
   acbctl unit render --diff --root DIR
   acbctl unit install --root DIR [--scope user|system] [--with-install-section 0|1]
   acbctl unit uninstall --root DIR
+  acbctl unit install-user
+  acbctl unit uninstall-user
   acbctl unit doctor --root DIR
   acbctl run --mode=launcher|direct [--config PATH] [--state-dir DIR]
   acbctl up [all|bridge]
@@ -142,6 +146,8 @@ fn print_unit_help() {
   acbctl unit render --diff --root DIR
   acbctl unit install --root DIR [--scope user|system] [--with-install-section 0|1]
   acbctl unit uninstall --root DIR
+  acbctl unit install-user
+  acbctl unit uninstall-user
   acbctl unit doctor --root DIR"
     );
 }
