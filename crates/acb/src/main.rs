@@ -131,6 +131,8 @@ Usage:
   acbctl grants explain|matrix|diff
   acbctl secrets check|resolve
   acbctl sessions [--config PATH]
+  acbctl sessions scan [--dsh-home DIR] [--known PRESET]... [--json]
+  acbctl sessions migrate-preset --map OLD=NEW [--dsh-home DIR] [--apply]
   acbctl unit --help
 
 Values are read only from whitelisted ACB_UNIT_* environment variables.",
