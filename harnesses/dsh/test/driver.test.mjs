@@ -288,6 +288,7 @@ test("reset 之后换带代次的新 id，冲突时再兜底换新", async (t) =
   await first
   assert.equal(dsh.createCalls[0].sessionId, "session-acb-main")
   assert.equal(dsh.createCalls[0].workspaceId, "ws-1", "workspace id 要传给 dsh（归组）")
+  assert.equal(dsh.createCalls[0].agentPreset, "p", "配置了 preset 时原样传给 dsh")
 
   // reset：映射丢掉 + 代次 +1。下一轮必须用新 id，不能撞旧会话。
   driver.resetSession("main")
@@ -305,6 +306,27 @@ test("reset 之后换带代次的新 id，冲突时再兜底换新", async (t) =
   dsh.lastFollow.push({ type: "turn/end", data: { turn: "t3" } })
   await third
   assert.match(dsh.createCalls[2].sessionId, /^session-acb-main-r\w+$/, "第三次请求本身就该带新代次")
+})
+
+test("preset 始终显式传给 dsh：ACB_PRESET 缺失时回退到 acb-<session>", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {}, cwd: "/w", preset: "" })
+  const run = driver.run(delivery(), link)
+  await waitFor(() => dsh.prompts.length === 1, "prompt 没被调")
+  assert.equal(
+    dsh.createCalls[0].agentPreset,
+    "acb-main",
+    "不能把预设留给 profile 的 selectedDefault 兜底"
+  )
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
+  await run
 })
 
 test("旧 sessionId 失效时重建会话并重试", async (t) => {

@@ -628,6 +628,10 @@ class TurnDriver {
     const cached = this.sessions.get(session)
     if (cached) return cached
     const fixed = this.#fixedSessionId(session)
+    // 建会话必须显式指定 preset：不能留给 profile 的 selectedDefault 兜底，
+    // 否则选中哪个预设取决于 profile 配置，可能被外来预设（如 liangshen）接管。
+    // ACB_PRESET 没传时按 acbctl sessions 的同一条规则回退到 acb-<session>。
+    const preset = this.preset || `acb-${session}`
     // 先把 workspace 备好、拿到 id，再建会话——**光传 cwd 不会归组**，dsh 只把它
     // 当工作目录，GUI 里照样「未分组」（2026-10-31 真机踩过）。旧版 bridge.js 的
     // 顺序就是 workspace/create → sessions.create({ workspaceId })。
@@ -651,7 +655,7 @@ class TurnDriver {
         // 二选一：workspaceId 和 cwd 不能同时传（dsh 报 gateway/bad-request，
         // 2026-10-31 真机踩过）。有 workspaceId 用它（能归组）；备不出来才退 cwd。
         ...(workspaceId ? { workspaceId } : this.cwd ? { cwd: this.cwd } : {}),
-        ...(this.preset ? { agentPreset: this.preset } : {}),
+        agentPreset: preset,
       })
     } catch (error) {
       const message = String(error?.message ?? error)
@@ -663,7 +667,7 @@ class TurnDriver {
         sessionId = await this.dsh.createSession({
           sessionId: fallback,
           ...(workspaceId ? { workspaceId } : this.cwd ? { cwd: this.cwd } : {}),
-          ...(this.preset ? { agentPreset: this.preset } : {}),
+          agentPreset: preset,
         })
       } else {
         throw error
@@ -674,7 +678,7 @@ class TurnDriver {
       sessionId,
       fixed,
       grouped: this.cwd ? t("dsh.session_grouped", { cwd: this.cwd }) : "",
-      preset: this.preset ? t("dsh.session_preset", { preset: this.preset }) : "",
+      preset: t("dsh.session_preset", { preset }),
     }))
     // 建好会话就把映射回报给桥，让控制台能查到「acb 会话 ↔ dsh 会话」的对应关系。
     // 用 report_map 指令，result 里带 session_id + meta（这里放固定 id 和分组）。
