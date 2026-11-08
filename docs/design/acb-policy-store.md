@@ -1501,7 +1501,8 @@ policy-store 加密保护“整个库/列 + 备份”。agenix 的轮换是替�
    - 回滚：恢复 `config.toml` 顶层键；`policy.store=file`；重启。
 
 每一步切换前先 `acbctl export`；切换失败用 export/备份恢复对应表，文件源仍保留到
-该步验收通过。不要一次性把所有表切完，否则无法判断是哪一步造成的行为差异。
+该步验收通过。验收通过后按 §10.3.1 从 `config.d` 删除已入库的房间策略，并停止从
+配置文件读取这些键。不要一次性把所有表切完，否则无法判断是哪一步造成的行为差异。
 
 ### 10.2 seed 语义与“Nix 不再覆盖”的证据
 
@@ -1533,6 +1534,23 @@ policy-store 加密保护“整个库/列 + 备份”。agenix 的轮换是替�
 - 记录 sha256、导入行数、导入 `policy_version`；
 - `config.d` 目录保留一个 `README.migrated` 说明“只读历史，不再加载”；
 - `90-console.toml` 归档后控制台写库，文件只作 export/seed。
+
+### 10.3.1 决定（2026-11-07）：grants/rooms 以库为唯一源
+
+- `[grants.rooms]` 的 `trust`、`members`、`approval_route` 归 `policy.db`
+  的 `rooms` / `relations` / `approval_routes`。导入并验收零差异后，**必须把已搬进
+  库的对应内容从 `config.d` 删除**，不保留 `.toml` 副本，也不留“文件 + 库”双份。
+- 此后 bridge **不再从配置文件读取** `trust` / `members` / `approval_route`；
+  `Config::load` 的 `config.d` 合并路径不再接受这些键（保留时报警或直接报错，按
+  schema 版本策略定）。单一数据源，禁止靠加载顺序对账。
+- 配置文件只保留引导期所需的种子：空库时写入一次，库非空跳过；seed 本身不承载
+  运行期策略。
+- 迁移完成前，**不得**用 `config.d` 分片承载 `[grants.rooms]` 的运行期改动；
+  改动等到入库能力可用后一次性落库。
+- 已知且可接受的缺口：迁移完成前，`769843907`、`973928169` 这类公开群的
+  群内 `/approve` 保持不可用（房间为 `untrusted`、无 `approval_route`）。
+  审批继续走现有已受信房间的路由（如 `498587179` / `962657331`），或等房间策略
+  入库后再开群内审批。
 
 ### 10.4 单一数据源证明
 
