@@ -6,6 +6,7 @@
 //! 实例已经退出时，才回退到正常的 `ProcessRunner` 拉起。
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::instance::{self, InstanceRecord};
 use crate::{CommandSpec, ExitInfo, ProcessRunner, Runner};
@@ -49,6 +50,14 @@ impl Runner for AdoptedRunner {
             instance::terminate(record.pid, record.start_token.as_deref())
         } else {
             self.fallback.stop()
+        }
+    }
+
+    fn stop_within(&mut self, deadline: Instant) -> Result<(), String> {
+        if let Some(record) = self.adopted.take() {
+            instance::terminate_within(record.pid, record.start_token.as_deref(), deadline)
+        } else {
+            self.fallback.stop_within(deadline)
         }
     }
 

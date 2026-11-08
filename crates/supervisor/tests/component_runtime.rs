@@ -51,8 +51,14 @@ fn manager(dir: &Path, text: &str) -> ComponentManager {
     let (_file, table) =
         acb_supervisor::component::parse_config_file(text, &PresetRegistry::empty())
             .expect("parse config");
-    ComponentManager::new(&state_dir(dir), &table, "test-sha", Some("inst-test"), now_ms())
-        .expect("create manager")
+    ComponentManager::new(
+        &state_dir(dir),
+        &table,
+        "test-sha",
+        Some("inst-test"),
+        now_ms(),
+    )
+    .expect("create manager")
 }
 
 fn wait_for(
@@ -119,7 +125,7 @@ kind = "process"
     assert!(!state.enabled);
     assert_eq!(state.phase, "stopped");
     assert_eq!(state.pid, None);
-  }
+}
 
 #[test]
 fn simple_component_starts_and_stops() {
@@ -161,7 +167,10 @@ startup_grace_secs = 0
     // process 探针只看子进程是否存活；给脚本一点时间真正执行第一行。
     thread::sleep(Duration::from_millis(250));
     let component_log = fs::read_to_string(dir.0.join("state/logs/alpha.log")).unwrap_or_default();
-    assert!(marker.exists(), "组件脚本必须真的被执行；log:\n{component_log}");
+    assert!(
+        marker.exists(),
+        "组件脚本必须真的被执行；log:\n{component_log}"
+    );
     assert!(manager.pid("alpha").is_some(), "存活组件必须有 pid");
     assert!(read_state(&dir.0, "alpha").log_path.is_some());
 
@@ -185,16 +194,11 @@ fn http_probe_marks_component_healthy() {
         if let Ok((mut socket, _)) = listener.accept() {
             let mut request = [0u8; 256];
             let _ = socket.read(&mut request);
-            let _ = socket.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         }
     });
-    let script = script(
-        &dir.0,
-        "stay.sh",
-        "while :; do sleep 0.2; done",
-    );
+    let script = script(&dir.0, "stay.sh", "while :; do sleep 0.2; done");
     let mut manager = manager(
         &dir.0,
         &format!(
@@ -223,10 +227,12 @@ startup_grace_secs = 0
     wait_for(&mut manager, Duration::from_secs(3), |manager| {
         manager.phase("alpha") == Some(Phase::Healthy)
     });
-    assert!(read_state(&dir.0, "alpha")
-        .probe_url
-        .as_deref()
-        .is_some_and(|url| url.ends_with("/healthz")));
+    assert!(
+        read_state(&dir.0, "alpha")
+            .probe_url
+            .as_deref()
+            .is_some_and(|url| url.ends_with("/healthz"))
+    );
     manager.stop_all(now_ms());
     server.join().ok();
 }
@@ -309,7 +315,9 @@ backoff_cap_secs = 0
         ),
     );
 
-    wait_for(&mut manager, Duration::from_secs(3), |_| lines(&counter) >= 2);
+    wait_for(&mut manager, Duration::from_secs(3), |_| {
+        lines(&counter) >= 2
+    });
     assert!(
         matches!(
             manager.phase("alpha"),
@@ -468,7 +476,9 @@ backoff_cap_secs = 0
         ),
     );
 
-    wait_for(&mut manager, Duration::from_secs(4), |_| lines(&counter) >= 2);
+    wait_for(&mut manager, Duration::from_secs(4), |_| {
+        lines(&counter) >= 2
+    });
     assert!(
         matches!(
             manager.phase("snow"),
@@ -642,7 +652,9 @@ backoff_cap_secs = 0
 
     // 依赖被杀 → 自动重启 → 再次就绪；oneshot 必须恰好重跑一次。
     fs::write(&trigger, b"").expect("trigger dep exit");
-    wait_for(&mut manager, Duration::from_secs(8), |_| lines(&sync_runs) >= 2);
+    wait_for(&mut manager, Duration::from_secs(8), |_| {
+        lines(&sync_runs) >= 2
+    });
     assert_eq!(manager.phase("dep"), Some(Phase::Healthy));
     assert_eq!(lines(&dep_runs), 2);
 
@@ -650,11 +662,7 @@ backoff_cap_secs = 0
         manager.tick(now_ms());
         thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(
-        lines(&sync_runs),
-        2,
-        "同一代就绪只触发一次重跑，不得刷重试"
-    );
+    assert_eq!(lines(&sync_runs), 2, "同一代就绪只触发一次重跑，不得刷重试");
     manager.stop_all(now_ms());
 }
 
@@ -771,4 +779,58 @@ startup_grace_secs = 0
     let text = fs::read_to_string(&order).expect("order file");
     let entries: Vec<&str> = text.lines().collect();
     assert_eq!(entries, vec!["beta", "alpha"], "停止必须逆依赖序");
+}
+
+fn pid_alive(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|text| {
+            let rest = text.get(text.rfind(')')? + 1..)?.trim_start();
+            rest.split_whitespace().next().map(str::to_string)
+        })
+        .is_some_and(|state| state != "Z")
+}
+
+#[test]
+fn stop_all_within_enforces_global_deadline() {
+    let dir = temp_dir("stop-budget");
+    let script = script(
+        &dir.0,
+        "stubborn.sh",
+        "trap '' TERM\nwhile :; do sleep 0.2; done",
+    );
+    let mut manager = manager(
+        &dir.0,
+        &format!(
+            r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "alpha"
+enabled = true
+command = ["{}"]
+stop_timeout_secs = 30
+[component.readiness]
+kind = "process"
+interval_secs = 1
+success_threshold = 1
+startup_grace_secs = 0
+"#,
+            script.display()
+        ),
+    );
+    wait_for(&mut manager, Duration::from_secs(3), |manager| {
+        manager.phase("alpha") == Some(Phase::Healthy)
+    });
+    thread::sleep(Duration::from_millis(250));
+    let pid = manager.pid("alpha").expect("live pid");
+
+    let started = Instant::now();
+    manager.stop_all_within(now_ms(), Instant::now() + Duration::from_millis(300));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "组件不肯退时必须被全局 deadline 截断"
+    );
+    assert!(!pid_alive(pid), "超时后必须 SIGKILL 组件进程组");
 }

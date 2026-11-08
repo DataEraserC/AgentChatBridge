@@ -30,6 +30,11 @@ use acb_supervisor::{
     SystemSleeper, build_policy, load_current, now_ms,
 };
 
+mod proctree;
+
+/// launcher 停机总预算：unit 的 `TimeoutStopSec=45s`，留 5s 给 systemd 收尾。
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(40);
+
 fn main() -> ExitCode {
     let (path, external_requested) = match config_path() {
         Some(path) => (path, true),
@@ -53,7 +58,10 @@ fn main() -> ExitCode {
     let config_text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) => {
-            eprintln!("acb-launcher: cannot read config {}: {error}", path.display());
+            eprintln!(
+                "acb-launcher: cannot read config {}: {error}",
+                path.display()
+            );
             return ExitCode::from(EXIT_GIVE_UP as u8);
         }
     };
@@ -267,19 +275,10 @@ fn main() -> ExitCode {
 
     while !supervisor.stopped() {
         if shutdown::requested() {
-            // 组件先按逆依赖序停，再停 bridge；否则依赖 bridge 的组件会先看到
-            // 一个已经消失的 endpoint。
-            if let Some(manager) = component_manager.as_mut() {
-                manager.stop_all(now_ms());
-            }
-            // unit 用 KillMode=process，cgroup 不会带走子进程，必须自己停：
-            // 否则 systemctl stop / 回退到旧 unit 时，孤儿 bridge 占着端口，
-            // 下一个进程只会 EADDRINUSE 然后 78。升级路径不经过这里——
-            // 它在提交前已显式 stop_child，退出 75 由 systemd 重拉。
-            eprintln!("acb-launcher: stop requested; stopping bridge");
-            if let Err(error) = supervisor.stop_child() {
-                eprintln!("acb-launcher: cannot stop bridge: {error}");
-            }
+            // unit 用 KillMode=process，cgroup 不会带走子进程，必须自己收敛：
+            // 组件 → bridge → 快照里剩下的非组进程（dsh scope 等）。
+            eprintln!("acb-launcher: stop requested; converging descendants");
+            converge_shutdown(&mut component_manager, &mut supervisor);
             notifier.stopping();
             return ExitCode::from(EXIT_OK as u8);
         }
@@ -295,11 +294,10 @@ fn main() -> ExitCode {
         thread::sleep(Duration::from_millis(100));
     }
 
-    // 升级 75 / 回滚 / 正常失败都走这里：先停组件，避免 systemd 重拉后
-    // 旧组件还活着而新 launcher 又起一份。
-    if let Some(manager) = component_manager.as_mut() {
-        manager.stop_all(now_ms());
-    }
+    // 升级 75 / 回滚 / 正常失败都走这里：先收敛组件与残留后代，避免 systemd
+    // 重拉后旧组件还活着而新 launcher 又起一份。bridge 可能已由 supervisor
+    // 停掉，`stop_child_within` 对空 child 是 no-op。
+    converge_shutdown(&mut component_manager, &mut supervisor);
 
     if let Some(reason) = supervisor.failed() {
         eprintln!("acb-launcher: stopped: {reason}");
@@ -308,6 +306,38 @@ fn main() -> ExitCode {
     finalize_active(&mailbox, code);
     notifier.stopping();
     ExitCode::from(code as u8)
+}
+
+/// 停机的唯一收敛入口：组件 → bridge → 快照里剩下的后代。
+///
+/// 所有阶段共享一个 deadline。快照必须在任何停止动作之前拍：父进程一死，
+/// 后代会被 reparent，之后再也无法按进程树找回（dsh 的 `dsh-subprocess-*.scope`
+/// 就是这种情况）。超时后逐条 SIGKILL 并写日志。
+fn converge_shutdown(
+    component_manager: &mut Option<ComponentManager>,
+    supervisor: &mut Supervisor,
+) {
+    let deadline = Instant::now() + SHUTDOWN_BUDGET;
+    let mut roots = vec![std::process::id()];
+    if let Some(pid) = supervisor.child_pid() {
+        roots.push(pid);
+    }
+    let snapshot = proctree::Snapshot::capture_roots(&roots);
+    // `leave_running` 的 oneshot 是使用者明确要求保留的，不能兜底误杀。
+    let protect = component_manager
+        .as_ref()
+        .map(|manager| snapshot.subtrees(&manager.leave_running_pids()))
+        .unwrap_or_default();
+
+    // 组件先按逆依赖序停，再停 bridge；否则依赖 bridge 的组件会先看到一个
+    // 已经消失的 endpoint。
+    if let Some(manager) = component_manager.as_mut() {
+        manager.stop_all_within(now_ms(), deadline);
+    }
+    if let Err(error) = supervisor.stop_child_within(deadline) {
+        eprintln!("acb-launcher: cannot stop bridge: {error}");
+    }
+    snapshot.terminate_leftovers(&protect, deadline, "shutdown");
 }
 
 fn config_path() -> Option<PathBuf> {

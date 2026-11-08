@@ -14,12 +14,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::ExitInfo;
 use crate::component::{
     ComponentTable, ComponentType, KillMode, LogTarget, ReadinessKind, ResolvedComponent,
     RestartPolicy, StopAction,
 };
 use crate::component_state::{self, ComponentState, LOGS_DIR, STATE_SCHEMA};
-use crate::ExitInfo;
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const DEFAULT_BACKOFF_SECS: [u64; 5] = [1, 2, 4, 8, 30];
@@ -138,7 +138,13 @@ impl ComponentManager {
         for name in &names {
             let entry = effective_entry(table, name);
             let log_path = match entry.log.target {
-                LogTarget::File if entry.log.path.as_deref().is_some_and(|path| !path.is_empty()) => {
+                LogTarget::File
+                    if entry
+                        .log
+                        .path
+                        .as_deref()
+                        .is_some_and(|path| !path.is_empty()) =>
+                {
                     PathBuf::from(entry.log.path.as_deref().unwrap_or_default())
                 }
                 // journald 目前也落文件：acbl 不接管 systemd journal，先保证有日志可查。
@@ -182,9 +188,7 @@ impl ComponentManager {
                     .and_then(|state| state.last_result.clone()),
                 ready_at_ms: previous.as_ref().and_then(|state| state.ready_at_ms),
                 failed_at_ms: previous.as_ref().and_then(|state| state.failed_at_ms),
-                last_run_at_ms: previous
-                    .as_ref()
-                    .and_then(|state| state.last_run_at_ms),
+                last_run_at_ms: previous.as_ref().and_then(|state| state.last_run_at_ms),
                 // launcher 重启后沿用「上一轮已就绪」的代次 1，避免把恢复当成一次新就绪。
                 ready_generation: u64::from(healthy_before),
                 ran_dependency_generations: Vec::new(),
@@ -266,10 +270,34 @@ impl ComponentManager {
 
     /// 逆依赖序停止。`oneshot` 按 `stop_action` 收尾；`failed` 保持可见不覆盖。
     pub fn stop_all(&mut self, now: i64) {
+        self.stop_all_until(now, None);
+    }
+
+    /// 带全局上界的停止：所有组件共享 `deadline`，预算用尽后剩余组件直接
+    /// SIGKILL，避免某个不肯退的组件把 launcher 停机卡死。
+    pub fn stop_all_within(&mut self, now: i64, deadline: Instant) {
+        self.stop_all_until(now, Some(deadline));
+    }
+
+    fn stop_all_until(&mut self, now: i64, deadline: Option<Instant>) {
         for index in (0..self.components.len()).rev() {
-            self.stop_one(index, now);
+            self.stop_one(index, now, deadline);
         }
         self.flush(now);
+    }
+
+    /// 停机时明确要求保留的组件（oneshot + `leave_running`）的 pid。
+    ///
+    /// launcher 拍后代快照时要把这些子树排除，否则兜底收敛会误杀。
+    pub fn leave_running_pids(&self) -> Vec<u32> {
+        self.components
+            .iter()
+            .filter(|comp| {
+                comp.entry.kind == ComponentType::Oneshot
+                    && comp.entry.stop_action == StopAction::LeaveRunning
+            })
+            .filter_map(|comp| comp.child.as_ref().map(Child::id))
+            .collect()
     }
 
     pub fn phase(&self, name: &str) -> Option<Phase> {
@@ -296,10 +324,7 @@ impl ComponentManager {
         }
         let kind = self.components[index].entry.kind;
         let phase = self.components[index].phase;
-        if matches!(
-            phase,
-            Phase::Failed | Phase::StoppedEarly | Phase::Stopped
-        ) {
+        if matches!(phase, Phase::Failed | Phase::StoppedEarly | Phase::Stopped) {
             return;
         }
 
@@ -631,6 +656,7 @@ impl ComponentManager {
             terminate_child(
                 &mut child,
                 &self.components[index].entry,
+                &self.components[index].entry.name,
                 self.components[index].entry.stop_timeout_secs,
             );
         }
@@ -784,16 +810,25 @@ impl ComponentManager {
         }
     }
 
-    fn stop_one(&mut self, index: usize, _now: i64) {
+    fn stop_one(&mut self, index: usize, _now: i64, deadline: Option<Instant>) {
         if self.components[index].phase == Phase::Failed {
             return;
         }
         self.components[index].stop_requested = true;
         if let Some(mut child) = self.components[index].child.take() {
+            let configured = self.components[index].entry.stop_timeout_secs;
+            let timeout = match deadline {
+                Some(deadline) => deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_secs()
+                    .min(configured),
+                None => configured,
+            };
             let exit = terminate_child(
                 &mut child,
                 &self.components[index].entry,
-                self.components[index].entry.stop_timeout_secs,
+                &self.components[index].entry.name,
+                timeout,
             );
             self.components[index].last_exit = exit;
         }
@@ -1035,6 +1070,7 @@ fn connect_host(host: &str) -> &str {
 fn terminate_child(
     child: &mut Child,
     entry: &ResolvedComponent,
+    name: &str,
     timeout_secs: u64,
 ) -> Option<ExitInfo> {
     let pid = child.id();
@@ -1051,11 +1087,15 @@ fn terminate_child(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    let target = match entry.process.kill_mode {
+        KillMode::Group => format!("process group {pid}"),
+        KillMode::Process => format!("pid {pid}"),
+    };
+    eprintln!(
+        "acb components: {name} {target} did not exit within {timeout_secs}s; sending SIGKILL"
+    );
     let _ = signal_group(pid, entry.process.kill_mode, libc::SIGKILL);
-    child
-        .wait()
-        .ok()
-        .map(|status| crate::exit_of(status))
+    child.wait().ok().map(|status| crate::exit_of(status))
 }
 
 #[cfg(unix)]

@@ -219,6 +219,20 @@ pub fn read_record(path: &Path) -> Result<Option<InstanceRecord>, String> {
 /// 结束一个被接管的进程：先 SIGTERM，等不到再 SIGKILL。
 #[allow(unsafe_code)]
 pub fn terminate(pid: u32, start_token: Option<&str>) -> Result<(), String> {
+    terminate_within(
+        pid,
+        start_token,
+        std::time::Instant::now() + std::time::Duration::from_secs(7),
+    )
+}
+
+/// 有界版本的 [`terminate`]：`deadline` 用尽后立即 SIGKILL。
+#[allow(unsafe_code)]
+pub fn terminate_within(
+    pid: u32,
+    start_token: Option<&str>,
+    deadline: std::time::Instant,
+) -> Result<(), String> {
     if pid == 0 {
         return Ok(());
     }
@@ -240,13 +254,16 @@ pub fn terminate(pid: u32, start_token: Option<&str>) -> Result<(), String> {
         unsafe {
             libc::kill(pid as i32, SIGTERM);
         }
-        for _ in 0..50 {
-            if !process_alive(pid) {
-                return Ok(());
+        while process_alive(pid) {
+            if std::time::Instant::now() >= deadline {
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         if process_alive(pid) {
+            eprintln!(
+                "acb supervisor: adopted bridge pid {pid} did not exit before stop deadline; SIGKILL"
+            );
             unsafe {
                 libc::kill(pid as i32, SIGKILL);
             }
@@ -265,6 +282,7 @@ pub fn terminate(pid: u32, start_token: Option<&str>) -> Result<(), String> {
     #[cfg(not(unix))]
     {
         let _ = start_token;
+        let _ = deadline;
         Err(format!(
             "cannot terminate adopted pid {pid} on this platform; \
              process adoption is not implemented outside Unix (see C-5)"

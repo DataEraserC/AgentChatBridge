@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use acb_supervisor_policy::{
     Decision, DecisionKind, FailureRecord, PolicyConfig, Snapshot, VersionInfo, decide,
@@ -296,6 +296,14 @@ pub struct ExitInfo {
 pub trait Runner {
     fn start(&mut self, spec: &CommandSpec) -> Result<(), String>;
     fn stop(&mut self) -> Result<(), String>;
+    /// 有界停止：在 `deadline` 前尽量优雅退出，超时强杀。
+    ///
+    /// 默认实现忽略 deadline 直接调用 [`Runner::stop`]；拥有进程组的 runner
+    /// 应覆盖它，保证停机不会被一个不肯退的子进程卡死。
+    fn stop_within(&mut self, deadline: Instant) -> Result<(), String> {
+        let _ = deadline;
+        self.stop()
+    }
     fn running(&mut self) -> bool;
     /// 上一次观察到的退出信息；没有退出记录返回 `None`。
     fn last_exit(&mut self) -> Option<ExitInfo>;
@@ -304,6 +312,9 @@ pub trait Runner {
         None
     }
 }
+
+/// bridge 停止的默认上界：core 排空约 30s；launcher 停机时会传入更紧的 deadline。
+pub const DEFAULT_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub struct ProcessRunner {
@@ -332,6 +343,13 @@ impl Runner for ProcessRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        // bridge 必须独立成组：否则它会和 launcher 同组，停 bridge 时只能杀
+        // 单个进程，bridge 的插件子进程（issue-tools/notifier 等）会被留下。
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let child = command
             .spawn()
             .map_err(|error| format!("cannot start {}: {error}", spec.program))?;
@@ -346,15 +364,28 @@ impl Runner for ProcessRunner {
     }
 
     fn stop(&mut self) -> Result<(), String> {
+        self.stop_within(Instant::now() + DEFAULT_CHILD_STOP_TIMEOUT)
+    }
+
+    fn stop_within(&mut self, deadline: Instant) -> Result<(), String> {
         let Some(mut child) = self.child.take() else {
             return Ok(());
         };
-        let _ = child.kill();
-        let status = child
-            .wait()
-            .map_err(|error| format!("cannot wait for child: {error}"))?;
-        self.last_exit = Some(exit_of(status));
-        Ok(())
+        #[cfg(unix)]
+        {
+            self.last_exit = stop_process_group(&mut child, deadline);
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = deadline;
+            let _ = child.kill();
+            let status = child
+                .wait()
+                .map_err(|error| format!("cannot wait for child: {error}"))?;
+            self.last_exit = Some(exit_of(status));
+            Ok(())
+        }
     }
 
     fn running(&mut self) -> bool {
@@ -379,6 +410,64 @@ impl Runner for ProcessRunner {
     fn pid(&mut self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }
+}
+
+/// 对 bridge 的整个进程组做有界收敛：TERM → 等 deadline → KILL。
+///
+/// 只等 leader 退出是不够的：leader 先退、插件子进程还在时，孤儿会继续占端口。
+/// 这里以进程组是否还有成员为准，超时后记录被强杀的组。
+#[cfg(unix)]
+fn stop_process_group(child: &mut Child, deadline: Instant) -> Option<ExitInfo> {
+    let pid = child.id();
+    let mut exit = None;
+    if !signal_group(pid, libc::SIGTERM) {
+        // 组里已经没人了，回收 leader 即可。
+        return child.wait().ok().map(exit_of);
+    }
+    loop {
+        if exit.is_none() {
+            if let Ok(Some(status)) = child.try_wait() {
+                exit = Some(exit_of(status));
+            }
+        }
+        if !group_alive(pid) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            eprintln!(
+                "acb supervisor: bridge pid {pid} did not exit before stop deadline; \
+                 SIGKILL process group (-{pid})"
+            );
+            let _ = signal_group(pid, libc::SIGKILL);
+            let kill_deadline = Instant::now() + Duration::from_secs(2);
+            while group_alive(pid) && Instant::now() < kill_deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if group_alive(pid) {
+                eprintln!("acb supervisor: process group {pid} still has members after SIGKILL");
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if exit.is_none() {
+        exit = child.wait().ok().map(exit_of);
+    }
+    exit
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn signal_group(pid: u32, signal: libc::c_int) -> bool {
+    // SAFETY: 只向已知的 bridge 进程组发信号，不读写共享内存。
+    unsafe { libc::kill(-(pid as libc::pid_t), signal) == 0 }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn group_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 只做存在性检查，不触发任何副作用。
+    unsafe { libc::kill(-(pid as libc::pid_t), 0) == 0 }
 }
 
 fn exit_of(status: std::process::ExitStatus) -> ExitInfo {
@@ -714,6 +803,16 @@ impl Supervisor {
     /// 升级提交前停旧子进程。失败由调用方决定 abort 还是继续。
     pub fn stop_child(&mut self) -> Result<(), String> {
         self.runner.stop()
+    }
+
+    /// 停机收敛用：在 `deadline` 前尽量优雅地停掉 bridge，超时强杀。
+    pub fn stop_child_within(&mut self, deadline: Instant) -> Result<(), String> {
+        self.runner.stop_within(deadline)
+    }
+
+    /// 当前被监督进程（含接管的 bridge）的 pid，供停机前拍后代快照。
+    pub fn child_pid(&mut self) -> Option<u32> {
+        self.runner.pid()
     }
 
     /// 指针未提交（stage/停旧/提交失败）时恢复旧版本进程。
