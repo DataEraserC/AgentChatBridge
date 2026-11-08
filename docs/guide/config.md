@@ -153,6 +153,10 @@ admin_qqs = []             # 这些号在记录里标成 system_admin；lua.stop
 - 可选 `options.http_listen`：额外监听一个 HTTP 端点接收 SnowLuma 的 `httpClients`
   事件（动作仍走 WS）。必须同时配置 `token`（HMAC-SHA1 密钥），请求要带
   `X-Signature: sha1=...`；没有 token 会启动失败。
+- 可选 `options.async_upload_timeout_ms`：**只放宽异步路径**的上传时限，默认
+  `300000`（300 秒）。同步路径维持 45 秒——opencode 单次工具调用有 60 秒硬超时，
+  放宽也没有意义。带宽参考：161 MB 在 10 Mbps ≈ 129s、20 Mbps ≈ 64s、40 Mbps ≈ 32s。
+  超时后任务只标 `unknown`，不标 `failed`，也不会自动重试。
 - `wss://` 部署前提：适配器只接受 `ws://`；需要 TLS 时用反向代理终止 TLS 后转发到
   桥监听的 `ws://` 地址。
 - 连接成功后适配器会自动调 `get_login_info` / `get_version_info` / `get_status`；
@@ -507,6 +511,31 @@ max_age_days = 90             # 已读记录最多留多少天
 `turn_timeout_secs` 默认**不自动中断**，模型想跑多久跑多久。只有显式写了正数时，
 一轮对话超过这个时长才会被 agent 侧主动打断（dsh 支持打断），打断算这一轮失败、
 照常走失败通知。需要限制长任务时再打开，例如 `turn_timeout_secs = 3600`。
+
+## 后台任务与异步工具（[tasks]）
+
+发送类工具（`send_message` / `send_message_to` / `platform_call`）的 `async` 参数是**必填**，
+没有默认值：`async = false` 是同步（要么结果、要么错误，永远不返回 `task_id`）；
+`async = true` 是后台执行，默认立即返回 `task_id` + 状态，给了 `wait_ms` 才在返回前等一段。
+返回统一形状 `{status, task_id?, result?, error?}`，`status` 是
+`pending / running / succeeded / failed / unknown`。`unknown` 表示可能已经发出、但没等到平台回话，
+不要盲目重发。确定性留给同步，弹性留给异步。
+
+```toml
+[tasks]
+wake_on_completion = false   # 后台任务收工后是否叫醒发起它的会话；默认关闭
+wait_max_ms = 45000          # tasks op=wait 的服务端上限，毫秒；默认 45 秒
+```
+
+- `wake_on_completion` 只叫醒**发起该任务**的会话，别的会话订阅同一房间也不会被叫醒；
+  该会话已有轮次在跑时，结果并入下一轮，不抢断当前轮。关闭时行为与以前完全一致，
+  不依赖 `lua.wake_policy`。
+- `wait_max_ms` 刻意低于 opencode 的单次工具调用硬超时（60 秒）；dsh 目前没有工具级死线。
+  调用方给更大的 `wait_ms` 会被截断，返回里带 `wait_truncated / requested_wait_ms / wait_ms`。
+  `op=wait` 等不到会返回 `still_running=true`，可以再等一次，不要一次死等到底。
+- 任务记录持久化在 `[storage].path` 的库里，重启后仍可查；发送类调用执行前就落一条
+  `pending` 记录，成功补 `platform_id`，超时留 `unknown`。回执与错误里带可查的 `task_id`
+  和 `idempotency_key`，供事后对账。
 
 ## 记忆管家：后台同步
 

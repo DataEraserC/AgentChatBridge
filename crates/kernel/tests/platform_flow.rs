@@ -808,7 +808,7 @@ fn call_returns_the_platform_result() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "msg.forward", "params": {"id": "x7/O5"}}),
+            json!({"async": false, "op": "msg.forward", "params": {"id": "x7/O5"}}),
         )
         .expect("能调");
 
@@ -832,6 +832,7 @@ fn platform_call_send_is_recorded_and_acked() {
             &sessions(),
             "platform_call",
             json!({
+                "async": false,
                 "op": "msg.send_image",
                 "params": {"file": "https://example.com/a.png"},
             }),
@@ -932,6 +933,7 @@ fn platform_send_timeout_is_recorded_as_unknown() {
             &sessions(),
             "platform_call",
             json!({
+                "async": false,
                 "op": "msg.send_image",
                 "params": {"file": "https://example.com/a.png"},
             }),
@@ -969,7 +971,7 @@ fn unknown_op_suggests_a_direct_neighbour() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "member.get", "params": {}}),
+            json!({"async": false, "op": "member.get", "params": {}}),
         )
         .expect_err("没有这个 op");
 
@@ -988,7 +990,7 @@ fn missing_required_param_names_the_field() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "msg.forward", "params": {}}),
+            json!({"async": false, "op": "msg.forward", "params": {}}),
         )
         .expect_err("少了 id");
     assert!(error.message.contains("bad_params"));
@@ -1006,7 +1008,7 @@ fn undeclared_param_is_refused_with_the_allowed_list() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "msg.forward", "params": {"id": "x", "verbose": true}}),
+            json!({"async": false, "op": "msg.forward", "params": {"id": "x", "verbose": true}}),
         )
         .expect_err("多了参数");
     assert!(error.message.contains("verbose"));
@@ -1024,7 +1026,7 @@ fn destructive_method_is_refused_by_default() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "member.kick", "params": {"user_id": "1"}}),
+            json!({"async": false, "op": "member.kick", "params": {"user_id": "1"}}),
         )
         .expect_err("默认 destructive=approval，直调不给");
 
@@ -1054,7 +1056,7 @@ capability = ["room_write", "platform", "destructive"]
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "member.kick", "params": {"user_id": "1"}}),
+            json!({"async": false, "op": "member.kick", "params": {"user_id": "1"}}),
         )
         .expect("规则授予 destructive 就放行");
 
@@ -1083,7 +1085,7 @@ capability = ["room_write", "platform", "destructive"]
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "member.kick", "params": {"user_id": "1"}}),
+            json!({"async": false, "op": "member.kick", "params": {"user_id": "1"}}),
         )
         .expect_err("不在白名单里，默认走票据");
     assert!(refused.message.contains("forbidden"));
@@ -1093,7 +1095,7 @@ capability = ["room_write", "platform", "destructive"]
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "group.mute", "params": {"user_id": "1"}}),
+            json!({"async": false, "op": "group.mute", "params": {"user_id": "1"}}),
         )
         .expect("在白名单里，直调放行");
     assert_eq!(allowed["done"], true);
@@ -1111,7 +1113,7 @@ fn room_outside_the_subscription_is_refused() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"room": "qq:group/999", "op": "msg.forward", "params": {"id": "x"}}),
+            json!({"async": false, "room": "qq:group/999", "op": "msg.forward", "params": {"id": "x"}}),
         )
         .expect_err("没订阅这个房间");
     assert!(calls.lock().expect("没被毒死").is_empty());
@@ -1129,7 +1131,7 @@ fn platform_call_cannot_change_the_room_target_via_params() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "member.info", "params": {"user_id": "10001", "group_id": "999"}}),
+            json!({"async": false, "op": "member.info", "params": {"user_id": "10001", "group_id": "999"}}),
         )
         .expect_err("不能在 params 里换群");
     assert_eq!(error.code, ErrorCode::BadRequest);
@@ -1156,7 +1158,7 @@ fn connection_scoped_method_needs_no_room() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "friend.list"}),
+            json!({"async": false, "op": "friend.list"}),
         )
         .expect("不给房间也能查好友列表");
 
@@ -1175,7 +1177,7 @@ fn connection_scoped_method_does_not_check_the_room() {
         &ticket,
         &sessions(),
         "platform_call",
-        json!({"room": "qq:group/999", "op": "friend.list"}),
+        json!({"async": false, "room": "qq:group/999", "op": "friend.list"}),
     );
     assert!(result.is_ok(), "连接级方法不该因为房间没订阅就拒");
 }
@@ -1277,7 +1279,7 @@ fn big_lists_page_with_a_total_instead_of_truncating() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "member.list", "limit": 50}),
+            json!({"async": false, "op": "member.list", "limit": 50}),
         )
         .expect("能调");
 
@@ -1297,7 +1299,7 @@ fn big_lists_page_with_a_total_instead_of_truncating() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "member.list", "limit": 50, "offset": next}),
+            json!({"async": false, "op": "member.list", "limit": 50, "offset": next}),
         )
         .expect("能翻页");
     assert_eq!(second["data"][0]["user_id"], 51);
@@ -1315,7 +1317,7 @@ fn group_by_answers_counting_questions_without_the_whole_list() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "member.list", "group_by": "role"}),
+            json!({"async": false, "op": "member.list", "group_by": "role"}),
         )
         .expect("能分组");
 
@@ -1342,6 +1344,7 @@ fn where_filter_projection_run_before_paging() {
             &sessions(),
             "platform_call",
             json!({
+                "async": false,
                 "op": "member.list",
                 "where": [{"field": "role", "op": "eq", "value": "admin"}],
                 "fields": ["user_id"],
@@ -1371,6 +1374,7 @@ fn bad_query_field_lists_the_real_ones() {
             &sessions(),
             "platform_call",
             json!({
+                "async": false,
                 "op": "member.list",
                 "where": [{"field": "rol", "op": "eq", "value": "admin"}],
             }),
@@ -1491,6 +1495,7 @@ fn 平台调用的params里本机文件换成中继URL() {
             &sessions(),
             "platform_call",
             json!({
+                "async": false,
                 "op": "msg.send_image",
                 "params": {"file": source.display().to_string()},
             }),
@@ -1538,6 +1543,7 @@ fn 平台调用的http路径原样透传() {
             &sessions(),
             "platform_call",
             json!({
+                "async": false,
                 "op": "msg.send_image",
                 "params": {"file": "https://elsewhere.example/a.png"},
             }),

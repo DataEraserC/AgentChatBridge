@@ -26,6 +26,32 @@ const TEXT_SCHEMA = {
   description: "只发一段纯文本时的快捷写法",
 }
 
+export const ASYNC_DOC = `**async 必填**，由你按场景判断，没有默认值；缺了会直接报参数错误。
+- async=false：同步。要么结果、要么错误，忽略 wait_ms，永远不返回 task_id。
+- async=true：后台执行。默认立即返回 task_id + 当前状态；给 wait_ms 就最多等这么久，
+  到点还没好就返回 task_id + 状态（still_running=true），可以再等一次。
+返回统一形状 {status, task_id?, result?, error?}，status 是 pending / running /
+succeeded / failed / unknown。unknown 表示可能已经发出去了但没等到回话，不要盲目重发。
+wait_ms 由你按所在 harness 与任务大小选：opencode 单次工具调用有 60 秒硬超时，超了会
+先被掐断；dsh 目前没有工具级死线。桥侧只设一个服务端上限（[tasks].wait_max_ms，缺省
+45 秒），超过会被截断，并在返回里带 wait_truncated / requested_wait_ms / wait_ms，不会静默。
+一句话：确定性留给同步，弹性留给异步。
+异步结果收工后也可能收到 sender=acb.task、tags 含 task.* 的合成事件；那时用事件里的
+任务 id 调 tasks op=get 取详情。`
+
+const ASYNC_SCHEMA = {
+  type: "boolean",
+  description:
+    "必填：false 同步（要么结果要么错误，不返回 task_id）；true 后台执行，可配 wait_ms 限时等待。",
+}
+
+const WAIT_MS_SCHEMA = {
+  type: "integer",
+  minimum: 0,
+  description:
+    "async=true 时可选：这次调用最多阻塞多少毫秒（0 或缺省=立即返回）。桥侧 [tasks].wait_max_ms 会截断并注明。",
+}
+
 const ROOM_SCHEMA = {
   type: "string",
   description:
@@ -59,10 +85,18 @@ ${ELEMENTS_DOC}
 回执是真的回执：只有返回里 ok=true 才算发出去了，那时才有 platform_id 和 at。
 失败了会直接给你 error——**不要**在失败之后跟群里说「已经发了」。
 被 forbidden / room_not_subscribed 挡下时，先查 capabilities（scope=session 或 scope=room）确认原因，别盲目重试。
-回执里 modified_by 非空 = 桥的发送前钩子改过正文（按顺序列出 provider），群里看到的不是你写的原文。`,
+回执里 modified_by 非空 = 桥的发送前钩子改过正文（按顺序列出 provider），群里看到的不是你写的原文。
+
+${ASYNC_DOC}`,
     schema: {
       type: "object",
-      properties: { elements: ELEMENTS_SCHEMA, text: TEXT_SCHEMA },
+      properties: {
+        elements: ELEMENTS_SCHEMA,
+        text: TEXT_SCHEMA,
+        async: ASYNC_SCHEMA,
+        wait_ms: WAIT_MS_SCHEMA,
+      },
+      required: ["async"],
       additionalProperties: false,
     },
   },
@@ -73,15 +107,19 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
 只能发到「当前会话订阅过的房间」——订阅表在桥的配置里，改不了也不该改。
 被拒绝时先查 capabilities（scope=room）确认读写与原因，不要盲目重试。
 跨会话发送已经砍掉：你不能替别的人格/会话发言。
-回执里 modified_by 非空 = 发送前钩子改过正文，群里看到的不是你写的原文。`,
+回执里 modified_by 非空 = 发送前钩子改过正文，群里看到的不是你写的原文。
+
+${ASYNC_DOC}`,
     schema: {
       type: "object",
       properties: {
         to: { type: "string", description: "目标房间，形如 qq:group/12345" },
         elements: ELEMENTS_SCHEMA,
         text: TEXT_SCHEMA,
+        async: ASYNC_SCHEMA,
+        wait_ms: WAIT_MS_SCHEMA,
       },
-      required: ["to"],
+      required: ["to", "async"],
       additionalProperties: false,
     },
   },
@@ -350,10 +388,15 @@ limit/offset 分页，默认 100、上限 500，_page 里有 total/returned/has_
 **目录分页**：不给 op 时也可以给 limit/offset；目录超过预算会自动只回一页，
 按 _page.next_offset 接着翻，或按 path / tags / query 收窄。
 报错分类：unknown_op（会给近似候选）、bad_params、unknown_tag、unsupported_platform、
-not_implemented、forbidden。`,
+not_implemented、forbidden。
+
+${ASYNC_DOC}
+执行（给了 op）时 async 必填；只列目录时不要给 async。`,
     schema: {
       type: "object",
       properties: {
+        async: ASYNC_SCHEMA,
+        wait_ms: WAIT_MS_SCHEMA,
         room: ROOM_SCHEMA,
         connection: {
           type: "string",
@@ -459,6 +502,7 @@ not_implemented、forbidden。`,
           description: "执行：按字段分组计数，返回 groups:[{key,count}]",
         },
       },
+      allOf: [{ if: { required: ["op"] }, then: { required: ["async"] } }],
       additionalProperties: false,
     },
   },
@@ -570,9 +614,9 @@ wait 到点返回的记录带 still_running=true，可以再等一次，不要�
 任务可能在本轮结束后才完成；即使你没有收到唤醒，也可以回来用 tasks 查询。
 
 这张表也收发送类工具的尝试记录（handler 为 send_message / send_message_to /
-platform_call:方法名）：执行前就落库，成功补 platform_id，超时留 unknown。发送类
-调用的回执和失败/超时错误里都带 task_id 与 idempotency_key；拿它们回来对账，
-遇到 unknown 不要重发。
+platform_call:方法名）：执行前就落库，成功补 platform_id，超时留 unknown。异步调用的
+返回里有 task_id；同步回执和失败/超时错误里带 idempotency_key（错误另带可查的尝试 id）。
+拿它们回来对账，遇到 unknown 不要重发。
 
 如果收到 sender 为 acb.task、tags 含 task.* 的合成事件，表示某个后台任务已经收工；
 用它事件文本里的任务 id 调 tasks op=get 取详情。`,

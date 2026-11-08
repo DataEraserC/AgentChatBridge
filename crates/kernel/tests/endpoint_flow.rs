@@ -258,7 +258,7 @@ fn session_refuses_a_ticket_it_did_not_receive() {
                 id: "c-1".into(),
                 ticket: acb_kernel::Ticket::new("main-99").expect("合法"),
                 tool: "send_message".into(),
-                args: json!({"elements": [{"type": "text", "text": "hi"}]}),
+                args: json!({"async": false, "elements": [{"type": "text", "text": "hi"}]}),
             },
         )
         .expect("不该崩");
@@ -351,7 +351,7 @@ fn one_connection_runs_two_sessions_in_parallel() {
                 id: "c-main".into(),
                 ticket: main_ticket.clone(),
                 tool: "send_message".into(),
-                args: json!({"elements": [{"type": "text", "text": "在"}]}),
+                args: json!({"async": false, "elements": [{"type": "text", "text": "在"}]}),
             },
         )
         .expect("不该崩");
@@ -369,7 +369,7 @@ fn one_connection_runs_two_sessions_in_parallel() {
                 id: "c-group2".into(),
                 ticket: group2_ticket.clone(),
                 tool: "send_message".into(),
-                args: json!({"elements": [{"type": "text", "text": "hi"}]}),
+                args: json!({"async": false, "elements": [{"type": "text", "text": "hi"}]}),
             },
         )
         .expect("不该崩");
@@ -476,9 +476,13 @@ struct TestServer {
 
 impl TestServer {
     fn start() -> Self {
+        Self::start_with(bridge())
+    }
+
+    fn start_with(bridge: Bridge<MemoryStore>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("能监听");
         let address = listener.local_addr().expect("有地址");
-        let bridge = Arc::new(Mutex::new(bridge()));
+        let bridge = Arc::new(Mutex::new(bridge));
         let shutdown = Arc::new(AtomicBool::new(false));
         let deps = DependencyRegistry::new();
 
@@ -596,7 +600,7 @@ fn a_real_connection_carries_a_whole_turn() {
             id: "c-1".into(),
             ticket: ticket.clone(),
             tool: "send_message".into(),
-            args: json!({"elements": [{"type": "text", "text": "在"}]}),
+            args: json!({"async": false, "elements": [{"type": "text", "text": "在"}]}),
         },
     );
     match read_frame(&mut reader).expect("能读到 tool_result") {
@@ -645,6 +649,286 @@ fn a_real_connection_carries_a_whole_turn() {
         }
         assert!(Instant::now() < deadline, "设备一直没空出来");
         thread::sleep(Duration::from_millis(20));
+    }
+
+    drop(reader);
+    drop(stream);
+    server.stop();
+}
+
+/// 异步发送：立即拿到 task_id，`tasks op=get` 查状态，`op=wait` 取结果，
+/// 缺 `async` 直接报参数错误；服务端上限截断要写进返回。
+#[test]
+fn async_send_returns_a_task_id_and_tasks_get_wait_fetch_it() {
+    let server = TestServer::start();
+    let bridge = Arc::clone(&server.bridge);
+
+    let mut stream = TcpStream::connect(server.address).expect("能连上");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("能设超时");
+    let mut reader = BufReader::new(stream.try_clone().expect("能复制"));
+    write_frame(
+        &mut stream,
+        &Frame::Hello {
+            version: PROTOCOL_VERSION,
+            harness: "dsh".into(),
+            token: Some(TOKEN.into()),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 ready") {
+        Frame::Ready { .. } => {}
+        other => panic!("应当是 ready，实际是 {}", other.kind()),
+    }
+    {
+        let mut guard = bridge.lock().expect("没被毒死");
+        guard.ingest(message("在吗")).expect("能记下来");
+    }
+    let ticket = match read_frame(&mut reader).expect("能读到 turn_start") {
+        Frame::TurnStart { delivery } => delivery.ticket,
+        other => panic!("应当是 turn_start，实际是 {}", other.kind()),
+    };
+
+    // 缺 async：明确的参数错误，不静默兜底。
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "c-missing".into(),
+            ticket: ticket.clone(),
+            tool: "send_message".into(),
+            args: json!({"elements": [{"type": "text", "text": "你好"}]}),
+        },
+    );
+    let error = match read_frame(&mut reader).expect("能读到 tool_result") {
+        Frame::ToolResult {
+            id,
+            result,
+            error,
+        } => {
+            assert_eq!(id, "c-missing");
+            assert!(result.is_none(), "不该有结果");
+            error.expect("缺 async 要报错")
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    };
+    assert_eq!(error.code, acb_proto::ErrorCode::BadRequest);
+    assert!(
+        error.message.contains("async"),
+        "错误要说明缺的是 async：{}",
+        error.message
+    );
+
+    // async=true + wait_ms=0：立即返回 task_id 与当前状态。
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "c-async".into(),
+            ticket: ticket.clone(),
+            tool: "send_message".into(),
+            args: json!({"async": true, "elements": [{"type": "text", "text": "你好"}]}),
+        },
+    );
+    let envelope = match read_frame(&mut reader).expect("能读到 tool_result") {
+        Frame::ToolResult { result, error, .. } => {
+            assert!(error.is_none(), "异步调用本身不该报错");
+            result.expect("要有信封")
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    };
+    assert!(
+        envelope["status"] == "running" || envelope["status"] == "succeeded",
+        "立即返回只能是 running / succeeded：{envelope}"
+    );
+    let task_id = envelope["task_id"]
+        .as_str()
+        .expect("异步要返回 task_id")
+        .to_owned();
+
+    // 立即查状态，不阻塞。
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "c-get".into(),
+            ticket: ticket.clone(),
+            tool: "tasks".into(),
+            args: json!({"op": "get", "id": task_id}),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 tool_result") {
+        Frame::ToolResult { result, error, .. } => {
+            assert!(error.is_none(), "查状态不该报错：{error:?}");
+            let record = result.expect("要有记录");
+            assert_eq!(record["id"], task_id.as_str());
+            assert!(record["status"].is_string());
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    }
+
+    // 限时等待取结果。
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "c-wait".into(),
+            ticket: ticket.clone(),
+            tool: "tasks".into(),
+            args: json!({"op": "wait", "id": task_id, "wait_ms": 2000}),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 tool_result") {
+        Frame::ToolResult { result, error, .. } => {
+            assert!(error.is_none(), "等待不该报错：{error:?}");
+            let record = result.expect("要有记录");
+            assert_eq!(record["status"], "succeeded");
+            assert_eq!(record["platform_id"], "p-1", "后台线程要补平台消息号");
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    }
+
+    drop(reader);
+    drop(stream);
+    server.stop();
+}
+
+/// 慢发送：后台真的跑起来，让 `tasks op=wait` 有机会等到上限。
+struct SlowOutbound;
+
+impl Outbound for SlowOutbound {
+    fn send(&mut self, _room: &RoomId, _elements: &[Element]) -> Result<Sent, OutboundError> {
+        thread::sleep(Duration::from_millis(450));
+        Ok(Sent {
+            platform_id: "p-slow".into(),
+            at: AT,
+        })
+    }
+}
+
+fn slow_config() -> &'static str {
+    r#"
+        [[connections]]
+        id = "qq"
+        platform = "qq"
+        kind = "onebot11"
+        url = "ws://127.0.0.1:3001"
+        account = "bot"
+
+        [endpoint]
+        listen = "127.0.0.1:7700"
+
+        [[personas]]
+        id = "p"
+        name = "人格"
+        text = "你是桥。"
+
+        [[harnesses]]
+        id = "dsh"
+        name = "DeepSeek"
+
+        [[sessions]]
+        id = "main"
+        harness = "dsh"
+        persona = "p"
+        token = { secret = "t-main" }
+
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/123"
+
+        [tasks]
+        wait_max_ms = 300
+    "#
+}
+
+/// 等不到就返回「仍在进行」，并把服务端上限截断写进返回；可以再等一次。
+#[test]
+fn task_wait_truncates_to_the_server_cap_and_reports_it() {
+    let server = TestServer::start_with(Bridge::new(
+        acb_kernel::Config::parse_fixture(slow_config()).expect("配置合法"),
+        MemoryStore::new(),
+        Box::new(SlowOutbound),
+    ));
+    let bridge = Arc::clone(&server.bridge);
+
+    let mut stream = TcpStream::connect(server.address).expect("能连上");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("能设超时");
+    let mut reader = BufReader::new(stream.try_clone().expect("能复制"));
+    write_frame(
+        &mut stream,
+        &Frame::Hello {
+            version: PROTOCOL_VERSION,
+            harness: "dsh".into(),
+            token: Some(TOKEN.into()),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 ready") {
+        Frame::Ready { .. } => {}
+        other => panic!("应当是 ready，实际是 {}", other.kind()),
+    }
+    {
+        let mut guard = bridge.lock().expect("没被毒死");
+        guard.ingest(message("在吗")).expect("能记下来");
+    }
+    let ticket = match read_frame(&mut reader).expect("能读到 turn_start") {
+        Frame::TurnStart { delivery } => delivery.ticket,
+        other => panic!("应当是 turn_start，实际是 {}", other.kind()),
+    };
+
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "c-async".into(),
+            ticket: ticket.clone(),
+            tool: "send_message".into(),
+            args: json!({"async": true, "elements": [{"type": "text", "text": "你好"}]}),
+        },
+    );
+    let task_id = match read_frame(&mut reader).expect("能读到 tool_result") {
+        Frame::ToolResult { result, .. } => result.expect("要有信封")["task_id"]
+            .as_str()
+            .expect("异步要返回 task_id")
+            .to_owned(),
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    };
+
+    // 请求 500ms，服务端只允许 300ms：截断并明确说明，等不到就返回仍在进行。
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "c-wait".into(),
+            ticket: ticket.clone(),
+            tool: "tasks".into(),
+            args: json!({"op": "wait", "id": task_id, "wait_ms": 500}),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 tool_result") {
+        Frame::ToolResult { result, .. } => {
+            let record = result.expect("要有记录");
+            assert_eq!(record["still_running"], true);
+            assert_eq!(record["wait_truncated"], true);
+            assert_eq!(record["requested_wait_ms"], 500);
+            assert_eq!(record["wait_ms"], 300);
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    }
+
+    // 再等一次能拿到结果。
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "c-wait-again".into(),
+            ticket,
+            tool: "tasks".into(),
+            args: json!({"op": "wait", "id": task_id, "wait_ms": 500}),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 tool_result") {
+        Frame::ToolResult { result, .. } => {
+            let record = result.expect("要有记录");
+            assert_eq!(record["status"], "succeeded");
+            assert_eq!(record["platform_id"], "p-slow");
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
     }
 
     drop(reader);

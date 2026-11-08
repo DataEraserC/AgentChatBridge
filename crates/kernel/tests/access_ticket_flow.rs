@@ -405,7 +405,7 @@ fn single_request_approve_and_use_once() {
             &after,
             &sessions(),
             "send_message_to",
-            json!({"to": "qq:group/999", "elements": [{"type": "text", "text": "again"}]}),
+            json!({"async": false, "to": "qq:group/999", "elements": [{"type": "text", "text": "again"}]}),
         )
         .expect_err("执行后票据已消费");
     assert_eq!(denied.code, ErrorCode::RoomNotSubscribed);
@@ -848,7 +848,7 @@ fn critical_never_runs_directly_and_only_via_ticket() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "account.cookies", "params": {"domain": "qun.qq.com"}}),
+            json!({"async": false, "op": "account.cookies", "params": {"domain": "qun.qq.com"}}),
         )
         .expect_err("没有规则授予 critical 时不能直接调用");
     assert!(
@@ -959,7 +959,7 @@ fn unverified_op_is_direct_denied_and_ticket_approval_shows_the_reason() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "group.unverified"}),
+            json!({"async": false, "op": "group.unverified"}),
         )
         .expect_err("unverified 不能直接调");
     assert_eq!(direct.code, ErrorCode::ToolNotAllowed);
@@ -1233,7 +1233,7 @@ fn critical_runs_directly_when_a_rule_grants_it() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "account.cookies", "params": {"domain": "qun.qq.com"}}),
+            json!({"async": false, "op": "account.cookies", "params": {"domain": "qun.qq.com"}}),
         )
         .expect("规则授予 critical 时直调");
     assert_eq!(result["cookies"], "SECRET-COOKIE");
@@ -1260,7 +1260,7 @@ fn unverified_op_stays_ticket_only_even_when_rules_grant_critical() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "group.unverified"}),
+            json!({"async": false, "op": "group.unverified"}),
         )
         .expect_err("unverified 是硬不变量，规则授予也不放行直调");
     assert_eq!(direct.code, ErrorCode::ToolNotAllowed);
@@ -1397,7 +1397,7 @@ fn ticket_and_normal_call_share_unknown_op_rejection() {
             &ticket,
             &sessions(),
             "platform_call",
-            json!({"op": "member.nope", "params": {}}),
+            json!({"async": false, "op": "member.nope", "params": {}}),
         )
         .expect_err("普通路径拒绝未知 op");
     assert_eq!(normal.code, ErrorCode::BadRequest);

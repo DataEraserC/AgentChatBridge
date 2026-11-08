@@ -125,6 +125,17 @@ path = "state/acb.db"
 max_records_per_room = 5000
 max_age_days = 90
 
+# 后台任务（可选）。发送类工具/平台调用可以 async=true 后台执行，结果落 tasks 表。
+[tasks]
+# 后台任务收工后是否叫醒发起它的会话。默认关闭：关闭时行为与以前完全一致。
+# 只叫醒发起者；该会话已有在跑的轮次时，结果并入下一轮，不抢断当前轮。
+wake_on_completion = false
+
+# tasks op=wait 的服务端上限（毫秒），默认 45000（45 秒）。
+# 调用方可以给更小的 wait_ms；给大了会被截断到上限，并在返回里注明。
+# 刻意低于 opencode 的单次工具调用硬超时（60 秒）；dsh 没有工具级死线。
+wait_max_ms = 45000
+
 # 外置进程策略 provider（最小面：access）。core 不认识 wasm，只按 command 启动宿主。
 # 列表为空 = 不启动任何宿主；配置里有但宿主起不来 = 启动期硬失败（退出 78）。
 # [[process_providers]]
@@ -171,6 +182,11 @@ account = "10001"
 admin_qqs = []   # 这些 QQ 号会被标成系统管理员（记录里的 sender.role = system_admin）
 # SnowLuma 兼容下限（默认 2.4.0）；低于下限只在启动日志告警，不断连。
 # options = { snowluma_min_version = "2.4.0" }
+#
+# 异步路径的上传时限（毫秒）。同步路径仍用 45 秒（要留在 harness 的 60 秒工具超时内）；
+# 异步调用提前返回 task_id，不受那条死线约束，所以给大文件留足时间。默认 300000（300 秒），
+# 约覆盖 5 Mbps 上行的 161 MB。带宽参考：161 MB 在 10 Mbps ≈ 129s、20 Mbps ≈ 64s、40 Mbps ≈ 32s。
+# options = { async_upload_timeout_ms = 300000 }
 #
 # 可选 HTTP 事件上报（SnowLuma 的 httpClients）：桥额外监听一个 HTTP 端点接收事件，
 # 动作仍走上面的 WS。token 同时是 HMAC-SHA1 密钥；SnowLuma 侧 accessToken 必须一致。

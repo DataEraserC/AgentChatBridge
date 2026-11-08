@@ -571,7 +571,7 @@ fn mention_wakes_then_reply_and_ack_advance_the_watermark() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "在"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "在"}]}),
         )
         .expect("能发");
     assert_eq!(result["id"], 2, "自己的话也进流水，编号接着排");
@@ -693,7 +693,7 @@ fn own_messages_never_come_back_as_unread() {
             &first,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "在"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "在"}]}),
         )
         .expect("能发");
 
@@ -943,6 +943,7 @@ fn send_message_to_is_fenced_by_subscriptions() {
             &sessions(),
             "send_message_to",
             json!({
+                "async": false,
                 "to": "dc:channel/456",
                 "elements": [{"type": "text", "text": "转过去"}]
             }),
@@ -961,6 +962,7 @@ fn send_message_to_is_fenced_by_subscriptions() {
             &sessions(),
             "send_message_to",
             json!({
+                "async": false,
                 "to": "tg:group/789",
                 "elements": [{"type": "text", "text": "发不出去"}]
             }),
@@ -1497,6 +1499,7 @@ fn access_provider_sees_the_turn_origin_room() {
             &sessions(),
             "send_message_to",
             json!({
+                "async": false,
                 "to": "qq:group/999",
                 "elements": [{"type": "text", "text": "来源是群 123，放行"}]
             }),
@@ -1544,7 +1547,7 @@ fn send_message_rechecks_current_room_access() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "不该发出去"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "不该发出去"}]}),
         )
         .expect_err("当前房间被 access 拒绝时必须拦住");
     assert_eq!(denied.code, ErrorCode::RoomNotSubscribed);
@@ -1560,7 +1563,7 @@ fn send_message_rechecks_current_room_access() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "可以发"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "可以发"}]}),
         )
         .expect("授权房间应通过");
     assert_eq!(sends.lock().expect("没被毒死")[0].0, room("qq:group/123"));
@@ -1599,6 +1602,7 @@ capability = ["room_read", "room_write", "platform", "destructive", "plugin"]
             &sessions(),
             "send_message_to",
             json!({
+                "async": false,
                 "to": "qq:group/999",
                 "elements": [{"type": "text", "text": "私信管理员可以越界"}]
             }),
@@ -1618,6 +1622,7 @@ capability = ["room_read", "room_write", "platform", "destructive", "plugin"]
             &sessions(),
             "send_message_to",
             json!({
+                "async": false,
                 "to": "qq:group/999",
                 "elements": [{"type": "text", "text": "群里越界"}]
             }),
@@ -1658,6 +1663,7 @@ fn active_turn_keeps_config_snapshot_after_reload() {
             &sessions(),
             "send_message_to",
             json!({
+                "async": false,
                 "to": "qq:group/123",
                 "elements": [{"type": "text", "text": "按本轮快照发"}]
             }),
@@ -1748,7 +1754,7 @@ fn a_stale_ticket_is_rejected() {
             &ticket,
             &sessions(),
             "send_message_to",
-            json!({"to": "qq:group/123", "elements": [{"type": "text", "text": "迟到的"}]}),
+            json!({"async": false, "to": "qq:group/123", "elements": [{"type": "text", "text": "迟到的"}]}),
         )
         .expect_err("收工之后的票作废");
     assert_eq!(error.code, ErrorCode::Unauthorized);
@@ -2217,7 +2223,7 @@ fn quoting_my_message_wakes_without_a_mention() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "在"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "在"}]}),
         )
         .expect("能发");
     bridge
@@ -2324,7 +2330,7 @@ fn reaction_on_my_message_wakes_without_a_mention() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "在"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "在"}]}),
         )
         .expect("能发");
     bridge
@@ -2378,7 +2384,7 @@ fn reaction_removal_is_recorded_without_waking() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "在"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "在"}]}),
         )
         .expect("能发");
     bridge
@@ -2518,6 +2524,7 @@ fn a_session_can_only_send_to_rooms_it_subscribes() {
             &group(),
             "send_message_to",
             json!({
+                "async": false,
                 "to": "qq:group/1",
                 "elements": [{"type": "text", "text": "接着说"}]
             }),
@@ -2531,6 +2538,7 @@ fn a_session_can_only_send_to_rooms_it_subscribes() {
             &group(),
             "send_message_to",
             json!({
+                "async": false,
                 "to": "qq:group/2",
                 "elements": [{"type": "text", "text": "去别的会话的群说"}]
             }),
@@ -2557,6 +2565,7 @@ fn a_room_outside_the_group_is_still_refused() {
             &group(),
             "send_message_to",
             json!({
+                "async": false,
                 "to": "qq:group/999",
                 "elements": [{"type": "text", "text": "发不出去"}]
             }),
@@ -3076,7 +3085,7 @@ fn send_message_is_allowed_right_after_the_turn_ends() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "补发的内容"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "补发的内容"}]}),
         )
         .expect("宽限窗内的补发应当放行");
     assert_eq!(result["ok"], true);
@@ -3127,7 +3136,7 @@ fn send_receipt_says_ok_and_when() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "在的"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "在的"}]}),
         )
         .expect("能发");
     assert_eq!(receipt["ok"], json!(true));
@@ -3266,7 +3275,7 @@ fn leaked_call_markup_never_reaches_the_room() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text":
+            json!({"async": false, "elements": [{"type": "text", "text":
                 "在的，你说。</text>\n</mcp__acb__send_message>\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"mcp__acb__platform_call\">"
             }]}),
         )
@@ -3299,7 +3308,7 @@ fn all_markup_text_is_refused_instead_of_sent_empty() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "</text></mcp__acb__send_message>"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "</text></mcp__acb__send_message>"}]}),
         )
         .expect_err("切完没正文就该拒");
     assert_eq!(rejected.code, ErrorCode::BadRequest);
@@ -3724,6 +3733,7 @@ fn 发送时本机文件换成中继URL_别的路径不动() {
             &sessions(),
             "send_message",
             json!({
+                "async": false,
                 "elements": [
                     {"type": "image", "url": source.display().to_string()},
                     {"type": "image", "url": "http://elsewhere.example/a.png"},
@@ -3774,6 +3784,7 @@ fn 没配文件中继时本机路径原样透传() {
             &sessions(),
             "send_message",
             json!({
+                "async": false,
                 "elements": [
                     {"type": "image", "url": "/home/nixos/ somewhere/a.png"},
                 ],
@@ -3885,7 +3896,7 @@ fn a_reply_is_acked_for_every_subscriber_not_just_the_speaker() {
             &turn.ticket,
             &["main".to_owned()],
             "send_message",
-            json!({"elements": [{"type": "text", "text": "在"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "在"}]}),
         )
         .expect("能发");
     // #3 是自己发的，deliver_out 已替所有订阅者确认；模型只需确认收到的 #2。
@@ -4078,7 +4089,7 @@ fn send_hooks_can_rewrite_and_observe() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "你好"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "你好"}]}),
         )
         .expect("能发送");
     // 改写必须如实上报：agent 要知道群里看到的不是自己写的原文。
@@ -4265,7 +4276,7 @@ fn timed_out_send_is_recorded_as_unknown_with_a_queryable_id() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "你好"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "你好"}]}),
         )
         .expect_err("超时要报错");
     assert_eq!(error.code, ErrorCode::Timeout);
@@ -4310,18 +4321,21 @@ fn successful_send_fills_platform_id_in_the_attempt_record() {
             &ticket,
             &sessions(),
             "send_message",
-            json!({"elements": [{"type": "text", "text": "你好"}]}),
+            json!({"async": false, "elements": [{"type": "text", "text": "你好"}]}),
         )
         .expect("能发送");
-    let task_id = receipt["task_id"].as_str().expect("回执要带 task_id");
+    let key = receipt["idempotency_key"]
+        .as_str()
+        .expect("回执要带幂等键");
+    assert!(key.starts_with("idem-"));
     assert!(
-        receipt["idempotency_key"]
-            .as_str()
-            .expect("回执要带幂等键")
-            .starts_with("idem-")
+        receipt.get("task_id").is_none(),
+        "同步调用不返回 task_id：{receipt}"
     );
 
-    let task = bridge.task_get("main", task_id).expect("能查");
+    let list = bridge.task_list("main", None, 20, 0).expect("能列任务");
+    let task = &list["tasks"][0];
+    assert_eq!(task["idempotency_key"], key, "凭幂等键对账");
     assert_eq!(task["status"], "succeeded");
     assert_eq!(task["platform_id"], "p-1", "成功要补平台消息号");
     assert!(task["finished_at"].as_i64().is_some());

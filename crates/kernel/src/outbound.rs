@@ -892,6 +892,23 @@ pub trait Outbound: Send {
             method = method
         )))
     }
+
+    /// 后台执行的一次发送。调用方已经拿到 task_id，不急着要回执；
+    /// 默认与同步一致，适配器可以在这里放宽自己「等平台回话」的时限
+    /// （比如大文件上传）。同步路径不受影响。
+    fn send_async(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
+        self.send(room, elements)
+    }
+
+    /// 后台执行的一次平台方法调用。语义同 [`Outbound::send_async`]。
+    fn call_async(
+        &mut self,
+        room: &RoomId,
+        method: &str,
+        params: &Value,
+    ) -> Result<CallOutcome, CallError> {
+        self.call(room, method, params)
+    }
 }
 
 /// 按连接分发的一组出站通道。
@@ -1004,6 +1021,33 @@ impl Outbound for Outbounds {
             ))),
         }
     }
+
+    fn send_async(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
+        match self.handle_for(&room.connection) {
+            Some(outbound) => outbound.send_async(room, elements),
+            None => Err(OutboundError::Unavailable(acb_i18n::t!(
+                "kernel.outbound.no_connection_send",
+                connection = room.connection,
+                room = room
+            ))),
+        }
+    }
+
+    fn call_async(
+        &mut self,
+        room: &RoomId,
+        method: &str,
+        params: &Value,
+    ) -> Result<CallOutcome, CallError> {
+        match self.handle_for(&room.connection) {
+            Some(outbound) => outbound.call_async(room, method, params),
+            None => Err(CallError::Unavailable(acb_i18n::t!(
+                "kernel.outbound.no_connection_call",
+                connection = room.connection,
+                room = room
+            ))),
+        }
+    }
 }
 
 /// 一条连接的出站句柄。可以克隆、带出 `Mutex<Bridge>`，等平台 I/O 时不再占着
@@ -1038,6 +1082,25 @@ impl OutboundHandle {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .call(room, method, params)
+    }
+
+    pub fn send_async(&self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .send_async(room, elements)
+    }
+
+    pub fn call_async(
+        &self,
+        room: &RoomId,
+        method: &str,
+        params: &Value,
+    ) -> Result<CallOutcome, CallError> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .call_async(room, method, params)
     }
 }
 

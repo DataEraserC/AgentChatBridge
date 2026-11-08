@@ -26,6 +26,15 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// agent 会重发，群里就出现两条。45 秒留在 harness 的 60 秒工具超时以内。
 pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// 异步路径下带媒体/文件的上传上限。
+///
+/// 同步路径的 45 秒是为了留在 harness 的 60 秒工具超时以内；异步调用已经提前
+/// 返回 task_id，不受那条死线约束，所以给大文件留足时间。默认 300 秒；每条连接
+/// 可以用 `options.async_upload_timeout_ms` 覆盖。
+///
+/// 带宽参考：161 MB 在 10 Mbps ≈ 129s、20 Mbps ≈ 64s、40 Mbps ≈ 32s。
+pub const ASYNC_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// 平台侧 `download_file` 默认超时是 60 秒（`SNOWLUMA_DOWNLOAD_FILE_TIMEOUT_MS`）。
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -70,6 +79,8 @@ pub struct OneBotSnowLumaOutbound {
     connection: String,
     timeout: Duration,
     upload_timeout: Duration,
+    /// 异步路径专用的上传时限；同步路径仍然用 `upload_timeout`。
+    async_upload_timeout: Duration,
     download_timeout: Duration,
     seq: u64,
 }
@@ -81,6 +92,7 @@ impl OneBotSnowLumaOutbound {
             connection: connection.into(),
             timeout: SEND_TIMEOUT,
             upload_timeout: UPLOAD_TIMEOUT,
+            async_upload_timeout: ASYNC_UPLOAD_TIMEOUT,
             download_timeout: DOWNLOAD_TIMEOUT,
             seq: 0,
         }
@@ -90,7 +102,14 @@ impl OneBotSnowLumaOutbound {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self.upload_timeout = timeout;
+        self.async_upload_timeout = timeout;
         self.download_timeout = timeout;
+        self
+    }
+
+    /// 单独调异步路径的上传时限（来自连接的 `options.async_upload_timeout_ms`）。
+    pub fn with_async_upload_timeout(mut self, timeout: Duration) -> Self {
+        self.async_upload_timeout = timeout;
         self
     }
 
@@ -161,6 +180,15 @@ impl Outbound for OneBotSnowLumaOutbound {
         parse_response(response)
     }
 
+    fn send_async(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
+        // 后台任务已经先给了 task_id，不受 harness 工具超时约束，换成更长的上传窗口。
+        let previous = self.upload_timeout;
+        self.upload_timeout = self.async_upload_timeout;
+        let result = self.send(room, elements);
+        self.upload_timeout = previous;
+        result
+    }
+
     fn catalog(&self, _connection: &str) -> std::sync::Arc<[MethodSpec]> {
         catalog()
     }
@@ -213,6 +241,20 @@ impl Outbound for OneBotSnowLumaOutbound {
         let value = parse_call_response(method, response)?;
         let record = outgoing_record(method, &params, &value);
         Ok(CallOutcome { value, record })
+    }
+
+    fn call_async(
+        &mut self,
+        room: &RoomId,
+        method: &str,
+        params: &Value,
+    ) -> Result<CallOutcome, CallError> {
+        // 只有非下载类方法走上传窗口；下载仍用 download_timeout。
+        let previous = self.upload_timeout;
+        self.upload_timeout = self.async_upload_timeout;
+        let result = self.call(room, method, params);
+        self.upload_timeout = previous;
+        result
     }
 }
 

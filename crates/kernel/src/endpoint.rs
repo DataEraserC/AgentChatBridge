@@ -19,11 +19,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use acb_proto::frame::{decode, encode};
-use acb_proto::{Delivery, Frame, LogLevel, Ticket};
+use acb_proto::{Delivery, ErrorCode, Frame, LogLevel, Ticket, ToolError};
+use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::deps::DependencyRegistry;
-use crate::engine::{Bridge, BridgeError, ToolCallStart};
+use crate::engine::{Bridge, BridgeError, PreparedPlatformCall, PreparedSend, ToolCallStart};
 use crate::storage::Store;
 
 /// 空闲时多久回头看一眼有没有活。越小越跟手，越大越省 CPU。
@@ -391,9 +392,124 @@ fn tool_reply(id: String, result: Result<serde_json::Value, acb_proto::ToolError
     }
 }
 
-/// 服务一条已经建立的连接，直到对端断开或出错。
-pub fn run_connection<S: Store>(
+/// 异步工具的统一返回：`{status, task_id?, result?, error?}`。
+fn async_envelope(record: &Value) -> Value {
+    let status = record["status"].as_str().unwrap_or("unknown");
+    let mut reply = json!({
+        "status": status,
+        "task_id": record["id"],
+    });
+    match status {
+        "succeeded" => reply["result"] = record["result"].clone(),
+        "failed" | "unknown" => reply["error"] = record["error"].clone(),
+        _ => {}
+    }
+    reply
+}
+
+fn task_is_finished(status: &str) -> bool {
+    matches!(status, "succeeded" | "failed" | "unknown")
+}
+
+/// 后台调用的即时/限时返回。
+///
+/// `wait_ms = 0` 只取当前状态；大于 0 才等到 `min(wait_ms, [tasks].wait_max_ms)`，
+/// 截断与「还在跑」都写进返回，不静默。
+fn async_reply<S: Store + Send + 'static>(
     bridge: &Mutex<Bridge<S>>,
+    task_id: Option<String>,
+    session: &str,
+    requested_wait_ms: u64,
+) -> Result<Value, ToolError> {
+    let Some(task_id) = task_id else {
+        return Err(ToolError::new(
+            ErrorCode::Internal,
+            acb_i18n::t!("kernel.endpoint.async_record_missing"),
+        ));
+    };
+    let cap = {
+        let guard = lock(bridge);
+        guard.config().tasks.wait_max_ms.max(1)
+    };
+    let effective = requested_wait_ms.min(cap);
+    let truncated = requested_wait_ms > cap;
+    let start = Instant::now();
+    loop {
+        let record = {
+            let guard = lock(bridge);
+            guard.task_get(session, &task_id)?
+        };
+        let status = record["status"].as_str().unwrap_or("unknown");
+        let finished = task_is_finished(status);
+        let elapsed = start.elapsed().as_millis() as u64;
+        if finished || elapsed >= effective {
+            let mut reply = async_envelope(&record);
+            if !finished {
+                reply["still_running"] = json!(true);
+            }
+            if truncated {
+                reply["wait_truncated"] = json!(true);
+                reply["requested_wait_ms"] = json!(requested_wait_ms);
+                reply["wait_ms"] = json!(effective);
+            }
+            return Ok(reply);
+        }
+        let remaining = effective - elapsed;
+        std::thread::sleep(POLL_INTERVAL.min(Duration::from_millis(remaining)));
+    }
+}
+
+/// 后台执行一次发送：中继、调平台、结算，全部在独立线程里完成。
+fn spawn_async_send<S: Store + Send + 'static>(
+    bridge: Arc<Mutex<Bridge<S>>>,
+    mut prepared: PreparedSend,
+) {
+    let task_id = prepared.task_id().map(str::to_owned);
+    std::thread::spawn(move || {
+        if let Err(error) = prepared.relay() {
+            let mut guard = lock(&bridge);
+            let error = guard.abort_send(&prepared, error);
+            if let Some(id) = &task_id {
+                guard.record_async_outcome(id, Err(error));
+            }
+            return;
+        }
+        let result = prepared.execute();
+        let mut guard = lock(&bridge);
+        let result = guard.finish_send(prepared, result);
+        if let Some(id) = &task_id {
+            guard.record_async_outcome(id, result);
+        }
+    });
+}
+
+/// 后台执行一次平台方法调用。
+fn spawn_async_platform<S: Store + Send + 'static>(
+    bridge: Arc<Mutex<Bridge<S>>>,
+    mut prepared: PreparedPlatformCall,
+) {
+    let task_id = prepared.task_id().map(str::to_owned);
+    std::thread::spawn(move || {
+        if let Err(error) = prepared.relay() {
+            let mut guard = lock(&bridge);
+            let error = guard.abort_platform(&prepared, error);
+            if let Some(id) = &task_id {
+                guard.record_async_outcome(id, Err(error));
+            }
+            return;
+        }
+        let result = prepared.execute();
+        let mut guard = lock(&bridge);
+        let result = guard.finish_platform_call(prepared, result);
+        if let Some(id) = &task_id {
+            guard.record_async_outcome(id, result);
+        }
+    });
+}
+
+/// 服务一条已经建立的连接，直到对端断开或出错。
+pub fn run_connection<S: Store + Send + 'static>(
+    bridge: Arc<Mutex<Bridge<S>>>,
     mut stream: TcpStream,
     controls: &ControlRegistry,
     deps: &DependencyRegistry,
@@ -420,7 +536,7 @@ pub fn run_connection<S: Store>(
         };
         let frame = decode(&line).map_err(|error| EndpointError::Protocol(error.to_string()))?;
         // 先握手校验身份，再登记依赖：未认证的 Hello 不能创建或污染依赖条目。
-        let guard = lock(bridge);
+        let guard = lock(&bridge);
         let sessions = handshake(&guard, frame)?;
         // 握手已经校验过「这些会话都属于这个 harness」，取第一个会话反查 harness id。
         let harness = sessions
@@ -434,7 +550,7 @@ pub fn run_connection<S: Store>(
     }
     // 把这条连接代表会话的已落盘映射带上，让 harness 跨重启复用旧会话（ADR-0018）。
     let maps = {
-        let guard = lock(bridge);
+        let guard = lock(&bridge);
         guard
             .session_maps()
             .map(|all| {
@@ -479,7 +595,7 @@ pub fn run_connection<S: Store>(
         //    跑多个会话的轮次——每个会话一张票，互不阻塞（ADR-0019）。
         {
             let delivery = {
-                let mut guard = lock(bridge);
+                let mut guard = lock(&bridge);
                 session.take_delivery(&mut guard)
             };
             match delivery {
@@ -528,22 +644,46 @@ pub fn run_connection<S: Store>(
                         args,
                     } => {
                         let start = {
-                            let mut guard = lock(bridge);
+                            let mut guard = lock(&bridge);
                             guard.begin_tool_call(&ticket, session.sessions(), &tool, args)
                         };
                         match start {
                             Ok(ToolCallStart::Done(result)) => {
                                 vec![tool_reply(id, Ok(result))]
                             }
+                            Ok(ToolCallStart::Platform(prepared)) if prepared.async_mode() => {
+                                let task_id = prepared.task_id().map(str::to_owned);
+                                let session = prepared.session().to_owned();
+                                let wait_ms = prepared.wait_ms();
+                                spawn_async_platform(Arc::clone(&bridge), prepared);
+                                let reply = async_reply(&bridge, task_id, &session, wait_ms)
+                                    .map(|value| {
+                                        let guard = lock(&bridge);
+                                        guard.fit_tool_result(&tool, value)
+                                    });
+                                vec![tool_reply(id, reply)]
+                            }
+                            Ok(ToolCallStart::Send(prepared)) if prepared.async_mode() => {
+                                let task_id = prepared.task_id().map(str::to_owned);
+                                let session = prepared.session().to_owned();
+                                let wait_ms = prepared.wait_ms();
+                                spawn_async_send(Arc::clone(&bridge), prepared);
+                                let reply = async_reply(&bridge, task_id, &session, wait_ms)
+                                    .map(|value| {
+                                        let guard = lock(&bridge);
+                                        guard.fit_tool_result(&tool, value)
+                                    });
+                                vec![tool_reply(id, reply)]
+                            }
                             Ok(ToolCallStart::Platform(mut prepared)) => match prepared.relay() {
                                 Ok(()) => {
                                     let result = prepared.execute();
-                                    let mut guard = lock(bridge);
+                                    let mut guard = lock(&bridge);
                                     let result = guard.finish_platform_call(prepared, result);
                                     vec![tool_reply(id, result)]
                                 }
                                 Err(error) => {
-                                    let mut guard = lock(bridge);
+                                    let mut guard = lock(&bridge);
                                     let error = guard.abort_platform(&prepared, error);
                                     drop(guard);
                                     vec![tool_reply(id, Err(error))]
@@ -552,14 +692,14 @@ pub fn run_connection<S: Store>(
                             Ok(ToolCallStart::Send(mut prepared)) => match prepared.relay() {
                                 Ok(()) => {
                                     let result = prepared.execute();
-                                    let mut guard = lock(bridge);
+                                    let mut guard = lock(&bridge);
                                     let result = guard
                                         .finish_send(prepared, result)
                                         .map(|value| guard.fit_tool_result(&tool, value));
                                     vec![tool_reply(id, result)]
                                 }
                                 Err(error) => {
-                                    let mut guard = lock(bridge);
+                                    let mut guard = lock(&bridge);
                                     let error = guard.abort_send(&prepared, error);
                                     drop(guard);
                                     vec![tool_reply(id, Err(error))]
@@ -574,7 +714,7 @@ pub fn run_connection<S: Store>(
                                 > = None;
                                 loop {
                                     {
-                                        let mut guard = lock(bridge);
+                                        let mut guard = lock(&bridge);
                                         match guard.poll_wait(&prepared) {
                                             Ok(Some(value)) => {
                                                 outcome = Some(Ok(value));
@@ -597,7 +737,7 @@ pub fn run_connection<S: Store>(
                                 let result = match outcome {
                                     Some(result) => result,
                                     None => {
-                                        let mut guard = lock(bridge);
+                                        let mut guard = lock(&bridge);
                                         guard.finish_wait(&prepared)
                                     }
                                 };
@@ -611,7 +751,7 @@ pub fn run_connection<S: Store>(
                                 > = None;
                                 loop {
                                     {
-                                        let guard = lock(bridge);
+                                        let guard = lock(&bridge);
                                         match guard.poll_task_wait(&prepared) {
                                             Ok(Some(value)) => {
                                                 outcome = Some(Ok(value));
@@ -634,7 +774,7 @@ pub fn run_connection<S: Store>(
                                 let result = match outcome {
                                     Some(result) => result,
                                     None => {
-                                        let guard = lock(bridge);
+                                        let guard = lock(&bridge);
                                         guard.finish_task_wait(&prepared)
                                     }
                                 };
@@ -645,7 +785,7 @@ pub fn run_connection<S: Store>(
                     }
                     other => {
                         let (replies, notices) = {
-                            let mut guard = lock(bridge);
+                            let mut guard = lock(&bridge);
                             match session.handle(&mut guard, other) {
                                 Ok(replies) => (replies, guard.take_pending_notices()),
                                 Err(error) => break 'conn Err(error),
@@ -664,7 +804,7 @@ pub fn run_connection<S: Store>(
                                 continue;
                             }
                             let sent = prepared.execute();
-                            let mut guard = lock(bridge);
+                            let mut guard = lock(&bridge);
                             if let Err(error) = guard.finish_send(prepared, sent) {
                                 eprintln!(
                                     "{}",
@@ -700,7 +840,7 @@ pub fn run_connection<S: Store>(
 
     // 无论怎么结束，都要把没跑完的轮次放掉。
     let queued = {
-        let mut guard = lock(bridge);
+        let mut guard = lock(&bridge);
         session.abandon(&mut guard);
         guard.queued_turns()
     };
@@ -750,7 +890,7 @@ pub fn serve<S: Store + Send + 'static>(
                 let deps = deps.clone();
                 std::thread::spawn(move || {
                     // 一条连接坏了不影响别的连接，但要说清楚为什么坏的。
-                    if let Err(error) = run_connection(&bridge, stream, &controls, &deps) {
+                    if let Err(error) = run_connection(bridge, stream, &controls, &deps) {
                         eprintln!(
                             "{}",
                             acb_i18n::t!("kernel.endpoint.connection_ended", error = error)

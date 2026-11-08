@@ -308,6 +308,8 @@ pub(crate) struct PreparedPlatformCall {
     spec: MethodSpec,
     params: Value,
     args: PlatformCallArgs,
+    /// 这次调用替哪个会话发起；异步结果要按会话落库、按会话取回。
+    session: String,
     /// 开轮时冻结的配置快照。结算写流水时要用它查账号、找订阅者。
     config: Arc<Config>,
     outbound: OutboundHandle,
@@ -318,6 +320,10 @@ pub(crate) struct PreparedPlatformCall {
     attempt_id: Option<String>,
     /// 幂等键，随尝试记录落库，供超时后对账/复用。
     idempotency_key: Option<String>,
+    /// 工具要求后台执行。
+    async_mode: bool,
+    /// 后台执行时最多等多久（毫秒）；0 = 立即返回。
+    wait_ms: u64,
 }
 
 impl PreparedPlatformCall {
@@ -334,8 +340,29 @@ impl PreparedPlatformCall {
     }
 
     pub(crate) fn execute(&self) -> Result<CallOutcome, CallError> {
-        self.outbound
-            .call(&self.room, self.spec.name.as_ref(), &self.params)
+        if self.async_mode {
+            self.outbound
+                .call_async(&self.room, self.spec.name.as_ref(), &self.params)
+        } else {
+            self.outbound
+                .call(&self.room, self.spec.name.as_ref(), &self.params)
+        }
+    }
+
+    pub(crate) fn async_mode(&self) -> bool {
+        self.async_mode
+    }
+
+    pub(crate) fn wait_ms(&self) -> u64 {
+        self.wait_ms
+    }
+
+    pub(crate) fn task_id(&self) -> Option<&str> {
+        self.attempt_id.as_deref()
+    }
+
+    pub(crate) fn session(&self) -> &str {
+        &self.session
     }
 }
 
@@ -364,6 +391,10 @@ pub(crate) struct PreparedSend {
     attempt_id: Option<String>,
     /// 幂等键，随尝试记录落库，供超时后对账/复用。
     idempotency_key: Option<String>,
+    /// 工具要求后台执行。
+    async_mode: bool,
+    /// 后台执行时最多等多久（毫秒）；0 = 立即返回。
+    wait_ms: u64,
 }
 
 impl PreparedSend {
@@ -380,7 +411,27 @@ impl PreparedSend {
     }
 
     pub(crate) fn execute(&self) -> Result<Sent, OutboundError> {
-        self.outbound.send(&self.room, &self.elements)
+        if self.async_mode {
+            self.outbound.send_async(&self.room, &self.elements)
+        } else {
+            self.outbound.send(&self.room, &self.elements)
+        }
+    }
+
+    pub(crate) fn async_mode(&self) -> bool {
+        self.async_mode
+    }
+
+    pub(crate) fn wait_ms(&self) -> u64 {
+        self.wait_ms
+    }
+
+    pub(crate) fn task_id(&self) -> Option<&str> {
+        self.attempt_id.as_deref()
+    }
+
+    pub(crate) fn session(&self) -> &str {
+        &self.session
     }
 }
 
@@ -1429,6 +1480,32 @@ impl<S: Store> Bridge<S> {
         };
         self.settle_attempt(id, TaskStatus::Failed, None, Some(error.message.clone()));
         with_attempt_note(error, id, key.as_deref())
+    }
+
+    /// 后台执行结束后把结果补进任务记录。状态已由 `finish_*` 结算；
+    /// 这里只补 `result` / `error`，并保留超时的 `unknown` 不被改成 `failed`。
+    pub(crate) fn record_async_outcome(&mut self, id: &str, result: Result<Value, ToolError>) {
+        let Ok(Some(mut record)) = self.store.task_find(id) else {
+            return;
+        };
+        match result {
+            Ok(value) => {
+                record.status = TaskStatus::Succeeded;
+                record.result = Some(value);
+                record.error = None;
+            }
+            Err(error) => {
+                if record.status != TaskStatus::Unknown {
+                    record.status = TaskStatus::Failed;
+                }
+                record.result = None;
+                record.error = Some(error.message);
+            }
+        }
+        record.finished_at = Some(now_millis());
+        if let Err(storage_error) = self.store.task_update(&record) {
+            eprintln!("task {id} 异步结果落库失败：{storage_error}");
+        }
     }
 
     pub(crate) fn mark_task_running(&mut self, task_id: &str) {
@@ -4043,6 +4120,7 @@ impl<S: Store> Bridge<S> {
         let value = match tool {
             // 不给目标：接着说当前这一轮的房间，用本轮的身份。
             "send_message" => {
+                let (async_mode, wait_ms) = exec_mode(&args)?;
                 let args: SendArgs = parse(args)?;
                 // 当前房间也要复检：不能假设「轮次开在这里」就等于 access 永远允许。
                 self.ensure_can_send(&turn_config, &turn_session, &room, &room, "send_message")?;
@@ -4053,10 +4131,13 @@ impl<S: Store> Bridge<S> {
                     SendOrigin::Message,
                     args.elements.0,
                     "send_message",
+                    async_mode,
+                    wait_ms,
                 )
             }
             // 给了目标：跨会话发送已砍；目标房间由本会话的访问策略把关。
             "send_message_to" => {
+                let (async_mode, wait_ms) = exec_mode(&args)?;
                 let args: SendToArgs = parse(args)?;
                 let target = resolve_room(&args.to)?;
                 self.ensure_can_send(
@@ -4073,6 +4154,8 @@ impl<S: Store> Bridge<S> {
                     SendOrigin::Message,
                     args.elements.0,
                     "send_message_to",
+                    async_mode,
+                    wait_ms,
                 )
             }
             // 申请一张一次性票据：只在当前房间申请，目标可以是未订阅房间。
@@ -4173,6 +4256,11 @@ impl<S: Store> Bridge<S> {
             }
             // 平台能力：单入口。给 op 执行；不给 op 按层级/标签列目录。
             "platform_call" => {
+                let (async_mode, wait_ms) = if args.get("op").is_some() {
+                    exec_mode(&args)?
+                } else {
+                    (false, 0)
+                };
                 let args: PlatformToolArgs = parse(args)?;
                 match args.op.as_deref() {
                     None => {
@@ -4182,7 +4270,7 @@ impl<S: Store> Bridge<S> {
                     Some(op) if op.trim().is_empty() => Err(empty_platform_op()),
                     Some(_) => {
                         let call = platform_call_args(args)?;
-                        self.platform_call(ticket, call)
+                        self.platform_call(ticket, call, async_mode, wait_ms)
                     }
                 }
             }
@@ -4537,7 +4625,8 @@ impl<S: Store> Bridge<S> {
 
         match tool {
             "send_message" => {
-                let args: SendArgs = parse(args)?;
+                let (async_mode, wait_ms) = exec_mode(&args)?;
+                let args: SendArgs = parse(args.clone())?;
                 let ctx = self.turn_ctx(ticket, tool)?;
                 self.ensure_can_send(
                     &ctx.config,
@@ -4553,11 +4642,14 @@ impl<S: Store> Bridge<S> {
                     SendOrigin::Message,
                     args.elements.0,
                     "send_message",
+                    async_mode,
+                    wait_ms,
                 )?;
                 Ok(ToolCallStart::Send(prepared))
             }
             "send_message_to" => {
-                let args: SendToArgs = parse(args)?;
+                let (async_mode, wait_ms) = exec_mode(&args)?;
+                let args: SendToArgs = parse(args.clone())?;
                 let target = resolve_room(&args.to)?;
                 let ctx = self.turn_ctx(ticket, tool)?;
                 self.ensure_can_send(
@@ -4574,11 +4666,18 @@ impl<S: Store> Bridge<S> {
                     SendOrigin::Message,
                     args.elements.0,
                     "send_message_to",
+                    async_mode,
+                    wait_ms,
                 )?;
                 Ok(ToolCallStart::Send(prepared))
             }
             "platform_call" => {
-                let args: PlatformToolArgs = parse(args)?;
+                let (async_mode, wait_ms) = if args.get("op").is_some() {
+                    exec_mode(&args)?
+                } else {
+                    (false, 0)
+                };
+                let args: PlatformToolArgs = parse(args.clone())?;
                 match args.op.as_deref() {
                     None => {
                         let ctx = self.turn_ctx(ticket, tool)?;
@@ -4594,9 +4693,9 @@ impl<S: Store> Bridge<S> {
                     Some(op) if op.trim().is_empty() => Err(empty_platform_op()),
                     Some(_) => {
                         let call = platform_call_args(args)?;
-                        Ok(ToolCallStart::Platform(
-                            self.prepare_platform_call(ticket, call)?,
-                        ))
+                        Ok(ToolCallStart::Platform(self.prepare_platform_call(
+                            ticket, call, async_mode, wait_ms,
+                        )?))
                     }
                 }
             }
@@ -4695,6 +4794,8 @@ impl<S: Store> Bridge<S> {
         &mut self,
         ticket: &Ticket,
         args: PlatformCallArgs,
+        async_mode: bool,
+        wait_ms: u64,
     ) -> Result<PreparedPlatformCall, ToolError> {
         let ctx = self.turn_ctx(ticket, "platform_call")?;
         let sessions = std::slice::from_ref(&ctx.session);
@@ -4797,7 +4898,11 @@ impl<S: Store> Bridge<S> {
             }
         }
 
-        self.assemble_platform_call(config, &ctx.session, room, spec.clone(), args, None)
+        let mut prepared =
+            self.assemble_platform_call(config, &ctx.session, room, spec.clone(), args, None)?;
+        prepared.async_mode = async_mode;
+        prepared.wait_ms = wait_ms;
+        Ok(prepared)
     }
 
     /// `platform_call` 的校验尾巴：参数、critical / destructive 闸门、账号与出站句柄。
@@ -4863,12 +4968,15 @@ impl<S: Store> Bridge<S> {
             // 中继的 I/O 必须留到锁外：这里只登记 relay 与原始 params。
             params: args.params.clone(),
             args,
+            session: session.to_owned(),
             config,
             outbound,
             relay: self.relay.clone(),
             relay_done: false,
             attempt_id,
             idempotency_key,
+            async_mode: false,
+            wait_ms: 0,
         })
     }
 
@@ -5051,8 +5159,10 @@ impl<S: Store> Bridge<S> {
         &mut self,
         ticket: &Ticket,
         args: PlatformCallArgs,
+        async_mode: bool,
+        wait_ms: u64,
     ) -> Result<Value, ToolError> {
-        let mut prepared = self.prepare_platform_call(ticket, args)?;
+        let mut prepared = self.prepare_platform_call(ticket, args, async_mode, wait_ms)?;
         if let Err(error) = prepared.relay() {
             return Err(self.abort_platform(&prepared, error));
         }
@@ -6774,6 +6884,8 @@ impl<S: Store> Bridge<S> {
                                 SendOrigin::Message,
                                 args.elements.0,
                                 op,
+                                false,
+                                0,
                             ) {
                                 Ok(value) => ("succeeded", Some(value), None),
                                 Err(error) => ("failed", None, Some(error.message)),
@@ -8001,9 +8113,19 @@ impl<S: Store> Bridge<S> {
         origin: SendOrigin,
         elements: Vec<Element>,
         handler: &str,
+        async_mode: bool,
+        wait_ms: u64,
     ) -> Result<Value, ToolError> {
-        let mut prepared =
-            self.prepare_send_attempt(config, session, room.clone(), origin, elements, handler)?;
+        let mut prepared = self.prepare_send_attempt(
+            config,
+            session,
+            room.clone(),
+            origin,
+            elements,
+            handler,
+            async_mode,
+            wait_ms,
+        )?;
         if let Err(error) = prepared.relay() {
             return Err(self.abort_send(&prepared, error));
         }
@@ -8167,6 +8289,8 @@ impl<S: Store> Bridge<S> {
             modified_by,
             attempt_id: None,
             idempotency_key: None,
+            async_mode: false,
+            wait_ms: 0,
         })
     }
 
@@ -8182,6 +8306,8 @@ impl<S: Store> Bridge<S> {
         origin: SendOrigin,
         elements: Vec<Element>,
         handler: &str,
+        async_mode: bool,
+        wait_ms: u64,
     ) -> Result<PreparedSend, ToolError> {
         let prepared = self.prepare_send(config, session, room.clone(), origin, elements)?;
         let summary = json!({ "elements": prepared.elements });
@@ -8191,6 +8317,8 @@ impl<S: Store> Bridge<S> {
         Ok(PreparedSend {
             attempt_id: Some(id),
             idempotency_key: Some(key),
+            async_mode,
+            wait_ms,
             ..prepared
         })
     }
@@ -8320,10 +8448,7 @@ impl<S: Store> Bridge<S> {
             "room": room.to_string(),
             "watermark": watermark,
         });
-        if let Some(id) = &attempt_id {
-            // 回执带上可查 id 与幂等键：超时/断线之后凭它去 tasks 对账，别重发。
-            receipt["task_id"] = json!(id);
-        }
+        // 同步调用不返回 task_id：契约是要么结果、要么错误。只带幂等键，供事后对账。
         if let Some(key) = &idempotency_key {
             receipt["idempotency_key"] = json!(key);
         }
@@ -10347,6 +10472,26 @@ fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, ToolError> {
             acb_i18n::t!("kernel.engine.invalid_params", error = error),
         )
     })
+}
+
+/// 发送类工具的必填 `async` 与可选 `wait_ms`。
+///
+/// 不给默认值：两种模式的返回契约完全不同，猜错一次比报错一次代价大。
+fn exec_mode(args: &Value) -> Result<(bool, u64), ToolError> {
+    let Some(value) = args.get("async") else {
+        return Err(ToolError::new(
+            ErrorCode::BadRequest,
+            acb_i18n::t!("kernel.engine.async_required"),
+        ));
+    };
+    let async_mode = value.as_bool().ok_or_else(|| {
+        ToolError::new(
+            ErrorCode::BadRequest,
+            acb_i18n::t!("kernel.engine.async_not_bool"),
+        )
+    })?;
+    let wait_ms = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(0);
+    Ok((async_mode, wait_ms))
 }
 
 fn parse_note_kind(text: &str) -> Result<NoteKind, ToolError> {

@@ -5,6 +5,7 @@
 //! 自己启动（`launch`），core 不持有 socket，也不把 `Bridge` 交出去。
 
 use std::borrow::Cow;
+use std::time::Duration;
 
 use acb_kernel::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
@@ -77,6 +78,23 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
     direct_room: None,
 };
 
+/// 异步路径的上传时限：同步路径仍用 45 秒，后台任务给大文件留足时间。
+fn async_upload_timeout(connection: &Connection) -> Result<Duration, AdapterError> {
+    match connection.options.get("async_upload_timeout_ms") {
+        None => Ok(crate::outbound::ASYNC_UPLOAD_TIMEOUT),
+        Some(value) => match value.as_u64() {
+            Some(ms) if ms > 0 => Ok(Duration::from_millis(ms)),
+            _ => Err(AdapterError::Create(
+                connection.id.clone(),
+                acb_i18n::t!(
+                    "adapter.onebot11.async_upload_timeout_invalid",
+                    id = connection.id
+                ),
+            )),
+        },
+    }
+}
+
 /// OneBot SnowLuma 的工厂。一个连接一个 `LinkSlot`，`launch` 里起守护线程。
 #[derive(Debug, Default)]
 pub struct OneBotSnowLumaAdapterFactory;
@@ -126,10 +144,11 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
             ));
         }
         let slot = LinkSlot::new();
-        let outbound = Box::new(OneBotSnowLumaOutbound::new(
-            slot.clone(),
-            connection.id.clone(),
-        ));
+        let async_upload_timeout = async_upload_timeout(connection)?;
+        let outbound = Box::new(
+            OneBotSnowLumaOutbound::new(slot.clone(), connection.id.clone())
+                .with_async_upload_timeout(async_upload_timeout),
+        );
 
         // 默认审批路由的一对一房间由适配器提供，core 不再拼 private/{account}。
         let mut manifest = MANIFEST.clone();
@@ -154,6 +173,54 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connection(options: serde_json::Value) -> Connection {
+        Connection {
+            id: "qq-main".into(),
+            platform: "qq".into(),
+            kind: "onebot11".into(),
+            transport: acb_kernel::Transport::WsClient,
+            url: Some("ws://127.0.0.1:6700".into()),
+            options,
+            token: None,
+            account: "10001".into(),
+            admin_qqs: Vec::new(),
+            receive: Default::default(),
+            routes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn async_upload_timeout_defaults_to_300_seconds() {
+        assert_eq!(
+            async_upload_timeout(&connection(serde_json::json!({}))).expect("默认合法"),
+            crate::outbound::ASYNC_UPLOAD_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn async_upload_timeout_can_be_overridden_per_connection() {
+        assert_eq!(
+            async_upload_timeout(&connection(
+                serde_json::json!({ "async_upload_timeout_ms": 60_000 })
+            ))
+            .expect("正整数合法"),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn async_upload_timeout_rejects_zero_and_non_integers() {
+        for options in [
+            serde_json::json!({ "async_upload_timeout_ms": 0 }),
+            serde_json::json!({ "async_upload_timeout_ms": -1 }),
+            serde_json::json!({ "async_upload_timeout_ms": 1.5 }),
+            serde_json::json!({ "async_upload_timeout_ms": "slow" }),
+        ] {
+            let error = async_upload_timeout(&connection(options)).expect_err("应当报错");
+            assert!(matches!(error, AdapterError::Create(id, _) if id == "qq-main"));
+        }
+    }
 
     #[test]
     fn manifest_keeps_persistent_ids_and_uses_the_snowluma_display_name() {
