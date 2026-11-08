@@ -59,11 +59,12 @@ pub struct Delivery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<PersonaInfo>,
     /// 还有多少条没投进来（桥按 `delivery_limit` 截断了）。`None` = 全投了，没有截断。
-    /// harness 渲染时据此提示模型「用 fetch_records 抓剩下的」。
+    /// 默认策略从旧到新连续投，这部分会在后续轮次接着投；harness 提示模型时
+    /// 应以「按顺序等下一轮」为准，不要假设未投的都在最新一端。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub more: Option<usize>,
-    /// 被跳过的那段未读：编号区间 + 条数。和 `more` 一起给，
-    /// 让模型能直接按编号回看，不用猜「没投的是哪几条」。
+    /// 被 composer 主动跳过的中段：编号区间 + 条数。默认连续投递不会设置；
+    /// 自定义 composer 跳段时才用，和 `more` 一起给，让模型能直接按编号回看。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted: Option<Omitted>,
     /// 这一轮最多跑多久（毫秒）。`None` = 桥没带（harness 用自己的默认兜底）；
@@ -96,7 +97,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// 本轮被跳过的未读区间。
+/// 本轮被 composer 主动跳过的未读区间。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Omitted {
     /// 区间里最早的编号。

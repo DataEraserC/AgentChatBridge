@@ -95,7 +95,7 @@ listen = "127.0.0.1:7700"
 worktrees_root = "state/worktrees"
 
 # 一轮投递最多塞多少条新记录。默认 30；0 = 不截断。
-# 超过上限时投「最旧一小段 + 最新一批」，中间用 omitted 告诉模型还有多少条。
+# 超过上限时从最旧开始连续投一段，剩余的下一轮接着投；水位每轮都能前进。
 delivery_limit = 30
 
 # 一轮失败后的全局默认通知动作：log / send:<房间>。会话自己的 on_turn_error 优先。
@@ -293,7 +293,7 @@ on_turn_error = []
 # [sessions.access]
 # provider = "vendor.access"
 
-# 投递批次选择（ADR-0026 Phase 4）。不写就是内置「最旧一小段 + 最新一批」。
+# 投递批次选择（ADR-0026 Phase 4）。不写就是内置「从旧到新连续投一段」。
 # [sessions.delivery]
 # provider = "acb.delivery.default"
 

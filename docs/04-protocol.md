@@ -92,8 +92,8 @@ sequenceDiagram
 | `persona` | 人格卡 `{id, name, text}`。桥只给语义，怎么塞进模型上下文由 harness 适配器决定 |
 | `room` | 本轮只涉及这一个房间 |
 | `records` | 投递的记录，可能为空 |
-| `more` | 非 0 表示投递超限、有 N 条未读没投进来。数值等于 `omitted.count` |
-| `omitted` | 被跳过的未读区间：`{from, to, count}`。桥按「最旧一小段 + 最新一批」投递，中间这段跳过；需要时用 `get_history({after, before})` 或 `fetch_records` 回看 |
+| `more` | 非 0 表示投递超限、有 N 条未读没投进来（按条数或 512 KiB 字节预算截断）。默认策略按从旧到新连续投，这些记录会在后续轮次接着投；自定义 composer 跳段时数值与 `omitted.count` 一致 |
+| `omitted` | 被 composer **主动跳过**的未读区间：`{from, to, count}`。默认连续投递不会设置；只有自定义 composer 跳段时才有。需要时用 `get_history({after, before})` 或 `fetch_records` 回看 |
 | `reason` | 为什么开这一轮：`wake` / `clock` |
 | `turn_timeout_ms` | 本轮超时（毫秒），来自配置 `turn_timeout_secs`；0 = 关闭超时。到点 harness 应主动打断这轮（如 dsh 的 session/cancel），打断按失败处理走 `on_turn_error` |
 

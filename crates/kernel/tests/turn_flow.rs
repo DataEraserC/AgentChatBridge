@@ -13,7 +13,7 @@ use acb_kernel::{
     Config, ControlRegistry, Cursor, DeliveryComposer, DeliveryPlan, DeliveryPolicy,
     DeliveryRequest, DependencyRegistry, Element, ErrorCode, EventQueue, ExtensionPoint, Feedbacks,
     Ingest, ManagerManifest, ManagerPlugin, MemoryStore, NoteKey, NoteKind, Notes, NoticeEvent,
-    NoticeSink, Omitted, Outbound, OutboundError, PLUGIN_API_VERSION, PluginError, PluginManager,
+    NoticeSink, Outbound, OutboundError, PLUGIN_API_VERSION, PluginError, PluginManager,
     ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, ReceiveDecision,
     ReceiveProvider, ReceiveRequest, RecordDraft, RoomId, RouteAction, RouteContext, RouteDecision,
     RoutePolicy, RouteProvider, RouteWorker, SendContext, SendHook, Sender, Sent, Transcript,
@@ -1712,36 +1712,25 @@ fn ack_accepts_records_read_this_turn_but_not_delivered() {
     let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
     let ticket = delivery.ticket;
     let ids: Vec<u64> = delivery.records.iter().map(|record| record.id).collect();
-    assert_eq!(ids, vec![3], "上限 1 条只给最新的");
-    assert_eq!(
-        delivery.omitted,
-        Some(Omitted {
-            from: 1,
-            to: 2,
-            count: 2
-        })
-    );
+    assert_eq!(ids, vec![1], "上限 1 条从最旧的开始投");
+    assert_eq!(delivery.more, Some(2));
+    assert_eq!(delivery.omitted, None, "连续投递不跳段");
 
-    // 补读跳过的两条；读到的编号进本轮 read set。
+    // 补读本轮没投递的 #2、#3；读到的编号进本轮 read set。
     let fetched = bridge
         .tool_call(
             &ticket,
             &sessions(),
             "fetch_records",
-            json!({"ids": [1, 2]}),
+            json!({"ids": [2, 3]}),
         )
         .expect("能补读");
     assert_eq!(fetched["returned"], 2);
 
     let acked = bridge
-        .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [1, 2]}))
-        .expect("读过的编号能确认");
-    assert_eq!(acked["watermark"], 2, "水位推到补读的连续前沿");
-
-    let acked = bridge
-        .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [3]}))
-        .expect("投递过的也能确认");
-    assert_eq!(acked["watermark"], 3);
+        .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [1, 2, 3]}))
+        .expect("投递过和补读过的编号都能确认");
+    assert_eq!(acked["watermark"], 3, "水位推到连续前沿");
 }
 
 #[test]
@@ -3936,13 +3925,14 @@ fn delivery_carries_the_session_persona() {
 }
 
 // ---------------------------------------------------------------------------
-// 投递截断：最旧一小段 + 最新一批，中间明确告知（2026-11-01 用户裁定）
+// 投递截断：从旧到新连续投一段，剩下的下一轮接着投
+// （2026-11-08 修复：分叉投递会留下永远补不齐的洞）
 // ---------------------------------------------------------------------------
 
 #[test]
-fn delivery_truncation_keeps_newest_and_a_small_oldest_slice() {
-    // 积压 5 条、上限 2 条：最旧留 1 条（水位要能前进）+ 最新 1 条（模型要看眼前）。
-    // 中间 #2–#4 跳过，编号区间明确告诉模型。
+fn delivery_truncation_keeps_the_oldest_contiguous_slice() {
+    // 积压 5 条、上限 2 条：只投最旧的连续两条。水位每轮都能前进，
+    // #3–#5 下一轮接着投；不跳过中段，也就不会留下永久洞。
     let text = format!("delivery_limit = 2\n{}", config());
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let mut bridge = Bridge::new(
@@ -3961,17 +3951,26 @@ fn delivery_truncation_keeps_newest_and_a_small_oldest_slice() {
 
     let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
     let ids: Vec<u64> = delivery.records.iter().map(|r| r.id).collect();
-    assert_eq!(ids, vec![1, 5], "最旧一条 + 最新一条");
-    assert_eq!(delivery.more, Some(3), "中间跳过 3 条");
-    assert_eq!(
-        delivery.omitted,
-        Some(Omitted {
-            from: 2,
-            to: 4,
-            count: 3
-        }),
-        "跳过的编号区间要明确给出"
-    );
+    assert_eq!(ids, vec![1, 2], "从最旧开始连续投，不掺最新一批");
+    assert_eq!(delivery.more, Some(3), "还有 3 条在后续轮次补齐");
+    assert_eq!(delivery.omitted, None, "默认策略不跳过中段");
+
+    // 确认前两条后水位前进；下一轮从 #3 继续，而不是回到 #1 或直接跳到 #5。
+    let ticket = delivery.ticket;
+    bridge
+        .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [1, 2]}))
+        .expect("投过的能确认");
+    bridge.end_turn(&ticket, None).expect("能收工");
+
+    // 新消息触发的下一轮：从 #3 继续，而不是回到 #1 或直接跳到 #5。
+    bridge
+        .ingest(message("qq:group/123", "10001", "第6条", true))
+        .expect("能记下来");
+    let next = bridge.poll_turn().expect("能开轮").expect("有活");
+    let ids: Vec<u64> = next.records.iter().map(|r| r.id).collect();
+    assert_eq!(ids, vec![3, 4], "水位推进后接着投下一段");
+    assert_eq!(next.more, Some(2), "剩下 #5、#6 还没投");
+    assert_eq!(next.omitted, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -3997,6 +3996,7 @@ fn custom_delivery_composer_decides_the_batch() {
     let ids: Vec<u64> = delivery.records.iter().map(|record| record.id).collect();
     assert_eq!(ids, vec![3], "composer 只留最新一条，未知编号被忽略");
     assert_eq!(delivery.omitted, None, "composer 说没跳过中段");
+    assert_eq!(delivery.more, Some(2), "没投出去的记录仍然要如实上报");
 }
 
 #[test]

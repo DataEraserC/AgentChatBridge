@@ -631,7 +631,7 @@ pub struct Session {
     pub subscriptions: Vec<Subscription>,
     /// 访问策略（ADR-0026 Phase 2d）。默认按订阅；可换 provider。
     pub access: AccessPolicy,
-    /// 投递批次选择策略（ADR-0026 Phase 4）。默认「最旧一小段 + 最新一批」。
+    /// 投递批次选择策略（ADR-0026 Phase 4）。默认从最旧开始连续投一段。
     pub delivery: DeliveryPolicy,
     /// 发送前/后钩子（ADR-0026 Phase 4）。按列表顺序执行。
     pub outbound: OutboundPolicy,
@@ -679,7 +679,7 @@ impl Default for AccessPolicy {
 /// 一个会话的投递批次选择策略（ADR-0026 Phase 4）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeliveryPolicy {
-    /// composer 的 provider id。不写就用内置「最旧一小段 + 最新一批」。
+    /// composer 的 provider id。不写就用内置「从旧到新连续投一段」。
     pub provider: ProviderId,
     /// 插件专属配置；内置 composer 忽略它。
     pub options: serde_json::Value,

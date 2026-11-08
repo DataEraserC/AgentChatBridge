@@ -4994,8 +4994,8 @@ impl<S: Store> Bridge<S> {
 
     /// 这个会话在这个房间里真正要处理的未读：水位之后、不在乱序确认里、且不是自己说的。
     ///
-    /// 取全量再筛选，不再只取「最旧 200 条」——混投策略要同时拿到最旧一小段和最新一批，
-    /// 只取最旧一段会让新消息永远排不上。
+    /// 取全量再筛选，不再只取「最旧 200 条」——composer 可能挑任意编号（例如只留最新），
+    /// 只取最旧一段会让它拿不到候选。
     fn pending_records(
         &self,
         session: &str,
@@ -7271,8 +7271,9 @@ impl<S: Store> Bridge<S> {
         // 没投出去的记录不能算「投过」，否则 ack_messages 会放行没见过的编号，
         // 投递次数也会被白白加上一次。
         //
-        // 消息过多时给最旧一小段（让水位能继续前进）+ 最新一批（让模型看得到
-        // 眼前的话），中间那段跳过并明确告诉模型编号区间。
+        // 消息过多时只投一段从旧到新的连续记录：水位每轮都能前进，
+        // 剩下的记录下一轮接着投，积压自然收敛；不再给「最旧一小段 + 最新一批」
+        // 的分叉，避免中间留下永远补不齐的洞。
         let limit = if turn_config.delivery_limit == 0 {
             MAX_DELIVERY
         } else {
@@ -7346,8 +7347,8 @@ impl<S: Store> Bridge<S> {
                 },
             )
         };
+        let total = records.len();
         let omitted = plan.omitted;
-        let more = omitted.map(|omitted| omitted.count);
         let mut by_id: HashMap<u64, Record> = records.into_iter().map(|r| (r.id, r)).collect();
         let mut selected = Vec::with_capacity(plan.keep.len());
         for id in &plan.keep {
@@ -7356,6 +7357,10 @@ impl<S: Store> Bridge<S> {
             }
         }
         records = selected;
+        // 本轮没投出去的都算「还有」：默认连续投递时是后续批次，
+        // composer 主动跳段时也一样，harness 据此提示并把回看工具带上。
+        let more = total.saturating_sub(records.len());
+        let more = (more > 0).then_some(more);
 
         let mut delivered = BTreeSet::new();
         let cursor = Cursor::new(pending.session.clone(), pending.room.clone());
@@ -7430,7 +7435,7 @@ impl<S: Store> Bridge<S> {
             pending.wake_reason.as_deref(),
         );
 
-        // 批次已经由 composer 选好（默认是最旧一小段 + 最新一批），这里直接用它。
+        // 批次已经由 composer 选好（默认从旧到新连续投一段），这里直接用它。
         Ok(Delivery {
             ticket,
             session: pending.session,

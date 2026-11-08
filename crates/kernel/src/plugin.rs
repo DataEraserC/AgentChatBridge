@@ -122,9 +122,6 @@ pub const CLOCK_INTERVAL_IDLE_PROVIDER: &str = "acb.clock.interval_idle";
 /// 内置入站策略：全部接收。
 pub const DEFAULT_RECEIVE_PROVIDER: &str = "acb.receive.all";
 
-/// 每轮从最旧端至少带几条（默认 composer 用）。
-const DELIVERY_OLDEST: usize = 5;
-
 /// 一轮投递的字节上限：整帧不能超过 1 MiB（协议上限），这里留一半余量给信封和记忆信息。
 const MAX_DELIVERY_BYTES: usize = 512 * 1024;
 
@@ -810,7 +807,7 @@ pub trait DeliveryComposer: Send + Sync {
     fn compose(&self, options: &DeliveryPolicy, request: &DeliveryRequest<'_>) -> DeliveryPlan;
 }
 
-/// 内置 composer：最旧一小段 + 最新一批，中间跳过。
+/// 内置 composer：从水位之后最旧的一条开始，连续投到条数/字节上限。
 #[derive(Debug, Default)]
 pub struct DefaultDeliveryComposer;
 
@@ -821,6 +818,11 @@ impl DeliveryComposer for DefaultDeliveryComposer {
 }
 
 /// 默认选批算法。composer 出错时 core 也用它兜底，保证一轮不会空手开。
+///
+/// 只投一段**连续**的旧记录，不搞「最旧一小段 + 最新一批」的分叉：分叉会在
+/// 中间留下一个本轮补不齐的洞，水位只能推进到最旧那段的末尾。连续投递让
+/// `ack_messages` 每轮都能把水位往前推，没投到的记录在下一轮接着投，积压
+/// 随 `delivery_limit` 自然收敛。
 pub fn default_delivery_plan(request: &DeliveryRequest<'_>) -> DeliveryPlan {
     let records = request.records;
     let len = records.len();
@@ -832,10 +834,6 @@ pub fn default_delivery_plan(request: &DeliveryRequest<'_>) -> DeliveryPlan {
     }
     let limit = request.limit.max(1);
 
-    // 条数切法：至少给最新留 1 条；`limit` 大时最旧端最多 5 条。
-    let head_target = DELIVERY_OLDEST.min(limit.saturating_sub(1)).min(len);
-    let tail_target = (limit - head_target).min(len - head_target);
-
     let sizes: Vec<usize> = records
         .iter()
         .map(|record| {
@@ -846,45 +844,21 @@ pub fn default_delivery_plan(request: &DeliveryRequest<'_>) -> DeliveryPlan {
         .collect();
 
     let mut budget = MAX_DELIVERY_BYTES;
-    // 最旧端：从旧往新装；第一条就算超预算也要留着（等同于「至少保一条」）。
-    let mut head_keep = 0usize;
-    while head_keep < head_target {
-        let size = sizes[head_keep];
-        if head_keep > 0 && size > budget {
+    // 从旧往新装；第一条就算超预算也要留着（等同于「至少保一条」）。
+    let mut keep_count = 0usize;
+    while keep_count < limit && keep_count < len {
+        let size = sizes[keep_count];
+        if keep_count > 0 && size > budget {
             break;
         }
         budget = budget.saturating_sub(size);
-        head_keep += 1;
+        keep_count += 1;
     }
 
-    // 最新端：从新往旧装，花剩下的预算。
-    let mut tail_keep = 0usize;
-    while tail_keep < tail_target {
-        let index = len - 1 - tail_keep;
-        if sizes[index] > budget {
-            break;
-        }
-        budget -= sizes[index];
-        tail_keep += 1;
+    DeliveryPlan {
+        keep: records[..keep_count].iter().map(|record| record.id).collect(),
+        omitted: None,
     }
-    // 一条都没留下：至少给最新 1 条，不能空手开轮。
-    if head_keep + tail_keep == 0 {
-        tail_keep = 1;
-    }
-
-    let mut keep = Vec::with_capacity(head_keep + tail_keep);
-    keep.extend(records[..head_keep].iter().map(|record| record.id));
-    keep.extend(records[len - tail_keep..].iter().map(|record| record.id));
-    let middle = &records[head_keep..len - tail_keep];
-    let omitted = middle
-        .first()
-        .zip(middle.last())
-        .map(|(first, last)| Omitted {
-            from: first.id,
-            to: last.id,
-            count: middle.len(),
-        });
-    DeliveryPlan { keep, omitted }
 }
 
 /// 这次发送从哪儿来。hook 可以按来源区分行为。

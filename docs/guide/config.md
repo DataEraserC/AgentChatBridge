@@ -424,7 +424,7 @@ provider = "acb.turn_error.default"
 ```
 
 - delivery 返回的未知编号会被 core 忽略；中间跳过的段用 `omitted` 告诉模型「还有 N 条」。
-  插件报错时回退内置「最旧一小段 + 最新一批」，一轮不会空手开。
+  插件报错时回退内置「从旧到新连续投一段」，一轮不会空手开。
 - `before` 按列表顺序执行，任一钩子报错就让这次发送失败；`after` 不影响已经发出去的消息。
 - turn_error 的 provider 只挑动作，不直接发消息；空列表 = 什么都不做。报错时回退
   会话 `on_turn_error` / 全局 `default_on_turn_error`。

@@ -10,7 +10,7 @@
 --
 -- 规则：只保留最新 keep 条（默认 20）；更早的当作「跳过」，把编号区间
 -- 交给 core 的 omitted，harness 会在轮次开头看到「还有 N 条没投」。
--- 返回 nil 或报错时 core 回退内置「最旧一小段 + 最新一批」。
+-- 返回 nil 或报错时 core 回退内置「从旧到新连续投一段」。
 
 return {
   extension = "delivery",

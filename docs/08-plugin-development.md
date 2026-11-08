@@ -428,7 +428,7 @@ acb-bridge --config config.toml --check
 | access | 拒绝 |
 | receive | 照收（宁可多记一条，不误丢） |
 | clock | 不触发 |
-| delivery | 回退内置「最旧一小段 + 最新一批」 |
+| delivery | 回退内置「从旧到新连续投一段」 |
 | turn_error | 回退会话动作 / 全局默认动作 |
 | send.before | 本次发送失败 |
 | send.after | 已发消息不受影响，只累计插件失败次数 |
