@@ -2,6 +2,7 @@
 
 mod component;
 mod grants;
+mod logs;
 mod run;
 mod secrets;
 mod service;
@@ -65,6 +66,7 @@ fn run() -> Result<ExitCode, String> {
         "up" => service::up(&args.collect::<Vec<_>>()),
         "down" => service::down(&args.collect::<Vec<_>>()),
         "stack" => service::stack(&args.collect::<Vec<_>>()),
+        "logs" => logs::command(&args.collect::<Vec<_>>()),
         "status" => {
             let rest: Vec<String> = args.collect();
             // `--mode=run` 是既有的运行态报告；不带 mode 时报告 bridge 单元本身。
@@ -115,6 +117,7 @@ Usage:
   acbctl down [all|bridge]
   acbctl status [--summary]
   acbctl stack [--dry-run]
+  acbctl logs [NAME] [-f] [-n LINES]
   acbctl status --mode=run [--state-dir DIR] [--config PATH] [--health-url URL]
   acbctl profile list|history|current|add|switch|rollback|gc|seed
   acbctl upgrade --generation ID | --payload PATH --strategy store|copy
