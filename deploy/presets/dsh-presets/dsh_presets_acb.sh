@@ -138,15 +138,35 @@ run_dump() {
   fi || fail "dsh --dump-config 失败（无法安全检查组合）：$(head -c 400 "$tmp_dir/dump.err")"
 }
 
-# dump 里 hmr 行显式 `disabled: true` 或整行缺失 = 该组合没有 HMR；
-# `disabled: !!js ...`（web/带 profileContext 的启动）视为启用。
+# 判定以 `--dump-config` 输出的**实际组合**为准，而不是看 profile patch 有没有
+# 显式声明 hmr：
+#   - `@deepseek-ai/dsh-base` 的 patch 默认就带 `- id: hmr`
+#     （`disabled: !!js "!ctx.get('profileContext')"`，`config.root: []`）。该表达式
+#     的含义是「由 launcher 提供的 profileContext 决定」：base-backed 的 web 组合
+#     由 launcher 提供 profileContext，所以运行时是启用的（现场设置页里
+#     `include:hmr` 显示「已启用 / 运行中」；`include:<id>` 是 plugin-manager 给
+#     这类内置行的 owner-entry 键，dump 里对应的就是 `- id: hmr`）。
+#   - headless / SDK / ACP bundle 会在自己的 YAML 里把它整行覆盖成 `disabled: true`。
+#   - profile patch 也可以显式 `disabled: false` 再启用。
+# 所以：组合里有 hmr 行、且最终没有 `disabled: true` = 启用；整行缺失或最终为
+# `disabled: true` 才判为没有 HMR。同一 id 可能被后续层整行重写（后来者覆盖），
+# dump 只保留最终一次出现；这里仍按块扫描，只认 `- id: hmr`（不认 `client-hmr`，
+# 那是浏览器侧实现，不能当作服务端 HMR）。
 hmr_state() {
   awk '
-    /^- id: hmr$/ { found = 1; next }
-    /^- id: / { found = 0 }
-    found && /^  disabled: true$/ { disabled = 1 }
+    /^# == / { in_hmr = 0; next }
+    /^- id: / {
+      in_hmr = 0
+      if ($0 == "- id: hmr" || $0 == "- id: include:hmr") {
+        seen = 1
+        in_hmr = 1
+        disabled = 0
+      }
+      next
+    }
+    in_hmr && /^  disabled: true$/ { disabled = 1 }
     END {
-      if (!found) print "absent"
+      if (!seen) print "absent"
       else if (disabled) print "disabled"
       else print "enabled"
     }

@@ -88,7 +88,7 @@ wait_port() {
 
 start_unit dsh-acb.service "dsh（3080）" 3080
 start_unit acb-bridge.service "桥（7700 + 控制台 3100）" 7700
-start_unit acb-drivers.service "驱动（3101 / 3102 / 3103 / 3104）" ""
+start_unit acb-drivers.service "驱动（MCP 端口按 acbctl sessions 推导）" ""
 start_unit acb-opencode-serve.service "opencode serve（4097）" 4097
 
 sleep 3

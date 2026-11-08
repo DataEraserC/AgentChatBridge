@@ -1,5 +1,5 @@
 [Unit]
-Description=ACB dsh drivers (MCP 3101/3102)
+Description=ACB dsh drivers (MCP ports derived from acbctl sessions)
 After=acb-bridge.service
 Wants=acb-bridge.service
 

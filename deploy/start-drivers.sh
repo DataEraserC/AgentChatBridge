@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# start-drivers.sh —— 起两个 acb 驱动进程（由 acb-up.sh 通过 systemd 单元调用）。
+# start-drivers.sh —— 按配置起 acb 驱动进程（由 acb-up.sh 通过 systemd 单元调用）。
 #
 # 每个驱动是一个进程干三件事：连桥（环回口）+ 起一个本地 MCP 端点 + 驱动一个 dsh 会话。
 # 一个 preset 只挂一个 MCP，模型在某个会话里就只看到那一套工具，不会拿着「另一套没票的
@@ -63,18 +63,14 @@ session_token() {
   "$ACBCTL" secrets resolve --session "$1" --config "$CONFIG"
 }
 
-# 会话 id : MCP 端口 : preset 名
-# preset 名必须和 harnesses/dsh/dsh-mcp.patch.yml 里注册的一致，否则 dsh 会报
-# Unknown agent preset，连 session resume 都失败。
-SESSIONS=(
-  "dsh-qas:3101:acb-dsh"
-  "dsh-dev:3103:acb-dsh-dev"
-  "dsh-snowluma-test:3104:acb-dsh-snowluma-test"
-  "dsh-group2:3102:acb-dsh-group2"
-)
+# 会话列表不写死：`acbctl sessions` 从 kernel 配置逐行读 id / harness / preset / port。
+# 唯一规则：preset = acb-<会话 id>，端口 = 3101 + [[sessions]] 下标。这里只接管
+# harness = dsh 的会话（opencode 会话由各自的 serve 入口处理）。
+SESSIONS_OUT=$("$ACBCTL" sessions --config "$CONFIG") \
+  || { echo "acbctl sessions 失败" >&2; exit 1; }
 
-for entry in "${SESSIONS[@]}"; do
-  IFS=: read -r sid port preset <<< "$entry"
+while IFS=$'\t' read -r sid harness preset port; do
+  [[ -n $sid && $harness == dsh ]] || continue
   token=$(session_token "$sid")
   if [[ -z $token ]]; then
     echo "解析不到会话 $sid 的 token，跳过" >&2
@@ -92,6 +88,6 @@ for entry in "${SESSIONS[@]}"; do
     ACB_DSH_MODEL="$DSH_MODEL" \
     ACB_DSH_EFFORT="$DSH_EFFORT" \
     "$NODE" "$DRIVER" &
-done
+done <<< "$SESSIONS_OUT"
 
 wait
