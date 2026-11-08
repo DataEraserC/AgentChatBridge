@@ -130,22 +130,62 @@ kind = "env"
 variable = "ACB_TEST_T_WEB"
 "#;
 
-/// 有 profileContext 的 web 组合：hmr 行是 `!!js`，视为启用。
+/// 现场 web 组合的真实形态：base bundle 默认插入 hmr 行（`!!js` 表达式，未显式
+/// `disabled: true`），profile 层没有声明 hmr；hmr 之后还有大量其它插件行，
+/// 其中既有 `disabled: true` 的行，也有浏览器侧的 `client-hmr`。
 const DUMP_HMR_ENABLED: &str = r#"# == @deepseek-ai/dsh-base
+- id: tool-plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager/tools'
+  disabled: true
+- id: plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager'
+  disabled: !!js '!ctx.get(''profileContext'')'
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
 - id: hmr
   name: '@deepseek-ai/dsh-hmr'
   disabled: !!js '!ctx.get(''profileContext'')'
   config:
     root: []
+- id: llm
+  name: '@deepseek-ai/dsh-llm'
+- id: session
+  name: '@deepseek-ai/dsh-session'
+  disabled: true
+# == @deepseek-ai/dsh-web-app
+- id: web
+  name: '@deepseek-ai/dsh-web-app'
+- id: client-hmr
+  name: '@deepseek-ai/dsh-client-hmr'
 "#;
 
-/// headless 组合：hmr 被显式禁用。
-const DUMP_HMR_DISABLED: &str = r#"# == @deepseek-ai/dsh-headless
+/// headless 组合：headless bundle 把 base 的 hmr 行整行覆盖为 `disabled: true`，
+/// 该行仍然留在组合里（不是「缺失」），后面也还有其它行。
+const DUMP_HMR_DISABLED: &str = r#"# == @deepseek-ai/dsh-base
+- id: tool-plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager/tools'
+  disabled: true
+# == @deepseek-ai/dsh-base, patched by @deepseek-ai/dsh-headless
 - id: hmr
   name: '@deepseek-ai/dsh-hmr'
   disabled: true
   config:
     root: []
+- id: credentials
+  disabled: true
+- id: llm
+  name: '@deepseek-ai/dsh-llm'
+"#;
+
+/// 组合里根本没有 hmr 行（不是被禁用），只能重启。
+const DUMP_HMR_ABSENT: &str = r#"# == @deepseek-ai/dsh-base
+- id: tool-plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager/tools'
+  disabled: true
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
+- id: llm
+  name: '@deepseek-ai/dsh-llm'
 "#;
 
 /// 静态 acb-presets bundle 与 profile patch 各注册了一个同名 preset。
@@ -521,6 +561,57 @@ fn without_hmr_reports_restart_instead_of_fake_success() {
         "stderr: {}",
         String::from_utf8_lossy(&again.stderr)
     );
+}
+
+#[test]
+fn base_default_hmr_is_not_misreported_as_absent() {
+    // 回归：base bundle 默认启用 hmr、profile 未显式声明，且 hmr 行之后还有大量
+    // 其它行。旧实现把「当前行仍是 hmr」和「出现过 hmr」混用一个状态位，
+    // 后续 `- id:` 行一到就判成 absent。
+    let dir = temp_dir("hmr-base-default");
+    let config = write(&dir.0.join("config.toml"), CONFIG_ONE_DSH);
+    let home = dir.0.join("home");
+    fs::create_dir_all(&home).expect("home");
+    let dsh_home = dir.0.join("dsh-home");
+    let manifest = profile_manifest(&dsh_home, &["@deepseek-ai/dsh-base"]);
+    let dsh = fake_dsh(&dir.0, DUMP_HMR_ENABLED);
+
+    let output = run_script(&config, &dsh_home, &dsh, &home);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("HMR 已启用"),
+        "应判定为启用，stdout: {stdout}"
+    );
+    assert!(
+        !stderr.contains("未启用 HMR"),
+        "不得再报 absent，stderr: {stderr}"
+    );
+    assert_eq!(ours(&manifest).len(), 1, "bundle 仍要安装");
+}
+
+#[test]
+fn missing_hmr_row_requires_restart() {
+    let dir = temp_dir("hmr-absent");
+    let config = write(&dir.0.join("config.toml"), CONFIG_ONE_DSH);
+    let home = dir.0.join("home");
+    fs::create_dir_all(&home).expect("home");
+    let dsh_home = dir.0.join("dsh-home");
+    let manifest = profile_manifest(&dsh_home, &["@deepseek-ai/dsh-base"]);
+    let dsh = fake_dsh(&dir.0, DUMP_HMR_ABSENT);
+
+    let output = run_script(&config, &dsh_home, &dsh, &home);
+    assert!(!output.status.success(), "组合里没有 hmr 必须非零退出");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("未启用 HMR"), "stderr: {stderr}");
+    assert!(stderr.contains("absent"), "stderr: {stderr}");
+    assert!(stderr.contains("重启 dsh"), "stderr: {stderr}");
+    assert_eq!(ours(&manifest).len(), 1, "安装与登记仍要完成");
 }
 
 #[test]
