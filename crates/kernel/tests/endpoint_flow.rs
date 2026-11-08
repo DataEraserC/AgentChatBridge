@@ -1310,3 +1310,286 @@ fn dropping_the_connection_mid_turn_releases_the_device() {
 
     server.stop();
 }
+
+// ---------------------------------------------------------------------------
+// 异步发送完成后的唤醒
+// ---------------------------------------------------------------------------
+
+/// 两个会话订阅同一个房间：main 是发起者，other 的唤醒策略对普通消息和
+/// `task` 事件都不敏感，用来证明「只叫发起者」。
+fn async_wake_config(wake_on_completion: bool) -> String {
+    format!(
+        r#"
+        [[connections]]
+        id = "qq"
+        platform = "qq"
+        kind = "onebot11"
+        url = "ws://127.0.0.1:3001"
+        account = "bot"
+
+        [endpoint]
+        listen = "127.0.0.1:7700"
+
+        [[personas]]
+        id = "p"
+        name = "人格"
+        text = "你是桥。"
+
+        [[harnesses]]
+        id = "dsh"
+        name = "DeepSeek"
+
+        [[sessions]]
+        id = "main"
+        harness = "dsh"
+        persona = "p"
+        token = {{ secret = "t-main" }}
+
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/123"
+
+        [[sessions]]
+        id = "other"
+        harness = "dsh"
+        persona = "p"
+        token = {{ secret = "t-other" }}
+
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/123"
+
+        [sessions.subscriptions.wake]
+        provider = "acb.wake.default"
+        at_mention = false
+
+        [tasks]
+        wake_on_completion = {wake_on_completion}
+        "#
+    )
+}
+
+fn async_wake_server(wake_on_completion: bool) -> TestServer {
+    TestServer::start_with(Bridge::new(
+        acb_kernel::Config::parse_fixture(&async_wake_config(wake_on_completion))
+            .expect("配置合法"),
+        MemoryStore::new(),
+        Box::new(Recorder::default()),
+    ))
+}
+
+/// 以 main 的身份连上，投一条 @ 消息，拿到本轮票。
+fn open_main_turn(server: &TestServer) -> (TcpStream, BufReader<TcpStream>, acb_kernel::Ticket) {
+    let mut stream = TcpStream::connect(server.address).expect("能连上");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("能设超时");
+    let mut reader = BufReader::new(stream.try_clone().expect("能复制"));
+
+    write_frame(
+        &mut stream,
+        &Frame::Hello {
+            version: PROTOCOL_VERSION,
+            harness: "dsh".into(),
+            token: Some(TOKEN.into()),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 ready") {
+        Frame::Ready { sessions, .. } => assert_eq!(sessions, vec!["main".to_owned()]),
+        other => panic!("应当是 ready，实际是 {}", other.kind()),
+    }
+
+    {
+        let mut guard = server.bridge.lock().expect("没被毒死");
+        guard.ingest(message("在吗")).expect("能记下来");
+    }
+    match read_frame(&mut reader).expect("能读到 turn_start") {
+        Frame::TurnStart { delivery } => {
+            assert_eq!(delivery.session, "main", "先醒的应当是发起会话");
+            (stream, reader, delivery.ticket)
+        }
+        other => panic!("应当是 turn_start，实际是 {}", other.kind()),
+    }
+}
+
+/// 发一条异步消息并等到它收工，返回 task id。
+fn async_send_and_settle(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    ticket: &acb_kernel::Ticket,
+) -> String {
+    write_frame(
+        stream,
+        &Frame::ToolCall {
+            id: "c-async".into(),
+            ticket: ticket.clone(),
+            tool: "send_message".into(),
+            args: json!({"async": true, "elements": [{"type": "text", "text": "你好"}]}),
+        },
+    );
+    let task_id = match read_frame(reader).expect("能读到 tool_result") {
+        Frame::ToolResult { result, error, .. } => {
+            assert!(error.is_none(), "异步调用本身不该报错");
+            result.expect("要有信封")["task_id"]
+                .as_str()
+                .expect("异步要返回 task_id")
+                .to_owned()
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    };
+
+    write_frame(
+        stream,
+        &Frame::ToolCall {
+            id: "c-wait".into(),
+            ticket: ticket.clone(),
+            tool: "tasks".into(),
+            args: json!({"op": "wait", "id": task_id, "wait_ms": 2000}),
+        },
+    );
+    match read_frame(reader).expect("能读到 tool_result") {
+        Frame::ToolResult { result, error, .. } => {
+            assert!(error.is_none(), "等待不该报错");
+            assert_eq!(
+                result.expect("要有记录")["status"],
+                "succeeded",
+                "后台任务应当在等待窗口内收工"
+            );
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    }
+    task_id
+}
+
+/// 开关打开：异步发送完成后给发起会话排一轮，合成事件进流水；同房间的其它
+/// 订阅者不被叫醒。
+#[test]
+fn async_send_completion_wakes_only_the_initiator_when_switch_is_on() {
+    let server = async_wake_server(true);
+    let bridge = Arc::clone(&server.bridge);
+    let (mut stream, mut reader, ticket) = open_main_turn(&server);
+
+    let task_id = async_send_and_settle(&mut stream, &mut reader, &ticket);
+
+    // 收工后没有新的入站消息，仍然能开出一轮——这就是异步完成唤醒。
+    write_frame(
+        &mut stream,
+        &Frame::TurnEnd {
+            ticket: ticket.clone(),
+            error: None,
+            failure: None,
+        },
+    );
+    let delivery = match read_frame(&mut reader).expect("任务完成应开一轮") {
+        Frame::TurnStart { delivery } => delivery,
+        other => panic!("应当是 turn_start，实际是 {}", other.kind()),
+    };
+    assert_eq!(delivery.session, "main", "只唤醒发起任务的会话");
+    let reason = delivery.wake_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains(&task_id),
+        "唤醒原因应带上任务 id，实际：{reason}"
+    );
+    assert!(
+        delivery
+            .records
+            .iter()
+            .any(|record| record.sender.id == "acb.task"),
+        "唤醒的那一轮应能看到 acb.task 合成事件"
+    );
+    write_frame(
+        &mut stream,
+        &Frame::TurnEnd {
+            ticket: delivery.ticket,
+            error: None,
+            failure: None,
+        },
+    );
+
+    // 同房间的另一个订阅者不该被这条任务完成叫醒。
+    assert!(
+        bridge
+            .lock()
+            .expect("没被毒死")
+            .poll_turn()
+            .expect("能轮询")
+            .is_none(),
+        "非发起会话不能被异步完成唤醒"
+    );
+
+    drop(reader);
+    drop(stream);
+    server.stop();
+}
+
+/// 开关关闭（默认）：异步发送完成后只有落库，不合成事件、不开轮。
+#[test]
+fn async_send_completion_does_not_wake_when_switch_is_off() {
+    let server = async_wake_server(false);
+    let (mut stream, mut reader, ticket) = open_main_turn(&server);
+
+    let _task_id = async_send_and_settle(&mut stream, &mut reader, &ticket);
+
+    write_frame(
+        &mut stream,
+        &Frame::TurnEnd {
+            ticket,
+            error: None,
+            failure: None,
+        },
+    );
+    // 没有待开的轮次：读一小会儿等不到 turn_start。
+    stream
+        .set_read_timeout(Some(Duration::from_millis(800)))
+        .expect("能设超时");
+    assert!(
+        read_frame(&mut reader).is_err(),
+        "开关关着时异步完成不该开出新轮"
+    );
+
+    drop(reader);
+    drop(stream);
+    server.stop();
+}
+
+/// 同步路径（`async:false`）不产生后台任务，即使开关打开也不唤醒。
+#[test]
+fn sync_send_does_not_wake_even_when_switch_is_on() {
+    let server = async_wake_server(true);
+    let (mut stream, mut reader, ticket) = open_main_turn(&server);
+
+    write_frame(
+        &mut stream,
+        &Frame::ToolCall {
+            id: "c-sync".into(),
+            ticket: ticket.clone(),
+            tool: "send_message".into(),
+            args: json!({"async": false, "elements": [{"type": "text", "text": "你好"}]}),
+        },
+    );
+    match read_frame(&mut reader).expect("能读到 tool_result") {
+        Frame::ToolResult { result, error, .. } => {
+            assert!(error.is_none(), "同步发送不该报错");
+            let result = result.expect("同步要直接给结果");
+            assert!(result.get("task_id").is_none(), "同步回执不该带 task_id");
+        }
+        other => panic!("应当是 tool_result，实际是 {}", other.kind()),
+    }
+
+    write_frame(
+        &mut stream,
+        &Frame::TurnEnd {
+            ticket,
+            error: None,
+            failure: None,
+        },
+    );
+    stream
+        .set_read_timeout(Some(Duration::from_millis(800)))
+        .expect("能设超时");
+    assert!(read_frame(&mut reader).is_err(), "同步路径不该开出新轮");
+
+    drop(reader);
+    drop(stream);
+    server.stop();
+}

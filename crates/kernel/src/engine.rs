@@ -1423,7 +1423,9 @@ impl<S: Store> Bridge<S> {
             room: room.clone(),
             handler: handler.to_owned(),
             params_summary: summarize_params(params),
-            // 尝试记录不发合成事件：成没成由调用方直接拿到结果，不用绕唤醒。
+            // 尝试记录不按 `wake_on` 配事件：它不发“按记录配置”的合成事件。
+            // 异步完成后的唤醒只由全局 `[tasks].wake_on_completion` 决定
+            // （见 `record_async_outcome`）；同步路径压根不会走到那里。
             wake_on: "never".to_owned(),
             status: TaskStatus::Running,
             created_at: now,
@@ -1484,6 +1486,10 @@ impl<S: Store> Bridge<S> {
 
     /// 后台执行结束后把结果补进任务记录。状态已由 `finish_*` 结算；
     /// 这里只补 `result` / `error`，并保留超时的 `unknown` 不被改成 `failed`。
+    ///
+    /// 开关打开时，异步发送的完成也会合成 `acb.task` 事件并唤醒发起会话，
+    /// 走的链路与路由任务一致（合成事件 → ingest → 直接 enqueue 发起者）。
+    /// 开关关着时这里只有落库，和旧版完全一致。
     pub(crate) fn record_async_outcome(&mut self, id: &str, result: Result<Value, ToolError>) {
         let Ok(Some(mut record)) = self.store.task_find(id) else {
             return;
@@ -1503,8 +1509,42 @@ impl<S: Store> Bridge<S> {
             }
         }
         record.finished_at = Some(now_millis());
+
+        // 尝试记录的 `wake_on` 固定是 `never`（它不参与“按记录配置”的事件语义）。
+        // 异步完成要不要唤醒发起者，统一由全局开关决定：成功、失败、unknown 都算收工。
+        let wake_initiator = self.config.tasks.wake_on_completion
+            && matches!(
+                record.status,
+                TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Unknown
+            );
+        let finished = wake_initiator.then(|| {
+            (
+                record.session.clone(),
+                record.room.clone(),
+                record.status,
+                record.handler.clone(),
+                record.result.clone(),
+                record.error.clone(),
+                record.delivery_error.clone(),
+            )
+        });
+
         if let Err(storage_error) = self.store.task_update(&record) {
             eprintln!("task {id} 异步结果落库失败：{storage_error}");
+        }
+
+        if let Some((session, room, status, handler, result, error, delivery_error)) = finished {
+            self.emit_task_event(
+                id,
+                session,
+                room,
+                status,
+                handler,
+                result,
+                error,
+                delivery_error,
+                true,
+            );
         }
     }
 
@@ -1582,6 +1622,46 @@ impl<S: Store> Bridge<S> {
             return;
         }
 
+        // 路由任务的合成事件按记录自己的 `wake_on` 决定；桥内唤醒仍由全局开关控制。
+        let wake_initiator = self.config.tasks.wake_on_completion
+            && matches!(
+                status,
+                TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Unknown
+            );
+        self.emit_task_event(
+            &id,
+            session,
+            room,
+            status,
+            handler,
+            result,
+            error,
+            delivery_error,
+            wake_initiator,
+        );
+    }
+
+    /// 合成 `acb.task` 事件，并在需要时把发起会话排回队列。路由任务与异步发送共用。
+    ///
+    /// 事件跳过 route/receive，只走 store + wake 策略；这样不会出现
+    /// “任务失败 → 路由再触发任务 → 再失败”的循环。
+    ///
+    /// 桥内唤醒只看「发起任务的会话」，不经过 lua.wake_policy，也不看别的订阅者。
+    /// 该会话若正在跑一轮，enqueue 只把它排进 pending；poll_turn_for 要等这一轮
+    /// 收工才会取走——结果自然并进下一轮，不会抢断当前轮。
+    #[allow(clippy::too_many_arguments)]
+    fn emit_task_event(
+        &mut self,
+        id: &str,
+        session: String,
+        room: RoomId,
+        status: TaskStatus,
+        handler: String,
+        result: Option<Value>,
+        error: Option<String>,
+        delivery_error: Option<String>,
+        wake_initiator: bool,
+    ) {
         let error_text = error
             .as_ref()
             .or(delivery_error.as_ref())
@@ -1634,11 +1714,9 @@ impl<S: Store> Bridge<S> {
             *event_summary = Some(summary);
         }
 
-        // 合成事件跳过 route/receive，只走 store + wake 策略；这样不会出现
-        // “任务失败 → 路由再触发任务 → 再失败”的循环。
         match self.ingest_inner(draft, true) {
             Ok(Ingest::Recorded { id: event_id, woke }) => {
-                if let Ok(Some(mut record)) = self.store.task_find(&id) {
+                if let Ok(Some(mut record)) = self.store.task_find(id) {
                     record.event_id = Some(event_id);
                     record.event_woke = woke;
                     record.event_error = None;
@@ -1649,31 +1727,25 @@ impl<S: Store> Bridge<S> {
             }
             Ok(Ingest::NotSubscribed { room }) => {
                 self.set_task_event_error(
-                    &id,
+                    id,
                     acb_i18n::t!("kernel.engine.task_event_not_subscribed", room = room),
                 );
             }
             Ok(Ingest::Dropped { room }) => {
                 self.set_task_event_error(
-                    &id,
+                    id,
                     acb_i18n::t!("kernel.engine.task_event_dropped", room = room),
                 );
             }
             Ok(Ingest::Handled { .. }) => {
-                self.set_task_event_error(&id, acb_i18n::t!("kernel.engine.task_event_handled"));
+                self.set_task_event_error(id, acb_i18n::t!("kernel.engine.task_event_handled"));
             }
             Err(error) => {
-                self.set_task_event_error(&id, error.to_string());
+                self.set_task_event_error(id, error.to_string());
             }
         }
 
-        // 桥内唤醒：只看「发起任务的会话」，不经过 lua.wake_policy，也不看别的订阅者。
-        // 关掉开关时这里什么都不做，行为与旧版完全一致。
-        // 该会话若正在跑一轮，enqueue 只把它排进 pending；poll_turn_for 要等这一轮
-        // 收工才会取走——结果自然并进下一轮，不会抢断当前轮。
-        if self.config.tasks.wake_on_completion
-            && matches!(status, TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Unknown)
-        {
+        if wake_initiator {
             let reason = acb_i18n::t!(
                 "kernel.engine.task_wake_reason",
                 id = id,
