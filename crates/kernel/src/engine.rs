@@ -314,6 +314,10 @@ pub(crate) struct PreparedPlatformCall {
     /// 本机文件中继；真正的文件拷贝在 `relay()` 里做，调用方应在锁外调用。
     relay: Option<crate::relay::FileRelay>,
     relay_done: bool,
+    /// 出站尝试记录 id（只有发送类平台方法才有）。
+    attempt_id: Option<String>,
+    /// 幂等键，随尝试记录落库，供超时后对账/复用。
+    idempotency_key: Option<String>,
 }
 
 impl PreparedPlatformCall {
@@ -356,6 +360,10 @@ pub(crate) struct PreparedSend {
     /// 本机文件中继；真正的文件拷贝在 `relay()` 里做，调用方应在锁外调用。
     relay: Option<crate::relay::FileRelay>,
     relay_done: bool,
+    /// 出站尝试记录 id（只有工具发起的发送才有；路由/失败通知不记账）。
+    attempt_id: Option<String>,
+    /// 幂等键，随尝试记录落库，供超时后对账/复用。
+    idempotency_key: Option<String>,
 }
 
 impl PreparedSend {
@@ -1304,6 +1312,11 @@ impl<S: Store> Bridge<S> {
         })
     }
 
+    fn next_task_id(&mut self) -> String {
+        self.task_seq = self.task_seq.saturating_add(1);
+        format!("task-{}-{}", self.ticket_prefix, self.task_seq)
+    }
+
     fn create_task_record(
         &mut self,
         room: &RoomId,
@@ -1311,8 +1324,7 @@ impl<S: Store> Bridge<S> {
         handler: &str,
         params: &Value,
     ) -> Result<String, BridgeError> {
-        self.task_seq = self.task_seq.saturating_add(1);
-        let id = format!("task-{}-{}", self.ticket_prefix, self.task_seq);
+        let id = self.next_task_id();
         let record = TaskRecord {
             id: id.clone(),
             session: session.to_owned(),
@@ -1340,6 +1352,83 @@ impl<S: Store> Bridge<S> {
         self.store.task_create(&record)?;
         self.store.task_prune(TASK_KEEP)?;
         Ok(id)
+    }
+
+    /// 预写一条出站尝试记录：执行前就落库，成功补 `platform_id`，超时留 `unknown`。
+    /// 返回（尝试 id，幂等键）；幂等键随记录落库，超时后可以拿它去对账/重试。
+    fn create_attempt_record(
+        &mut self,
+        session: &str,
+        room: &RoomId,
+        handler: &str,
+        params: &Value,
+    ) -> Result<(String, String), BridgeError> {
+        let id = self.next_task_id();
+        let key = format!("idem-{id}");
+        let now = now_millis();
+        let record = TaskRecord {
+            id: id.clone(),
+            session: session.to_owned(),
+            room: room.clone(),
+            handler: handler.to_owned(),
+            params_summary: summarize_params(params),
+            // 尝试记录不发合成事件：成没成由调用方直接拿到结果，不用绕唤醒。
+            wake_on: "never".to_owned(),
+            status: TaskStatus::Running,
+            created_at: now,
+            started_at: Some(now),
+            finished_at: None,
+            result: None,
+            error: None,
+            delivery_error: None,
+            event_id: None,
+            event_woke: Vec::new(),
+            event_error: None,
+            platform_id: None,
+            idempotency_key: Some(key.clone()),
+        };
+        self.store.task_create(&record)?;
+        self.store.task_prune(TASK_KEEP)?;
+        Ok((id, key))
+    }
+
+    /// 给一次出站尝试收尾。`platform_id` 有值才覆盖（超时/失败保留空值，供对账回填）。
+    fn settle_attempt(
+        &mut self,
+        id: &str,
+        status: TaskStatus,
+        platform_id: Option<String>,
+        error: Option<String>,
+    ) {
+        match self.store.task_find(id) {
+            Ok(Some(mut record)) => {
+                record.status = status;
+                record.finished_at = Some(now_millis());
+                if platform_id.is_some() {
+                    record.platform_id = platform_id;
+                }
+                record.error = error;
+                if let Err(storage_error) = self.store.task_update(&record) {
+                    eprintln!("task {id} 尝试结算落库失败：{storage_error}");
+                }
+            }
+            Ok(None) => {}
+            Err(storage_error) => eprintln!("task {id} 尝试结算读取失败：{storage_error}"),
+        }
+    }
+
+    /// 本机中继失败等「还没碰平台」的失败：记 `failed`，并把可查 id 补进错误文案。
+    fn abort_attempt(
+        &mut self,
+        id: &Option<String>,
+        key: &Option<String>,
+        error: ToolError,
+    ) -> ToolError {
+        let Some(id) = id else {
+            return error;
+        };
+        self.settle_attempt(id, TaskStatus::Failed, None, Some(error.message.clone()));
+        with_attempt_note(error, id, key.as_deref())
     }
 
     pub(crate) fn mark_task_running(&mut self, task_id: &str) {
@@ -3963,6 +4052,7 @@ impl<S: Store> Bridge<S> {
                     &room,
                     SendOrigin::Message,
                     args.elements.0,
+                    "send_message",
                 )
             }
             // 给了目标：跨会话发送已砍；目标房间由本会话的访问策略把关。
@@ -3982,6 +4072,7 @@ impl<S: Store> Bridge<S> {
                     &target,
                     SendOrigin::Message,
                     args.elements.0,
+                    "send_message_to",
                 )
             }
             // 申请一张一次性票据：只在当前房间申请，目标可以是未订阅房间。
@@ -4455,12 +4546,13 @@ impl<S: Store> Bridge<S> {
                     &ctx.room,
                     "send_message",
                 )?;
-                let prepared = self.prepare_send(
+                let prepared = self.prepare_send_attempt(
                     ctx.config.clone(),
                     &ctx.session,
                     ctx.room.clone(),
                     SendOrigin::Message,
                     args.elements.0,
+                    "send_message",
                 )?;
                 Ok(ToolCallStart::Send(prepared))
             }
@@ -4475,12 +4567,13 @@ impl<S: Store> Bridge<S> {
                     &ctx.room,
                     "send_message_to",
                 )?;
-                let prepared = self.prepare_send(
+                let prepared = self.prepare_send_attempt(
                     ctx.config.clone(),
                     &ctx.session,
                     target,
                     SendOrigin::Message,
                     args.elements.0,
+                    "send_message_to",
                 )?;
                 Ok(ToolCallStart::Send(prepared))
             }
@@ -4557,10 +4650,13 @@ impl<S: Store> Bridge<S> {
             "tasks" => {
                 let op = args.get("op").and_then(Value::as_str).unwrap_or("");
                 let wait_ms = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(0);
-                if op == "get" && wait_ms > 0 {
+                if op != "wait" && wait_ms > 0 {
                     return Err(ToolError::new(
                         ErrorCode::BadRequest,
-                        "[bad_params] tasks op=get 立即返回当前状态；要等结果请用 op=wait。",
+                        format!(
+                            "[bad_params] tasks op={} 立即返回当前状态；只有 op=wait 接受 wait_ms。",
+                            if op.is_empty() { "?" } else { op }
+                        ),
                     ));
                 }
                 if op != "wait" {
@@ -4701,7 +4797,7 @@ impl<S: Store> Bridge<S> {
             }
         }
 
-        self.assemble_platform_call(config, room, spec.clone(), args, None)
+        self.assemble_platform_call(config, &ctx.session, room, spec.clone(), args, None)
     }
 
     /// `platform_call` 的校验尾巴：参数、critical / destructive 闸门、账号与出站句柄。
@@ -4709,6 +4805,7 @@ impl<S: Store> Bridge<S> {
     fn assemble_platform_call(
         &mut self,
         config: Arc<Config>,
+        session: &str,
         room: RoomId,
         spec: MethodSpec,
         args: PlatformCallArgs,
@@ -4749,6 +4846,17 @@ impl<S: Store> Bridge<S> {
             )))
         })?;
 
+        // 只有发送类方法记账：读方法重复调用没有副作用，不需要事后对账。
+        let (attempt_id, idempotency_key) = if spec.effect == Effect::Send {
+            let handler = format!("platform_call:{}", spec.name);
+            let (id, key) = self
+                .create_attempt_record(session, &room, &handler, &args.params)
+                .map_err(internal)?;
+            (Some(id), Some(key))
+        } else {
+            (None, None)
+        };
+
         Ok(PreparedPlatformCall {
             room,
             spec,
@@ -4759,6 +4867,8 @@ impl<S: Store> Bridge<S> {
             outbound,
             relay: self.relay.clone(),
             relay_done: false,
+            attempt_id,
+            idempotency_key,
         })
     }
 
@@ -4778,9 +4888,40 @@ impl<S: Store> Bridge<S> {
             spec,
             args,
             config,
+            attempt_id,
+            idempotency_key,
             ..
         } = prepared;
-        let CallOutcome { value, record } = result.map_err(call_error)?;
+        let outcome = match result {
+            Ok(outcome) => {
+                if let Some(id) = &attempt_id {
+                    let platform_id = outcome
+                        .record
+                        .as_ref()
+                        .and_then(|record| record.platform_id.clone());
+                    self.settle_attempt(id, TaskStatus::Succeeded, platform_id, None);
+                }
+                outcome
+            }
+            Err(error) => {
+                // 超时和 send 一样留 unknown：调用可能已经落到平台上，别让模型
+                // 看到 failed 就重发。其它错误是平台明确拒绝/不可用，记 failed。
+                let status = if matches!(error, CallError::Timeout(_)) {
+                    TaskStatus::Unknown
+                } else {
+                    TaskStatus::Failed
+                };
+                if let Some(id) = &attempt_id {
+                    self.settle_attempt(id, status, None, Some(error.to_string()));
+                }
+                let mut tool_error = call_error(error);
+                if let Some(id) = &attempt_id {
+                    tool_error = with_attempt_note(tool_error, id, idempotency_key.as_deref());
+                }
+                return Err(tool_error);
+            }
+        };
+        let CallOutcome { value, record } = outcome;
 
         if spec.record != RecordMode::None {
             if let Some(record) = record {
@@ -4912,7 +5053,9 @@ impl<S: Store> Bridge<S> {
         args: PlatformCallArgs,
     ) -> Result<Value, ToolError> {
         let mut prepared = self.prepare_platform_call(ticket, args)?;
-        prepared.relay()?;
+        if let Err(error) = prepared.relay() {
+            return Err(self.abort_platform(&prepared, error));
+        }
         let result = prepared.execute();
         self.finish_platform_call(prepared, result)
     }
@@ -6630,6 +6773,7 @@ impl<S: Store> Bridge<S> {
                                 &room,
                                 SendOrigin::Message,
                                 args.elements.0,
+                                op,
                             ) {
                                 Ok(value) => ("succeeded", Some(value), None),
                                 Err(error) => ("failed", None, Some(error.message)),
@@ -6739,12 +6883,19 @@ impl<S: Store> Bridge<S> {
             params: params.clone(),
             ..Default::default()
         };
-        let mut prepared =
-            match self.assemble_platform_call(config, anchor, spec, args, Some(ticket)) {
-                Ok(prepared) => prepared,
-                Err(error) => return ("failed", None, Some(error.message)),
-            };
+        let mut prepared = match self.assemble_platform_call(
+            config,
+            &ticket.session,
+            anchor,
+            spec,
+            args,
+            Some(ticket),
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return ("failed", None, Some(error.message)),
+        };
         if let Err(error) = prepared.relay() {
+            let error = self.abort_platform(&prepared, error);
             return ("failed", None, Some(error.message));
         }
         let executed = prepared.execute();
@@ -7849,9 +8000,13 @@ impl<S: Store> Bridge<S> {
         room: &RoomId,
         origin: SendOrigin,
         elements: Vec<Element>,
+        handler: &str,
     ) -> Result<Value, ToolError> {
-        let mut prepared = self.prepare_send(config, session, room.clone(), origin, elements)?;
-        prepared.relay()?;
+        let mut prepared =
+            self.prepare_send_attempt(config, session, room.clone(), origin, elements, handler)?;
+        if let Err(error) = prepared.relay() {
+            return Err(self.abort_send(&prepared, error));
+        }
         let sent = prepared.execute();
         self.finish_send(prepared, sent)
     }
@@ -8010,6 +8165,33 @@ impl<S: Store> Bridge<S> {
             after_hooks,
             after_hook_ids: outbound_policy.after.clone(),
             modified_by,
+            attempt_id: None,
+            idempotency_key: None,
+        })
+    }
+
+    /// 工具发起的发送：在 `prepare_send` 之后立刻预写尝试记录。
+    ///
+    /// 路由动作与失败通知走 `prepare_send`，不记账——它们不是模型可以直接
+    /// 对账的一次调用。
+    fn prepare_send_attempt(
+        &mut self,
+        config: Arc<Config>,
+        session: &str,
+        room: RoomId,
+        origin: SendOrigin,
+        elements: Vec<Element>,
+        handler: &str,
+    ) -> Result<PreparedSend, ToolError> {
+        let prepared = self.prepare_send(config, session, room.clone(), origin, elements)?;
+        let summary = json!({ "elements": prepared.elements });
+        let (id, key) = self
+            .create_attempt_record(session, &room, handler, &summary)
+            .map_err(internal)?;
+        Ok(PreparedSend {
+            attempt_id: Some(id),
+            idempotency_key: Some(key),
+            ..prepared
         })
     }
 
@@ -8030,12 +8212,34 @@ impl<S: Store> Bridge<S> {
             after_hooks,
             after_hook_ids,
             modified_by,
+            attempt_id,
+            idempotency_key,
             ..
         } = prepared;
 
         let sent = match result {
-            Ok(sent) => sent,
+            Ok(sent) => {
+                if let Some(id) = &attempt_id {
+                    self.settle_attempt(
+                        id,
+                        TaskStatus::Succeeded,
+                        Some(sent.platform_id.clone()),
+                        None,
+                    );
+                }
+                sent
+            }
             Err(error) => {
+                // 超时不是「失败」：请求已经交给适配器，平台可能已经发出去了。
+                // 记 unknown 并给出可查 id，避免 agent 盲目重发。
+                let status = if matches!(error, OutboundError::Timeout(_)) {
+                    TaskStatus::Unknown
+                } else {
+                    TaskStatus::Failed
+                };
+                if let Some(id) = &attempt_id {
+                    self.settle_attempt(id, status, None, Some(error.to_string()));
+                }
                 // 平台侧拉不到媒体 URL 时的报错只有一句干巴巴的 fetch failed
                 // （平台内部自己的下载失败，桥拿不到它的 errno）。桥补得上的是
                 // 上下文：哪些 URL、很可能只有发消息这侧可达、本机文件该怎么写。
@@ -8048,6 +8252,9 @@ impl<S: Store> Bridge<S> {
                          本机文件直接把路径写进 url，桥会自动中继成平台取得到的地址。",
                         urls.join(", ")
                     ));
+                }
+                if let Some(id) = &attempt_id {
+                    tool_error = with_attempt_note(tool_error, id, idempotency_key.as_deref());
                 }
                 return Err(tool_error);
             }
@@ -8113,6 +8320,13 @@ impl<S: Store> Bridge<S> {
             "room": room.to_string(),
             "watermark": watermark,
         });
+        if let Some(id) = &attempt_id {
+            // 回执带上可查 id 与幂等键：超时/断线之后凭它去 tasks 对账，别重发。
+            receipt["task_id"] = json!(id);
+        }
+        if let Some(key) = &idempotency_key {
+            receipt["idempotency_key"] = json!(key);
+        }
         if trimmed {
             // 必须说：模型以为发出去的是全文，实际少了尾巴。不说它就永远不知道。
             receipt["trimmed"] = json!(true);
@@ -8136,6 +8350,20 @@ impl<S: Store> Bridge<S> {
             receipt["modified_by"] = json!(modified_by);
         }
         Ok(receipt)
+    }
+
+    /// endpoint 在中继阶段失败时调用：把预写的尝试记录改成 `failed`。
+    pub(crate) fn abort_send(&mut self, prepared: &PreparedSend, error: ToolError) -> ToolError {
+        self.abort_attempt(&prepared.attempt_id, &prepared.idempotency_key, error)
+    }
+
+    /// 同上，针对 `platform_call` 的发送类方法。
+    pub(crate) fn abort_platform(
+        &mut self,
+        prepared: &PreparedPlatformCall,
+        error: ToolError,
+    ) -> ToolError {
+        self.abort_attempt(&prepared.attempt_id, &prepared.idempotency_key, error)
     }
 
     /// 适配器翻译好的出站记录 → 流水。
@@ -10843,6 +11071,19 @@ fn outbound_error(error: OutboundError) -> ToolError {
             ToolError::new(ErrorCode::Timeout, with_file_hint(detail))
         }
     }
+}
+
+/// 给一次尝试的报错补上「去哪查」：记录 id 与幂等键。
+fn with_attempt_note(mut error: ToolError, id: &str, key: Option<&str>) -> ToolError {
+    error
+        .message
+        .push_str(&acb_i18n::t!("kernel.engine.send_attempt_recorded", id = id));
+    if let Some(key) = key {
+        error
+            .message
+            .push_str(&acb_i18n::t!("kernel.engine.send_attempt_key", key = key));
+    }
+    error
 }
 
 fn now_millis() -> i64 {

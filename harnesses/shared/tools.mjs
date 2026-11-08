@@ -569,6 +569,11 @@ wait_truncated / requested_wait_ms / wait_ms 说明，不会静默。
 wait 到点返回的记录带 still_running=true，可以再等一次，不要一次死等到底。
 任务可能在本轮结束后才完成；即使你没有收到唤醒，也可以回来用 tasks 查询。
 
+这张表也收发送类工具的尝试记录（handler 为 send_message / send_message_to /
+platform_call:方法名）：执行前就落库，成功补 platform_id，超时留 unknown。发送类
+调用的回执和失败/超时错误里都带 task_id 与 idempotency_key；拿它们回来对账，
+遇到 unknown 不要重发。
+
 如果收到 sender 为 acb.task、tags 含 task.* 的合成事件，表示某个后台任务已经收工；
 用它事件文本里的任务 id 调 tasks op=get 取详情。`,
     schema: {

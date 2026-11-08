@@ -542,7 +542,12 @@ pub fn run_connection<S: Store>(
                                     let result = guard.finish_platform_call(prepared, result);
                                     vec![tool_reply(id, result)]
                                 }
-                                Err(error) => vec![tool_reply(id, Err(error))],
+                                Err(error) => {
+                                    let mut guard = lock(bridge);
+                                    let error = guard.abort_platform(&prepared, error);
+                                    drop(guard);
+                                    vec![tool_reply(id, Err(error))]
+                                }
                             },
                             Ok(ToolCallStart::Send(mut prepared)) => match prepared.relay() {
                                 Ok(()) => {
@@ -553,7 +558,12 @@ pub fn run_connection<S: Store>(
                                         .map(|value| guard.fit_tool_result(&tool, value));
                                     vec![tool_reply(id, result)]
                                 }
-                                Err(error) => vec![tool_reply(id, Err(error))],
+                                Err(error) => {
+                                    let mut guard = lock(bridge);
+                                    let error = guard.abort_send(&prepared, error);
+                                    drop(guard);
+                                    vec![tool_reply(id, Err(error))]
+                                }
                             },
                             Ok(ToolCallStart::Wait(prepared)) => {
                                 // 关键：等待期间**不持有锁**。每次都回锁里查一下，

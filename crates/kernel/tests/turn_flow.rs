@@ -4238,3 +4238,100 @@ fn merged_tool_ops_are_closed_and_report_candidates() {
         .expect_err("未知 op 要拒绝");
     assert!(error.message.contains("status / log"), "{}", error.message);
 }
+
+/// 只回超时的出站通道：模拟「命令已经交给适配器、平台一直没回话」。
+struct TimingOutOutbound;
+
+impl Outbound for TimingOutOutbound {
+    fn send(&mut self, _room: &RoomId, _elements: &[Element]) -> Result<Sent, OutboundError> {
+        Err(OutboundError::Timeout("平台 10 秒没回话".into()))
+    }
+}
+
+#[test]
+fn timed_out_send_is_recorded_as_unknown_with_a_queryable_id() {
+    let mut bridge = Bridge::new(
+        Config::parse_fixture(config()).expect("配置合法"),
+        MemoryStore::new(),
+        Box::new(TimingOutOutbound),
+    );
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message",
+            json!({"elements": [{"type": "text", "text": "你好"}]}),
+        )
+        .expect_err("超时要报错");
+    assert_eq!(error.code, ErrorCode::Timeout);
+    assert!(
+        error.message.contains("[attempt]"),
+        "报错要指向可查记录：{}",
+        error.message
+    );
+
+    let list = bridge.task_list("main", None, 20, 0).expect("能列任务");
+    let task = &list["tasks"][0];
+    assert_eq!(task["handler"], "send_message");
+    assert_eq!(task["status"], "unknown", "超时不能记成失败，平台可能已经发出去了");
+    assert!(task["platform_id"].is_null(), "超时拿不到平台消息号");
+    assert!(
+        task["idempotency_key"]
+            .as_str()
+            .expect("幂等键要落库")
+            .starts_with("idem-"),
+        "{}",
+        task["idempotency_key"]
+    );
+    assert!(
+        error
+            .message
+            .contains(task["id"].as_str().expect("记录有 id")),
+        "错误文案要带上记录 id：{}",
+        error.message
+    );
+}
+
+#[test]
+fn successful_send_fills_platform_id_in_the_attempt_record() {
+    let (mut bridge, _sends) = bridge();
+    bridge
+        .ingest(message("qq:group/123", "10001", "在吗", true))
+        .expect("能记下来");
+    let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let receipt = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "send_message",
+            json!({"elements": [{"type": "text", "text": "你好"}]}),
+        )
+        .expect("能发送");
+    let task_id = receipt["task_id"].as_str().expect("回执要带 task_id");
+    assert!(
+        receipt["idempotency_key"]
+            .as_str()
+            .expect("回执要带幂等键")
+            .starts_with("idem-")
+    );
+
+    let task = bridge.task_get("main", task_id).expect("能查");
+    assert_eq!(task["status"], "succeeded");
+    assert_eq!(task["platform_id"], "p-1", "成功要补平台消息号");
+    assert!(task["finished_at"].as_i64().is_some());
+    assert_eq!(
+        bridge
+            .task_list("other", None, 20, 0)
+            .expect("能列")
+            .get("total")
+            .and_then(Value::as_u64),
+        Some(0),
+        "尝试记录只属于发起会话"
+    );
+}

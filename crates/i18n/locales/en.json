@@ -658,6 +658,8 @@
   "kernel.engine.task_event_handled": "task synthetic event unexpectedly reached routing",
   "kernel.engine.task_not_found": "task {id} not found (or it belongs to another session)",
   "kernel.engine.task_wake_reason": "background task {id} ({handler}) finished: {status}",
+  "kernel.engine.send_attempt_recorded": "\n[attempt] this send attempt is recorded as {id}. Use tasks op=get to check its state; unknown means it may have succeeded, do not blindly resend.",
+  "kernel.engine.send_attempt_key": "\n[attempt] idempotency key: {key}; quote it when reconciling or retrying after a timeout.",
   "kernel.engine.direct_wake": "direct wake: {source} -> {room} ({count} session(s))",
   "kernel.engine.direct_wake_reason": "direct wake ({source})",
   "kernel.engine.direct_wake_reason_detail": "direct wake ({source}): {reason}",

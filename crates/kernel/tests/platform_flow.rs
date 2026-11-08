@@ -844,6 +844,12 @@ fn platform_call_send_is_recorded_and_acked() {
     assert_eq!(stored[0].sender.id, "bot", "发送者是自己这个号");
     assert_eq!(stored[0].platform_id.as_deref(), Some("9002"));
 
+    let list = bridge.task_list("main", None, 20, 0).expect("能列任务");
+    let task = &list["tasks"][0];
+    assert_eq!(task["handler"], "platform_call:msg.send_image");
+    assert_eq!(task["status"], "succeeded");
+    assert_eq!(task["platform_id"], "9002", "发送类平台调用也要补平台消息号");
+
     // 先确认轮次里收到的那条，水位才推得动；自己发的那条已经确认过，不能留下洞。
     let acked = bridge
         .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [1]}))
@@ -860,6 +866,95 @@ fn platform_call_send_is_recorded_and_acked() {
         unread(bridge.store(), &Cursor::new("main", room), 100)
             .expect("可读")
             .is_empty()
+    );
+}
+
+/// 平台一直不回话的出站通道：发送类调用要留 `unknown`，不能记成失败。
+struct TimingPlatformy {
+    calls: Calls,
+}
+
+impl Outbound for TimingPlatformy {
+    fn send(&mut self, _room: &RoomId, _elements: &[Element]) -> Result<Sent, OutboundError> {
+        Ok(Sent {
+            platform_id: "p".into(),
+            at: AT,
+        })
+    }
+
+    fn catalog(&self, connection: &str) -> Arc<[MethodSpec]> {
+        if connection == "qq" {
+            methods()
+        } else {
+            Arc::from(Vec::<MethodSpec>::new())
+        }
+    }
+
+    fn call(
+        &mut self,
+        _room: &RoomId,
+        method: &str,
+        params: &Value,
+    ) -> Result<CallOutcome, CallError> {
+        self.calls
+            .lock()
+            .expect("没被毒死")
+            .push((method.to_owned(), params.clone()));
+        Err(CallError::Timeout("平台 30 秒没回话".into()))
+    }
+}
+
+fn setup_timing() -> (Bridge<MemoryStore>, Calls) {
+    let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+    let mut plugins = PluginManager::with_native_builtins();
+    plugins
+        .register_adapter(Arc::new(FakeAdapterFactory))
+        .expect("注册假适配器");
+    let bridge = Bridge::with_plugins(
+        acb_kernel::Config::parse_fixture(config()).expect("配置合法"),
+        MemoryStore::new(),
+        Box::new(TimingPlatformy {
+            calls: calls.clone(),
+        }),
+        plugins,
+    );
+    (bridge, calls)
+}
+
+#[test]
+fn platform_send_timeout_is_recorded_as_unknown() {
+    let (mut bridge, _calls) = setup_timing();
+    let ticket = open_turn(&mut bridge);
+
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({
+                "op": "msg.send_image",
+                "params": {"file": "https://example.com/a.png"},
+            }),
+        )
+        .expect_err("超时要报错");
+    assert_eq!(error.code, ErrorCode::Timeout);
+    assert!(
+        error.message.contains("[attempt]"),
+        "报错要指向可查记录：{}",
+        error.message
+    );
+
+    let list = bridge.task_list("main", None, 20, 0).expect("能列任务");
+    let task = &list["tasks"][0];
+    assert_eq!(task["handler"], "platform_call:msg.send_image");
+    assert_eq!(
+        task["status"], "unknown",
+        "超时可能已经发出去了，不能记成失败"
+    );
+    assert!(task["platform_id"].is_null());
+    assert!(
+        task["idempotency_key"].as_str().is_some(),
+        "幂等键要落库"
     );
 }
 

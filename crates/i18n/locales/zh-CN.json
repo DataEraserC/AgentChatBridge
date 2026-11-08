@@ -658,6 +658,8 @@
   "kernel.engine.task_event_handled": "任务合成事件意外进入了路由处理",
   "kernel.engine.task_not_found": "没有任务 {id}（或不属于当前会话）",
   "kernel.engine.task_wake_reason": "后台任务 {id}（{handler}）已收工：{status}",
+  "kernel.engine.send_attempt_recorded": "\n[attempt] 这次发送尝试已记录：id={id}。用 tasks op=get 查看当前状态；unknown 表示可能已经成功，不要盲目重发。",
+  "kernel.engine.send_attempt_key": "\n[attempt] 幂等键：{key}；超时后对账或重试请带上它。",
   "kernel.engine.direct_wake": "直接唤醒：{source} → {room}（{count} 个会话）",
   "kernel.engine.direct_wake_reason": "直接唤醒（{source}）",
   "kernel.engine.direct_wake_reason_detail": "直接唤醒（{source}）：{reason}",
