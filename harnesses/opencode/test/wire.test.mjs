@@ -503,7 +503,8 @@ test("平台载荷过长会截断，但绝不整段吞掉", () => {
 
 test("事件记录里的原始载荷不摊开，只给流水编号让 agent 自己查", () => {
   // 未解析事件的降级存法（ADR-0004 补充裁定 2026-10-31）：载荷存流水，
-  // 投递不塞上下文。渲染要给编号 + 查法，否则模型不知道细节去哪找。
+  // 投递不塞上下文。渲染要给编号 + 查法，否则模型不知道细节去哪找；
+  // 但只有本轮工具面里真的有 fetch_records 时才推荐它，避免 unknown tool。
   const record = {
     id: 87,
     room: { connection: "qq", path: ["group", "158296748"] },
@@ -517,9 +518,26 @@ test("事件记录里的原始载荷不摊开，只给流水编号让 agent 自�
   }
   const text = renderTurn({ ...delivery(), records: [record] }, { now: Date.now() })
 
-  assert.match(text, /fetch_records/)
   assert.match(text, /#87/)
+  assert.ok(!text.includes("fetch_records"), `工具面没有 fetch_records 时不能推荐：${text}`)
   assert.ok(!text.includes("emoji_id"), `原始载荷不该进上下文：${text}`)
+
+  const withTool = renderTurn(
+    { ...delivery(), records: [record] },
+    { now: Date.now(), tools: ["fetch_records"] },
+  )
+  assert.match(withTool, /fetch_records/, "工具存在时才给具体查法")
+})
+
+test("投递超限提示按连续投递描述，工具面没有回看工具时不推荐", () => {
+  const truncated = { ...delivery(), more: 3 }
+  const text = renderTurn(truncated, { now: Date.now() })
+  assert.match(text, /从旧到新的一段连续记录/)
+  assert.match(text, /剩余记录会按顺序在后续轮次补齐/)
+  assert.ok(!text.includes("fetch_records"), `工具面没有 fetch_records 时不能推荐：${text}`)
+
+  const withTool = renderTurn(truncated, { now: Date.now(), tools: ["fetch_records"] })
+  assert.match(withTool, /fetch_records/)
 })
 
 test("消息记录里的 opaque 照旧摊开，不受事件降级影响", () => {

@@ -41,6 +41,7 @@ import {
 import {
   ON_DEMAND_TOOL_NAMES,
   RESIDENT_TOOL_NAMES,
+  bootstrapSurface,
   residentSurface,
   toolsForSurface,
   withLocalSchema,
@@ -258,8 +259,9 @@ class TurnDriver {
     // 重置代次：reset 过的会话换新 id（-r<代次>），避开同 id + 不同 cwd 的冲突。
     this.generations = new Map()
     this.chain = Promise.resolve()
-    // 本轮可见工具面；启动时只有常驻白名单，开轮后用桥的 capabilities scope=surface 更新。
-    this.surface = residentSurface()
+    // 本轮可见工具面。启动时就要给出目录层（含按需工具）：dsh 的 MCP 客户端
+    // 只在连接时同步一次 tools/list，之后不会因桥的 surface 变化自动重拉。
+    this.surface = bootstrapSurface()
     // `ok` / `surface_fallback`：桥拉取失败时退回常驻层，不退回 29 个全量。
     this.surfaceStatus = "resident_only"
     // 本轮按需注入的工具：只在投递溢出/需要补上下文时非空。
@@ -534,7 +536,7 @@ class TurnDriver {
    * 这里就会把人格重新带上。
    */
   #composePrompt(delivery) {
-    let text = renderTurn(delivery)
+    let text = renderTurn(delivery, { tools: this.toolDefs().map((tool) => tool.name) })
     const personaText = renderPersona(delivery.persona)
     const signature = personaSignature(delivery.persona)
     if (personaText && this.personas.get(delivery.session) !== signature) {

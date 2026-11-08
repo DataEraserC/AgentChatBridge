@@ -464,7 +464,7 @@ class TurnDriver {
       if (issueUnread) delivery.issue_unread = issueUnread
       // 映射（新建或接上的）报给桥，控制台才看得到 harness 侧映射。
       this.#reportMap(delivery.session, sessionID, link)
-      let text = renderTurn(delivery) + CODE_MODE_HINT
+      let text = renderTurn(delivery, { tools: this.visibleNames }) + CODE_MODE_HINT
       // 人格只在首轮或变更时注入：桥只给语义，opencode 这边把它放在本轮最前面。
       // 重复注入会白烧 token，所以按签名去重。
       const personaText = renderPersona(delivery.persona)

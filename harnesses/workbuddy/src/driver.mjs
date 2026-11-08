@@ -26,7 +26,7 @@
 //   ACB_WB_CWD        CLI 的工作目录，默认当前目录
 
 import { BridgeLink, personaSignature, renderPersona, renderTurn, roomText } from "../../opencode/plugin/acb-wire.mjs"
-import { residentSurface } from "../../shared/tools.mjs"
+import { bootstrapSurface, residentSurface } from "../../shared/tools.mjs"
 import { callBridge, overflowTools, toolDefsForSurface } from "../../shared/bridge-tools.mjs"
 import { McpHttpServer } from "../../dsh/src/mcp-http-server.mjs"
 import { t } from "../../shared/i18n.mjs"
@@ -187,7 +187,8 @@ class TurnDriver {
     // CLI session id -> 已注入的人格签名。
     this.personas = new Map()
     this.chain = Promise.resolve()
-    this.surface = residentSurface()
+    // MCP 客户端只在连接时同步一次 tools/list，启动面必须带目录层。
+    this.surface = bootstrapSurface()
     this.surfaceStatus = "resident_only"
     this.onDemand = []
     // acb session id -> 当前在跑的轮次（interrupt 用）。
@@ -403,7 +404,7 @@ class TurnDriver {
   }
 
   #composePrompt(delivery, sessionId) {
-    let text = renderTurn(delivery)
+    let text = renderTurn(delivery, { tools: this.toolDefs().map((tool) => tool.name) })
     const personaText = renderPersona(delivery.persona)
     const signature = personaSignature(delivery.persona)
     if (personaText && this.personas.get(sessionId) !== signature) {

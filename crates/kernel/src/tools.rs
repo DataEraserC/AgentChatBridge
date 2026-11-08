@@ -72,11 +72,13 @@ pub const RESIDENT_TOOLS: &[&str] = &[
     "ack_messages",
 ];
 
-/// 按需工具：不进常驻层，也不在普通轮次的可见集里。
+/// 按需工具：不进常驻层；harness 在投递溢出时给完整 schema。
 ///
 /// `get_history` / `fetch_records` 的使用场景是「投递溢出」和「补齐上下文」——
-/// 这两件事 harness 自己知道（`delivery.omitted` / `delivery.more`）。harness 在
-/// 触发时把它们临时加进本轮工具面，其余时候不预先注入。
+/// 这两件事 harness 自己知道（`delivery.omitted` / `delivery.more`）。但 MCP
+/// 客户端只在连接时拉一次 `tools/list`，所以 MCP facade 启动时必须把目录层
+/// （含这两个工具）先注册出来，否则会话里永远是 unknown tool；开轮后是否给
+/// 完整 schema 仍由 harness 按溢出标志决定。
 pub const ON_DEMAND_TOOLS: &[&str] = &["get_history", "fetch_records"];
 
 /// 这个工具是否按需注入（只影响 harness 的可见集，不影响可调用性）。
@@ -99,12 +101,12 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
     ToolCatalogEntry {
         name: "get_history",
         purpose: "翻房间历史记录，补齐上下文",
-        when: "投递溢出或需要往前翻时（harness 按需注入）",
+        when: "投递溢出或需要往前翻时（harness 溢出轮次给完整 schema）",
     },
     ToolCatalogEntry {
         name: "fetch_records",
         purpose: "按水位编号精确回看记录",
-        when: "投递溢出、只拿到部分编号时（harness 按需注入）",
+        when: "投递溢出、只拿到部分编号时（harness 溢出轮次给完整 schema）",
     },
     ToolCatalogEntry {
         name: "wait_message",

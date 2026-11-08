@@ -472,8 +472,12 @@ export function renderIssueUnread(unread, { max = 3 } = {}) {
   return `[系统事件 issue_unread] ${count} 条未读：${summary}${tail}；用 issue_my_work 查看并确认。`
 }
 
-export function renderTurn(delivery, { now = Date.now() } = {}) {
+export function renderTurn(delivery, { now = Date.now(), tools = null } = {}) {
   const lines = []
+  const hasTool = (name) => {
+    if (tools instanceof Set) return tools.has(name)
+    return Array.isArray(tools) && tools.includes(name)
+  }
   const prompts = renderPrompts(delivery.prompts)
   if (prompts) lines.push(prompts)
   const issueUnread = renderIssueUnread(delivery.issue_unread)
@@ -520,7 +524,7 @@ export function renderTurn(delivery, { now = Date.now() } = {}) {
     }
     const tail = marks.length ? `（${marks.join("、")}）` : ""
     lines.push(`#${record.id} ${when} ${who}(${record.sender.id})${tail}`)
-    lines.push(`  ${renderElements(deliverableElements(record), { quoteRef: record.quote_ref })}`)
+    lines.push(`  ${renderElements(deliverableElements(record, { showFetchHint: hasTool("fetch_records") }), { quoteRef: record.quote_ref })}`)
     // 桥的旁白不是对方说的话，单独一行，绝不拼进上面那行内容里。
     if (record.note) {
       lines.push(`  ※ ${record.note}`)
@@ -528,19 +532,26 @@ export function renderTurn(delivery, { now = Date.now() } = {}) {
   }
 
   lines.push("")
-  // 消息太多被截断时，明确告诉模型：本轮给的是「最旧一小段 + 最新一批」，
-  // 中间那段跳过了，并把编号区间直接给它，省得它猜。
+  // 消息太多被截断时，明确告诉模型这一轮只投了一段连续的旧记录。
+  // 只在工具面里真的有回看工具时才推荐它；否则就按默认策略等下一轮。
   if (delivery.omitted) {
     const omitted = delivery.omitted
+    const advice =
+      hasTool("get_history") || hasTool("fetch_records")
+        ? `补看用 get_history({ after: ${omitted.from - 1}, before: ${omitted.to + 1} }) 或 fetch_records；` +
+          `读过的编号可以用 ack_messages 确认，水位才会推进。`
+        : `本轮只投递一段，剩余记录会按顺序在后续轮次补齐；` +
+          `读过的编号可以用 ack_messages 确认，水位才会推进。`
     lines.push(
-      `⚠️ 还有 #${omitted.from}–#${omitted.to} 共 ${omitted.count} 条未读没投（本轮给了最旧一小段和最新一批）。` +
-        `补看用 get_history({ after: ${omitted.from - 1}, before: ${omitted.to + 1} }) 或 fetch_records；` +
-        `读过的编号可以用 ack_messages 确认，水位才会推进。`
+      `⚠️ 还有 #${omitted.from}–#${omitted.to} 共 ${omitted.count} 条未读没投（自定义投递策略跳过了中段）。${advice}`
     )
     lines.push("")
   } else if (delivery.more) {
+    const advice = hasTool("fetch_records")
+      ? "需要更早的上下文时用 fetch_records 按编号回看。"
+      : "本轮只投递一段，剩余记录会按顺序在后续轮次补齐。"
     lines.push(
-      `⚠️ 投递超限，更早的 ${delivery.more} 条没投进来（本轮只保留最新的）。需要更早的上下文时用 fetch_records 按编号回看。`
+      `⚠️ 投递超限，还有 ${delivery.more} 条没投（本轮只投递了从旧到新的一段连续记录）。${advice}`
     )
     lines.push("")
   }
@@ -558,14 +569,16 @@ export function renderTurn(delivery, { now = Date.now() } = {}) {
  * 塞上下文纯烧 token，绝大多数轮次根本用不上。投递只给流水编号，agent
  * 真想看细节时用 fetch_records 按编号拉完整记录。
  */
-function deliverableElements(record) {
+function deliverableElements(record, { showFetchHint = false } = {}) {
   const elements = record.elements ?? []
   if (record.kind?.kind !== "event") return elements
   return elements.map((element) =>
     element.type === "opaque"
       ? {
           type: "text",
-          text: `[未解析的平台事件，原始载荷已存流水，想看用 fetch_records 查 #${record.id}]`,
+          text: showFetchHint
+            ? `[未解析的平台事件，原始载荷已存流水，想看用 fetch_records 查 #${record.id}]`
+            : `[未解析的平台事件，原始载荷已存流水（#${record.id}），需要时按编号回看]`,
         }
       : element,
   )

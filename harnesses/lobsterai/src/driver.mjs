@@ -29,7 +29,7 @@
 //   ACB_LA_AGENT       可选 agent id，给 session key 加 agent: 前缀
 
 import { BridgeLink, personaSignature, renderPersona, renderTurn, roomText } from "../../opencode/plugin/acb-wire.mjs"
-import { residentSurface } from "../../shared/tools.mjs"
+import { bootstrapSurface, residentSurface } from "../../shared/tools.mjs"
 import { callBridge, overflowTools, toolDefsForSurface } from "../../shared/bridge-tools.mjs"
 import { McpHttpServer } from "../../dsh/src/mcp-http-server.mjs"
 import { t } from "../../shared/i18n.mjs"
@@ -161,7 +161,8 @@ class TurnDriver {
     // session key -> 已注入的人格签名；人格只在首轮/变更时注入。
     this.personas = new Map()
     this.chain = Promise.resolve()
-    this.surface = residentSurface()
+    // MCP 客户端只在连接时同步一次 tools/list，启动面必须带目录层。
+    this.surface = bootstrapSurface()
     this.surfaceStatus = "resident_only"
     this.onDemand = []
     // session -> 当前在跑的 {sessionKey, runId}，interrupt 用。
@@ -370,7 +371,7 @@ class TurnDriver {
    * 人格只在签名变化时注入，重复注入会白烧 token。
    */
   #composePrompt(delivery, sessionKey) {
-    let text = renderTurn(delivery)
+    let text = renderTurn(delivery, { tools: this.toolDefs().map((tool) => tool.name) })
     const personaText = renderPersona(delivery.persona)
     const signature = personaSignature(delivery.persona)
     if (personaText && this.personas.get(sessionKey) !== signature) {

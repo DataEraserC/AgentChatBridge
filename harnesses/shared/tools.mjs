@@ -833,15 +833,17 @@ export const RESIDENT_TOOL_NAMES = [
 ]
 
 /**
- * 按需工具：默认不注入，harness 检测到投递溢出（`delivery.omitted` / `delivery.more`）
- * 时临时加进本轮工具面。它们仍有完整 schema，按需时直接给模型用。
+ * 按需工具：默认轮次不保证注入；harness 检测到投递溢出（`delivery.omitted` /
+ * `delivery.more`）时给完整 schema。MCP 客户端只在连接时拉一次 tools/list，
+ * 所以 MCP facade 的启动面必须先把它们注册出来（见 bootstrapSurface），
+ * 否则模型调用时只会得到 unknown tool。
  */
 export const ON_DEMAND_TOOL_NAMES = [
   "get_history",
   "fetch_records",
 ]
 
-/** 只含常驻白名单的 surface：启动时与桥拉取失败时的兜底，绝不退回全量工具。 */
+/** 只含常驻白名单的 surface：桥拉取失败时的兜底，绝不退回全量工具。 */
 export function residentSurface() {
   return {
     resident: RESIDENT_TOOL_NAMES,
@@ -851,6 +853,41 @@ export function residentSurface() {
       catalog: 0,
       visible: RESIDENT_TOOL_NAMES.length,
       hidden: 0,
+    },
+  }
+}
+
+/// 管理员专属工具：启动面也不注册，免得普通会话看到注定被拒的入口。
+const BOOTSTRAP_HIDDEN_TOOLS = new Set([
+  "extensions_list",
+  "extensions_read",
+  "extensions_write",
+  "extensions_reload",
+])
+
+/**
+ * MCP facade 启动时的工具面：常驻层 + 目录层（含按需工具）。
+ *
+ * dsh / workbuddy / lobsterai 的 MCP 客户端只在连接时同步一次 tools/list，
+ * 之后不会因为桥的 surface 变化自动重拉。启动时若只给常驻层，长尾工具
+ * （`plugin_tools`、`notes`、`get_history`……）在模型侧永远是 unknown tool。
+ * 这里把除管理员专属外的目录先注册出来；真正的权限判定仍由桥在调用时做。
+ */
+export function bootstrapSurface() {
+  const catalog = TOOLS
+    .filter((spec) => !RESIDENT_TOOL_NAMES.includes(spec.name))
+    .filter((spec) => !BOOTSTRAP_HIDDEN_TOOLS.has(spec.name))
+    .map((spec) => ({ tool: spec.name, direct_executable: true }))
+  return {
+    resident: RESIDENT_TOOL_NAMES,
+    catalog,
+    // 启动面不是桥算出来的真实 surface：允许按需工具也先以目录占位注册。
+    bootstrap: true,
+    counts: {
+      resident: RESIDENT_TOOL_NAMES.length,
+      catalog: catalog.length,
+      visible: RESIDENT_TOOL_NAMES.length + catalog.length,
+      hidden: BOOTSTRAP_HIDDEN_TOOLS.size,
     },
   }
 }
@@ -883,9 +920,10 @@ function catalogSpec(spec, entry) {
  * - 其余（隐藏）不注入，但仍可从 `capabilities scope=catalog/session` 查到。
  *
  * surface 不再重复列 `visible`：可见集 = 常驻 ∪ 可执行的长尾。
- * `get_history` / `fetch_records` 默认可执行但不注入；传 `includeOnDemand` 才给
- * 完整 schema（投递溢出/补齐上下文时由 harness 显式触发）。
- * 没有 surface（例如还没开过轮）时只返回常驻层。
+ * `get_history` / `fetch_records` 在普通轮次的可见集里默认不出现；但 MCP 启动面
+ * （`bootstrapSurface`，带 `bootstrap: true`）会先把它们以目录占位注册出来——
+ * MCP 客户端不会每轮重拉 tools/list。传 `includeOnDemand` 时升级成完整 schema。
+ * 没有 surface（例如桥拉取失败）时只返回常驻层。
  */
 export function toolsForSurface(surface = {}, { includeOnDemand = [] } = {}) {
   const resident = new Set(
@@ -903,7 +941,7 @@ export function toolsForSurface(surface = {}, { includeOnDemand = [] } = {}) {
   for (const entry of catalog.values()) {
     if (
       entry.direct_executable !== false &&
-      !ON_DEMAND_TOOL_NAMES.includes(entry.tool)
+      (surface.bootstrap === true || !ON_DEMAND_TOOL_NAMES.includes(entry.tool))
     ) {
       visible.add(entry.tool)
     }
