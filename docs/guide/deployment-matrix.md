@@ -589,7 +589,7 @@ exec "$ACBL_BIN" --config "$STATE_DIR/supervisor.toml"
 
 ACB 计划提供 `deploy/presets/`，预设的维度是**安装方式**，不是组件名：同一个 dsh 可以有 `dsh_nix.sh`、`dsh_npm.sh`、`dsh_guix.sh`、`dsh_scoop.sh`；opencode 可以有 `opencode_nix.sh`、`opencode_npm.sh`。清单 `deploy/presets/presets.toml` 把它们登记成一张“带开关的服务列表”。
 
-- **ACB 保证**：预设脚本的启动/停止/健康检查/重启策略由 acbl 执行；**预设清单与脚本随 acbl 安装分发，不随 payload**（仓库源在 `deploy/presets/`，安装后在 acbl 包的共享目录）。payload 只带 drivers 实际执行的扇出脚本与 harness 实现。
+- **ACB 保证**：预设脚本的启动/停止/健康检查/重启策略由 acbl 执行；**预设清单与脚本随 acbl 安装分发，不随 payload**（仓库源在 `deploy/presets/`，安装到 `<acbl>/share/acb/presets/`）。运行时查找顺序：`ACB_PRESETS_FILE` → 自管配置同目录 `presets.toml` → 可执行文件同级 `../share/acb/presets/presets.toml`（先解析 `/run/current-system/sw/bin` 这类符号路径）→ 空集合。因此 nix-config 不需要设置任何环境变量。payload 只带 drivers 实际执行的扇出脚本与 harness 实现。
 - **用户自备**：组件本体（dsh / opencode / node）仍要自己装；预设只负责“怎么起”，找不到二进制时明确报错。
 - **互斥**：同一个组件同一时刻只能启用一个来源（例如 `dsh` 不能同时开 nix 和 npm 两个预设）；在 `supervisor.toml` 的 `[[component]]` 里用 `preset = "dsh_nix"` 选择，改了要重启 acbl 或点控制台的“重新加载组件表”。
 - **控制台**：短期只读展示“有哪些预设、启用了哪个、健康如何”；长期只允许“选预设 / 开关 / 覆盖白名单字段”，不允许填写任意命令。
