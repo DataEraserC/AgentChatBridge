@@ -1,8 +1,10 @@
 //! ACB 运维 CLI：`acbctl unit` / `run` / `status`。
 
+mod component;
 mod grants;
 mod run;
 mod secrets;
+mod sessions;
 mod status;
 mod unit;
 mod upgrade;
@@ -67,8 +69,16 @@ fn run() -> Result<ExitCode, String> {
                 Ok(ExitCode::from(failure.exit_code()))
             }
         },
+        "component" => match component::command(&args.collect::<Vec<_>>()) {
+            Ok(code) => Ok(code),
+            Err(failure) => {
+                eprintln!("acbctl: {failure}");
+                Ok(ExitCode::from(failure.exit_code()))
+            }
+        },
         "grants" => grants::command(&args.collect::<Vec<_>>()),
         "secrets" => secrets::command(&args.collect::<Vec<_>>()),
+        "sessions" => sessions::command(&args.collect::<Vec<_>>()),
         "upgrade" => upgrade::command(&args.collect::<Vec<_>>()),
         other => Err(format!("unknown command: {other}")),
     }
@@ -90,8 +100,11 @@ Usage:
   acbctl profile list|history|current|add|switch|rollback|gc|seed
   acbctl upgrade --generation ID | --payload PATH --strategy store|copy
   acbctl upgrade status [REQUEST_ID]
+  acbctl component list [--config PATH]
+  acbctl component status [NAME] [--config PATH]
   acbctl grants explain|matrix|diff
   acbctl secrets check|resolve
+  acbctl sessions [--config PATH]
   acbctl unit --help
 
 Values are read only from whitelisted ACB_UNIT_* environment variables.",
