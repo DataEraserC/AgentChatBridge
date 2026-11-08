@@ -1,0 +1,115 @@
+# 内置预设清单（契约 §5.2 / §5.4）。
+#
+# 这里只登记「组件 × 安装来源」和默认值；启用与否写在 supervisor.toml 的
+# `[[component]]` 里。所有预设默认 `default_enabled = false`：装好 acbl 之后
+# 一个组件都不会起。
+#
+# 脚本路径相对本文件所在目录解析；部署时应把整个 `deploy/presets/` 装到
+# `<acbl>/share/acb/presets/`，再用 `ACB_PRESETS_FILE` 指向这份清单。
+
+schema = 1
+
+[[preset]]
+id = "dsh_nix"
+component = "dsh"
+type = "simple"
+source = "nix"
+script = "dsh/dsh_nix.sh"
+description = "dsh 本体（nix 安装）：前台常驻，3080 端口"
+default_enabled = false
+
+[preset.readiness]
+kind = "tcp"
+port = 3080
+startup_grace_secs = 60
+
+# dsh-real 自己会拉起子进程（HMR / 插件宿主），停止必须整组回收。
+[preset.process]
+kill_mode = "group"
+
+[preset.restart]
+policy = "on-failure"
+max_attempts = 5
+
+[[preset]]
+id = "dsh_presets_acb"
+component = "dsh-presets"
+type = "oneshot"
+source = "acb"
+script = "dsh-presets/dsh_presets_acb.sh"
+description = "把 `acbctl sessions` 推导出的 agent preset 写进 $DSH_HOME/cordis.patch.yml"
+default_enabled = false
+
+# dsh 包装器每次启动都会整份覆盖 cordis.patch.yml，所以必须等它真的就绪
+# （不是「进程刚起来」）之后才重放；dsh 重启后管理内核会再触发一次。
+after = ["dsh"]
+
+# 只看退出码：写完就结束，没有常驻进程可探测。
+[preset.readiness]
+kind = "exit"
+
+[preset.restart]
+policy = "on-failure"
+max_attempts = 3
+
+[[preset]]
+id = "drivers_acb"
+component = "drivers"
+type = "simple"
+source = "acb"
+script = "drivers/drivers_acb.sh"
+description = "按会话扇出的桥—dsh 适配层；任一驱动退出即整体退出"
+default_enabled = false
+
+# 会话列表与 preset 名都从 `acbctl sessions` 推导（kernel 配置是唯一来源）；
+# 必须等 dsh-presets 把 agent preset 注册好，否则 dsh 会报 Unknown agent preset。
+after = ["dsh-presets"]
+
+# 单个驱动死掉时脚本整体退出，所以「脚本进程还活着」就等于「所有驱动都活着」。
+# 不再内置任何会话端口：端口与 preset 名都从 config.toml 的 [[sessions]] 读。
+[preset.readiness]
+kind = "process"
+startup_grace_secs = 30
+
+[preset.process]
+kill_mode = "group"
+
+[preset.restart]
+policy = "on-failure"
+max_attempts = 5
+
+[[preset]]
+id = "opencode_nix"
+component = "opencode"
+type = "simple"
+source = "nix"
+script = "opencode/opencode_nix.sh"
+description = "opencode2 serve（nix 安装）：首次初始化慢，宽限放大"
+default_enabled = false
+
+[preset.readiness]
+kind = "tcp"
+port = 4097
+startup_grace_secs = 120
+
+# 脚本内部 `serve &` 再等就绪，停止时必须整组回收。
+[preset.process]
+kill_mode = "group"
+
+[preset.restart]
+policy = "on-failure"
+max_attempts = 5
+
+[[preset]]
+id = "snowluma_container"
+component = "snowluma"
+type = "oneshot"
+source = "container"
+script = "snowluma/snowluma_container.sh"
+description = "snowluma 容器：podman-compose -f <file> up -d；file 与 compose_bin 来自组件配置"
+default_enabled = false
+
+# oneshot 必须由组件显式声明 readiness（契约 §5.1），这里不给默认探针。
+[preset.restart]
+policy = "on-failure"
+max_attempts = 3
