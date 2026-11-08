@@ -459,19 +459,25 @@ impl PresetRegistry {
     }
 }
 
-/// 载入 supervisor.toml 时配套的预设集合：`ACB_PRESETS_FILE` 优先，
-/// 其次取同目录 `presets.toml`，都没有按空集合处理（引用预设会报
-/// `component_preset_unknown`）。
+/// 载入 supervisor.toml 时配套的预设集合，按顺序取第一个可用的来源：
+///
+/// 1. `ACB_PRESETS_FILE`（显式覆盖）；
+/// 2. 配置文件同目录的 `presets.toml`（自管配置的覆盖层）；
+/// 3. 当前可执行文件同级推导的 `../share/acb/presets/presets.toml`
+///    （acbl 安装包自带的默认清单，`acb-launcher` 与 `acbctl` 都适用）；
+/// 4. 空集合（引用预设会报 `component_preset_unknown`）。
 pub fn load_presets_for(config_path: &Path) -> Result<PresetRegistry, ComponentError> {
     if let Some(path) = std::env::var_os(PRESETS_FILE_ENV).filter(|value| !value.is_empty()) {
         return PresetRegistry::load(Path::new(&path));
     }
     let sibling = sibling_presets_path(config_path);
     if sibling.exists() {
-        PresetRegistry::load(&sibling)
-    } else {
-        Ok(PresetRegistry::empty())
+        return PresetRegistry::load(&sibling);
     }
+    if let Some(path) = installed_presets_path() {
+        return PresetRegistry::load(&path);
+    }
+    Ok(PresetRegistry::empty())
 }
 
 fn sibling_presets_path(config_path: &Path) -> PathBuf {
@@ -479,6 +485,24 @@ fn sibling_presets_path(config_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("presets.toml")
+}
+
+/// acbl 包内预设清单相对安装前缀的位置。
+const INSTALLED_PRESETS_REL: &str = "share/acb/presets/presets.toml";
+
+fn installed_presets_path() -> Option<PathBuf> {
+    installed_presets_path_from(&std::env::current_exe().ok()?)
+}
+
+/// 从可执行文件路径推导同包预设清单。先 `canonicalize` 解析软链：
+/// `/run/current-system/sw/bin/acbctl` 这类路径的父目录是符号链接目录，
+/// 不解析就会推导到 `/run/current-system/sw/share/...`。解析后
+/// `<prefix>/bin/<exe>` → `<prefix>/share/acb/presets/presets.toml`。
+fn installed_presets_path_from(exe: &Path) -> Option<PathBuf> {
+    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let prefix = exe.parent()?.parent()?;
+    let path = prefix.join(INSTALLED_PRESETS_REL);
+    path.is_file().then_some(path)
 }
 
 /// 解析期确定下来的探针。
@@ -1090,4 +1114,82 @@ fn default_backoff_cap_secs() -> u64 {
 }
 fn default_preset_schema() -> u64 {
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::installed_presets_path_from;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    struct TempDir(PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(label: &str) -> TempDir {
+        let path = std::env::temp_dir().join(format!(
+            "acb-presets-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        fs::create_dir_all(&path).expect("create temp dir");
+        TempDir(path)
+    }
+
+    fn write_presets(prefix: &Path) -> PathBuf {
+        let path = prefix.join("share/acb/presets/presets.toml");
+        fs::create_dir_all(path.parent().expect("parent")).expect("create presets dir");
+        fs::write(&path, "[preset]\nschema = 1\n").expect("write presets");
+        path
+    }
+
+    #[test]
+    fn installed_presets_follow_bin_parent() {
+        let dir = temp_dir("layout");
+        let prefix = dir.0.join("acbl");
+        let bin = prefix.join("bin");
+        fs::create_dir_all(&bin).expect("create bin");
+        let exe = bin.join("acbctl");
+        fs::write(&exe, "").expect("write exe");
+        let expected = write_presets(&prefix);
+        assert_eq!(installed_presets_path_from(&exe), Some(expected));
+    }
+
+    #[test]
+    fn installed_presets_resolve_symlinked_bin_directory() {
+        let dir = temp_dir("symlink");
+        let prefix = dir.0.join("acbl");
+        let bin = prefix.join("bin");
+        fs::create_dir_all(&bin).expect("create bin");
+        let exe = bin.join("acbctl");
+        fs::write(&exe, "").expect("write exe");
+        let expected = write_presets(&prefix);
+
+        // 模拟 /run/current-system/sw/bin：目录本身是软链，指向 store 里的 bin。
+        let link_root = dir.0.join("sw");
+        fs::create_dir_all(&link_root).expect("create link root");
+        std::os::unix::fs::symlink(&bin, link_root.join("bin")).expect("symlink bin");
+
+        assert_eq!(
+            installed_presets_path_from(&link_root.join("bin/acbctl")),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn installed_presets_absent_returns_none() {
+        let dir = temp_dir("absent");
+        let bin = dir.0.join("prefix/bin");
+        fs::create_dir_all(&bin).expect("create bin");
+        let exe = bin.join("acbctl");
+        fs::write(&exe, "").expect("write exe");
+        assert_eq!(installed_presets_path_from(&exe), None);
+    }
 }

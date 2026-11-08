@@ -47,12 +47,20 @@
       # acbl：静态入口分发包。只含 acbl 侧内容；bridge / harnesses / drivers
       # 属于 payload，不在这里。unit 模板随包分发，由 `acbctl unit install` 渲染。
       acbl = pkgs.runCommand "acbl-${version}" { } ''
-        mkdir -p $out/bin $out/share/acb/units
+        mkdir -p $out/bin $out/share/acb/units $out/share/acb/presets
         install -m755 ${workspace}/bin/acb-launcher $out/bin/acb-launcher
         install -m755 ${workspace}/bin/acb-supervisor $out/bin/acb-supervisor
         install -m755 ${workspace}/bin/acbctl $out/bin/acbctl
         install -m644 ${./share/acb/units}/*.tmpl $out/share/acb/units/
         install -m644 ${./deploy/systemd/acb-launcher.service} $out/share/acb/units/acb-launcher.service
+        # 预设清单与脚本随 acbl 分发（不随 payload）。安装后由
+        # `bin/<launcher|acbctl>` 同级推导 ../share/acb/presets/presets.toml，
+        # 不需要任何环境变量。脚本按安装布局（$HERE/../../../.. = prefix）
+        # 找同包的 bin/acbctl，不依赖仓库相对路径。
+        cp -r ${./deploy/presets}/. $out/share/acb/presets/
+        chmod -R u+w $out/share/acb/presets
+        patchShebangs $out/share/acb/presets
+        find $out/share/acb/presets -name '*.sh' -exec chmod 755 {} +
       '';
 
       # payload：会随迭代换代的内容。口径与 B-12 的 validate_payload 对齐：

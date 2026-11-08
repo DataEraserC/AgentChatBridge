@@ -4,8 +4,11 @@
 # `[[component]]` 里。所有预设默认 `default_enabled = false`：装好 acbl 之后
 # 一个组件都不会起。
 #
-# 脚本路径相对本文件所在目录解析；部署时应把整个 `deploy/presets/` 装到
-# `<acbl>/share/acb/presets/`，再用 `ACB_PRESETS_FILE` 指向这份清单。
+# 脚本路径相对本文件所在目录解析；acbl 打包时整份 `deploy/presets/` 会装到
+# `<acbl>/share/acb/presets/`。运行时查找顺序：
+#   ACB_PRESETS_FILE → 自管配置同目录 presets.toml →
+#   可执行文件同级 ../share/acb/presets/presets.toml → 空集合。
+# 因此 nix-config 不需要设置任何环境变量。
 
 schema = 1
 
@@ -37,11 +40,12 @@ component = "dsh-presets"
 type = "oneshot"
 source = "acb"
 script = "dsh-presets/dsh_presets_acb.sh"
-description = "把 `acbctl sessions` 推导出的 agent preset 写进 $DSH_HOME/cordis.patch.yml"
+description = "把 `acbctl sessions` 推导出的 agent preset 打成独立 dsh bundle（acb-presets-live-<摘要>）并登记进 profile"
 default_enabled = false
 
-# dsh 包装器每次启动都会整份覆盖 cordis.patch.yml，所以必须等它真的就绪
-# （不是「进程刚起来」）之后才重放；dsh 重启后管理内核会再触发一次。
+# dsh 包装器每次启动都会用 nix 快照覆盖 profile 的 package.json（含
+# `dsh.profile.bundles`），清掉 bundle 登记；所以必须等 dsh 真的就绪（不是
+# 「进程刚起来」）之后才重放，dsh 重启后管理内核会再触发一次。
 after = ["dsh"]
 
 # 只看退出码：写完就结束，没有常驻进程可探测。

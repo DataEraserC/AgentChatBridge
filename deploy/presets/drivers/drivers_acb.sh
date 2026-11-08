@@ -18,21 +18,24 @@ if [[ -n ${ACB_ENV_FILE:-} && -f ${ACB_ENV_FILE} ]]; then
 fi
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO=$(cd "$HERE/../../.." && pwd)
+# 安装布局：<prefix>/share/acb/presets/drivers/this.sh
+PREFIX=$(cd "$HERE/../../../.." && pwd)
+ACB_DATA=${ACB_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/acb}
 
 NODE=${ACB_NODE_BIN:-}
 [[ -n $NODE ]] || NODE=$(command -v node || true)
 [[ -x $NODE ]] || fail "找不到 node（用 ACB_NODE_BIN 指定）"
 
-DRIVER=${ACB_DRIVER_SCRIPT:-$REPO/harnesses/dsh/src/driver.mjs}
+DRIVER=${ACB_DRIVER_SCRIPT:-}
+[[ -n $DRIVER ]] || fail "找不到 driver.mjs（用 ACB_DRIVER_SCRIPT 指定安装包里的绝对路径）"
 [[ -f $DRIVER ]] || fail "找不到 driver.mjs（用 ACB_DRIVER_SCRIPT 指定）：$DRIVER"
 
 ACBCTL=${ACBCTL_BIN:-}
 [[ -n $ACBCTL ]] || ACBCTL=$(command -v acbctl || true)
-[[ -x $ACBCTL ]] || ACBCTL=$REPO/result/bin/acbctl
+[[ -n $ACBCTL && -x $ACBCTL ]] || ACBCTL=$PREFIX/bin/acbctl
 [[ -x $ACBCTL ]] || fail "找不到 acbctl（用 ACBCTL_BIN 指定）"
 
-CONFIG=${ACB_CONFIG_FILE:-$REPO/config.toml}
+CONFIG=${ACB_CONFIG_FILE:-$ACB_DATA/config/config.toml}
 [[ -f $CONFIG ]] || fail "找不到 kernel 配置（用 ACB_CONFIG_FILE 指定）：$CONFIG"
 
 PATCH=${ACB_DSH_PATCH:-}
@@ -57,7 +60,7 @@ else
   echo "没有可读的 dsh patch，驱动不干预模型" >&2
 fi
 
-ACB_CWD="${ACB_CWD:-$REPO/state/agents}"
+ACB_CWD="${ACB_CWD:-$ACB_DATA/agents}"
 ACB_WORKSPACE_TITLE="${ACB_WORKSPACE_TITLE:-ACB}"
 mkdir -p "$ACB_CWD"
 export ACB_CWD ACB_WORKSPACE_TITLE
