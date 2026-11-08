@@ -1,9 +1,10 @@
-//! ACB 运维 CLI：`acbctl unit` / `run` / `status`。
+//! ACB 运维 CLI：`acbctl unit` / `run` / `status` / `up` / `down` / `stack`。
 
 mod component;
 mod grants;
 mod run;
 mod secrets;
+mod service;
 mod sessions;
 mod status;
 mod unit;
@@ -61,7 +62,21 @@ fn run() -> Result<ExitCode, String> {
             }
         }
         "run" => run::command(&args.collect::<Vec<_>>()),
-        "status" => status::command(&args.collect::<Vec<_>>()),
+        "up" => service::up(&args.collect::<Vec<_>>()),
+        "down" => service::down(&args.collect::<Vec<_>>()),
+        "stack" => service::stack(&args.collect::<Vec<_>>()),
+        "status" => {
+            let rest: Vec<String> = args.collect();
+            // `--mode=run` 是既有的运行态报告；不带 mode 时报告 bridge 单元本身。
+            if rest
+                .iter()
+                .any(|arg| arg == "--mode" || arg.starts_with("--mode="))
+            {
+                status::command(&rest)
+            } else {
+                service::status(&rest)
+            }
+        }
         "profile" => match profile::command(&args.collect::<Vec<_>>()) {
             Ok(code) => Ok(code),
             Err(failure) => {
@@ -96,6 +111,10 @@ Usage:
   acbctl unit uninstall --root DIR
   acbctl unit doctor --root DIR
   acbctl run --mode=launcher|direct [--config PATH] [--state-dir DIR]
+  acbctl up [all|bridge]
+  acbctl down [all|bridge]
+  acbctl status [--summary]
+  acbctl stack [--dry-run]
   acbctl status --mode=run [--state-dir DIR] [--config PATH] [--health-url URL]
   acbctl profile list|history|current|add|switch|rollback|gc|seed
   acbctl upgrade --generation ID | --payload PATH --strategy store|copy
