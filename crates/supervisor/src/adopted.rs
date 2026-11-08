@@ -5,11 +5,13 @@
 //! [`crate::instance::detect`] 找到旧实例，用本 runner 接管；只有接管失败或
 //! 实例已经退出时，才回退到正常的 `ProcessRunner` 拉起。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::instance::{self, InstanceRecord};
-use crate::{CommandSpec, ExitInfo, ProcessRunner, Runner};
+use crate::proctree::Snapshot;
+use crate::{CommandSpec, DEFAULT_CHILD_STOP_TIMEOUT, ExitInfo, ProcessRunner, Runner};
 
 pub struct AdoptedRunner {
     adopted: Option<InstanceRecord>,
@@ -46,16 +48,18 @@ impl Runner for AdoptedRunner {
     }
 
     fn stop(&mut self) -> Result<(), String> {
-        if let Some(record) = self.adopted.take() {
-            instance::terminate(record.pid, record.start_token.as_deref())
-        } else {
-            self.fallback.stop()
-        }
+        self.stop_within(Instant::now() + DEFAULT_CHILD_STOP_TIMEOUT)
     }
 
     fn stop_within(&mut self, deadline: Instant) -> Result<(), String> {
         if let Some(record) = self.adopted.take() {
-            instance::terminate_within(record.pid, record.start_token.as_deref(), deadline)
+            // 被接管的 bridge 不是 launcher 的子进程，它的插件子进程也不在
+            // 新 launcher 的后代树里。先拍快照，停掉 bridge 后再兜底收子进程。
+            let snapshot = Snapshot::capture_roots(&[record.pid]);
+            let result =
+                instance::terminate_within(record.pid, record.start_token.as_deref(), deadline);
+            snapshot.terminate_leftovers(&HashSet::new(), deadline, "adopted bridge");
+            result
         } else {
             self.fallback.stop_within(deadline)
         }

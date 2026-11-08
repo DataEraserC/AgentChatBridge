@@ -27,10 +27,8 @@ use acb_supervisor::upgrade::{
 use acb_supervisor::{
     ActivationWriter, CommandSpec, EXIT_GIVE_UP, EXIT_OK, EXIT_ROLLBACK, Parts, Probe,
     ProcessRunner, Projection, ReconcileOutcome, RollbackMode, Runner, Supervisor, SystemClock,
-    SystemSleeper, build_policy, load_current, now_ms,
+    SystemSleeper, build_policy, load_current, now_ms, proctree,
 };
-
-mod proctree;
 
 /// launcher 停机总预算：unit 的 `TimeoutStopSec=45s`，留 5s 给 systemd 收尾。
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(40);
@@ -337,7 +335,7 @@ fn converge_shutdown(
     if let Err(error) = supervisor.stop_child_within(deadline) {
         eprintln!("acb-launcher: cannot stop bridge: {error}");
     }
-    snapshot.terminate_leftovers(&protect, deadline, "shutdown");
+    snapshot.terminate_leftovers(&protect, deadline, "launcher shutdown");
 }
 
 fn config_path() -> Option<PathBuf> {

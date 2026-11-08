@@ -1,9 +1,9 @@
 //! 停机收敛的后代快照。
 //!
-//! unit 用 `KillMode=process`，systemd 只杀 launcher 主进程。组件和 bridge 各有
-//! 进程组，但 dsh 会把 subprocess 放进独立的 systemd scope；scope 进程既不在
-//! 组里，父进程一死还会被 reparent。所以在任何停止动作之前先按 `/proc` 拍下
-//! 整棵后代树，停机末尾按快照 pid 兜底 TERM/​KILL。
+//! unit 用 `KillMode=process`，systemd 只杀主进程。组件和 bridge 各有进程组，
+//! 但 dsh 会把 subprocess 放进独立的 systemd scope；scope 进程既不在组里，父
+//! 进程一死还会被 reparent。所以在任何停止动作之前先按 `/proc` 拍下整棵后代
+//! 树，停机末尾按快照 pid 兜底 TERM/​KILL。
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -77,7 +77,7 @@ impl Snapshot {
                 continue;
             }
             eprintln!(
-                "acb-launcher: {label}: descendant pid {} ({}) did not exit before shutdown deadline; SIGKILL",
+                "acb: {label}: descendant pid {} ({}) did not exit before deadline; SIGKILL",
                 target.pid,
                 comm(target.pid)
             );

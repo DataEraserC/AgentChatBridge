@@ -17,6 +17,7 @@ pub mod component_runtime;
 pub mod component_state;
 pub mod instance;
 mod pointer;
+pub mod proctree;
 pub mod upgrade;
 
 pub use component::{Component, ComponentError, ComponentTable, ConfigFile, PresetRegistry};
