@@ -40,11 +40,12 @@ component = "dsh-presets"
 type = "oneshot"
 source = "acb"
 script = "dsh-presets/dsh_presets_acb.sh"
-description = "把 `acbctl sessions` 推导出的 agent preset 写进 $DSH_HOME/cordis.patch.yml"
+description = "把 `acbctl sessions` 推导出的 agent preset 打成独立 dsh bundle（acb-presets-live-<摘要>）并登记进 profile"
 default_enabled = false
 
-# dsh 包装器每次启动都会整份覆盖 cordis.patch.yml，所以必须等它真的就绪
-# （不是「进程刚起来」）之后才重放；dsh 重启后管理内核会再触发一次。
+# dsh 包装器每次启动都会用 nix 快照覆盖 profile 的 package.json（含
+# `dsh.profile.bundles`），清掉 bundle 登记；所以必须等 dsh 真的就绪（不是
+# 「进程刚起来」）之后才重放，dsh 重启后管理内核会再触发一次。
 after = ["dsh"]
 
 # 只看退出码：写完就结束，没有常驻进程可探测。

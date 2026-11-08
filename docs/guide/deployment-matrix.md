@@ -592,6 +592,7 @@ ACB 计划提供 `deploy/presets/`，预设的维度是**安装方式**，不是
 - **ACB 保证**：预设脚本的启动/停止/健康检查/重启策略由 acbl 执行；**预设清单与脚本随 acbl 安装分发，不随 payload**（仓库源在 `deploy/presets/`，安装到 `<acbl>/share/acb/presets/`）。运行时查找顺序：`ACB_PRESETS_FILE` → 自管配置同目录 `presets.toml` → 可执行文件同级 `../share/acb/presets/presets.toml`（先解析 `/run/current-system/sw/bin` 这类符号路径）→ 空集合。因此 nix-config 不需要设置任何环境变量。payload 只带 drivers 实际执行的扇出脚本与 harness 实现。
 - **用户自备**：组件本体（dsh / opencode / node）仍要自己装；预设只负责“怎么起”，找不到二进制时明确报错。
 - **互斥**：同一个组件同一时刻只能启用一个来源（例如 `dsh` 不能同时开 nix 和 npm 两个预设）；在 `supervisor.toml` 的 `[[component]]` 里用 `preset = "dsh_nix"` 选择，改了要重启 acbl 或点控制台的“重新加载组件表”。
+- **dsh-presets（动态 bundle）**：`dsh-presets` 预设（`oneshot` + `kind = "exit"` + `after = ["dsh"]`）把 `acbctl sessions` 推导出的 agent preset 打成独立 bundle `acb-presets-live-<内容摘要>`，装进 `$DSH_HOME/profiles/<profile>/node_modules/` 并登记到该 profile `package.json` 的有序 `dsh.profile.bundles`；**不写任何 `cordis.patch.yml`**。包名带内容摘要，只有会话表/端口变化才改 bundles 列表，从而触发 dsh HMR 重新组合；没有 HMR 的组合（headless/SDK）会明确报“必须重启 dsh”，不假装生效。**冲突策略是“同名 preset id 即失败”**：检测到静态 `acb-presets` bundle、其它 bundle 或 patch 已经注册同名 preset 时，非零退出且不改任何文件，并列出来源。因此启用它之前，nix-config 必须移除 `modules.dsh.acbSessions` 里对应会话的静态声明；动态 id 保持 `acb-<session id>`，不改名、不覆盖。dsh 必须由 `dsh_nix.sh` 以 `dsh-real` 启动：nix 的 `dsh` 包装器会按指纹覆盖 profile `package.json`，把 bundle 登记清掉。
 - **控制台**：短期只读展示“有哪些预设、启用了哪个、健康如何”；长期只允许“选预设 / 开关 / 覆盖白名单字段”，不允许填写任意命令。
 - **当前状态**：组件表、预设装载与热加载按钮**尚未实现**（缺口 B-7~B-10）；现在只能靠 systemd 各 unit 或用户自己的进程管理器。
 - 设计见 [acbl-component-manager.md](../plan/acbl-component-manager.md)。
