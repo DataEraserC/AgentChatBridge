@@ -68,6 +68,7 @@ export default withMermaid({
           items: [
             { text: 'acb-bridge 是什么', link: '/guide/' },
             { text: '快速开始', link: '/guide/getting-started' },
+            { text: '部署组合矩阵', link: '/guide/deployment-matrix' },
             { text: '配置手册', link: '/guide/config' },
             { text: '网页控制台', link: '/guide/console' },
             { text: '日常使用', link: '/guide/talking' },
