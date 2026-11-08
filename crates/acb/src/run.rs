@@ -21,8 +21,6 @@ const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(45);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-const SUPERVISOR_TEMPLATE: &str = include_str!("../../../deploy/run/supervisor.toml.tmpl");
-
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,10 +239,16 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
 
     match arguments.mode {
         Mode::Launcher => {
-            let state_dir = match &arguments.state_dir {
+            let fallback_state_dir = match &arguments.state_dir {
                 Some(path) => path.clone(),
                 None => crate::profile::default_state_dir(),
             };
+            let state_dir_source = if arguments.state_dir.is_some() {
+                "--state-dir"
+            } else {
+                "XDG default (profile/../state/supervisor)"
+            };
+            let external = arguments.config.is_some();
             let (config_path, config_text) = match arguments.config {
                 Some(path) => {
                     let text = fs::read_to_string(&path)
@@ -252,11 +256,10 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
                     (path, text)
                 }
                 None => {
-                    let text = render_supervisor_config(&state_dir)?;
-                    let path = state_dir.join("supervisor.toml");
-                    fs::create_dir_all(&state_dir)
-                        .map_err(|error| format!("create {}: {error}", state_dir.display()))?;
-                    write_atomic(&path, text.as_bytes())?;
+                    let path =
+                        acb::supervisor_owner::ensure_owned_config(&fallback_state_dir, state_dir_source)?;
+                    let text = fs::read_to_string(&path)
+                        .map_err(|error| format!("read {}: {error}", path.display()))?;
                     (path, text)
                 }
             };
@@ -274,6 +277,14 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
                 Some(path) => path,
                 None => PathBuf::from(&config.state_dir),
             };
+            if external {
+                eprintln!(
+                    "acbctl run: using external config {} (migration mode): \
+                     this file stays read-only; component state is written under {}/components",
+                    config_path.display(),
+                    effective_state_dir.display()
+                );
+            }
             let config_sha = sha256_hex(config_text.as_bytes());
             let launcher = bin_dir.join("acb-launcher");
             let child_args = vec![
@@ -326,44 +337,6 @@ fn prepare(arguments: Arguments) -> Result<Prepared, String> {
             })
         }
     }
-}
-
-fn render_supervisor_config(state_dir: &Path) -> Result<String, String> {
-    let mut values = crate::unit::resolved_values()?;
-    values.insert(
-        "RUN_STATE_DIR".to_string(),
-        state_dir.to_string_lossy().into_owned(),
-    );
-    let generation_section = match crate::profile::active_meta()? {
-        Some(meta) => {
-            // supervisor 只消费 generation 的 payload 路径，不感知 store/copy 策略。
-            // 把 program 钉在 payload 上，LKG 提升/回退才真正指向那一代的字节。
-            let payload = meta.payload_path(&crate::profile::root());
-            values.insert(
-                "ACB_UNIT_BIN_DIR".to_string(),
-                payload.join("bin").to_string_lossy().into_owned(),
-            );
-            let mut section = format!(
-                "\n[supervisor.generation]\nid = \"{}\"\npath = \"{}\"\n",
-                toml_escape(&meta.id),
-                toml_escape(&payload.to_string_lossy())
-            );
-            if let Some(config) = &meta.config {
-                section.push_str(&format!(
-                    "config_sha256 = \"{}\"\n",
-                    toml_escape(&config.sha256)
-                ));
-            }
-            section
-        }
-        None => String::new(),
-    };
-    values.insert("GENERATION_SECTION".to_string(), generation_section);
-    crate::unit::substitute("supervisor.toml", SUPERVISOR_TEMPLATE, &values)
-}
-
-fn toml_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn env_path(key: &str) -> Option<PathBuf> {
