@@ -8,3 +8,4 @@ pub mod contract;
 pub mod fsutil;
 mod pins;
 pub mod profile;
+pub mod supervisor_owner;
