@@ -198,7 +198,36 @@ effective rules: 1
 
 ### 8.3 遗留
 
-- 策略侧那 9 条 `plugin` 规则仍然不在库里（`F1a` 挂起，用户裁定不止血）。真机验收后
-  建议一次性补录——现在补是「迁移收尾」，不是止血。
 - 会话增删之后驱动不会自动重启：`drivers` 组件只在 launcher 启动时读一次清单
   （现在读的是库，`acbctl sessions` 已修），轮次边界对账仍未做（F1b 后半段）。
+- 桥启动时 `sync_policy_from_store` 会因「库有 10 条规则、`config.toml` 没有 `[grants]`」
+  打一行「不一致，以库为准」。判断本身是对的（库里确实不是那份空集），只是每次开机
+  都会出现一行无害提示；改它要为一行日志换一次代，暂不动。
+- `config.d/80-issue-tools.toml` 仍是文件（`[[tool_plugins]]`）。插件存储（L1 入库）
+  没做之前，它只能留在文件里。
+
+### 8.4 9 条 plugin 规则入库（2026-11-09 20:30，F1a 收口）
+
+用户澄清：「不止血」指的是**不再往配置文件里塞新东西**，不是「不入库」。于是按库为准
+的姿势补录，不重启、不改配置文件：
+
+1. `GET /api/policy` 拿库里那一份（1 条 `base-system-admin-private` + 7 个房间），
+   追加 `70-grants-issue.toml` 里那 9 条原样规则（`system_admin` / `place=group` /
+   `scope=room` / `capability=[plugin]`），`POST /api/policy` 整份写回。
+   返回 `{"ok":true,"rules":10,"rooms":7}`；`policy_rules` 实测 10 行、
+   `policy_rooms` 7 行；下一个轮次边界后 `/api/policy` 报 `pending_reload=false`、
+   `/api/status` 报 `rules=10`——**库是唯一来源，配置文件没动**。
+2. 归档 `config.d/70-grants-issue.toml` 与它的三个 `pre-*` 备份到
+   `config.d/history/`（子目录不被枚举）。它自 schema 13 起就是死文件：覆盖层时代
+   看着生效，进库之后只是「假来源」。
+3. **附带修掉 `acbctl grants` 的同款病**：它跟迁移前的 `acbctl sessions` 一样只读文件，
+   文件一归档就会回答「一律 deny」。`crates/acb/src/config_source.rs` 的共享加载层
+   现在也覆盖策略（库里有策略就整份替换文件里的 `[grants]`），`grants explain/matrix`
+   走同一个入口。真机对照（同一条查询 `room:qq:group/1093015329` + `plugin`）：
+   - 旧 `acbl`（`5zbk…`）：`decision: deny  basis: admin:no_plugin_grant`
+   - 新 `acbl`（`kq44…`）：`decision: allow  basis: rule:group-1093015329-issue`
+
+   新增两条测试：`库里的策略优先于文件的_grants`、`库没策略时保留文件的_grants`。
+4. `supervisor.toml` 三处 `ACBCTL_BIN` 从 `5zbk…` 改指 `kq44…`（新 acbl）。
+   **launcher 重启后才生效**；驱动当前跑的是旧二进制，`sessions`/`secrets` 行为一致，
+   不影响。

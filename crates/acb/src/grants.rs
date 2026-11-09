@@ -175,18 +175,12 @@ impl PolicySource for ConfigSource {
 fn load_config_source(path: &Path, config_dir: Option<&Path>) -> Result<ConfigSource, CliError> {
     let config_dir = config_dir
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| default_config_dir(path));
-    let loaded = Config::load(path, Some(&config_dir))
-        .map_err(|error| CliError::config(format!("load config {}: {error}", path.display())))?;
+        .unwrap_or_else(|| crate::config_source::default_config_dir(path));
+    // 和 `sessions` / `secrets resolve` 走同一个入口：业务对象与策略都以库为准。
+    // 只读文件会解释错权限——`[grants]` 自 schema 13 起只是导入源。
+    let loaded = crate::config_source::load(path, Some(&config_dir)).map_err(CliError::config)?;
     let label = format!("config:{}+{}", path.display(), config_dir.display());
     Ok(ConfigSource::new(label, loaded.config))
-}
-
-fn default_config_dir(path: &Path) -> PathBuf {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .join("config.d")
 }
 
 fn subscriptions_of(config: &Config) -> Vec<RoomId> {

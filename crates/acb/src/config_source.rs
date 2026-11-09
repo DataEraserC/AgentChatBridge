@@ -1,23 +1,25 @@
-//! `acbctl` 各子命令共用的配置加载：**文件 + 库对象**，与桥同一语义。
+//! `acbctl` 各子命令共用的配置加载：**文件 + 库对象 + 库策略**，与桥同一语义。
 //!
 //! 为什么要有这一层：`sessions` 与 `secrets resolve` 是驱动脚本（`drivers_acb.sh`）
 //! 的两条命脉——会话清单决定起几个驱动、token 决定驱动能不能连上桥。业务对象
 //! 进库（schema 15）之后，只读文件会得到一份空清单：驱动一个都不起，dsh 会话
 //! 全部失联，而且脚本自己不报错（「零个会话」是合法输出）。2026-11-09 真机实测
-//! 踩中过一次。
+//! 踩中过一次。`grants explain/matrix` 同理：库里的策略才是生效的那一份，读文件
+//! 会给出「为什么这条权限不生效」的错误答案。
 //!
-//! 语义与 `acb-bridge` 的 `config_objects::sync` 对齐：
+//! 语义与 `acb-bridge` 的 `config_objects::sync` / `sync_policy_from_store` 对齐：
 //! - 库已初始化（`meta.config_objects_initialized` 存在）→ 用库里的五段**整类替换**
 //!   文件里的，文件里写没写都不参与；
+//! - 库里有过策略（`policy_*` 非空）→ 整份替换文件里的 `[grants]`；
 //! - 库还没初始化（首次部署、还没跑过桥）→ 按文件加载（迁移前的行为）；
 //! - 库打不开、或库里的对象解析失败 → **报错退出**。宁可驱动起不来让人看见，
 //!   也不要悄悄按一份过期的文件清单起一堆连不上的驱动。
 use std::path::{Path, PathBuf};
 
-use acb_kernel::storage::ConfigObjectsStore;
+use acb_kernel::storage::{ConfigObjectsStore, Policies};
 use acb_kernel::{Config, LoadedConfig};
 
-/// 加载配置：先按文件解析，再（若库已初始化）用库对象重载一遍。
+/// 加载配置：先按文件解析，再（若库已初始化）用库对象与库策略覆盖。
 pub fn load(config: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, String> {
     let dir_label = config_dir
         .map(|dir| dir.display().to_string())
@@ -35,19 +37,30 @@ pub fn load(config: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, St
             config.display()
         )
     })?;
-    let Some(objects) = store
+    let mut loaded = match store
         .config_objects_load()
         .map_err(|error| format!("read config objects: {error}"))?
-    else {
+    {
         // 库还没初始化：首次部署，按文件走（桥第一次启动会把文件导入库）。
-        return Ok(loaded);
+        None => loaded,
+        Some(objects) => {
+            Config::load_with_objects(config, config_dir, Some(&objects)).map_err(|error| {
+                format!(
+                    "load config {} with store objects: {error}",
+                    config.display()
+                )
+            })?
+        }
     };
-    Config::load_with_objects(config, config_dir, Some(&objects)).map_err(|error| {
-        format!(
-            "load config {} with store objects: {error}",
-            config.display()
-        )
-    })
+    // 策略以库为准（schema 13 起 `[grants]` 只是导入源）。库里还没有策略时保留文件那份，
+    // 这是首次部署、桥还没跑过的状态。
+    if let Some(grants) = store
+        .policy_load()
+        .map_err(|error| format!("read policy: {error}"))?
+    {
+        loaded.config.grants = grants;
+    }
+    Ok(loaded)
 }
 
 /// 与两个子命令原先各自实现的默认值保持一致：`<config 所在目录>/config.d`。
@@ -61,7 +74,7 @@ pub fn default_config_dir(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acb_kernel::storage::ConfigObjectsStore;
+    use acb_kernel::storage::{ConfigObjectsStore, Policies};
     use acb_kernel::{ConfigObject, ConfigObjectKind, ConfigObjects};
     use std::path::PathBuf;
 
@@ -170,5 +183,69 @@ mod tests {
 
         let loaded = load(&base, None).expect("加载");
         assert_eq!(loaded.config.sessions[0].id, "from-file");
+    }
+
+    /// 策略也是「库为准」：文件里的 `[grants]` 只是导入源。
+    #[test]
+    fn 库里的策略优先于文件的_grants() {
+        unsafe { std::env::set_var("ACB_TEST_CFG_SRC", "s3cret") };
+        let dir = TempDir::new("policy");
+        let base = dir.0.join("config.toml");
+        let db = dir.0.join("acb.db");
+        std::fs::write(
+            &base,
+            format!(
+                "{}[[grants.rules]]\nid = \"from-file\"\nsubject = \"system_admin\"\nplace = \"group\"\nscope = \"room\"\ntarget = {{ kind = \"room\", id = \"qq:group/1\" }}\ncapability = [\"plugin\"]\n",
+                bootstrap(&db)
+            ),
+        )
+        .expect("写 base");
+
+        let seed_path = dir.0.join("seed.toml");
+        std::fs::write(
+            &seed_path,
+            format!(
+                "{}[[grants.rules]]\nid = \"from-store\"\nsubject = \"system_admin\"\nplace = \"group\"\nscope = \"room\"\ntarget = {{ kind = \"room\", id = \"qq:group/2\" }}\ncapability = [\"plugin\"]\n",
+                bootstrap(&db)
+            ),
+        )
+        .expect("写 seed");
+        let seed = Config::load(&seed_path, None)
+            .expect("解析种子策略")
+            .config
+            .grants;
+
+        let mut store = acb_kernel::SqliteStore::open(&db).expect("开库");
+        store.policy_replace(&seed).expect("写入策略");
+
+        let loaded = load(&base, None).expect("加载");
+        let ids: Vec<&str> = loaded
+            .config
+            .grants
+            .rules
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["from-store"], "权限判定必须来自库");
+    }
+
+    /// 库里还没策略（首次部署、桥没跑过）时文件仍然是唯一来源。
+    #[test]
+    fn 库没策略时保留文件的_grants() {
+        unsafe { std::env::set_var("ACB_TEST_CFG_SRC", "s3cret") };
+        let dir = TempDir::new("policy-empty");
+        let base = dir.0.join("config.toml");
+        let db = dir.0.join("acb.db");
+        std::fs::write(
+            &base,
+            format!(
+                "{}[[grants.rules]]\nid = \"from-file\"\nsubject = \"system_admin\"\nplace = \"group\"\nscope = \"room\"\ntarget = {{ kind = \"room\", id = \"qq:group/1\" }}\ncapability = [\"plugin\"]\n",
+                bootstrap(&db)
+            ),
+        )
+        .expect("写 base");
+
+        let loaded = load(&base, None).expect("加载");
+        assert_eq!(loaded.config.grants.rules[0].id, "from-file");
     }
 }

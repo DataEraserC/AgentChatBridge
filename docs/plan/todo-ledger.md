@@ -133,9 +133,9 @@
 
 | id | 目标 | 现状 | 判定 | 状态 |
 |---|---|---|---|---|
-| F1 | 控制台不再写 `90-console.toml` 覆盖层 | **走 B（用户 2026-11-09 裁定）：控制台直接写库。** 审计见 [config-source-audit.md](config-source-audit.md)；实现与**真机迁移记录**见其 §8（2026-11-09 已执行：schema 15 上线、覆盖层归档、`config.toml` 清成纯引导；`config.active.toml` 实为 acb-config-merge 派生物，改配置要改 `config.toml`） | **done**（遗留只剩 F1a 的 9 条 plugin 规则补录，用户裁定不止血） | done |
+| F1 | 控制台不再写 `90-console.toml` 覆盖层 | **走 B（用户 2026-11-09 裁定）：控制台直接写库。** 审计见 [config-source-audit.md](config-source-audit.md)；实现与**真机迁移记录**见其 §8（2026-11-09 已执行：schema 15 上线、覆盖层归档、`config.toml` 清成纯引导；`config.active.toml` 实为 acb-config-merge 派生物，改配置要改 `config.toml`） | **done**（F1a 的 9 条规则已于 2026-11-09 20:30 入库，见审计 §8.4） | done |
 | F1b | 会话增删后驱动跟着重起 | 前半段已修（2026-11-09）：`acbctl sessions` / `secrets resolve` 改走「文件+库对象」加载（`crates/acb/src/config_source.rs`），驱动清单从库来；后半段未做：`drivers` 组件只在 launcher 启动时读一次清单，运行期加减会话不会自动起/停驱动 | 做后半段：轮次边界对账（F2 的原生前置） | next |
-| F1a | 止血：把 plugin 授权补回库（**用户裁定不止血**） | 覆盖层吃掉 `70-grants-issue.toml` 的 9 条 `plugin` 规则 → F3 首次导入只拿到 1 条规则（`allow=1 deny=0 rooms=7`）；此后 `bridge.log` 实测 **12 次** `admin:no_plugin_grant`（含管理员私信），system_admin 调不动任何插件工具 | 用 `/api/policy` 补两条 `scope=subscribed`（`place=group`/`private`）即可覆盖原 9 条；补完删掉 70 片的 `[grants]`，否则它继续当「看着生效实际无效」的假来源 | next |
+| F1a | 止血：把 plugin 授权补回库（**用户裁定不止血**） | 覆盖层吃掉 `70-grants-issue.toml` 的 9 条 `plugin` 规则 → F3 首次导入只拿到 1 条规则（`allow=1 deny=0 rooms=7`）；此后 `bridge.log` 实测 **12 次** `admin:no_plugin_grant`（含管理员私信），system_admin 调不动任何插件工具 | **已完成（2026-11-09 20:30）**：用户澄清「不止血」= 不再往配置文件塞新东西、不是不入库；`/api/policy` 整份写回（9 条原样 + 原有 1 条 = 10 条，房 7），70 片与三个 `pre-*` 归档进 `config.d/history/`；`acbctl grants` 一并接库（审计 §8.4） | done |
 | F2 | sessions 进库 + 能动态新增 | **会话已在库**（F1 的 `config_objects`，schema 15），控制台可增删改、下一轮生效；`acbctl sessions`/`secrets resolve` 也已接库（2026-11-09）。仍差：加完会话驱动不会自己起（F1b 后半段）、端口仍是驱动侧算的 | 只剩 F1b 后半段 | doing |
 | F3 | grants/rooms 进库 | **已完成**（schema 13）：`policy_rules`/`policy_rooms`/`policy_accounts`/`policy_admins` 四表；启动时一次性导入 TOML 并打 `policy_initialized`，之后库为唯一来源；控制台「权限」页 + `GET/POST /api/policy`，保存后轮次边界生效 | 做完了。顺带解决了 C11：审批路由改完下一张票就走新路由，不再有「建票时快照」 | done |
 | F4 | 插件注册进库 | `[[tool_plugins]]` 在 `80-issue-tools.toml`，command 是 nix store 路径（会 GC 失效） | 做，并在 L1 里顺手把 command 改成 `command_kind` 声明 + 指纹校验 | next |
