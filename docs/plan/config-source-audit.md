@@ -170,20 +170,35 @@ effective rules: 1
 存的是**每一条的 TOML 原文**，不是结构体 JSON。这样解析、默认值、`token = { secret = ... }`
 的密钥引用全走原来那条路——密钥真值仍然只在 env/agenix，库里只有引用名。
 
-### 8.2 真机迁移步骤（待执行）
+### 8.2 真机迁移（2026-11-09 已执行）
 
-1. 换代（schema 15）：`profile add` → `switch` → 重启桥；日志应出现
-   `业务对象首次导入完成：连接 1、会话 6、人格 2、记忆 2、harness 2`。
-2. 核对：`/api/config` 与旧值逐项对比；`--check` 的 `effective rules` 不受影响（仍是 1）。
-3. 把 `[tickets] pending_ttl_secs` 挪进 base（覆盖层里只有这一条是 base 没有的），
-   然后把 `90-console.toml` 归档到 `config.d/history/`（改后缀，加载器自然忽略）。
-4. 再重启一次，确认启动日志变成 `业务对象取自库：…`，且不再出现「配置里还有已入库的段」
-   之外的差异。
-5. 归档后 `config.active.toml` 可以删掉那五段（留着也行：会被忽略并打警告）。
+按计划走完，另有两件计划外发现：
+
+1. 换代 `gen-1794223041186-ed3807df`（label `f1-config-objects`）：备份
+   `pre-schema15-20261109-191705` → `profile add` → `switch` → 重启。库升 schema 15，
+   首次导入 **连接 1、会话 6、人格 2、记忆 2、harness 2**（与预测一致，覆盖层里的
+   6 个会话全部进库）。
+2. **发现：`config.active.toml` 不是手写文件**。systemd 单元里有一行
+   `ExecStartPre=…/acb-config-merge`，每次启动把手写的 `config.toml` 派生成
+   `config.active.toml`（base 没写 `[notifications]` 时追加 nix 片段）。直接改
+   active 会在下次重启被原样盖回——迁移必须改 `config.toml`。旧结论「active 与仓库
+   副本漂移 301 行」的真因也是这个。
+3. 清理 `config.toml` 为纯引导（`[secrets]` / `[endpoint]` / `[console]` /
+   `[tickets]` / `[file_relay]` / `[notifications]` + 三个全局键），归档
+   `90-console.toml` → `config.d/history/`（子目录不被加载器枚举）。重启后
+   `--check`：base 来源 0/0/0、`config objects loaded from store: 1/6/2/2/2`，
+   `/api/status` 6 会话、规则 1（库策略）、体检全绿。
+4. **事故（当场修复）**：清空文件会话后 dsh 驱动全灭——`drivers_acb.sh` 起驱动前用
+   `acbctl sessions` **从文件**读清单，文件空了就一个驱动都不起（合法输出，无报错）。
+   修复：`acbctl sessions` / `secrets resolve --session` 改走「文件 + 库对象」加载
+   （`crates/acb/src/config_source.rs`，语义同桥：库初始化过以库为准，否则按文件，
+   库坏则报错退出）。`--check` 的副作用（对未初始化库做空导入）一并修掉。
+5. 遗留：`supervisor.toml` 里 `drivers` 组件的 `ACBCTL_BIN` 指向旧 store 路径，
+   换代后需同步更新（见 §8.3）。
 
 ### 8.3 遗留
 
 - 策略侧那 9 条 `plugin` 规则仍然不在库里（`F1a` 挂起，用户裁定不止血）。真机验收后
   建议一次性补录——现在补是「迁移收尾」，不是止血。
-- 会话增删之后驱动不会自动重启（`acb-drivers` 仍按启动时的会话表起进程），这条是
-  F2 的原生前置，未在本轮解决。
+- 会话增删之后驱动不会自动重启：`drivers` 组件只在 launcher 启动时读一次清单
+  （现在读的是库，`acbctl sessions` 已修），轮次边界对账仍未做（F1b 后半段）。

@@ -3,10 +3,8 @@
 //! 输出只含来源名、kind、路径或变量名。`resolve` 才打印值，供部署脚本
 //! 把「按会话 / 控制台」的密钥交给子进程；配置文件里始终只有引用。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
-
-use acb_kernel::Config;
 
 const EXIT_USAGE: u8 = 2;
 const EXIT_CONFIG: u8 = 78;
@@ -79,21 +77,9 @@ fn load(options: &Options) -> Result<acb_kernel::LoadedConfig, String> {
     let config_dir = options
         .config_dir
         .clone()
-        .unwrap_or_else(|| default_config_dir(&config));
-    Config::load(&config, Some(&config_dir)).map_err(|error| {
-        format!(
-            "load config {} (dir {}): {error}",
-            config.display(),
-            config_dir.display()
-        )
-    })
-}
-
-fn default_config_dir(path: &Path) -> PathBuf {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .join("config.d")
+        .unwrap_or_else(|| crate::config_source::default_config_dir(&config));
+    // --session 的 token 在库里（schema 15）：只读文件会报 unknown session。
+    crate::config_source::load(&config, Some(&config_dir))
 }
 
 struct Options {

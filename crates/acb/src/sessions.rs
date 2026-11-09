@@ -17,16 +17,15 @@
 //! 字符串），再追加一条 `agent-preset/selected` 事件（让投影立即前进，不必重启 dsh）。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
 #[cfg(unix)]
 use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use acb_kernel::Config;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const EXIT_USAGE: u8 = 2;
 const EXIT_CONFIG: u8 = 78;
@@ -98,21 +97,9 @@ fn load(options: &Options) -> Result<acb_kernel::LoadedConfig, String> {
     let config_dir = options
         .config_dir
         .clone()
-        .unwrap_or_else(|| default_config_dir(&config));
-    Config::load(&config, Some(&config_dir)).map_err(|error| {
-        format!(
-            "load config {} (dir {}): {error}",
-            config.display(),
-            config_dir.display()
-        )
-    })
-}
-
-fn default_config_dir(path: &Path) -> PathBuf {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .join("config.d")
+        .unwrap_or_else(|| crate::config_source::default_config_dir(&config));
+    // 会话清单以库为准（schema 15）：只读文件会拿到空清单，驱动一个都不起。
+    crate::config_source::load(&config, Some(&config_dir))
 }
 
 struct Options {
@@ -301,10 +288,7 @@ fn print_scan_human(dsh_home: &Path, inventory: &Inventory, known: &BTreeSet<Str
         rows.entry(preset).or_default().0 += 1;
     }
     for cache in &inventory.caches {
-        let preset = cache
-            .preset
-            .clone()
-            .unwrap_or_else(|| "(none)".to_string());
+        let preset = cache.preset.clone().unwrap_or_else(|| "(none)".to_string());
         rows.entry(preset).or_default().1 += 1;
     }
 
@@ -348,10 +332,7 @@ fn print_scan_json(
         rows.entry(preset).or_default().0 += 1;
     }
     for cache in &inventory.caches {
-        let preset = cache
-            .preset
-            .clone()
-            .unwrap_or_else(|| "(none)".to_string());
+        let preset = cache.preset.clone().unwrap_or_else(|| "(none)".to_string());
         rows.entry(preset).or_default().1 += 1;
     }
 
@@ -627,7 +608,11 @@ fn migrate_command(args: &[String]) -> Result<ExitCode, String> {
             }
         };
         if let Err(error) = write_atomic(&session.archive, &next) {
-            failures.push(format!("{}: write {}: {error}", session.id, session.archive.display()));
+            failures.push(format!(
+                "{}: write {}: {error}",
+                session.id,
+                session.archive.display()
+            ));
             continue;
         }
         migrated_ids.insert(session.id.clone());
@@ -1150,8 +1135,8 @@ fn inspect_archive_bytes(bytes: &[u8], compressed: bool) -> Result<ParsedArchive
 
 fn read_cache_preset(path: &Path) -> Result<Option<String>, String> {
     let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {error}", path.display()))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse {}: {error}", path.display()))?;
     Ok(value
         .pointer("/record/rows/agentPreset/val")
         .and_then(Value::as_str)
@@ -1267,18 +1252,14 @@ fn backup_file(path: &Path, stamp: u64) -> Result<PathBuf, String> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid file name {}", path.display()))?;
     let backup = path.with_file_name(format!("{name}.bak.{stamp}"));
-    fs::copy(path, &backup).map_err(|error| {
-        format!(
-            "copy {} to {}: {error}",
-            path.display(),
-            backup.display()
-        )
-    })?;
+    fs::copy(path, &backup)
+        .map_err(|error| format!("copy {} to {}: {error}", path.display(), backup.display()))?;
     Ok(backup)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let metadata = fs::metadata(path).map_err(|error| format!("stat {}: {error}", path.display()))?;
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("stat {}: {error}", path.display()))?;
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
@@ -1288,20 +1269,16 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .ok_or_else(|| format!("invalid file name {}", path.display()))?;
     let temp = parent.join(format!(".{name}.acb-migrate-{}", std::process::id()));
     let result = (|| -> Result<(), String> {
-        let mut file = File::create(&temp).map_err(|error| format!("create {}: {error}", temp.display()))?;
+        let mut file =
+            File::create(&temp).map_err(|error| format!("create {}: {error}", temp.display()))?;
         file.write_all(bytes)
             .map_err(|error| format!("write {}: {error}", temp.display()))?;
         file.sync_all()
             .map_err(|error| format!("sync {}: {error}", temp.display()))?;
         fs::set_permissions(&temp, metadata.permissions())
             .map_err(|error| format!("chmod {}: {error}", temp.display()))?;
-        fs::rename(&temp, path).map_err(|error| {
-            format!(
-                "rename {} to {}: {error}",
-                temp.display(),
-                path.display()
-            )
-        })
+        fs::rename(&temp, path)
+            .map_err(|error| format!("rename {} to {}: {error}", temp.display(), path.display()))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
@@ -1354,7 +1331,7 @@ fn acquire_lock(session_dir: &Path) -> Result<Option<LockGuard>, LockFailure> {
             return Err(LockFailure::Failure(format!(
                 "open {}: {error}",
                 path.display()
-            )))
+            )));
         }
     };
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -1408,7 +1385,10 @@ mod tests {
             help: false,
         };
         options.insert_mapping("acb-dsh=acb-dsh-qas").unwrap();
-        assert_eq!(options.maps.get("acb-dsh"), Some(&"acb-dsh-qas".to_string()));
+        assert_eq!(
+            options.maps.get("acb-dsh"),
+            Some(&"acb-dsh-qas".to_string())
+        );
         assert!(options.insert_mapping("acb-dsh").is_err());
         assert!(options.insert_mapping("=acb-dsh-qas").is_err());
         assert!(options.insert_mapping("acb-dsh=").is_err());
@@ -1436,7 +1416,9 @@ mod tests {
         let header = r#"{"type":"session","version":4,"id":"s1","createdAt":1,"cwd":"/tmp","isSeeded":false,"agentPreset":"acb-dsh"}"#;
         let bytes = encode_archive(
             header,
-            &[r#"{"type":"permission/preset","seq":0,"time":1,"data":{"preset":"workspace-write"}}"#],
+            &[
+                r#"{"type":"permission/preset","seq":0,"time":1,"data":{"preset":"workspace-write"}}"#,
+            ],
         );
         let parsed = inspect_archive_bytes(&bytes, true).unwrap();
         let session = StoredSession {
@@ -1453,7 +1435,8 @@ mod tests {
             archive: PathBuf::from("/tmp/s1"),
             error: None,
         };
-        let next = migrate_bytes(&bytes, &session, Some("acb-dsh-qas"), "acb-dsh-qas", 1, 99).unwrap();
+        let next =
+            migrate_bytes(&bytes, &session, Some("acb-dsh-qas"), "acb-dsh-qas", 1, 99).unwrap();
         let reparsed = inspect_archive_bytes(&next, true).unwrap();
         assert_eq!(reparsed.header_preset.as_deref(), Some("acb-dsh-qas"));
         assert_eq!(reparsed.effective_preset.as_deref(), Some("acb-dsh-qas"));
@@ -1465,7 +1448,9 @@ mod tests {
         let header = r#"{"type":"session","version":4,"id":"s1","createdAt":1,"cwd":"/tmp","isSeeded":false,"agentPreset":"standard"}"#;
         let bytes = encode_archive(
             header,
-            &[r#"{"type":"permission/preset","seq":0,"time":1,"data":{"preset":"workspace-write"}}"#],
+            &[
+                r#"{"type":"permission/preset","seq":0,"time":1,"data":{"preset":"workspace-write"}}"#,
+            ],
         );
         let parsed = inspect_archive_bytes(&bytes, true).unwrap();
         let session = StoredSession {
@@ -1506,7 +1491,8 @@ mod tests {
             archive: PathBuf::from("/tmp/s1"),
             error: None,
         };
-        let next = migrate_bytes(bytes, &session, Some("acb-dsh-qas"), "acb-dsh-qas", 1, 99).unwrap();
+        let next =
+            migrate_bytes(bytes, &session, Some("acb-dsh-qas"), "acb-dsh-qas", 1, 99).unwrap();
         let reparsed = inspect_archive_bytes(&next, false).unwrap();
         assert_eq!(reparsed.header_preset.as_deref(), Some("acb-dsh-qas"));
         assert_eq!(reparsed.effective_preset.as_deref(), Some("acb-dsh-qas"));

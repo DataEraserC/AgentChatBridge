@@ -12,6 +12,28 @@ use acb_kernel::{
     storage::ConfigObjectsStore,
 };
 
+/// 只读对齐（`--check` 用）：绝不写库。
+///
+/// 库初始化过 → 按库加载（这样 `--check` 校验的就是真要跑的那份配置）；
+/// 还没初始化 → 按文件返回（首次部署还没跑过桥，文件就是权威）。
+/// 与 [`sync`] 的唯一差别：不做首次导入——`--check` 的契约是零副作用，
+/// 2026-11-09 实测它曾把「空文件 + 未初始化的开发库」写成空导入。
+pub fn inspect<S: ConfigObjectsStore>(
+    store: &S,
+    config_path: &Path,
+    config_dir: &Path,
+    loaded: LoadedConfig,
+) -> Result<LoadedConfig, Box<dyn std::error::Error>> {
+    match store.config_objects_load()? {
+        None => Ok(loaded),
+        Some(objects) => Ok(Config::load_with_objects(
+            config_path,
+            Some(config_dir),
+            Some(&objects),
+        )?),
+    }
+}
+
 /// 首次导入/后续对齐。返回**最终生效**的那份配置。
 ///
 /// - 库里没有标记 → 把 `loaded` 里（已合并覆盖层的）五类数组抄进库，再原样返回；

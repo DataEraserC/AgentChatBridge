@@ -98,7 +98,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // 先开库：业务对象（连接/会话/人格/记忆/harness）以库为准，配置里那五段只在
     // 库为空时被导入一次。库打不开就别往下走——用内存悄悄跑起来比起不来更糟。
     let mut store = SqliteStore::open(&loaded.config.storage.path)?;
-    let loaded = config_objects::sync(&mut store, Path::new(&options.config), &config_dir, loaded)?;
+    let loaded = if options.check_only {
+        // --check 零副作用：只读对齐，不做首次导入（2026-11-09 实测曾把
+        // 「空文件 + 未初始化的开发库」写成空导入）。
+        config_objects::inspect(&store, Path::new(&options.config), &config_dir, loaded)?
+    } else {
+        config_objects::sync(&mut store, Path::new(&options.config), &config_dir, loaded)?
+    };
     let config = loaded.config;
     let sources = loaded.sources;
     let duplicate_rules = loaded.duplicate_rules;

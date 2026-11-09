@@ -1,6 +1,7 @@
 //! ACB 运维 CLI：`acbctl unit` / `run` / `status` / `up` / `down` / `stack`。
 
 mod component;
+mod config_source;
 mod grants;
 mod logs;
 mod run;
