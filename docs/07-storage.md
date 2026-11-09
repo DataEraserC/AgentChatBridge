@@ -21,7 +21,24 @@ path = "/var/lib/acb/bridge.db"
 | `deliveries` | 投递次数：这条记录投给这个会话几次了（「第 N 次投递」的 N） | 按「会话 + 房间 + 记录」 |
 | `notes` | 笔记：agent 自己记下的备忘 | 按房间 + 种类 + 键 |
 | `feedback` | 反馈：agent 写的「哪里卡住了」，同指纹合并、次数累加；`replies` 存维护方回复 | 按条，自带会话/房间/现场 |
-| `meta` | 结构版本号 | 一个键值对 |
+| `tasks` | 后台任务与出站尝试：执行前写 `running`，成功补 `platform_id`，超时留 `unknown` | 按任务 id |
+| `policy_rules` | 授权规则（`allow` / `deny` 同表，靠 `effect` 分） | 按规则 id |
+| `policy_rooms` | 房间政策：信任、可信成员、审批路由 | 按房间键 `qq:group/123` |
+| `policy_accounts` | 账号级审批路由 | 按账号键 `qq:10001` |
+| `policy_admins` | `bot_admin` / `system_admin` 两个单例 | 按角色 |
+| `meta` | 结构版本号、`policy_initialized` 标记 | 一个键值对 |
+
+**策略为什么在库里**（schema 13 起）：`[grants]` 以前只能手改 `config.toml`，改错要重启，
+事后补配置还救不回已经建出去的票据——审批路由是建票时的快照。2026-11-09 现场就是
+一个群漏配 `approval_route`，票据一路 pending 到过期，没人收到审批消息。
+
+从此**库是唯一来源**：`config.toml` 里的 `[grants]` 只是首次导入的原料，导入完成
+（`meta.policy_initialized` 有值）之后就不再读了。改权限走控制台的「权限」页
+（`GET/POST /api/policy`），保存后在**轮次边界**生效——一轮里可能判定多次，中途换规则
+会让同一轮的两次判定用两套权限。
+
+`policy_initialized` 标记不能省：没有它，「管理员把策略清空了」和「还没导入过」在库里
+长得一模一样，重启时会把清空当成首次导入，用旧的 `config.toml` 把权限复活。
 
 投递时 `unread` 会同时排除 `acks` 里的编号：乱序确认过的记录不会再投一遍（ADR-0010）。
 
@@ -158,7 +175,7 @@ EOF
 
 ## 结构版本
 
-`meta.schema_version` 记着这个库是第几版结构；当前 `SCHEMA_VERSION = 11`。
+`meta.schema_version` 记着这个库是第几版结构；当前 `SCHEMA_VERSION = 13`。
 
 - 库比程序**新** → 拒绝打开，报「库是第 N 版，本程序只认识第 M 版」。这是故意的：老程序往新库里写，比起不来严重得多。
 - 库比程序**老** → 就地升级（补列、建索引，最后才改版本号），老数据照旧读得出来。
@@ -175,6 +192,8 @@ EOF
 | 8 → 9 | `records` 加 `labels`（JSON 数组） | 适配器给记录追加通用标签（如撤回事件给原消息加 `recall`）；老记录默认空 |
 | 9 → 10 | `records` 加 `suppressed`（0 / 1） | 记录自身声明「只进流水」；不投递、不唤醒、不计未读，之后新加的订阅者也生效 |
 | 10 → 11 | `feedback` 加 `replies`（JSON 数组） | 维护方回复反馈并通知原会话；老反馈默认空数组 |
+| 11 → 12 | 加 `tasks` 表 | 后台任务与出站尝试要跨重启：`wait` 不能在重启后变成悬空引用；`running` 的残留项启动时置 `unknown` |
+| 12 → 13 | 加 `policy_rules` / `policy_rooms` / `policy_accounts` / `policy_admins` 四张表 | 权限与审批路由从 `config.toml` 搬进库（ADR-0009 的「业务对象只认库」）。新表由建表语句建，不搬数据；首次启动把 TOML 的 `[grants]` 一次性导入并打上 `meta.policy_initialized` |
 
 ## 已知限制
 

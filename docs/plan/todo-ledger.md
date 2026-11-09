@@ -61,7 +61,7 @@
 | C8 | `engine.rs:2916` | 审批命令写错（群内缺 nonce）或地点不对（不在 `approval_route` 里）一律 `return Ok(None)`：没订阅的房间彻底静默，订阅了的房间把 `/approve tk-…` 当普通消息喂给 agent | 照做：识别到命令就必回话（用法 / 拒绝原因 / 该去哪批）；`bt-` 整批不需要 nonce；审批消息里直接给可复制命令 | done |
 | C9 | 进程输出 | 桥与 launcher 的 stdout/stderr **不进 journal**（`_PID=61715/61716` 均 0 条），所有 `eprintln!` 诊断（队列拒绝、审批拒绝、投递失败）实际不可见 | 定去向：非 systemd 场景也要能留证 → 落 `<state>/logs/bridge.log`，与其它组件一致 | next |
 | C10 | `harnesses/dsh/src/driver.mjs` | dsh 重启后有一段 `agentAvailable=false` 的窗口（实测 30s～2.5min），此时 `session/selectModel` 会阻塞到 driver 的 15s 超时，**整轮 turn 直接 failed**；用户视角就是「dsh 挂了」（2026-11-09 12:15–12:19 连挂 4 轮） | 照做：轮前等 `agentAvailable` 就绪（带上限，别无限等）；`selectModel` 仍失败就降级为「沿用会话当前模型」继续本轮并 warn，不让整轮死 | next |
-| C11 | `engine.rs:6813` / `tickets.rs:506` | ① 票据的 `approval_route` 是**创建时快照**，事后补配置不会重算，旧 pending 票只能等过期（2026-11-09 `tk-70bb436f010762f8-2` 就是这么废的）；② 房间没配 `approval_route` 时静默回退适配器 `direct_room`（bot 自己的私聊，没人订阅、没人看），票据一路 pending 到过期，只留一行 stderr | 照做：① `pending_unannounced` 每次按当前 config 重算路由（或 route_unavailable 时重解析一次）；② 无路由时给申请会话回一条「本房间没配审批地点，请让管理员配 `[grants.rooms."<房间>"].approval_route`」，别让人干等 | next |
+| C11 | `engine.rs:6813` / `tickets.rs:506` | ① 票据的 `approval_route` 是**创建时快照**，事后补配置不会重算，旧 pending 票只能等过期（2026-11-09 `tk-70bb436f010762f8-2` 就是这么废的）；② 房间没配 `approval_route` 时静默回退适配器 `direct_room`（bot 自己的私聊，没人订阅、没人看），票据一路 pending 到过期，只留一行 stderr | 照做：① `pending_unannounced` 每次按当前 config 重算路由（或 route_unavailable 时重解析一次）；② 无路由时给申请会话回一条「本房间没配审批地点，请让管理员配 `[grants.rooms."<房间>"].approval_route`」，别让人干等。**进展（2026-11-09）**：策略已入库（F3），新票在轮次边界后走新路由；剩下的是「旧票快照」与②的回话 | next |
 
 ## 4. 批次 C：流程（原本 4 条）
 
@@ -131,9 +131,9 @@
 
 | id | 目标 | 现状 | 判定 | 状态 |
 |---|---|---|---|---|
-| F1 | 控制台不再写 `90-console.toml` 覆盖层 | `console.rs:145/574` 仍写覆盖层，顶层 key 整体替换下层 = bug 根源 | **最高优先**：先让控制台写库（或至少写独立片段而不是覆盖层），再做表迁移 | next |
+| F1 | 控制台不再写 `90-console.toml` 覆盖层 | `console.rs:145/574` 仍写覆盖层，顶层 key 整体替换下层 = bug 根源。**权限已脱离这条路**（F3 起走 `/api/policy` 直写库），连接/会话/人格仍走覆盖层 | **最高优先**：先让控制台写库（或至少写独立片段而不是覆盖层），再做表迁移 | next |
 | F2 | sessions 进库 + 能动态新增 | 会话仍在 toml；`acbctl sessions` 只读；控制台只有 GET + reset | 做，但要先解决三个前置：端口显式化、token 来源、drivers 重起 | next |
-| F3 | grants/rooms 进库 | 仍在 toml（1 条规则 + 6 个房间覆盖） | 跟 F1 一起做才有意义（否则又是两个源） | next |
+| F3 | grants/rooms 进库 | **已完成**（schema 13）：`policy_rules`/`policy_rooms`/`policy_accounts`/`policy_admins` 四表；启动时一次性导入 TOML 并打 `policy_initialized`，之后库为唯一来源；控制台「权限」页 + `GET/POST /api/policy`，保存后轮次边界生效 | 做完了。顺带解决了 C11：审批路由改完下一张票就走新路由，不再有「建票时快照」 | done |
 | F4 | 插件注册进库 | `[[tool_plugins]]` 在 `80-issue-tools.toml`，command 是 nix store 路径（会 GC 失效） | 做，并在 L1 里顺手把 command 改成 `command_kind` 声明 + 指纹校验 | next |
 | F5 | 插件配置 `plugin_config` + `StorageHandle` | 0 实现 | 做：拆 L1（配置闭环）/ L2（自带存储），见 §5 D3/D5 | next |
 | F6 | agent 能改配置（工具 + 能力 + 审批） | 29 个工具里 0 个能写配置；能力枚举 10 项无配置类 | 依赖 F1/F2；先把能力加上，工具后跟 | next |
