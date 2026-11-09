@@ -139,7 +139,10 @@ stage_fmt() {
   local f
   for f in "${files[@]}"; do
     # 逐个文件跑：rustfmt 一次传多个文件时会在第一个 diff 处就退出，统计不准。
-    rustfmt --edition 2024 --check "$f" >>"$out" 2>&1 || bad+=("$f")
+    # `skip_children`：rustfmt 默认会顺着 `mod` 声明递归检查子模块，于是「改了
+    # main.rs」会把同目录的历史遗留文件一起算到这个文件头上（假红）。门禁只该
+    # 判这次改动碰过的文件，子模块自己进列表时再单独检查。
+    rustfmt --edition 2024 --config skip_children=true --check "$f" >>"$out" 2>&1 || bad+=("$f")
   done
   if [ ${#bad[@]} -eq 0 ]; then
     record fmt OK "${#files[@]} 个文件格式正确"
