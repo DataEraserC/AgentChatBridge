@@ -904,7 +904,12 @@ fn verify_detects_snapshot_corruption() {
     let profile = temp.path().join("profile");
     let config = temp.path().join("config.toml");
     fs::write(&config, "[endpoint]\n").expect("config");
-    let id = add(&profile, &config, &payload(temp.path(), "corrupt"), "corrupt");
+    let id = add(
+        &profile,
+        &config,
+        &payload(temp.path(), "corrupt"),
+        "corrupt",
+    );
     let snapshot = generation_dir(&profile, &id).join("root");
     fs::write(
         snapshot.join("harnesses/shared/tools.mjs"),
@@ -1002,7 +1007,8 @@ fn legacy_generation_still_switches_and_migrates_to_copy() {
             .is_symlink()
     );
     let meta: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(generation_dir(&profile, "gen-legacy").join("meta.json")).expect("meta"),
+        &fs::read_to_string(generation_dir(&profile, "gen-legacy").join("meta.json"))
+            .expect("meta"),
     )
     .expect("parse migrated meta");
     assert_eq!(meta["payload"]["strategy"], "copy");
@@ -1111,10 +1117,7 @@ fn add_names_the_missing_payload_entry() {
     );
     assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
     let text = stderr(&output);
-    assert!(
-        text.contains("deploy/start-drivers.sh (file)"),
-        "{text}"
-    );
+    assert!(text.contains("deploy/start-drivers.sh (file)"), "{text}");
 }
 
 #[test]
@@ -1224,9 +1227,18 @@ fn switch_rejects_contract_incompatible_generation_before_commit() {
     let before = read_link(&profile);
 
     // 模拟 payload 被替换成声明更高契约的版本：必须在指针提交前拒绝。
-    write_contract(&generation_dir(&profile, &id).join("root"), 2, "0.1.0", &["bin"]);
+    write_contract(
+        &generation_dir(&profile, &id).join("root"),
+        2,
+        "0.1.0",
+        &["bin"],
+    );
     let rejected = run_acb(&env, &["profile", "switch", &id]);
     assert_eq!(rejected.status.code(), Some(78), "{}", stderr(&rejected));
-    assert!(stderr(&rejected).contains("contract_incompatible"), "{}", stderr(&rejected));
+    assert!(
+        stderr(&rejected).contains("contract_incompatible"),
+        "{}",
+        stderr(&rejected)
+    );
     assert_eq!(read_link(&profile), before, "pointer must not move");
 }

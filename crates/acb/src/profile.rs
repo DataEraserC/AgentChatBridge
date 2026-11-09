@@ -508,7 +508,10 @@ fn switch_command(args: &[String]) -> Result<ExitCode, Failure> {
     pin_generation(&root, &id);
     // current.json 是执行真值，profile/current 只是投影；两者由同一个写入器提交。
     commit_profile_switch(&root, &id, &state_dir, "acbctl-profile-switch")?;
-    println!("switched current -> {id} (current.json committed at {})", state_dir.display());
+    println!(
+        "switched current -> {id} (current.json committed at {})",
+        state_dir.display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -544,7 +547,13 @@ pub fn activate_generation(
 ) -> Result<acb_supervisor::CommandSpec, Failure> {
     let command = resolve_generation_command(profile_root, state_dir, generation_id)?;
     pin_generation(profile_root, generation_id);
-    commit_command(profile_root, generation_id, state_dir, "acb-launcher", &command)?;
+    commit_command(
+        profile_root,
+        generation_id,
+        state_dir,
+        "acb-launcher",
+        &command,
+    )?;
     Ok(command)
 }
 
@@ -662,7 +671,10 @@ fn pin_generation(root: &Path, id: &str) {
     let payload = match fs::canonicalize(&generation_root) {
         Ok(payload) => payload,
         Err(error) => {
-            eprintln!("pin: warning: resolve {}: {error}", generation_root.display());
+            eprintln!(
+                "pin: warning: resolve {}: {error}",
+                generation_root.display()
+            );
             return;
         }
     };
@@ -1074,8 +1086,8 @@ fn copy_dir(
 
 /// 流式复制 + 计算 sha256；保留文件权限（目录权限不保留，保证 gc 可删）。
 fn copy_file(source: &Path, dest: &Path) -> Result<(u64, String), String> {
-    let mut input = fs::File::open(source)
-        .map_err(|error| format!("open {}: {error}", source.display()))?;
+    let mut input =
+        fs::File::open(source).map_err(|error| format!("open {}: {error}", source.display()))?;
     let mut output =
         fs::File::create(dest).map_err(|error| format!("create {}: {error}", dest.display()))?;
     let mut hasher = Sha256::new();
@@ -1164,7 +1176,8 @@ fn scan_dir(dir: &Path, prefix: &str, entries: &mut Vec<ManifestEntry>) -> Resul
 }
 
 fn hash_file(path: &Path) -> Result<(u64, String), String> {
-    let mut input = fs::File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let mut input =
+        fs::File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
     let mut size = 0u64;
@@ -1213,7 +1226,9 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> Result<(), String> {
 fn verify_command(args: &[String]) -> Result<ExitCode, String> {
     let (positional, options) = parse_options(args, &["profile-dir"])?;
     if positional.len() > 1 {
-        return Err("usage: acbctl profile verify [<gen-or-label>] [--profile-dir DIR]".to_string());
+        return Err(
+            "usage: acbctl profile verify [<gen-or-label>] [--profile-dir DIR]".to_string(),
+        );
     }
     let root = profile_root(&options);
     let id = match positional.first() {
@@ -1226,7 +1241,9 @@ fn verify_command(args: &[String]) -> Result<ExitCode, String> {
 
     let Some(payload) = &meta.payload else {
         println!("verify: {id} is a legacy symlink generation; no strategy or manifest to verify");
-        println!("verify: run `acbctl profile migrate --to copy` if this generation must survive without nix");
+        println!(
+            "verify: run `acbctl profile migrate --to copy` if this generation must survive without nix"
+        );
         return Ok(ExitCode::SUCCESS);
     };
 
@@ -1475,16 +1492,13 @@ fn migrate_command(args: &[String]) -> Result<ExitCode, String> {
         println!(
             "migrate: {migrated} generation(s) converted to copy; current and LKG pointers were not touched"
         );
-        println!(
-            "migrate: runtime LKG promotion/rollback stays with the launcher and supervisor"
-        );
+        println!("migrate: runtime LKG promotion/rollback stays with the launcher and supervisor");
     }
     Ok(ExitCode::SUCCESS)
 }
 
 fn migrate_one(root: &Path, id: &str) -> Result<bool, String> {
-    let mut meta =
-        load_meta(root, id)?.ok_or_else(|| format!("generation not found: {id}"))?;
+    let mut meta = load_meta(root, id)?.ok_or_else(|| format!("generation not found: {id}"))?;
     if meta.payload.as_ref().map(|payload| payload.strategy) == Some(Strategy::Copy) {
         println!("migrate: {id} already copy; skipped");
         return Ok(false);
@@ -1513,7 +1527,10 @@ fn migrate_one(root: &Path, id: &str) -> Result<bool, String> {
         .map_err(|error| format!("move {}: {error}", generation_root.display()))?;
     if let Err(error) = fs::rename(&staging, &generation_root) {
         let _ = fs::rename(&backup, &generation_root);
-        return Err(format!("install snapshot {}: {error}", generation_root.display()));
+        return Err(format!(
+            "install snapshot {}: {error}",
+            generation_root.display()
+        ));
     }
     match fs::symlink_metadata(&backup) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
