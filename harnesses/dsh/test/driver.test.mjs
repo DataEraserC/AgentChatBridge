@@ -674,3 +674,233 @@ test("surface_failure_falls_back_to_resident_only：拉取失败时退回常驻�
   dsh.lastFollow.push({ type: "turn/end", data: { turn: "t2" } })
   await second
 })
+
+// ---------------------------------------------------------------------------
+// 后备模型链：主模型被拒就换下一个，把这一轮重放一遍
+// ---------------------------------------------------------------------------
+
+test("内容审核拒绝时换后备模型重试这一轮", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/primary",
+        model_fallbacks: ["trae/backup"],
+      },
+    }),
+    link,
+  )
+
+  // 第一个模型：上游 router 回 400 content-blocked
+  await waitFor(() => dsh.prompts.length === 1, "主模型 prompt 没被调")
+  dsh.lastFollow.push({
+    type: "turn/end",
+    data: {
+      turn: "t1",
+      reason: {
+        kind: "error",
+        error: { message: "content-blocked", code: "content-blocked" },
+      },
+    },
+  })
+
+  // 驱动应当换模型、把同一轮再投一次
+  await waitFor(() => dsh.prompts.length === 2, "没有换后备模型重试")
+  assert.deepEqual(
+    dsh.modelPicks.map((pick) => pick.model),
+    ["primary", "backup"],
+    "先钉主模型，再钉后备模型",
+  )
+  assert.deepEqual(
+    dsh.prompts[1].content,
+    dsh.prompts[0].content,
+    "重放的是同一段 prompt，不是新内容",
+  )
+
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t2" } })
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.equal(turnEnd.error, undefined, "后备模型跑完就不该再报失败")
+  await runPromise
+})
+
+test("已经调过桥工具的轮次不换模型重放（避免重复发言）", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/primary",
+        model_fallbacks: ["trae/backup"],
+      },
+    }),
+    link,
+  )
+
+  await waitFor(() => dsh.prompts.length === 1, "prompt 没被调")
+  // 模拟模型已经调过一次桥工具（可能已经把话发出去了）
+  driver.noteToolCall()
+  dsh.lastFollow.push({
+    type: "turn/end",
+    data: {
+      turn: "t1",
+      reason: { kind: "error", error: { message: "content-blocked", code: "content-blocked" } },
+    },
+  })
+
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.match(turnEnd.error ?? "", /content-blocked/, "这一轮要如实报失败")
+  assert.equal(dsh.prompts.length, 1, "说过话就不能重放，哪怕有后备模型")
+  await runPromise
+})
+
+test("没有后备链时不重试，失败照常上报", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: { id: "main", name: "main", harness: "dsh", model: "trae/primary" },
+    }),
+    link,
+  )
+
+  await waitFor(() => dsh.prompts.length === 1, "prompt 没被调")
+  dsh.lastFollow.push({
+    type: "turn/end",
+    data: {
+      turn: "t1",
+      reason: { kind: "error", error: { message: "content-blocked", code: "content-blocked" } },
+    },
+  })
+
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.match(turnEnd.error ?? "", /content-blocked/)
+  assert.deepEqual(
+    turnEnd.failure,
+    { component: "model", class: "content_blocked" },
+    "内容审核要标成模型侧失败，不能标成后端不可达",
+  )
+  assert.equal(dsh.prompts.length, 1, "没有后备链就不该重试")
+  await runPromise
+})
+
+test("后备链里与主模型重复的项不重复尝试", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/primary",
+        // 第一项等于主模型：去重后只剩 backup
+        model_fallbacks: ["trae/primary", "trae/backup"],
+      },
+    }),
+    link,
+  )
+
+  await waitFor(() => dsh.prompts.length === 1, "prompt 没被调")
+  dsh.lastFollow.push({
+    type: "turn/end",
+    data: {
+      turn: "t1",
+      reason: { kind: "error", error: { message: "content-blocked", code: "content-blocked" } },
+    },
+  })
+  await waitFor(() => dsh.prompts.length === 2, "应当换 backup 重试")
+  assert.deepEqual(dsh.modelPicks.map((pick) => pick.model), ["primary", "backup"])
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t2" } })
+  await nextTurnEnd(bridge)
+  await runPromise
+})
+
+test("后备模型不在 catalog 里时跳到再下一个", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const realSelect = dsh.selectModel.bind(dsh)
+  // 记下所有尝试过的模型：钉失败的那次不会进 modelPicks（异常在 push 之前抛出）。
+  const tried = []
+  dsh.selectModel = async (sessionId, choice) => {
+    tried.push(`${choice.provider}/${choice.model}`)
+    if (choice.provider === "missing") {
+      throw new DshError("session/model-unavailable", "provider not found")
+    }
+    return realSelect(sessionId, choice)
+  }
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/primary",
+        // 第一项是写错的模型：钉不上就该跳过，不能把后面能用的也废掉
+        model_fallbacks: ["missing/x", "trae/backup"],
+      },
+    }),
+    link,
+  )
+
+  await waitFor(() => dsh.prompts.length === 1, "prompt 没被调")
+  dsh.lastFollow.push({
+    type: "turn/end",
+    data: {
+      turn: "t1",
+      reason: { kind: "error", error: { message: "content-blocked", code: "content-blocked" } },
+    },
+  })
+
+  await waitFor(() => dsh.prompts.length === 2, "应当跳过写错的模型，用 backup 重试")
+  assert.deepEqual(
+    tried,
+    ["trae/primary", "missing/x", "trae/backup"],
+    "先是主模型，再试写错的（失败），最后落到 backup",
+  )
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t2" } })
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.equal(turnEnd.error, undefined, "backup 跑完就不该报失败")
+  await runPromise
+})

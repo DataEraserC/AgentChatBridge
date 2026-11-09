@@ -217,5 +217,9 @@
   "workbuddy.turn_end_sent": "已发 turn_end（{at}）：会话 {session}，票据 {ticket}",
   "workbuddy.turn_failed": "这一轮跑挂了：{error}",
   "workbuddy.turn_start": "开轮 {ticket}：{room}，{count} 条，WorkBuddy 会话 {sessionId}（resume {resume}），模型 {model}",
-  "workbuddy.unknown_command": "不认识的指令 {command}"
+  "workbuddy.unknown_command": "不认识的指令 {command}",
+  "dsh.model_fallback": "主模型 {from} 这轮不行（{reason}），换 {to} 重试这一轮",
+  "dsh.model_fallback_ok": "后备模型 {model} 起作用了：{ticket} 第 {attempt} 次尝试跑完",
+  "dsh.model_fallback_skipped_spoke": "不换模型重试：这轮已经调过 {calls} 次桥工具，重放会重复发言",
+  "dsh.model_fallback_invalid": "跳过无效的后备模型 {value}：{error}"
 }

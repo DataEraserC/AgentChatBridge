@@ -141,6 +141,8 @@ async function main() {
   const toolDefs = () => driver.toolDefs()
   const onCall = async (name, args) => {
     const started = Date.now()
+    // 模型真的动过手：这一轮就不能再换模型重放（会重复发言）。
+    driver.noteToolCall()
     log(
       "debug",
       t("dsh.tool_call_start", {
@@ -266,6 +268,14 @@ class TurnDriver {
     this.surfaceStatus = "resident_only"
     // 本轮按需注入的工具：只在投递溢出/需要补上下文时非空。
     this.onDemand = []
+    // 本轮模型已经调过几次桥工具。用它判断「这轮有没有真的说过话」：
+    // 说过话就不能换模型重放，否则群里会出现两条意思相近的回复。
+    this.turnToolCalls = 0
+  }
+
+  /** 模型调了一次桥工具。只由 MCP 的 onCall 记，控制面自己发的不算。 */
+  noteToolCall() {
+    this.turnToolCalls += 1
   }
 
   /** 当前 MCP tools/list 要返回的工具定义。 */
@@ -462,50 +472,113 @@ class TurnDriver {
       await this.#refreshSurface(link, delivery.session)
       const issueUnread = await this.#primeIssueUnread(link, delivery)
       if (issueUnread) delivery.issue_unread = issueUnread
-      const modelRef = this.#modelFor(delivery)
-      await this.#pinModel(sessionId, modelRef)
-      let text = this.#composePrompt(delivery)
-      const model = modelRef
-        ? `${modelRef.provider}/${modelRef.model}`
-        : t("dsh.model_default")
-      this.log(
-        "debug",
-        t("dsh.turn_start", {
-          ticket: delivery.ticket,
-          room: `${delivery.room.connection}:${delivery.room.path.join("/")}`,
-          count: delivery.records.length,
-          model,
-        }),
-      )
-      // prompt 投话，follow 等这一轮真正结束（turn/end）。
-      try {
-        await this.dsh.prompt(sessionId, [{ type: "text", text }])
-      } catch (error) {
-        if (!isDeadSessionError(error)) throw error
-        // dsh 重启/清理后旧 sessionId 可能失效：重建会话、重新钉模型和人格，再试一次。
+      // 主模型 + 后备链。一次轮次里可能换好几次模型，直到有一个能说话。
+      const attempts = this.#modelAttempts(delivery)
+      for (let index = 0; index < attempts.length; index += 1) {
+        const modelRef = attempts[index]
+        // 每一轮尝试都从零开始计：换模型重放的前提是「上一次什么都没说出去」。
+        this.turnToolCalls = 0
+        const label = modelRef ? `${modelRef.provider}/${modelRef.model}` : t("dsh.model_default")
+        try {
+          await this.#pinModel(sessionId, modelRef)
+        } catch (error) {
+          // 钉不上（模型没在 dsh 的 catalog 里：写错了，或这台机器没加过）：
+          // 跳过它去试下一个，别让链里一个错项把后面能用的模型全废掉。
+          failure = error?.message ?? String(error)
+          failureInfo = classifyTurnError(error)
+          this.log("error", t("dsh.turn_failed", { error: failure }))
+          if (index + 1 >= attempts.length || !isRetryableModelFailure(failureInfo)) throw error
+          const next = attempts[index + 1]
+          this.log(
+            "warn",
+            t("dsh.model_fallback", {
+              ticket: delivery.ticket,
+              from: label,
+              to: `${next.provider}/${next.model}`,
+              reason: failureInfo?.class ?? "unknown",
+            }),
+          )
+          continue
+        }
+        let text = this.#composePrompt(delivery)
         this.log(
-          "warn",
-          t("dsh.session_invalid", { session: sessionId, error: error?.message ?? error }),
+          "debug",
+          t("dsh.turn_start", {
+            ticket: delivery.ticket,
+            room: `${delivery.room.connection}:${delivery.room.path.join("/")}`,
+            count: delivery.records.length,
+            model: label,
+          }),
         )
-        this.sessions.delete(delivery.session)
-        this.modelPinned.delete(sessionId)
-        this.personas.delete(delivery.session)
-        sessionId = await this.#session(delivery.session, link)
-        await this.#pinModel(sessionId, modelRef)
-        text = this.#composePrompt(delivery)
-        await this.dsh.prompt(sessionId, [{ type: "text", text }])
-      }
-      // 超时跟着桥的配置走：0 = 关闭（跑多久都等）；不带 = 旧桥，用 5 分钟兜底。
-      const turnFailure = await this.#waitTurnEnd(
-        sessionId,
-        typeof delivery.turn_timeout_ms === "number" ? delivery.turn_timeout_ms : 5 * 60 * 1000,
-      )
-      if (turnFailure) {
+        // prompt 投话，follow 等这一轮真正结束（turn/end）。
+        try {
+          await this.dsh.prompt(sessionId, [{ type: "text", text }])
+        } catch (error) {
+          if (!isDeadSessionError(error)) throw error
+          // dsh 重启/清理后旧 sessionId 可能失效：重建会话、重新钉模型和人格，再试一次。
+          this.log(
+            "warn",
+            t("dsh.session_invalid", { session: sessionId, error: error?.message ?? error }),
+          )
+          this.sessions.delete(delivery.session)
+          this.modelPinned.delete(sessionId)
+          this.personas.delete(delivery.session)
+          sessionId = await this.#session(delivery.session, link)
+          await this.#pinModel(sessionId, modelRef)
+          text = this.#composePrompt(delivery)
+          await this.dsh.prompt(sessionId, [{ type: "text", text }])
+        }
+        // 超时跟着桥的配置走：0 = 关闭（跑多久都等）；不带 = 旧桥，用 5 分钟兜底。
+        const turnFailure = await this.#waitTurnEnd(
+          sessionId,
+          typeof delivery.turn_timeout_ms === "number" ? delivery.turn_timeout_ms : 5 * 60 * 1000,
+        )
+        if (!turnFailure) {
+          failure = null
+          failureInfo = null
+          if (index > 0) {
+            this.log(
+              "info",
+              t("dsh.model_fallback_ok", {
+                ticket: delivery.ticket,
+                model: label,
+                attempt: index,
+              }),
+            )
+          }
+          break
+        }
         failure = turnFailure.message
         failureInfo = turnFailure.failure
         this.log("error", t("dsh.turn_failed", { error: failure }))
         // 失败/中止不丢会话映射：下次开轮继续用同一个 dsh 会话，不新建。
         // 只有显式 reset（handleControl）才解除 acb↔harness 会话关联。
+
+        // —— 下面决定要不要换模型重放这一轮 ——
+        if (index + 1 >= attempts.length) break
+        if (!isRetryableModelFailure(failureInfo) && !turnFailure.retryable) break
+        // 已经调过桥工具 = 可能已经往群里说过话，重放会出现两条相近的回复。
+        // 宁可失败也不重复发言：群里看到两条比看不到更糟。
+        if (this.turnToolCalls > 0) {
+          this.log(
+            "warn",
+            t("dsh.model_fallback_skipped_spoke", {
+              ticket: delivery.ticket,
+              calls: this.turnToolCalls,
+            }),
+          )
+          break
+        }
+        const next = attempts[index + 1]
+        this.log(
+          "warn",
+          t("dsh.model_fallback", {
+            ticket: delivery.ticket,
+            from: label,
+            to: `${next.provider}/${next.model}`,
+            reason: failureInfo?.class ?? "unknown",
+          }),
+        )
       }
     } catch (error) {
       failure = error?.message ?? String(error)
@@ -582,6 +655,39 @@ class TurnDriver {
       }
     }
     return this.model
+  }
+
+  /**
+   * 这一轮依次尝试的模型：主模型在前，后面是桥下发的后备链。
+   *
+   * 链是全局的（库表 `model_fallbacks`），桥每轮随 `session_info` 一起给，
+   * 驱动不自己记、不自己猜——换代的桥可以随时改顺序，下一次投递就生效。
+   * 去重按 `provider/model`：主模型本来就在链里就不试第二遍。
+   * 一项都没有时返回 `[null]`，让调用方仍按「不干预模型」跑一轮。
+   */
+  #modelAttempts(delivery) {
+    const out = []
+    const seen = new Set()
+    const push = (ref) => {
+      if (!ref?.provider || !ref?.model) return
+      const key = `${ref.provider}/${ref.model}`
+      if (seen.has(key)) return
+      seen.add(key)
+      out.push(ref)
+    }
+    push(this.#modelFor(delivery))
+    for (const raw of delivery.session_info?.model_fallbacks ?? []) {
+      let parsed = null
+      try {
+        parsed = parseModelRef(raw)
+      } catch (error) {
+        // 桥侧已经校验过一遍；这里再兜一层：坏值只跳过，不把整轮搞死。
+        this.log("warn", t("dsh.model_fallback_invalid", { value: String(raw), error: error?.message ?? error }))
+        continue
+      }
+      push({ ...parsed, reasoningEffort: "" })
+    }
+    return out.length ? out : [null]
   }
 
   /**
@@ -743,10 +849,13 @@ class TurnDriver {
           continue
         }
         // 是我们主动打断后没等到收尾：不是后端连通性故障，不写结构化分类。
+        // `retryable` 只给驱动自己看（不随 turn/end 上报）：超时后换模型再试是安全的，
+        // 前提是这轮还没调过桥工具——那个判断在 #one 里做。
         return {
           message:
             "turn timeout: no turn/end within 30 seconds after interrupting; treating it as failed",
           failure: null,
+          retryable: true,
         }
       }
       if (next.done) {
@@ -873,7 +982,29 @@ function classifyTurnReason(reason) {
   if (code.includes("rate") || code.includes("429") || code.includes("quota")) {
     return { component: "model", class: "rate_limited" }
   }
+  // 内容审核拒绝：上游 router 回 400 content-blocked。它不是连通性故障（换网络没用），
+  // 但**换个模型**可能就过了——所以单独一类，只用来触发后备链，不标 backend。
+  if (code.includes("content-blocked") || code.includes("content_blocked")) {
+    return { component: "model", class: "content_blocked" }
+  }
+  if (code.includes("overloaded") || code.includes("503") || code.includes("529")) {
+    return { component: "model", class: "overloaded" }
+  }
   return null
+}
+
+// 这些失败值得换一个模型再试一次：都是「这个模型此刻不肯/不能干活」，
+// 而不是「这一轮的内容本身有问题」。超时单独由 turn 的 retryable 标记带进来。
+function isRetryableModelFailure(info) {
+  if (!info || info.component !== "model") return false
+  return [
+    "model_unavailable",
+    "model_unconfigured",
+    "auth_failed",
+    "rate_limited",
+    "content_blocked",
+    "overloaded",
+  ].includes(info.class)
 }
 
 async function callBridge(link, name, args, options = {}) {
