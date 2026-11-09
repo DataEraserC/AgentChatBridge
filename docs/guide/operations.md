@@ -102,6 +102,12 @@ grep -aE "content-blocked|dsh\.unreachable|ETIMEDOUT" ~/.local/state/acb/bridge.
   30 秒～2.5 分钟内 `agentAvailable=false`，等一会儿或再发一次。
 - 都没有 → 用 `deploy/acb-status.sh` 看连接和端口。
 
+日志行**不带时间戳**，所以上面这条 grep 会把重启前的旧错也捞出来。判断「新的还是旧的」只有一个
+锚点：`bridge.log` 里最近一条 `acb-config: generation=…`（这次启动的横幅），`drivers.log` 里最近一条
+`起驱动：会话 …`。`acb-status.sh` 的「本次启动以来的错误」段就是按这个锚点切的，直接信它；
+手工排查时先 `grep -an "acb-config: generation=" ~/.local/state/acb/bridge.log | tail -1` 拿到行号，
+再从那一行往后看。
+
 控制台「依赖健康」表怎么读（3100 → 概览）：
 
 - **harness 行**说的是「桥↔harness 的通道通不通」，看 `通道 N 条`。状态为「正常」+

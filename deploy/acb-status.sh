@@ -79,13 +79,38 @@ if command -v acbctl >/dev/null 2>&1; then
   say "  · acbctl status：$(acbctl status --summary 2>&1 | head -1)"
 fi
 
-say "== 最近错误（各日志最后 3 条命中）=="
+say "== 本次启动以来的错误（各日志最后 3 条命中）=="
+# 只看「最近一次启动之后」的部分。日志行不带时间戳，能锚定时间的只有启动横幅：
+#   bridge.log   → `acb-config: generation=…`
+#   drivers.log  → `起驱动：会话 …`（launcher 每次拉起驱动都会打）
+# 不锚定就会出现「刚重启完，体检却报一堆重启前的旧错」——2026-11-09 就这么被误导过一次。
+anchor_of() {
+  case $(basename "$1") in
+    bridge.log)  printf '^acb-config: generation=' ;;
+    drivers.log) printf '^起驱动：' ;;
+    *)           printf '' ;;
+  esac
+}
 for name in bridge.log drivers.log dsh.log; do
   f=$(newest_log "$name")
   if [[ -z $f ]]; then warn "$name 不存在"; continue; fi
-  hits=$(grep -aE "content-blocked|dsh\.unreachable|ETIMEDOUT|panic|error:" "$f" 2>/dev/null | tail -3)
-  if [[ -z $hits ]]; then ok "$name 无近期错误（$(basename "$f")）"; else
-    say "  · $name ($f)"
+  # 一小时内没写过的文件是别的部署形态留下的，别拿它的旧错吓人。
+  age=$(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || date +%s) ))
+  if (( age > 3600 )); then
+    warn "$name 已 $(( age / 60 )) 分钟没写入，跳过（$(basename "$f")，可能是别的部署形态的残留）"
+    continue
+  fi
+  pattern=$(anchor_of "$f")
+  start=1
+  if [[ -n $pattern ]]; then
+    hit=$(grep -an "$pattern" "$f" 2>/dev/null | tail -1 | cut -d: -f1)
+    [[ -n ${hit:-} ]] && start=$hit
+  fi
+  since="自第 $start 行起"
+  (( start == 1 )) && since="全文件"
+  hits=$(tail -n +"$start" "$f" | grep -aE "content-blocked|dsh\.unreachable|ETIMEDOUT|panic|error:" | tail -3)
+  if [[ -z $hits ]]; then ok "$name 无错误（$since）"; else
+    say "  · $name ($f，$since)"
     printf '%s\n' "$hits" | cut -c1-160 | sed 's/^/      /'
   fi
 done
