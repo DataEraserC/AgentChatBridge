@@ -654,6 +654,12 @@ pub struct Bridge<S: Store> {
     /// 暂存的新配置（管理员在控制台保存后放这，下一次开轮时换上——ADR-0009
     /// 轮次边界重载）。正在跑的轮次不受影响：投递批次在开轮时组装，组装完就不变。
     staged_config: Option<Config>,
+    /// 策略（权限/审批路由）在库里被改过，等下一个轮次边界重新读一遍。
+    ///
+    /// 和 `staged_config` 分开，是因为两者的来源不同：配置改的是文件，策略改的是
+    /// 库。控制台保存策略时没有新配置可暂存，但同样必须在轮次边界生效——一轮
+    /// 判定到一半换掉权限，会让同一轮的两次判定用两套规则。
+    pending_policy_reload: bool,
     /// 等待在轮次边界执行的动态插件卸载。
     pending_unloads: Vec<ProviderId>,
     /// 等待在轮次边界执行的动态插件重新加载。
@@ -885,8 +891,6 @@ impl<S: Store> Bridge<S> {
         let relay = config.file_relay.as_ref().map(|cfg| {
             crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base, cfg.max_publish_bytes)
         });
-        // 启动时把房间政策落一条审计：某群何时被放开必须可查。
-        audit_grants_config(None, &config.grants);
         let policy: Arc<dyn Policy> = Arc::new(CorePolicy::new());
         let mut bridge = Self {
             config,
@@ -912,6 +916,7 @@ impl<S: Store> Bridge<S> {
             memory,
             relay,
             staged_config: None,
+            pending_policy_reload: false,
             pending_unloads: Vec::new(),
             pending_reloads: Vec::new(),
             plugin_errors: HashMap::new(),
@@ -927,6 +932,9 @@ impl<S: Store> Bridge<S> {
         // 上一次进程留下的未闭环任务必须先收尾，否则它们永远是 `running`：
         // `tasks op=wait` 等到死，`drain_snapshot` 还会把它算作在跑，排空永远不完成。
         bridge.reclaim_orphan_tasks();
+        // 策略以库为准（schema 13）。启动时对齐一次：库里没有就导入 `config.toml`
+        // 的这份，库里有就以库为准。审计跟着一起落。
+        bridge.sync_policy_from_store();
         bridge
     }
 
@@ -2273,24 +2281,116 @@ impl<S: Store> Bridge<S> {
     ///
     /// 顺带重建从配置派生的两样东西：记忆仓库（worktrees_root 可能改了）、
     /// 文件中继发布端（public_base/dir 可能改了）。
+    ///
+    /// 策略不跟文件走：`[grants]` 自 schema 13 起以库为准。文件换一版之后要立刻
+    /// 把库里的策略盖回来，否则「保存配置」会把控制台刚改的审批路由冲掉。
     fn apply_staged_config(&mut self) {
-        let Some(config) = self.staged_config.take() else {
+        let staged = self.staged_config.take();
+        let policy_reload = std::mem::take(&mut self.pending_policy_reload);
+        if staged.is_none() && !policy_reload {
             return;
-        };
-        self.memory = MemoryRepo::new(config.worktrees_root.clone());
-        self.relay = config.file_relay.as_ref().map(|cfg| {
-            crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base, cfg.max_publish_bytes)
-        });
-        // 依赖表跟配置走：新增的登记为 unknown，移除的直接删掉。
-        self.deps.retain_config(&config);
-        self.plugins
-            .set_provider_timeout_ms(config.provider_calls.timeout_ms);
-        let previous = self.config.grants.clone();
-        self.config = config;
-        // P1 默认实现无状态；策略快照随 GrantQuery 进来，轮次内冻结。
-        self.policy = Arc::new(CorePolicy::new());
-        audit_grants_config(Some(&previous), &self.config.grants);
-        self.config_version += 1;
+        }
+        if let Some(config) = staged {
+            self.memory = MemoryRepo::new(config.worktrees_root.clone());
+            self.relay = config.file_relay.as_ref().map(|cfg| {
+                crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base, cfg.max_publish_bytes)
+            });
+            // 依赖表跟配置走：新增的登记为 unknown，移除的直接删掉。
+            self.deps.retain_config(&config);
+            self.plugins
+                .set_provider_timeout_ms(config.provider_calls.timeout_ms);
+            let previous = self.config.grants.clone();
+            self.config = config;
+            // P1 默认实现无状态；策略快照随 GrantQuery 进来，轮次内冻结。
+            self.policy = Arc::new(CorePolicy::new());
+            audit_grants_config(Some(&previous), &self.config.grants);
+            self.config_version += 1;
+        }
+        self.adopt_store_policy();
+    }
+
+    /// 把库里的策略读进来。变了就落审计、配置版本 +1；没变什么都不做。
+    ///
+    /// 读失败**不清空**：一次库抖动不该让所有人瞬间失去权限。保持当前快照并记账，
+    /// 人工去查库——这比按空策略跑安全。
+    fn adopt_store_policy(&mut self) {
+        match self.store.policy_load() {
+            Ok(Some(grants)) => {
+                if grants == self.config.grants {
+                    return;
+                }
+                let previous = std::mem::replace(&mut self.config.grants, grants.clone());
+                audit_grants_config(Some(&previous), &grants);
+                self.config_version += 1;
+            }
+            Ok(None) => {
+                // 启动时一定会导入，正常流程走不到这里。真到了说明有人从外部把
+                // `policy_*` 表删了：不动内存里的策略，只记账。
+                eprintln!("[policy] 库里查不到策略记录，继续用内存里这一份");
+            }
+            Err(error) => {
+                eprintln!("[policy] 重新读库失败，继续用当前策略：{error}");
+            }
+        }
+    }
+
+    /// 启动时把策略对齐到库。
+    ///
+    /// `config.toml` 里的 `[grants]` 从此只是**导入源**：库里有策略就以库为准。
+    /// 不保留「两边都能改、谁在后谁赢」——那会让「为什么这条权限不生效」变成猜谜
+    /// （2026-11-07 用户裁定：业务对象只认库）。
+    fn sync_policy_from_store(&mut self) {
+        match self.store.policy_load() {
+            Ok(Some(from_store)) => {
+                if from_store != self.config.grants {
+                    eprintln!(
+                        "[policy] 库里的策略与 config.toml 不一致，以库为准；\
+                         config.toml 的 [grants] 已不再生效，改权限请走控制台或 acbctl"
+                    );
+                }
+                let previous = std::mem::replace(&mut self.config.grants, from_store.clone());
+                audit_grants_config(Some(&previous), &from_store);
+            }
+            Ok(None) => {
+                // 首次导入：这时候 TOML 里那一份是唯一来源。
+                let grants = self.config.grants.clone();
+                match self.store.policy_replace(&grants) {
+                    Ok(()) => {
+                        eprintln!(
+                            "[policy] 首次导入完成：allow={} deny={} rooms={} accounts={}",
+                            grants.rules.len(),
+                            grants.deny.len(),
+                            grants.rooms.len(),
+                            grants.accounts.len()
+                        );
+                    }
+                    Err(error) => {
+                        // 导不进去不挡启动：这一份仍在内存里生效，只是重启要再导一次。
+                        eprintln!("[policy] 首次导入失败，本次仍按 config.toml 判定：{error}");
+                    }
+                }
+                audit_grants_config(None, &grants);
+            }
+            Err(error) => {
+                // 读不出来时按 TOML 跑并大声记账。不能按空策略跑——那等于把库里的
+                // 收紧当没看见；也不拒绝启动——一次库抖动不该让整台桥起不来。
+                eprintln!("[policy] 读库失败，本次按 config.toml 判定：{error}");
+                audit_grants_config(None, &self.config.grants);
+            }
+        }
+    }
+
+    /// 有人在库外改了策略（控制台保存）：等下一个轮次边界重新读。
+    ///
+    /// 为什么不当场生效：一轮里可能做多次判定，中途换规则会让同一轮的两次判定
+    /// 用两套权限。轮次边界的承诺是「这一轮看到的策略不变」。
+    pub fn request_policy_reload(&mut self) {
+        self.pending_policy_reload = true;
+    }
+
+    /// 有没有待生效的策略改动。
+    pub fn has_pending_policy_reload(&self) -> bool {
+        self.pending_policy_reload
     }
 
     /// 只读看存储，给管理页和测试用。
@@ -2301,6 +2401,19 @@ impl<S: Store> Bridge<S> {
     /// 可变地看存储。只给控制台用（改反馈状态），调度自己不要借这个口绕过流水。
     pub fn store_mut(&mut self) -> &mut S {
         &mut self.store
+    }
+
+    /// 整份替换策略（控制台保存用）。
+    ///
+    /// 先校验再写库：规则写错会让人整片失去权限，宁可拒绝保存。写完只置标记，
+    /// 真正的生效在轮次边界（见 [`Self::request_policy_reload`]）。
+    pub fn replace_policy(&mut self, grants: &crate::grants::GrantsConfig) -> Result<(), String> {
+        grants.validate()?;
+        self.store
+            .policy_replace(grants)
+            .map_err(|error| error.to_string())?;
+        self.pending_policy_reload = true;
+        Ok(())
     }
 
     /// 记录会话映射：acb 会话 id → harness 内部会话 id（harness 回报时调）。

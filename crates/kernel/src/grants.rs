@@ -162,7 +162,7 @@ impl fmt::Display for AccessTarget {
 }
 
 /// 授权主体。`System` 表示没有人类触发者的轮次（clock/自发唤醒）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantSubject {
     System,
@@ -312,8 +312,19 @@ impl<'de> Deserialize<'de> for GrantScope {
     }
 }
 
+impl Serialize for GrantScope {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Subscribed => "subscribed",
+            Self::Room => "room",
+            Self::Connection => "connection",
+            Self::PlatformOp => "platform_op",
+        })
+    }
+}
+
 /// 能力枚举。封闭值域，未知值在配置解析期报错。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantCapability {
     RoomRead,
@@ -350,7 +361,7 @@ impl GrantCapability {
 }
 
 /// 一个常态授予规则。
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantRule {
     /// 稳定标识；Decision 与审计用它追溯来源。
@@ -385,20 +396,20 @@ pub struct AccountGrant {
     pub approval_route: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantAccount {
     pub connection: String,
     pub account: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BotAdminGrant {
     pub accounts: Vec<GrantAccount>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemAdminGrant {
     pub connection: String,
@@ -406,7 +417,11 @@ pub struct SystemAdminGrant {
 }
 
 /// `[grants]` 配置。未知字段由 `deny_unknown_fields` 在解析期拒绝。
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+///
+/// 这一份既是从 `config.toml` 读进来的形状，也是落库的形状（schema 13 起
+/// `policy_*` 四张表按对象拆开存）。可序列化是为了能整份写进库里、也能在
+/// 控制台原样回显。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantsConfig {
     #[serde(default)]

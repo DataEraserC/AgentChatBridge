@@ -39,9 +39,9 @@ pub use config::{
     DEFAULT_WORKTREES_ROOT, DeliveryPolicy, EndpointConfig, Harness, InBandNoticeConfig,
     KNOWN_MEMORY_KINDS, LkgConfig, LoadedConfig, Memory, NotificationsConfig, OutboundPolicy,
     Persona, PluginConfig, ProviderCallsConfig, QueueConfig, ReceivePolicy, RetentionConfig,
-    RoutePolicy, SecretEntry, SecretStore, Session, StorageConfig, Subscription,
-    ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision,
-    WakeInput, WakePolicy, WakeVerdict,
+    RoutePolicy, SecretEntry, SecretStore, Session, StorageConfig, Subscription, ToolPluginConfig,
+    Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput,
+    WakePolicy, WakeVerdict,
 };
 pub use deps::{DependencyKind, DependencyRegistry, PlatformVersionInfo};
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
@@ -50,8 +50,9 @@ pub use event_queue::{
     EventQueue, EventReceiver, QueueSnapshot, QueueStats, SubmitError, drain_events,
 };
 pub use grants::{
-    AccessTarget, AccessTargetKind, AccountGrant, GrantCapability, GrantDecision, GrantScope,
-    GrantSubject, GrantsConfig, Place, RoomGrant, RoomScope, Trust,
+    AccessTarget, AccessTargetKind, AccountGrant, BotAdminGrant, GrantCapability, GrantDecision,
+    GrantRule, GrantScope, GrantSubject, GrantsConfig, Place, RoomGrant, RoomScope,
+    SystemAdminGrant, Trust,
 };
 pub use lkg::{LkgEntry, LkgInfo, LkgState, PluginLkg};
 pub use notice::{NoticeEvent, NoticeSink};
@@ -82,9 +83,9 @@ pub use relay::{FileRelay, RelayError};
 pub use route_worker::RouteWorker;
 pub use storage::{
     Counts, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks,
-    MIN_KEPT, MemoryStore, Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft, Recorded,
-    SCHEMA_VERSION, SessionMap, SessionMaps, SqliteStore, StorageError, Store, Tasks, TopicStatus,
-    Transcript, Watermarks, unread,
+    MIN_KEPT, MemoryStore, Note, NoteKey, NoteKind, Notes, Policies, PolicyEffect, PrunePlan,
+    RecordDraft, Recorded, SCHEMA_VERSION, SessionMap, SessionMaps, SqliteStore, StorageError,
+    Store, Tasks, TopicStatus, Transcript, Watermarks, unread,
 };
 pub use task::{TaskHandler, TaskOutcome};
 pub use tools::{

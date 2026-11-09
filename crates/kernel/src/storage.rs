@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::engine::{TaskRecord, TaskStatus};
+use crate::grants::{
+    AccountGrant, BotAdminGrant, GrantRule, GrantsConfig, RoomGrant, SystemAdminGrant,
+};
 
 /// 存储层错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -642,14 +645,104 @@ pub trait Tasks {
     fn task_prune(&mut self, keep: usize) -> Result<u64, StorageError>;
 }
 
-/// 七样东西合起来。桥只依赖这一个约束，换后端只换实现。
+/// 规则是「允许」还是「显式拒绝」。两者同一个形状，语义相反：
+/// `deny` 只做减法，和 allow 的顺序无关（见 [`crate::policy`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PolicyEffect {
+    Allow,
+    Deny,
+}
+
+impl PolicyEffect {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "allow" => Some(Self::Allow),
+            "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
+}
+
+/// 策略（权限与审批路由）的落库接口。
+///
+/// 为什么单独一组：`[grants]` 以前只能手改 TOML，改错了要重启，事后补配置
+/// 还救不回已经建出去的票据（2026-11-09 现场：审批路由写漏一个群，票据一路
+/// pending 到过期）。这批对象从此有表，桥按库判、控制台按库改。
+///
+/// 四类对象分开存，是因为键不同：规则靠 `id`（审计与判定都要能追溯来源），
+/// 房间靠 `qq:group/123`，账号靠 `qq:10001`，两个管理员是单例。
+pub trait Policies {
+    /// 读整份策略。
+    ///
+    /// 库里**一条记录都没有**时返回 `None`，不是空策略——调用方靠这个区分
+    /// 「还没导入过」和「确实把权限清空了」，否则首次启动会把所有人降权。
+    fn policy_load(&self) -> Result<Option<GrantsConfig>, StorageError>;
+
+    /// 整份覆盖写。首次导入与「控制台整份保存」用它。
+    ///
+    /// 单条改动用下面的细粒度接口：两个人同时改不同房间时，整份覆盖会互相吃掉。
+    fn policy_replace(&mut self, grants: &GrantsConfig) -> Result<(), StorageError>;
+
+    /// 写一条规则。同 `id` 覆盖；`effect` 决定进 allow 还是 deny。
+    fn policy_rule_put(
+        &mut self,
+        effect: PolicyEffect,
+        rule: &GrantRule,
+        at: i64,
+    ) -> Result<(), StorageError>;
+
+    /// 删一条规则。返回之前有没有。
+    fn policy_rule_delete(&mut self, effect: PolicyEffect, id: &str) -> Result<bool, StorageError>;
+
+    /// 写房间级政策：信任、可信成员、审批路由。
+    fn policy_room_put(
+        &mut self,
+        room: &str,
+        grant: &RoomGrant,
+        at: i64,
+    ) -> Result<(), StorageError>;
+
+    fn policy_room_delete(&mut self, room: &str) -> Result<bool, StorageError>;
+
+    /// 写账号级审批路由。键形如 `qq:10001`。
+    fn policy_account_put(
+        &mut self,
+        account: &str,
+        grant: &AccountGrant,
+        at: i64,
+    ) -> Result<(), StorageError>;
+
+    fn policy_account_delete(&mut self, account: &str) -> Result<bool, StorageError>;
+
+    /// 单例管理员。`None` = 撤掉。
+    fn policy_bot_admin_put(
+        &mut self,
+        value: Option<&BotAdminGrant>,
+        at: i64,
+    ) -> Result<(), StorageError>;
+
+    fn policy_system_admin_put(
+        &mut self,
+        value: Option<&SystemAdminGrant>,
+        at: i64,
+    ) -> Result<(), StorageError>;
+}
+
+/// 八样东西合起来。桥只依赖这一个约束，换后端只换实现。
 pub trait Store:
-    Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks + Tasks
+    Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks + Tasks + Policies
 {
 }
 
 impl<T> Store for T where
-    T: Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks + Tasks
+    T: Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks + Tasks + Policies
 {
 }
 
@@ -673,6 +766,11 @@ pub struct MemoryStore {
     next_feedback: i64,
     /// 任务/尝试记录，按创建顺序追加；查询时按时间倒序。
     tasks: Vec<TaskRecord>,
+    /// 策略整份挂在这里。
+    policy: GrantsConfig,
+    /// 有没有被写过。和 sqlite 的 `policy_initialized` 标记同一个意思：
+    /// 「导入过一份空的」和「从没导入过」必须分得开，否则重启会把清空当成首次导入。
+    policy_initialized: bool,
 }
 
 impl MemoryStore {
@@ -707,11 +805,7 @@ impl Tasks for MemoryStore {
     }
 
     fn task_find(&self, id: &str) -> Result<Option<TaskRecord>, StorageError> {
-        Ok(self
-            .tasks
-            .iter()
-            .find(|task| task.id == id)
-            .cloned())
+        Ok(self.tasks.iter().find(|task| task.id == id).cloned())
     }
 
     fn task_list(
@@ -1153,6 +1247,98 @@ impl Feedbacks for MemoryStore {
         };
         item.replies.push(reply);
         Ok(true)
+    }
+}
+
+impl Policies for MemoryStore {
+    fn policy_load(&self) -> Result<Option<GrantsConfig>, StorageError> {
+        Ok(self.policy_initialized.then(|| self.policy.clone()))
+    }
+
+    fn policy_replace(&mut self, grants: &GrantsConfig) -> Result<(), StorageError> {
+        self.policy = grants.clone();
+        self.policy_initialized = true;
+        Ok(())
+    }
+
+    fn policy_rule_put(
+        &mut self,
+        effect: PolicyEffect,
+        rule: &GrantRule,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        let list = match effect {
+            PolicyEffect::Allow => &mut self.policy.rules,
+            PolicyEffect::Deny => &mut self.policy.deny,
+        };
+        match list.iter_mut().find(|existing| existing.id == rule.id) {
+            Some(slot) => *slot = rule.clone(),
+            None => list.push(rule.clone()),
+        }
+        self.policy_initialized = true;
+        Ok(())
+    }
+
+    fn policy_rule_delete(&mut self, effect: PolicyEffect, id: &str) -> Result<bool, StorageError> {
+        let list = match effect {
+            PolicyEffect::Allow => &mut self.policy.rules,
+            PolicyEffect::Deny => &mut self.policy.deny,
+        };
+        let before = list.len();
+        list.retain(|rule| rule.id != id);
+        Ok(list.len() != before)
+    }
+
+    fn policy_room_put(
+        &mut self,
+        room: &str,
+        grant: &RoomGrant,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.policy.rooms.insert(room.to_owned(), grant.clone());
+        self.policy_initialized = true;
+        Ok(())
+    }
+
+    fn policy_room_delete(&mut self, room: &str) -> Result<bool, StorageError> {
+        Ok(self.policy.rooms.remove(room).is_some())
+    }
+
+    fn policy_account_put(
+        &mut self,
+        account: &str,
+        grant: &AccountGrant,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.policy
+            .accounts
+            .insert(account.to_owned(), grant.clone());
+        self.policy_initialized = true;
+        Ok(())
+    }
+
+    fn policy_account_delete(&mut self, account: &str) -> Result<bool, StorageError> {
+        Ok(self.policy.accounts.remove(account).is_some())
+    }
+
+    fn policy_bot_admin_put(
+        &mut self,
+        value: Option<&BotAdminGrant>,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.policy.bot_admin = value.cloned();
+        self.policy_initialized = true;
+        Ok(())
+    }
+
+    fn policy_system_admin_put(
+        &mut self,
+        value: Option<&SystemAdminGrant>,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.policy.system_admin = value.cloned();
+        self.policy_initialized = true;
+        Ok(())
     }
 }
 

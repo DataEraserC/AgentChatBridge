@@ -15,8 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT,
-    Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft, Recorded, SessionMap, SessionMaps,
-    StorageError, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript, Watermarks,
+    Note, NoteKey, NoteKind, Notes, Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded,
+    SessionMap, SessionMaps, StorageError, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript,
+    Watermarks,
+};
+use crate::grants::{
+    AccountGrant, BotAdminGrant, GrantRule, GrantsConfig, RoomGrant, SystemAdminGrant,
 };
 
 /// 这个程序认识的库结构版本。改表就加一。
@@ -37,7 +41,10 @@ use super::{
 ///         语义落在记录上，之后新加的订阅者也不会看到它。
 /// 10 → 11：`feedback` 加 `replies` JSON；维护方回复与通知原会话（T7c）。
 /// 11 → 12：加 `tasks` 表——后台任务与出站尝试记录落盘，重启后仍可按 id 查。
-pub const SCHEMA_VERSION: i64 = 12;
+/// 12 → 13：加 `policy_*` 四张表——权限规则、房间政策、审批路由、管理员从
+///          `config.toml` 搬进库。新表由建表语句建，不用搬数据；首次启动时
+///          桥把 TOML 里的 `[grants]` 一次性导入（见 `engine::sync_policy`）。
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"
@@ -167,6 +174,38 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE INDEX IF NOT EXISTS tasks_by_session ON tasks (session, created_at DESC);
 CREATE INDEX IF NOT EXISTS tasks_open ON tasks (status, created_at);
+
+-- 策略（schema 13）。以前 `[grants]` 只能手改 TOML：改错要重启，事后补配置
+-- 还救不回已经建出去的票据（2026-11-09：审批路由漏配一个群，票一路 pending
+-- 到过期）。从此桥按库判权限、控制台按库改权限。
+--
+-- 四类对象分表是因为键不同：规则靠 id（审计与判定都要追溯来源），房间靠
+-- `qq:group/123`，账号靠 `qq:10001`，两个管理员是单例。payload 存整份 JSON，
+-- 形状就是 config.toml 里那一份——读写都走同一个 serde 定义，不会两套字段。
+CREATE TABLE IF NOT EXISTS policy_rules (
+    id         TEXT PRIMARY KEY,     -- GrantRule.id
+    effect     TEXT NOT NULL,        -- allow | deny
+    payload    TEXT NOT NULL,        -- GrantRule 的 JSON
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS policy_rooms (
+    room_key   TEXT PRIMARY KEY,     -- qq:group/769843907
+    payload    TEXT NOT NULL,        -- RoomGrant：trust / members / approval_route
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS policy_accounts (
+    account_key TEXT PRIMARY KEY,    -- qq:10001（连接:账号）
+    payload     TEXT NOT NULL,       -- AccountGrant：approval_route
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS policy_admins (
+    role       TEXT PRIMARY KEY,     -- bot_admin | system_admin
+    payload    TEXT NOT NULL,        -- BotAdminGrant / SystemAdminGrant
+    updated_at INTEGER NOT NULL
+);
 "#;
 
 /// 库里的家底，启动时打给人看。
@@ -1735,14 +1774,12 @@ impl TaskRow {
                 self.id, self.status
             )));
         };
-        let room = RoomId::new(&self.connection, &self.room_key).map_err(|error| {
-            backend(format!("任务记录 {} 的房间无法还原：{error}", self.id))
-        })?;
+        let room = RoomId::new(&self.connection, &self.room_key)
+            .map_err(|error| backend(format!("任务记录 {} 的房间无法还原：{error}", self.id)))?;
         let result = match self.result {
-            Some(text) => Some(
-                serde_json::from_str(&text)
-                    .map_err(|error| backend(format!("任务记录 {} 的结果 JSON 坏了：{error}", self.id)))?,
-            ),
+            Some(text) => Some(serde_json::from_str(&text).map_err(|error| {
+                backend(format!("任务记录 {} 的结果 JSON 坏了：{error}", self.id))
+            })?),
             None => None,
         };
         let event_woke: Vec<String> = serde_json::from_str(&self.event_woke).unwrap_or_default();
@@ -1977,5 +2014,362 @@ impl Tasks for SqliteStore {
             )
             .map_err(io_error)?;
         Ok(removed as u64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 策略（schema 13）
+// ---------------------------------------------------------------------------
+
+/// 一条策略对象翻译成 JSON 时的失败。坏数据必须是显式错误，不能悄悄丢一条
+/// 规则——丢的那条可能正是唯一的 allow，也可能是唯一的 deny。
+fn policy_json(error: serde_json::Error, what: &str) -> StorageError {
+    backend(acb_i18n::t!(
+        "kernel.storage.policy_payload_invalid",
+        what = what,
+        error = error
+    ))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+impl Policies for SqliteStore {
+    fn policy_load(&self) -> Result<Option<GrantsConfig>, StorageError> {
+        let mut grants = GrantsConfig::default();
+        let mut any = false;
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, effect, payload FROM policy_rules ORDER BY id")
+            .map_err(io_error)?;
+        let mut rows = stmt.query([]).map_err(io_error)?;
+        while let Some(row) = rows.next().map_err(io_error)? {
+            let id: String = row.get(0).map_err(io_error)?;
+            let effect: String = row.get(1).map_err(io_error)?;
+            let payload: String = row.get(2).map_err(io_error)?;
+            let rule: GrantRule = serde_json::from_str(&payload)
+                .map_err(|error| policy_json(error, &format!("policy_rules/{id}")))?;
+            match PolicyEffect::parse(&effect) {
+                Some(PolicyEffect::Allow) => grants.rules.push(rule),
+                Some(PolicyEffect::Deny) => grants.deny.push(rule),
+                None => {
+                    return Err(backend(format!(
+                        "policy_rules/{id} 的 effect 不认识：{effect:?}（只认 allow / deny）"
+                    )));
+                }
+            }
+            any = true;
+        }
+        drop(rows);
+        drop(stmt);
+
+        for (sql, label) in [
+            (
+                "SELECT room_key, payload FROM policy_rooms ORDER BY room_key",
+                "policy_rooms",
+            ),
+            (
+                "SELECT account_key, payload FROM policy_accounts ORDER BY account_key",
+                "policy_accounts",
+            ),
+        ] {
+            let mut stmt = self.conn.prepare(sql).map_err(io_error)?;
+            let mut rows = stmt.query([]).map_err(io_error)?;
+            while let Some(row) = rows.next().map_err(io_error)? {
+                let key: String = row.get(0).map_err(io_error)?;
+                let payload: String = row.get(1).map_err(io_error)?;
+                if label == "policy_rooms" {
+                    let grant: RoomGrant = serde_json::from_str(&payload)
+                        .map_err(|error| policy_json(error, &format!("{label}/{key}")))?;
+                    grants.rooms.insert(key, grant);
+                } else {
+                    let grant: AccountGrant = serde_json::from_str(&payload)
+                        .map_err(|error| policy_json(error, &format!("{label}/{key}")))?;
+                    grants.accounts.insert(key, grant);
+                }
+                any = true;
+            }
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT role, payload FROM policy_admins ORDER BY role")
+            .map_err(io_error)?;
+        let mut rows = stmt.query([]).map_err(io_error)?;
+        while let Some(row) = rows.next().map_err(io_error)? {
+            let role: String = row.get(0).map_err(io_error)?;
+            let payload: String = row.get(1).map_err(io_error)?;
+            let what = format!("policy_admins/{role}");
+            match role.as_str() {
+                "bot_admin" => {
+                    grants.bot_admin = Some(
+                        serde_json::from_str(&payload)
+                            .map_err(|error| policy_json(error, &what))?,
+                    );
+                }
+                "system_admin" => {
+                    grants.system_admin = Some(
+                        serde_json::from_str(&payload)
+                            .map_err(|error| policy_json(error, &what))?,
+                    );
+                }
+                other => {
+                    return Err(backend(format!(
+                        "policy_admins 里有不认识的 role：{other:?}"
+                    )));
+                }
+            }
+            any = true;
+        }
+
+        Ok((any || self.policy_initialized()?).then_some(grants))
+    }
+
+    fn policy_replace(&mut self, grants: &GrantsConfig) -> Result<(), StorageError> {
+        let at = now_ms();
+        let transaction = self.conn.transaction().map_err(io_error)?;
+        for table in [
+            "policy_rules",
+            "policy_rooms",
+            "policy_accounts",
+            "policy_admins",
+        ] {
+            transaction
+                .execute(&format!("DELETE FROM {table}"), [])
+                .map_err(io_error)?;
+        }
+        for (effect, rules) in [
+            (PolicyEffect::Allow, &grants.rules),
+            (PolicyEffect::Deny, &grants.deny),
+        ] {
+            for rule in rules {
+                let payload = serde_json::to_string(rule)
+                    .map_err(|error| policy_json(error, &format!("rule/{}", rule.id)))?;
+                transaction
+                    .execute(
+                        "INSERT INTO policy_rules (id, effect, payload, updated_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![rule.id, effect.as_str(), payload, at],
+                    )
+                    .map_err(io_error)?;
+            }
+        }
+        for (room, grant) in &grants.rooms {
+            let payload = serde_json::to_string(grant)
+                .map_err(|error| policy_json(error, &format!("room/{room}")))?;
+            transaction
+                .execute(
+                    "INSERT INTO policy_rooms (room_key, payload, updated_at) VALUES (?1, ?2, ?3)",
+                    params![room, payload, at],
+                )
+                .map_err(io_error)?;
+        }
+        for (account, grant) in &grants.accounts {
+            let payload = serde_json::to_string(grant)
+                .map_err(|error| policy_json(error, &format!("account/{account}")))?;
+            transaction
+                .execute(
+                    "INSERT INTO policy_accounts (account_key, payload, updated_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![account, payload, at],
+                )
+                .map_err(io_error)?;
+        }
+        if let Some(bot) = &grants.bot_admin {
+            let payload =
+                serde_json::to_string(bot).map_err(|error| policy_json(error, "bot_admin"))?;
+            transaction
+                .execute(
+                    "INSERT INTO policy_admins (role, payload, updated_at) VALUES ('bot_admin', ?1, ?2)",
+                    params![payload, at],
+                )
+                .map_err(io_error)?;
+        }
+        if let Some(system) = &grants.system_admin {
+            let payload = serde_json::to_string(system)
+                .map_err(|error| policy_json(error, "system_admin"))?;
+            transaction
+                .execute(
+                    "INSERT INTO policy_admins (role, payload, updated_at) VALUES ('system_admin', ?1, ?2)",
+                    params![payload, at],
+                )
+                .map_err(io_error)?;
+        }
+        // 留一个「已经初始化过」的标记：否则「管理员把策略清空了」和「还没导入过」
+        // 在库里长得一模一样，重启时会把清空当成首次导入，用旧的 TOML 配置复活。
+        transaction
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('policy_initialized', ?1)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![at.to_string()],
+            )
+            .map_err(io_error)?;
+        transaction.commit().map_err(io_error)?;
+        Ok(())
+    }
+
+    fn policy_rule_put(
+        &mut self,
+        effect: PolicyEffect,
+        rule: &GrantRule,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        let payload = serde_json::to_string(rule)
+            .map_err(|error| policy_json(error, &format!("rule/{}", rule.id)))?;
+        self.conn
+            .execute(
+                "INSERT INTO policy_rules (id, effect, payload, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (id) DO UPDATE SET
+                     effect = excluded.effect,
+                     payload = excluded.payload,
+                     updated_at = excluded.updated_at",
+                params![rule.id, effect.as_str(), payload, at],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+
+    fn policy_rule_delete(&mut self, effect: PolicyEffect, id: &str) -> Result<bool, StorageError> {
+        let removed = self
+            .conn
+            .execute(
+                "DELETE FROM policy_rules WHERE id = ?1 AND effect = ?2",
+                params![id, effect.as_str()],
+            )
+            .map_err(io_error)?;
+        Ok(removed > 0)
+    }
+
+    fn policy_room_put(
+        &mut self,
+        room: &str,
+        grant: &RoomGrant,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        let payload = serde_json::to_string(grant)
+            .map_err(|error| policy_json(error, &format!("room/{room}")))?;
+        self.conn
+            .execute(
+                "INSERT INTO policy_rooms (room_key, payload, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (room_key) DO UPDATE SET
+                     payload = excluded.payload,
+                     updated_at = excluded.updated_at",
+                params![room, payload, at],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+
+    fn policy_room_delete(&mut self, room: &str) -> Result<bool, StorageError> {
+        let removed = self
+            .conn
+            .execute(
+                "DELETE FROM policy_rooms WHERE room_key = ?1",
+                params![room],
+            )
+            .map_err(io_error)?;
+        Ok(removed > 0)
+    }
+
+    fn policy_account_put(
+        &mut self,
+        account: &str,
+        grant: &AccountGrant,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        let payload = serde_json::to_string(grant)
+            .map_err(|error| policy_json(error, &format!("account/{account}")))?;
+        self.conn
+            .execute(
+                "INSERT INTO policy_accounts (account_key, payload, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (account_key) DO UPDATE SET
+                     payload = excluded.payload,
+                     updated_at = excluded.updated_at",
+                params![account, payload, at],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+
+    fn policy_account_delete(&mut self, account: &str) -> Result<bool, StorageError> {
+        let removed = self
+            .conn
+            .execute(
+                "DELETE FROM policy_accounts WHERE account_key = ?1",
+                params![account],
+            )
+            .map_err(io_error)?;
+        Ok(removed > 0)
+    }
+
+    fn policy_bot_admin_put(
+        &mut self,
+        value: Option<&BotAdminGrant>,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        self.put_admin_singleton(
+            "bot_admin",
+            value.map(serde_json::to_string).transpose(),
+            at,
+        )
+    }
+
+    fn policy_system_admin_put(
+        &mut self,
+        value: Option<&SystemAdminGrant>,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        self.put_admin_singleton(
+            "system_admin",
+            value.map(serde_json::to_string).transpose(),
+            at,
+        )
+    }
+}
+
+impl SqliteStore {
+    /// 策略是否已经初始化过（首次导入完成）。
+    fn policy_initialized(&self) -> Result<bool, StorageError> {
+        let found: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'policy_initialized'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io_error)?;
+        Ok(found.is_some())
+    }
+
+    /// 单例管理员：给了就覆盖，`None` 就删掉那一行。
+    fn put_admin_singleton(
+        &mut self,
+        role: &str,
+        payload: Result<Option<String>, serde_json::Error>,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        let Some(payload) = payload.map_err(|error| policy_json(error, role))? else {
+            self.conn
+                .execute("DELETE FROM policy_admins WHERE role = ?1", params![role])
+                .map_err(io_error)?;
+            return Ok(());
+        };
+        self.conn
+            .execute(
+                "INSERT INTO policy_admins (role, payload, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (role) DO UPDATE SET
+                     payload = excluded.payload,
+                     updated_at = excluded.updated_at",
+                params![role, payload, at],
+            )
+            .map_err(io_error)?;
+        Ok(())
     }
 }
