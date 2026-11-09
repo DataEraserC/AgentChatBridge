@@ -48,26 +48,41 @@ impl RouteWorker {
     }
 
     /// 有界入队：满时拒绝该动作并计数，绝不阻塞 drain 线程。
-    pub(crate) fn enqueue(&self, actions: Vec<PreparedRouteAction>) {
+    ///
+    /// 返回**被丢弃的任务**。任务一旦受理就必须有结局，队列满直接丢掉会让它永远停在
+    /// `Pending`，`tasks op=wait` 等到死也等不到（2026-11-09 审查 C1）。发送动作没有
+    /// 这个约束（丢了就是没发，模型会从上下文看到），所以只交回任务、由调用方落 `failed`。
+    pub(crate) fn enqueue(&self, actions: Vec<PreparedRouteAction>) -> Vec<PreparedTask> {
         let mut rejected = 0usize;
+        let mut stopped_logged = false;
+        let mut dropped: Vec<PreparedTask> = Vec::new();
         for action in actions {
             self.busy.fetch_add(1, Ordering::SeqCst);
             // 先计数再入队：worker 可能立刻取走，不能让它先看到 0 再减。
             self.stats.enqueued();
             match self.tx.try_send(action) {
                 Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
+                Err(TrySendError::Full(action)) => {
                     self.busy.fetch_sub(1, Ordering::SeqCst);
                     self.stats.dequeued();
                     self.stats.rejected();
                     rejected = rejected.saturating_add(1);
+                    if let PreparedRouteAction::Task(task) = action {
+                        dropped.push(task);
+                    }
                 }
-                Err(TrySendError::Disconnected(_)) => {
+                Err(TrySendError::Disconnected(action)) => {
                     self.busy.fetch_sub(1, Ordering::SeqCst);
                     self.stats.dequeued();
                     rejected = rejected.saturating_add(1);
-                    eprintln!("{}", acb_i18n::t!("kernel.route_worker.stopped"));
-                    break;
+                    // 队列已断：不 `break`，把这一批剩下的任务也一并交回去收尾，
+                    // 否则它们同样是永远 `Pending`。
+                    if let PreparedRouteAction::Task(task) = action {
+                        dropped.push(task);
+                    } else if !stopped_logged {
+                        eprintln!("{}", acb_i18n::t!("kernel.route_worker.stopped"));
+                        stopped_logged = true;
+                    }
                 }
             }
         }
@@ -78,6 +93,7 @@ impl RouteWorker {
                 self.stats.snapshot().rejected
             );
         }
+        dropped
     }
 
     /// 队列里 + 正在执行的动作数。排空判定用。
@@ -372,10 +388,32 @@ mod tests {
         assert_eq!(worker.busy(), 1);
         assert_eq!(worker.stats().snapshot().depth, 1);
 
-        worker.enqueue(vec![task("b", config)]);
+        let dropped = worker.enqueue(vec![task("b", config)]);
         let snapshot = worker.stats().snapshot();
         assert_eq!(worker.busy(), 1, "被拒绝的动作不算 busy");
         assert_eq!(snapshot.rejected, 1);
         assert_eq!(snapshot.depth, 1);
+        // 任务被拒不能就这么没了：必须交回调用方落 failed，否则永远 Pending。
+        assert_eq!(dropped.len(), 1, "被拒的任务必须交回");
+        assert_eq!(dropped[0].task_id, "b");
+    }
+
+    #[test]
+    fn stopped_route_queue_hands_back_every_task_in_batch() {
+        let config = Arc::new(crate::config::Config::parse_fixture("").expect("空配置合法"));
+        let (tx, rx) = sync_channel(1);
+        drop(rx); // 接收端已消失 → 队列断了
+        let worker = RouteWorker {
+            tx,
+            busy: Arc::new(AtomicUsize::new(0)),
+            stats: QueueStats::new("route", 1),
+        };
+
+        let dropped = worker.enqueue(vec![task("a", Arc::clone(&config)), task("b", config)]);
+        // 断了之后不能 break 掉整批：剩下的任务同样是「受理了没结局」。
+        assert_eq!(dropped.len(), 2, "队列已断时整批任务都要交回收尾");
+        assert_eq!(dropped[0].task_id, "a");
+        assert_eq!(dropped[1].task_id, "b");
+        assert_eq!(worker.busy(), 0);
     }
 }

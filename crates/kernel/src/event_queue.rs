@@ -254,7 +254,22 @@ pub fn drain_events<S: Store + Send + 'static>(
                         );
                     }
                 }
-                worker.enqueue(actions);
+                let dropped = worker.enqueue(actions);
+                if !dropped.is_empty() {
+                    // 队列满/已断而被丢掉的任务必须落结局，否则永远 `Pending`
+                    // （2026-11-09 审查 C1）。拒绝是罕见路径，多拿一次锁可以接受。
+                    let mut guard = bridge
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for task in dropped {
+                        let reason = acb_i18n::t!(
+                            "kernel.event_queue.task_dropped_queue_full",
+                            handler = task.handler
+                        );
+                        eprintln!("{}", reason);
+                        guard.finish_task(&task.task_id, None, Some(reason), None);
+                    }
+                }
 
                 if let Err(error) = result {
                     // 记不下来是真问题，说清楚，别装作没事。
