@@ -547,8 +547,14 @@ fn wait_for_stop<S: acb_kernel::Store + Send + 'static>(
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 bridge.drain_snapshot()
             };
+            // 排空判据必须覆盖所有「还没落盘的部分」：只在跑的轮次/任务不算完，
+            // 排队等开轮的、排队等 worker 的、已准备但还没入队的动作，都是
+            // 一退出就消失的东西（2026-11-09 审查 P0-4）。
             if last["active_turns"].as_u64() == Some(0)
+                && last["queued_turns"].as_u64() == Some(0)
+                && last["queued_tasks"].as_u64() == Some(0)
                 && last["running_tasks"].as_u64() == Some(0)
+                && last["pending_route_actions"].as_u64() == Some(0)
                 && worker.busy() == 0
             {
                 drained = true;
