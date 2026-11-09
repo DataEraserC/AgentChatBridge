@@ -589,6 +589,33 @@ test("endpoint 只认 host:port", () => {
   assert.throws(() => parseEndpoint("127.0.0.1:abc"), /port/)
 })
 
+test("执行模式（async / wait_ms）不能被归一化丢掉", () => {
+  // 2026-11-09 现场：opencode 侧 platform_call 两种模式都成功，send_message 一律
+  // 报「缺 async」；dsh 侧同样死在入参校验。原因是这里重建参数对象时只留了
+  // elements —— async 是桥的必填契约，丢一次就等于所有发送都发不出去。
+  assert.deepEqual(normalizeToolArgs("send_message", { text: "在的", async: false }), {
+    elements: [{ type: "text", text: "在的" }],
+    async: false,
+  })
+  assert.deepEqual(
+    normalizeToolArgs("send_message", { text: "在的", async: true, wait_ms: 5000 }),
+    { elements: [{ type: "text", text: "在的" }], async: true, wait_ms: 5000 },
+  )
+  assert.deepEqual(
+    normalizeToolArgs("send_message_to", { to: "qq:group/1", text: "喂", async: true }),
+    { elements: [{ type: "text", text: "喂" }], to: "qq:group/1", async: true },
+  )
+  // 没给就是不补：桥那边的报错比本地猜一个默认值安全（返回契约完全不同）。
+  assert.deepEqual(normalizeToolArgs("send_message", { text: "嗯" }), {
+    elements: [{ type: "text", text: "嗯" }],
+  })
+  // platform_call 走 default 分支透传，本来就是对的——钉住这个差异，别一起改坏。
+  assert.deepEqual(normalizeToolArgs("platform_call", { op: "group.mute", async: true }), {
+    op: "group.mute",
+    async: true,
+  })
+})
+
 test("text 是单段文本的糖，elements 才是本体", () => {
   assert.deepEqual(normalizeToolArgs("send_message", { text: "在的" }), {
     elements: [{ type: "text", text: "在的" }],

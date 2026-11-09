@@ -399,14 +399,19 @@ test("callBridge 把工具参数转成带票的 tool_call", async (t) => {
   // 手动设一个 ticket（模拟轮次中）。
   link.ticket = TICKET
 
-  const callPromise = callBridge(link, "send_message", { text: "收到" })
+  // async 是桥的必填契约，必须原样过桥——2026-11-09 现场所有 send_message
+  // 都死在「缺 async」上，就是因为共享归一化把它丢了。
+  const callPromise = callBridge(link, "send_message", { text: "收到", async: true })
 
   // 桥那边应该收到一个 tool_call 帧。
   const frame = await bridge.next()
   assert.equal(frame.frame, "tool_call")
   assert.equal(frame.ticket, TICKET)
   assert.equal(frame.tool, "send_message")
-  assert.deepEqual(frame.args, { elements: [{ type: "text", text: "收到" }] })
+  assert.deepEqual(frame.args, {
+    elements: [{ type: "text", text: "收到" }],
+    async: true,
+  })
 
   // 回一个 tool_result。
   bridge.socket.write(JSON.stringify({ frame: "tool_result", id: frame.id, result: { platform_id: "123" } }) + "\n")

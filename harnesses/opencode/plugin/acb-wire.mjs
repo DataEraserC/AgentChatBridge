@@ -794,13 +794,15 @@ export const ELEMENT_TYPES = [
  * 只做两件事：`send_message` / `send_message_to` 收 `elements`（`text` 是单段文本的糖），
  * 其余工具原样透传认识的字段。**不做语义校验**——房间对不对、票对不对，桥说了算，
  * 这里抢着判会把错误信息说不清楚。
+ *
+ * `async` / `wait_ms` 一律原样带走：它们是桥的必填契约，不是本地糖。
  */
 export function normalizeToolArgs(tool, args = {}) {
   const given = args && typeof args === "object" ? args : {}
 
   switch (tool) {
     case "send_message":
-      return { elements: elementsOf(given) }
+      return withExecMode({ elements: elementsOf(given) }, given)
     case "send_message_to": {
       if (!given.to || typeof given.to !== "string") {
         throw new BridgeError(
@@ -809,7 +811,7 @@ export function normalizeToolArgs(tool, args = {}) {
         )
       }
       // 跨会话发送已砍：to 只落在当前会话订阅的房间，没有 device 身份一说。
-      return { elements: elementsOf(given), to: given.to }
+      return withExecMode({ elements: elementsOf(given), to: given.to }, given)
     }
     case "ack_messages": {
       const ids = Array.isArray(given.ids) ? given.ids : []
@@ -825,6 +827,24 @@ export function normalizeToolArgs(tool, args = {}) {
     default:
       return stripUndefined(given)
   }
+}
+
+/**
+ * 带上执行模式（`async` 必填 / `wait_ms` 可选）。
+ *
+ * 2026-11-09 的 bug 就出在这里：以前这两个工具直接 `return { elements }`，
+ * 重建参数对象时把 async 丢了，于是每一次 send_message 都死在桥的
+ * 「缺 async」校验上；platform_call 走 default 分支原样透传，所以两种模式
+ * 都能用——表现不一致，根因是同一个函数。
+ *
+ * 缺 async 时**故意不补默认值**：桥要报错，让调用方显式选模式；本地猜一个
+ * 默认值会把「同步/异步」的返回契约悄悄改掉。
+ */
+function withExecMode(wire, given) {
+  for (const key of ["async", "wait_ms"]) {
+    if (given[key] !== undefined && given[key] !== null) wire[key] = given[key]
+  }
+  return wire
 }
 
 function elementsOf(args) {
