@@ -67,7 +67,7 @@
 | E2 | plan 三态化，45 篇打标签 | **drop** | 见 §5 | drop |
 | E3 | 变更单模板（一页） | **改判：并入 AGENTS.md** | 单独一页模板没人填；把「改了什么/怎么验/剩什么」写进提交尾注足够 | drop |
 | E4 | 三个可执行断言 | 照做（缩到 2 条） | 已做：AGENTS.md 行数预算、禁止本机配置状态入库。第三条「文档承诺必须有实现」无法自动判定，人工 review | done |
-| E5 | docs 构建长期红，信号被污染 | 照做 | 真因三处：① `issue/<id>` 不在反引号内被当 Vue 标签；② `${{NAME}}` 命中 Vue 插值；③ 表格单元格里的 `|` 把行内代码切断，`<toml>` 漏成标签。已修，本地 `vitepress build` 13s 通过 | done |
+| E5 | docs 构建长期红，信号被污染 | 照做 | 真因三处：① `issue/<id>` 不在反引号内被当 Vue 标签；② 双花括号变量写法命中 Vue 插值；③ 表格单元格里的 `\|` 把行内代码切断，`<toml>` 漏成标签。已修，本地 `vitepress build` 13s 通过 | done |
 
 ## 5. 改判记录（原方案 → 新方案 → 理由 → 何时翻回）
 
@@ -138,6 +138,42 @@
 **F1/F2/F3 顺序理由**：先断掉「第二写入口」（F1），再迁数据（F2/F3）。反过来的话，
 控制台还会继续往覆盖层写，迁完立即漂移。
 
+## 6b. 控制台前端（2026-11-09 用户追加）
+
+用户原话：「前端可以重写，希望多端都美观好用，插件配置也能在前端反映」。
+
+**现状（实测，不是印象）**：`crates/bridge/src/console.html` 1266 行，已有设计令牌
+（`--space-*`/`--text-*`）、`@media (max-width:720px)` 与 `@media (pointer:coarse)`。
+但**只有概览 tab 是成品**（卡片头、信息提示、刷新按钮）；sessions / feedback /
+plugins / config 四个 tab 顶部都挂着 `console.ui.pending.tab`「This tab is not
+localized yet.」，内容是裸渲染。插件 tab 只有 reload/unload，没有配置。
+
+所以这不是「从零重写」，是「把四个占位 tab 补成概览的质量」+「窄屏降级」。
+
+| id | 目标 | 判定 | 状态 |
+|---|---|---|---|
+| J1 | 四个 tab 与概览同等质量（卡片头、空态、错误态、刷新、可读的键值/表格） | 做：沿用现有令牌与 `.card` 结构，**不引入前端构建链** | next |
+| J2 | 多端可用：窄屏表格转「标签-值」卡片、导航可横滑、按钮达 44px | 做：与 J1 同一批改（同一套 CSS 与结构） | next |
+| J3 | 插件配置在前端可见可改（按插件声明的 schema 渲染表单） | **被 F5-L1 阻塞**：后端没有 `plugin_config` 表与 schema 接口，前端无东西可渲染。先做 F5-L1 | blocked |
+| J4 | 浅色/深色跟随系统 + 手动切换 | 做：现在写死 `color-scheme: dark`；三态（跟随/浅/深）存 localStorage | next |
+
+**为什么不引入 React/Vue + 构建链**：① `nix build` 现在是纯 Rust，加了前端构建就多一条
+node 依赖链，且产物要 `include_str!` 或额外打包；② 这个页面没有路由、没有共享状态树，
+五个 tab 的复杂度撑不起框架；③ 现有的设计令牌与组件 CSS 可以直接复用，重写等于把已经
+做对的部分（触控尺寸、断点、i18n 属性）扔掉重来。
+**翻回条件**：若 J1 做完后仍需在页面内做多步表单流（比如插件 schema 嵌套条件字段 +
+实时校验 + 依赖联动），再考虑引入轻量框架（此时应单独起一个 crate 托管静态资源）。
+
+**顺序**：J1+J2+J4 一批（纯前端，不动后端）→ F5-L1（后端表与 schema）→ J3。
+
+## 6c. 插件配置与存储（L1 / L2）
+
+见 §5「D3/D5」。要点：L1 的验收是「`issue.tools` 的三个配置项从 toml 搬进库，改一次
+不重启桥生效」；L2 的验收是「写一个只依赖插件接口的示例插件，全程零改动
+`crates/kernel` 业务代码」。J3 的插件配置表单直接吃 L1 的 schema。
+
+
+
 ## 7. 安全批（按可利用性）
 
 | id | 问题 | 判定 | 状态 |
@@ -161,16 +197,17 @@
 ## 9. 建议执行顺序
 
 ```
-已完成：A2 A3 B2 B3 B4 + 门禁假红
-下一轮：C1 C3（一行级）+ A4（TLS/cookie/CSRF，用户要用远程）
-再下轮：B1 B5（结构性）+ F1（断「控制台写覆盖层」这条第二写入口）
-之后：F2 F3（会话与权限进库）→ F4 F5-L1（插件配置闭环）→ F5-L2（插件自带存储）
+已完成：A2 A3 B2 B3 B4 C1 C3 E5 + 门禁假红
+下一轮：A4（TLS/cookie/CSRF，用户要用远程）+ G1（昵称剥换行，成本最低）
+再下轮：J1 J2 J4（四个占位 tab 补成成品 + 窄屏降级 + 深浅色）
+之后：B1 B5（结构性）+ F1（断「控制台写覆盖层」这条第二写入口）
+再后：F2 F3（会话与权限进库）→ F5-L1（插件配置闭环）→ J3（插件配置表单）→ F5-L2
 hold：B6 F7 E2 G6（等条件，见 §5）
 ```
 
 理由：先把「静默丢消息/卡死」清掉（用户感知最强、修复最确定），再断第二写入口（F1），
-再做迁移（F2/F3）。插件 L1 排在 F2/F3 之后，因为它要复用同一套「库里读配置」的机制——
-先有机制再有插件，顺序反了要写两遍。
+再做迁移（F2/F3）。前端 J1/J2/J4 不动后端，可以并行插队；J3 必须等 F5-L1，否则前端
+没有 schema 可渲染。
 
 ## 10. 分支与推送状态
 
@@ -196,25 +233,42 @@ hold：B6 F7 E2 G6（等条件，见 §5）
 `--config skip_children=true`，门禁只判本次改动碰过的文件。这条属于「门禁必须可判定、
 不许假红」，记在 E4 名下。
 
+| `crates/kernel/src/route_worker.rs` | `enqueue` 返回被拒任务，队列断掉时整批交回（不 `break`） | C1 |
+| `crates/kernel/src/event_queue.rs` | 拿到被拒任务后落 `failed` 并写原因 | C1 |
+| `crates/kernel/src/engine.rs` | 启动 `reclaim_orphan_tasks`：遗留 `pending/running` 置 `unknown` | C3 |
+| `crates/kernel/tests/task_recovery.rs` | 新增：崩溃遗留任务变 `unknown`；已闭环的不动；排空快照不再计数 | C3 验收 |
+| `deploy/verify.sh` | harness 测试子进程设 `SAFE_DELETE_ENABLED=0`（沙箱批量删除拦截会造成假红） | 环境 |
+| `docs/plan/self-iteration-adversarial-review.md` 等 3 份 | 修 Vue 模板误解析（裸 `<id>`、双花括号插值、表格里含 `\|` 的行内代码） | E5 |
+
+`docs` 工作流长期红，真因不是构建环境，是文档里三处写法被 Vue 编译器当模板解析。
+本地 `vitepress build` 13 秒就能验，**不必等 CI**——这条已写进 `AGENTS.md` 的坑清单。
+
 验证：`./deploy/verify.sh` — 见 §12。
 
 ## 12. 验证证据
 
-`./deploy/verify.sh`（625s，退出码 0）：
+`./deploy/verify.sh`（37s，退出码 0）：
 
 ```
-fmt            OK   14 个文件格式正确
-test           OK   通过 1090
+fmt            OK   4 个文件格式正确
+test           OK   通过 1092
 node           OK   5 个 harness，144 条通过
 guards         OK   3 条约束通过
 全部通过。
 ```
 
+`cd docs && node node_modules/vitepress/bin/vitepress.js build` → `build complete in 13.26s`。
+
+CI：push `2c372f3..2c12de8` 后 `verify` 工作流 **首次跑绿**；`docs` 因上述三处写法红，
+本轮修完待下次 push 复验。
+
 中间结果：
 
-- `cargo test -p acb-kernel --test task_flow` → 6 passed（含新增 `panicking_plugin_task_…`）
-- `cargo test -p acb-kernel --test drain_flow --test turn_flow --test endpoint_flow --test task_flow` → 4 + 19 + 6 + 81 全绿
-- 基线是 1089 条；1090 = 基线 + 本轮新增 1 条
+- `cargo test -p acb-kernel --test task_recovery` → 1 passed（崩溃遗留任务变 unknown）
+- `cargo test -p acb-kernel --lib route_worker` → 2 passed（满队列交回、队列断掉整批交回）
+- `cargo test -p acb-kernel` → 31 个测试目标全绿
+- 基线 1090 → 1092：route_worker 新增 1 条（满队列交回；队列断掉那条与原用例合并计数），
+  task_recovery 新增 1 条
 
 **注意**：`cargo fmt --all` 会格式化全仓库（本仓库历史文件并不都合 rustfmt），
 不要用它；只对改动的文件跑 `rustfmt`，或者依赖门禁的 `skip_children` 逐文件检查。
