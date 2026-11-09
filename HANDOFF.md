@@ -27,7 +27,7 @@
 - 目标：让 DSH / WorkBuddy / Trae / Codex / OpenClaw 这类 **harness**（AI 运行时），通过统一协议接上 QQ / KOOK / Discord / Telegram 这类**聊天平台**。
 - core 只管跨平台跨 harness 都成立的部分；harness 工具、平台特有事件不归 core 管，但 core 必须有抽象承载住、不能丢。
 - 技术栈：**Rust**（kernel + proto + adapters + bridge），harness 驱动是 **Node.js**（`harnesses/dsh/`、`harnesses/opencode/`）。
-- 构建：**nix**（`flake.nix` + `buildRustPackage`）。验证用 `nix build .#acb-bridge`（会自动跑 cargo test）。
+- 构建：**nix**（`flake.nix` + `buildRustPackage`）。验证用 `./deploy/verify.sh`（fmt + `cargo test` + harness 测试 + guards）；`nix build .#acb-bridge` **不跑测试**（`flake.nix` 里 `doCheck = false`）。
 
 ### 核心对象模型（ADR-0017 定案，五个一等对象）
 
