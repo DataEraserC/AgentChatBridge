@@ -48,6 +48,14 @@ class ControllableDsh {
     return { selected: choice }
   }
 
+  // 探活用：驱动在「模型接口超时」后会问一句 dsh 还活着吗。
+  // 默认答「活着」；要演 dsh 卡死就设 probeError。
+  async listSessions() {
+    this.probes = (this.probes ?? 0) + 1
+    if (this.probeError) throw this.probeError
+    return this.sessions
+  }
+
   async prompt(sessionId, content) {
     if (this.promptErrors.length) throw new Error(this.promptErrors.shift())
     this.prompts.push({ sessionId, content })
@@ -808,6 +816,97 @@ test("没有后备链时不重试，失败照常上报", async (t) => {
     "内容审核要标成模型侧失败，不能标成后端不可达",
   )
   assert.equal(dsh.prompts.length, 1, "没有后备链就不该重试")
+  await runPromise
+})
+
+test("selectModel 超时但 dsh 还活着：算模型侧失败，换后备模型", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const realSelect = dsh.selectModel.bind(dsh)
+  dsh.selectModel = async (sessionId, choice) => {
+    if (choice.model === "primary") {
+      // 上游模型没就绪时 selectModel 会一直挂到超时：dsh 的 HTTP 面是好的。
+      throw new DshError("unreachable", "cannot reach dsh at …/session/selectModel: ETIMEDOUT", {
+        errno: "ETIMEDOUT",
+        endpoint: "session/selectModel",
+      })
+    }
+    return realSelect(sessionId, choice)
+  }
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/primary",
+        model_fallbacks: ["trae/backup"],
+      },
+    }),
+    link,
+  )
+
+  await waitFor(() => dsh.prompts.length === 1, "应当换 backup 把这一轮跑起来")
+  assert.equal(dsh.probes, 1, "模型接口超时后要探活确认 dsh 还活着")
+  assert.deepEqual(
+    dsh.modelPicks.map((pick) => pick.model),
+    ["backup"],
+    "主模型超时被跳过，只有 backup 钉成功",
+  )
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.equal(turnEnd.error, undefined, "backup 跑完就不该报失败")
+  await runPromise
+})
+
+test("selectModel 超时且探活也失败：归后端不可达，不换模型", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  dsh.selectModel = async () => {
+    throw new DshError("unreachable", "cannot reach dsh at …/session/selectModel: ETIMEDOUT", {
+      errno: "ETIMEDOUT",
+      endpoint: "session/selectModel",
+    })
+  }
+  // 连 session/list 都超时 = dsh 自己卡死了，这时候换模型毫无意义。
+  dsh.probeError = new DshError("unreachable", "cannot reach dsh at …/session/list: ETIMEDOUT", {
+    errno: "ETIMEDOUT",
+    endpoint: "session/list",
+  })
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/primary",
+        model_fallbacks: ["trae/backup"],
+      },
+    }),
+    link,
+  )
+
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.deepEqual(
+    turnEnd.failure,
+    { component: "backend", class: "unreachable" },
+    "探活失败就是后端不可达，不能报成模型超时",
+  )
+  assert.equal(dsh.modelPicks.length, 0, "后端挂了不该再换模型试")
   await runPromise
 })
 

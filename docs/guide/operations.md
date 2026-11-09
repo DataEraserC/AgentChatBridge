@@ -101,3 +101,13 @@ grep -aE "content-blocked|dsh\.unreachable|ETIMEDOUT" ~/.local/state/acb/bridge.
 - `dsh.unreachable / ETIMEDOUT`（`selectModel`）→ dsh 刚重启的冷启动窗口，
   30 秒～2.5 分钟内 `agentAvailable=false`，等一会儿或再发一次。
 - 都没有 → 用 `deploy/acb-status.sh` 看连接和端口。
+
+控制台「依赖健康」表怎么读（3100 → 概览）：
+
+- **harness 行**说的是「桥↔harness 的通道通不通」，看 `通道 N 条`。状态为「正常」+
+  最后一句话是 `无法连接 ... selectModel ETIMEDOUT` 时，dsh 本身是活的，问题在模型侧。
+- **model 行**说的才是「上游模型能不能用」。`内容被审核拦截` / `被限流` /
+  `模型接口超时` 都只落在这行，不会把 harness 标红（2026-11-09 起）。
+- harness 行转「不可用」只有三种来路：`未启动`（启动宽限期内一次连接都没建）、
+  `通道断开`（最后一条连接关闭且达阈值）、`无法连接`（没有连接时的连不上）。
+  看到这行红，才该去重启 dsh。

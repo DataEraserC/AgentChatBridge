@@ -512,10 +512,38 @@ impl DependencyRegistry {
         }
     }
 
-    /// harness 明确报告后端失败：把它记成 down，class 用 harness 给的分类。
-    /// 连接状态仍由 endpoint 维护；这是「harness 连着但后端不可用」的叠加信号。
+    /// harness 报告后端失败。
+    ///
+    /// **通道还在（有打开的连接）时只记录、不改状态**：一轮没跑完不等于「连不上」，
+    /// 真正的通道中断由 `harness_connection_closed` 负责。早先这里无条件 `mark_down`，
+    /// 于是 `POST /api/session/selectModel` 超时（上游模型没就绪）会把 dsh 从 up
+    /// 打成 down，面板上显示「dsh 不可用」——而桥↔dsh 的连接一条都没断
+    /// （2026-11-09 连续两次据此误判「dsh 挂了」）。连接状态是更强的证据，不能被
+    /// 轮次级失败推翻。
     pub fn harness_turn_down(&self, id: &str, class: &str, detail: &str, now: i64) {
-        self.mark_down(DependencyKind::Harness, id, class, detail, now);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, DependencyKind::Harness, id, now);
+        let key = Key {
+            kind: DependencyKind::Harness,
+            id: id.to_owned(),
+        };
+        let channel_open = inner
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.open_connections > 0);
+        let notice = if channel_open {
+            note_failure_locked(&mut inner, &key, class, detail, now);
+            None
+        } else {
+            record_failure_locked(&mut inner, &key, class, detail, now)
+        };
+        drop(inner);
+        if let Some(event) = notice {
+            self.emit(event);
+        }
     }
 
     /// harness 报告模型失败：更新模型条目。
@@ -777,27 +805,7 @@ fn record_failure_locked(
 ) -> Option<NoticeEvent> {
     let threshold = inner.failure_threshold;
     let window_ms = inner.failure_window_ms;
-    let count = {
-        let entry = inner.entries.get_mut(key).expect("调用前已 upsert");
-        entry.last_error = Some(detail.to_owned());
-        entry.last_class = Some(class.to_owned());
-        while let Some(front) = entry.failures.front() {
-            if now.saturating_sub(front.at) > window_ms {
-                entry.failures.pop_front();
-            } else {
-                break;
-            }
-        }
-        entry.failures.push_back(FailureRecord {
-            at: now,
-            class: class.to_owned(),
-        });
-        entry
-            .failures
-            .iter()
-            .filter(|failure| failure.class == class)
-            .count() as u64
-    };
+    let count = note_failure_locked(inner, key, class, detail, now);
     if count < threshold {
         return None;
     }
@@ -811,6 +819,33 @@ fn record_failure_locked(
         entry.hint = Some(hint);
     }
     mark_down_locked(inner, key, class, detail, now)
+}
+
+/// 只记录失败（刷新 `last_error` / 滑窗计数），不判状态。返回窗口内同 class 的条数。
+///
+/// 给「状态不该由这次失败决定」的场景用：harness 通道还开着时，轮次级失败只
+/// 该让排障看到最后一句话，不该把整条依赖标红。
+fn note_failure_locked(inner: &mut Inner, key: &Key, class: &str, detail: &str, now: i64) -> u64 {
+    let window_ms = inner.failure_window_ms;
+    let entry = inner.entries.get_mut(key).expect("调用前已 upsert");
+    entry.last_error = Some(detail.to_owned());
+    entry.last_class = Some(class.to_owned());
+    while let Some(front) = entry.failures.front() {
+        if now.saturating_sub(front.at) > window_ms {
+            entry.failures.pop_front();
+        } else {
+            break;
+        }
+    }
+    entry.failures.push_back(FailureRecord {
+        at: now,
+        class: class.to_owned(),
+    });
+    entry
+        .failures
+        .iter()
+        .filter(|failure| failure.class == class)
+        .count() as u64
 }
 
 /// 把条目置为 `down`，必要时写迁移并返回带外事件。调用方持有 `inner` 锁。
@@ -921,6 +956,9 @@ fn entry_json(entry: &Entry) -> Value {
         "lastError": entry.last_error,
         "lastErrorClass": entry.last_class,
         "attempts": entry.attempts,
+        // 当前打开的连接数。harness 行的状态由它决定：有连接就是通道在，
+        // 面板要把它露出来，否则「up 但一轮轮失败」看不出原因。
+        "openConnections": entry.open_connections,
         "accountOnline": entry.account_online,
         "accountGood": entry.account_good,
         "version": entry.version.as_ref().map(version_json),
@@ -1252,6 +1290,67 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(event);
         }
+    }
+
+    #[test]
+    fn harness_turn_failure_cannot_override_an_open_channel() {
+        let registry = DependencyRegistry::from_config(&harness_config());
+        registry.harness_connection_opened("dsh", 100);
+        assert_eq!(
+            entry(&registry.snapshot(None), "dsh")["state"],
+            "up",
+            "连接建立就是 up"
+        );
+
+        // 上游模型没就绪时 selectModel 会一直挂着直到超时：这种轮次级失败
+        // 反复出现也不能把 dsh 标红——通道一条都没断。
+        for offset in 0..5 {
+            registry.harness_turn_down(
+                "dsh",
+                "unreachable",
+                "cannot reach dsh at /api/session/selectModel: ETIMEDOUT",
+                101 + offset,
+            );
+        }
+        let snapshot = registry.snapshot(None);
+        let dsh = entry(&snapshot, "dsh");
+        assert_eq!(dsh["state"], "up", "通道还在就不改状态");
+        assert_eq!(
+            dsh["lastErrorClass"], "unreachable",
+            "但最后一句话要留下来给排障看"
+        );
+        assert!(
+            dsh["lastError"]
+                .as_str()
+                .is_some_and(|e| e.contains("selectModel"))
+        );
+        assert_eq!(
+            snapshot["transitions"].as_array().unwrap().len(),
+            1,
+            "只应有连接建立那一条迁移环：{snapshot}"
+        );
+
+        // 通道真的断了（最后一条连接关闭，第 3 次达阈值）才转 down。
+        for offset in 0..3 {
+            registry.harness_connection_closed("dsh", "socket closed", 200 + offset);
+        }
+        let snapshot = registry.snapshot(None);
+        assert_eq!(entry(&snapshot, "dsh")["state"], "down");
+        assert_eq!(entry(&snapshot, "dsh")["lastErrorClass"], "closed");
+    }
+
+    #[test]
+    fn harness_turn_failure_without_a_channel_uses_the_threshold() {
+        let registry = DependencyRegistry::from_config(&harness_config());
+        registry.harness_turn_down("dsh", "unreachable", "connect ECONNREFUSED", 100);
+        assert_eq!(
+            entry(&registry.snapshot(None), "dsh")["state"],
+            "unknown",
+            "没有连接时按阈值累计：单次不 down"
+        );
+        registry.harness_turn_down("dsh", "unreachable", "connect ECONNREFUSED", 101);
+        registry.harness_turn_down("dsh", "unreachable", "connect ECONNREFUSED", 102);
+        assert_eq!(entry(&registry.snapshot(None), "dsh")["state"], "down");
     }
 
     #[test]

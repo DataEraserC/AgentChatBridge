@@ -478,6 +478,9 @@ class TurnDriver {
         const modelRef = attempts[index]
         // 每一轮尝试都从零开始计：换模型重放的前提是「上一次什么都没说出去」。
         this.turnToolCalls = 0
+        // 上一轮的失败归类不能漏到这一轮：这一轮抛错时外层会沿用它。
+        failure = null
+        failureInfo = null
         const label = modelRef ? `${modelRef.provider}/${modelRef.model}` : t("dsh.model_default")
         try {
           await this.#pinModel(sessionId, modelRef)
@@ -485,7 +488,7 @@ class TurnDriver {
           // 钉不上（模型没在 dsh 的 catalog 里：写错了，或这台机器没加过）：
           // 跳过它去试下一个，别让链里一个错项把后面能用的模型全废掉。
           failure = error?.message ?? String(error)
-          failureInfo = classifyTurnError(error)
+          failureInfo = await this.#classifyPinFailure(error)
           this.log("error", t("dsh.turn_failed", { error: failure }))
           if (index + 1 >= attempts.length || !isRetryableModelFailure(failureInfo)) throw error
           const next = attempts[index + 1]
@@ -582,7 +585,9 @@ class TurnDriver {
       }
     } catch (error) {
       failure = error?.message ?? String(error)
-      failureInfo = classifyTurnError(error)
+      // 循环里已经判过（模型接口超时还会先探活 dsh），别用一个只看错误码的
+      // 函数把它覆盖掉——那会把探活得出的「其实是后端挂了」重新说成模型问题。
+      failureInfo = failureInfo ?? classifyTurnError(error)
       this.log("error", t("dsh.turn_failed", { error: failure }))
       // 同上：异常也不丢映射，避免「一轮失败就换一个新会话」。
     } finally {
@@ -722,6 +727,31 @@ class TurnDriver {
       }
       // transport / auth / protocol 失败原样上抛：不能把它们都报成「模型不存在」。
       throw error
+    }
+  }
+
+  /**
+   * 钉模型失败时的归因。除了按错误码分，还要为「接口超时」多问一句：
+   * dsh 的 HTTP 面到底还活着吗？
+   *
+   * 为什么非要探一下：selectModel / prompt 要等上游模型就绪才回话，
+   * 模型冷启动期间它们会一直挂到超时，而 session/list 秒回。只看超时这一个
+   * 事实，分不清「dsh 卡死」和「dsh 正常、模型没就绪」——这两种情况该修的
+   * 东西完全相反（重启 dsh vs 换模型），面板也不该把 dsh 标红。
+   */
+  async #classifyPinFailure(error) {
+    const info = classifyTurnError(error)
+    if (info?.class !== "model_timeout") return info
+    try {
+      await this.dsh.listSessions({ timeoutMs: MODEL_PROBE_TIMEOUT_MS })
+      return info
+    } catch (probeError) {
+      // 连 session/list 都超时/拒连：这是 dsh 自己的问题，原样归后端。
+      this.log(
+        "warn",
+        t("dsh.model_probe_failed", { error: probeError?.message ?? String(probeError) }),
+      )
+      return classifyTurnError(probeError) ?? { component: "backend", class: "unreachable" }
     }
   }
 
@@ -945,6 +975,13 @@ function normalizeErrorCode(code) {
     .replaceAll("_", "-")
 }
 
+/// 这些接口要等上游模型就绪才回话（selectModel 在 agentAvailable=false 时会一直挂着），
+/// 所以它们超时不能当成「dsh 连不上」。
+const MODEL_GATED_ENDPOINTS = new Set(["session/selectModel", "session/prompt"])
+
+/// 探活用的短超时：只想知道 dsh 的 HTTP 面还活着，不想再等一整个 15 秒。
+const MODEL_PROBE_TIMEOUT_MS = 3_000
+
 /// #pinModel 抛出的错误：selectModel 对照 catalog 失败 = 模型未配置。
 /// dsh 自身不可达/鉴权失败归到后端。
 function classifyTurnError(error) {
@@ -953,6 +990,19 @@ function classifyTurnError(error) {
     return { component: "model", class: "model_unconfigured" }
   }
   if (code === "unreachable" || code === "closed") {
+    // 同一个 "unreachable" 里混了两种完全相反的事：
+    //   ECONNREFUSED/ECONNRESET  → dsh 的 HTTP 面没了，后端故障；
+    //   ETIMEDOUT + 模型相关接口 → dsh 活着，只是这个接口在等上游模型。
+    // 后者归模型层：面板不该把 dsh 标红（2026-11-09 误判两次的根因），
+    // 而且它值得换一个模型重试。
+    const errno = String(error?.errno ?? "").toUpperCase()
+    if (
+      code === "unreachable" &&
+      errno === "ETIMEDOUT" &&
+      MODEL_GATED_ENDPOINTS.has(error?.endpoint)
+    ) {
+      return { component: "model", class: "model_timeout" }
+    }
     return { component: "backend", class: code }
   }
   if (code === "auth-failed" || code === "unauthorized" || code === "forbidden") {
@@ -1004,6 +1054,7 @@ function isRetryableModelFailure(info) {
     "rate_limited",
     "content_blocked",
     "overloaded",
+    "model_timeout",
   ].includes(info.class)
 }
 

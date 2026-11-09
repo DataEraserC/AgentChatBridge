@@ -641,7 +641,7 @@ function renderDependencies(data, stale, error, detail) {
     return `<tr>
       <td class="wrap" data-label="${label("console.deps.col.id")}"><code>${esc(dep.id)}</code>${dep.version ? `<br><span class="muted">${esc(depVersion(dep))}</span>` : ""}</td>
       <td data-label="${label("console.deps.col.kind")}">${esc(depLabel("console.deps.kind.", dep.kind))}</td>
-      <td data-label="${label("console.deps.col.state")}"><span class="pill ${depStateClass(dep.state)}">${esc(depLabel("console.deps.state.", dep.state))}</span></td>
+      <td data-label="${label("console.deps.col.state")}"><span class="pill ${depStateClass(dep.state)}">${esc(depLabel("console.deps.state.", dep.state))}</span>${dep.kind === "harness" ? `<br><span class="muted">${esc(t("console.deps.channel", { count: dep.openConnections ?? 0 }))}</span>` : ""}</td>
       <td data-label="${label("console.deps.col.account")}">${esc(depAccount(dep))}</td>
       <td data-label="${label("console.deps.col.since")}">${esc(depTime(dep.since))}</td>
       <td data-label="${label("console.deps.col.lastOkAt")}">${esc(dep.lastOkAt ? depTime(dep.lastOkAt) : t("console.deps.never"))}</td>

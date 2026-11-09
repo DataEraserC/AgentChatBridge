@@ -221,5 +221,6 @@
   "dsh.model_fallback": "model fallback: {from} rejected ({reason}); retrying this turn with {to}",
   "dsh.model_fallback_ok": "model fallback worked: {model} finished turn {ticket} on attempt {attempt}",
   "dsh.model_fallback_skipped_spoke": "not switching model: this turn already made {calls} bridge call(s); replaying would double-post",
-  "dsh.model_fallback_invalid": "ignoring bad fallback model {value}: {error}"
+  "dsh.model_fallback_invalid": "ignoring bad fallback model {value}: {error}",
+  "dsh.model_probe_failed": "model endpoint timed out and dsh liveness probe failed too: {error}"
 }

@@ -189,10 +189,15 @@ function wrapArgs(method, payload) {
 // ---------------------------------------------------------------------------
 
 export class DshError extends Error {
-  constructor(code, message) {
+  constructor(code, message, extra = {}) {
     super(message)
     this.name = "DshError"
     this.code = code
+    // `errno` 是底层 transport 的真实错误码（ECONNREFUSED / ETIMEDOUT / …），
+    // `endpoint` 是被调用的 dsh 接口。上层要靠这两个字段区分「dsh 连不上」与
+    // 「dsh 连得上、但这个接口在等上游模型」——只按 code 分不出来。
+    if (extra.errno !== undefined) this.errno = extra.errno
+    if (extra.endpoint !== undefined) this.endpoint = extra.endpoint
   }
 }
 
@@ -299,7 +304,7 @@ export class DshClient {
   }
 
   /** unary RPC：POST /api/<endpoint>，解出 server-response 的结果槽。 */
-  async callUnary(method, payload = {}) {
+  async callUnary(method, payload = {}, { timeoutMs } = {}) {
     const endpoint = endpointOf(method)
     const rpcId = randomUUID()
     const message = {
@@ -310,7 +315,10 @@ export class DshClient {
     }
     // 只对可安全重放的方法重试；prompt/create 这类重发会产生重复副作用，保持单次。
     const retryDelaysMs = REPLAYABLE_ENDPOINTS.has(endpoint) ? this.retryDelaysMs : []
-    const response = await this.#fetchWithAuth(`/api/${endpoint}`, message, retryDelaysMs)
+    const response = await this.#fetchWithAuth(`/api/${endpoint}`, message, retryDelaysMs, {
+      endpoint,
+      timeoutMs,
+    })
     const full = await response.json()
     if (!full || full.type !== "server-response" || full.rpcId !== rpcId || !full.result) {
       throw new DshError("protocol", t("dsh.bad_server_response", { endpoint }))
@@ -327,7 +335,7 @@ export class DshClient {
     return full.result.value ?? full.result
   }
 
-  async #fetchWithAuth(path, body, retryDelaysMs = []) {
+  async #fetchWithAuth(path, body, retryDelaysMs = [], { endpoint, timeoutMs } = {}) {
     const headers = { "content-type": "application/json" }
     if (this.hasAuth()) {
       const cookie = await this.ensureAuth()
@@ -337,8 +345,9 @@ export class DshClient {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      timeoutMs: this.timeoutMs,
+      timeoutMs: timeoutMs ?? this.timeoutMs,
       retryDelaysMs,
+      endpoint,
     })
     // 401 = 鉴权失效（dsh 重启 / 密钥对不上），重铸一次再试。
     // 这次重试不叠加 transport 退避：鉴权已经换新，再失败就按真实错误上抛。
@@ -350,15 +359,16 @@ export class DshClient {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        timeoutMs: this.timeoutMs,
+        timeoutMs: timeoutMs ?? this.timeoutMs,
+        endpoint,
       })
     }
     return res
   }
 
-  /** 列会话。 */
-  async listSessions() {
-    const result = await this.callUnary("session/list", {})
+  /** 列会话。`timeoutMs` 用于探活：不传就用客户端默认超时。 */
+  async listSessions({ timeoutMs } = {}) {
+    const result = await this.callUnary("session/list", {}, { timeoutMs })
     return result.items ?? []
   }
 
@@ -558,10 +568,18 @@ function sleep(ms) {
  *
  * 传入 retryDelaysMs 时只重试 transport 错误（连接拒绝/重置/超时/断管），最多
  * 1 + 重试延迟数 次；重试耗尽后统一变成 DshError("unreachable")，消息带目标地址与 errno。
+ * `endpoint` 只用于归因（哪个接口挂了），错误上原样带出去。
  */
 function httpRequest(
   urlStr,
-  { method = "GET", headers = {}, body, timeoutMs = 15_000, retryDelaysMs = [] } = {},
+  {
+    method = "GET",
+    headers = {},
+    body,
+    timeoutMs = 15_000,
+    retryDelaysMs = [],
+    endpoint,
+  } = {},
 ) {
   let attempt = 0
   const run = () =>
@@ -578,6 +596,7 @@ function httpRequest(
           errno: error?.code ?? "transport",
           error: error?.message ?? String(error),
         }),
+        { errno: error?.code ?? "transport", endpoint },
       )
     })
   return run()
