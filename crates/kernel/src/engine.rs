@@ -888,7 +888,7 @@ impl<S: Store> Bridge<S> {
         // 启动时把房间政策落一条审计：某群何时被放开必须可查。
         audit_grants_config(None, &config.grants);
         let policy: Arc<dyn Policy> = Arc::new(CorePolicy::new());
-        Self {
+        let mut bridge = Self {
             config,
             policy,
             store,
@@ -923,6 +923,58 @@ impl<S: Store> Bridge<S> {
             draining: false,
             config_version: 0,
             room_profiles: HashMap::new(),
+        };
+        // 上一次进程留下的未闭环任务必须先收尾，否则它们永远是 `running`：
+        // `tasks op=wait` 等到死，`drain_snapshot` 还会把它算作在跑，排空永远不完成。
+        bridge.reclaim_orphan_tasks();
+        bridge
+    }
+
+    /// 把上一次进程留下的 `Pending`/`Running` 任务置为 `Unknown`（2026-11-09 审查 C3）。
+    ///
+    /// `Pending`/`Running` 的语义是「**本进程**正在管这个任务」。进程崩溃/被杀之后，
+    /// 库里这些行没有任何人负责，但状态看起来还在跑。
+    ///
+    /// 为什么不是 `Failed`：出站尝试可能已经把消息发出去了，`exec` 也可能已经跑了一半；
+    /// 说「失败」是编，说「成功」更是编。`Unknown` 的既有语义就是「不知道，要核」，
+    /// 模型/运维能据此决定重试还是对账。
+    fn reclaim_orphan_tasks(&mut self) {
+        let open = match self.store.task_open() {
+            Ok(open) => open,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.engine.orphan_tasks_unreadable",
+                        error = error.to_string()
+                    )
+                );
+                return;
+            }
+        };
+        let mut reclaimed = 0usize;
+        for mut task in open {
+            task.status = TaskStatus::Unknown;
+            task.finished_at = Some(now_millis());
+            task.error = Some(acb_i18n::t!("kernel.engine.orphan_task_reason"));
+            if let Err(error) = self.store.task_update(&task) {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.engine.orphan_task_update_failed",
+                        id = task.id,
+                        error = error.to_string()
+                    )
+                );
+                continue;
+            }
+            reclaimed = reclaimed.saturating_add(1);
+        }
+        if reclaimed > 0 {
+            eprintln!(
+                "{}",
+                acb_i18n::t!("kernel.engine.orphan_tasks_reclaimed", count = reclaimed)
+            );
         }
     }
 
