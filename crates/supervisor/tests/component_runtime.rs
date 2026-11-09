@@ -717,20 +717,26 @@ kind = "process"
 fn stop_order_is_reverse_dependency_order() {
     let dir = temp_dir("order");
     let order = dir.0.join("order");
+    // 脚本装好 trap 之后自己写一行 ready：靠 sleep 猜「大概装好了」在并行跑
+    // 全套测试时不可靠（高负载下 sh 可能还没执行到 trap 行就被 TERM 杀掉，
+    // 于是 trap 的记账永远不写，断言只能看到空文件）。
+    let ready = dir.0.join("ready");
     let script_a = script(
         &dir.0,
         "alpha.sh",
         &format!(
-            "trap 'echo alpha >> \"{}\"; exit 0' TERM\nwhile :; do sleep 0.2; done",
-            order.display()
+            "trap 'echo alpha >> \"{}\"; exit 0' TERM\necho ready >> \"{}\"\nwhile :; do sleep 0.2; done",
+            order.display(),
+            ready.display()
         ),
     );
     let script_b = script(
         &dir.0,
         "beta.sh",
         &format!(
-            "trap 'echo beta >> \"{}\"; exit 0' TERM\nwhile :; do sleep 0.2; done",
-            order.display()
+            "trap 'echo beta >> \"{}\"; exit 0' TERM\necho ready >> \"{}\"\nwhile :; do sleep 0.2; done",
+            order.display(),
+            ready.display()
         ),
     );
     // 故意把依赖方写在前面，验证拓扑排序而不是声明顺序。
@@ -745,7 +751,7 @@ program = "/bin/true"
 name = "beta"
 enabled = true
 command = ["{}"]
-stop_timeout_secs = 1
+stop_timeout_secs = 5
 depends.requires = ["alpha"]
 [component.readiness]
 kind = "process"
@@ -757,7 +763,7 @@ startup_grace_secs = 0
 name = "alpha"
 enabled = true
 command = ["{}"]
-stop_timeout_secs = 1
+stop_timeout_secs = 5
 [component.readiness]
 kind = "process"
 interval_secs = 1
@@ -772,8 +778,21 @@ startup_grace_secs = 0
     wait_for(&mut manager, Duration::from_secs(3), |manager| {
         manager.pid("alpha").is_some() && manager.pid("beta").is_some()
     });
-    // 等两个脚本都装好 TERM trap。
-    thread::sleep(Duration::from_millis(250));
+    // 两个脚本都写出 ready 才发 TERM，否则测的就不是「停止顺序」而是调度运气。
+    let armed = Instant::now() + Duration::from_secs(10);
+    loop {
+        let count = fs::read_to_string(&ready)
+            .map(|text| text.lines().filter(|line| !line.is_empty()).count())
+            .unwrap_or(0);
+        if count >= 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < armed,
+            "两个假组件没在 10s 内进入就绪态，本用例无法证明停止顺序"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     manager.stop_all(now_ms());
 
     // 子进程是异步收尾的：stop_all 返回不代表假组件已经把 TERM 处理完、把行写进
