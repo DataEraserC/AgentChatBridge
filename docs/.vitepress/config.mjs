@@ -72,6 +72,7 @@ export default withMermaid({
             { text: '配置手册', link: '/guide/config' },
             { text: '网页控制台', link: '/guide/console' },
             { text: '日常使用', link: '/guide/talking' },
+            { text: '启停与体检', link: '/guide/operations' },
             { text: '排障手册', link: '/guide/troubleshooting' },
           ],
         },
