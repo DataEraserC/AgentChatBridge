@@ -61,6 +61,7 @@
 | C8 | `engine.rs:2916` | 审批命令写错（群内缺 nonce）或地点不对（不在 `approval_route` 里）一律 `return Ok(None)`：没订阅的房间彻底静默，订阅了的房间把 `/approve tk-…` 当普通消息喂给 agent | 照做：识别到命令就必回话（用法 / 拒绝原因 / 该去哪批）；`bt-` 整批不需要 nonce；审批消息里直接给可复制命令 | done |
 | C9 | 进程输出 | 桥与 launcher 的 stdout/stderr **不进 journal**（`_PID=61715/61716` 均 0 条），所有 `eprintln!` 诊断（队列拒绝、审批拒绝、投递失败）实际不可见 | 定去向：非 systemd 场景也要能留证 → 落 `<state>/logs/bridge.log`，与其它组件一致 | next |
 | C10 | `harnesses/dsh/src/driver.mjs` | dsh 重启后有一段 `agentAvailable=false` 的窗口（实测 30s～2.5min），此时 `session/selectModel` 会阻塞到 driver 的 15s 超时，**整轮 turn 直接 failed**；用户视角就是「dsh 挂了」（2026-11-09 12:15–12:19 连挂 4 轮） | 照做：轮前等 `agentAvailable` 就绪（带上限，别无限等）；`selectModel` 仍失败就降级为「沿用会话当前模型」继续本轮并 warn，不让整轮死 | next |
+| C11 | `engine.rs:6813` / `tickets.rs:506` | ① 票据的 `approval_route` 是**创建时快照**，事后补配置不会重算，旧 pending 票只能等过期（2026-11-09 `tk-70bb436f010762f8-2` 就是这么废的）；② 房间没配 `approval_route` 时静默回退适配器 `direct_room`（bot 自己的私聊，没人订阅、没人看），票据一路 pending 到过期，只留一行 stderr | 照做：① `pending_unannounced` 每次按当前 config 重算路由（或 route_unavailable 时重解析一次）；② 无路由时给申请会话回一条「本房间没配审批地点，请让管理员配 `[grants.rooms."<房间>"].approval_route`」，别让人干等 | next |
 
 ## 4. 批次 C：流程（原本 4 条）
 
