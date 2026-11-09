@@ -121,13 +121,14 @@ QQ 这一侧需要 OneBot 11 实现（NapCat / Lagrange / go-cqhttp 等）开出
 
 ## 验证
 
-```bash
-cargo test --workspace                    # 单元 + 调度 + 接入点
-cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
+一条命令跑全部机器可判定的检查（Rust 测试、harness 的 node 测试、格式、仓库约束）：
 
-node --test harnesses/opencode/test/*.test.mjs   # harness 适配器：协议层 28 + 插件逻辑 11
+```bash
+deploy/verify.sh          # 全部门禁；红了不许提交
+deploy/verify.sh --quick  # 提交前秒级自检（格式 + 仓库约束）
 ```
+
+参与开发前先读 [AGENTS.md](AGENTS.md)：里面有分层边界、提交规矩和本仓库的坑。
 
 ## 许可证
 
