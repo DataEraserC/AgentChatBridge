@@ -27,6 +27,8 @@ libc = "0.2"
 # 配置补丁用：在原 TOML 文档上外科手术式改键，注释排版不丢（ADR-0009）。
 # 版本跟 kernel 的 toml 0.8 同族（toml 0.8 内部就是它）。
 toml_edit = "0.22"
+# 和控制台补丁同一族；只用于把合并后的配置解析成 Value 再抽业务对象。
+toml = { workspace = true }
 
 [dev-dependencies]
 # 测试 fixture 只在这条 dev-dependency 开启 feature 后可见；生产构建不包含 dev-dependencies。

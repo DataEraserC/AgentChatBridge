@@ -5,6 +5,7 @@
 
 pub mod adapter;
 pub mod config;
+pub mod config_objects;
 pub mod deps;
 pub mod endpoint;
 pub mod engine;
@@ -43,6 +44,7 @@ pub use config::{
     Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput,
     WakePolicy, WakeVerdict,
 };
+pub use config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 pub use deps::{DependencyKind, DependencyRegistry, PlatformVersionInfo};
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
 pub use engine::{

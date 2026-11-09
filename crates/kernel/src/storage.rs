@@ -22,6 +22,7 @@ use acb_proto::{Element, Record, RecordKind, RoomId, Sender};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 use crate::engine::{TaskRecord, TaskStatus};
 use crate::grants::{
     AccountGrant, BotAdminGrant, GrantRule, GrantsConfig, RoomGrant, SystemAdminGrant,
@@ -747,6 +748,45 @@ pub trait ModelFallbacks {
     fn replace_model_fallbacks(&mut self, list: &[String]) -> Result<(), StorageError>;
 }
 
+/// 业务对象的落库接口：`connections` / `sessions` / `personas` / `memories` /
+/// `harnesses` 五类数组。
+///
+/// 为什么进库：这五类以前只能写在配置文件里，控制台为了能改它们，写了一份
+/// **按顶层 key 整体替换**的覆盖层 `90-console.toml`。结果是覆盖层悄悄盖住了
+/// base 和分片里的同名对象——实测吞掉过 9 条 plugin 授权，谁也看不见
+/// （见 `docs/plan/config-source-audit.md`）。库是唯一源之后，覆盖层没有存在的
+/// 理由，`config.toml` 只剩引导参数（2026-11-07 用户裁定）。
+///
+/// 存的是每一条的 TOML 原文（`[[sessions]]` 那一段），不是结构体的 JSON：
+/// 解析、默认值、密钥引用都还走原来那条路，两端不会各有一套字段。
+pub trait ConfigObjectsStore {
+    /// 读整份快照。
+    ///
+    /// `None` 表示**还没导入过**，不是「一条都没有」——两者必须分开，否则重启会把
+    /// 「用户把会话删空了」当成首次导入，又把文件里那份抄回来。
+    fn config_objects_load(&self) -> Result<Option<ConfigObjects>, StorageError>;
+
+    /// 整组替换（首次导入、整份恢复用）。写完置初始化标记。
+    fn config_objects_replace(&mut self, set: &ConfigObjects, at: i64) -> Result<(), StorageError>;
+
+    /// 写一条。同 `(kind, id)` 覆盖；`position` 只影响同类内部的顺序。
+    fn config_object_put(
+        &mut self,
+        kind: ConfigObjectKind,
+        id: &str,
+        toml: &str,
+        position: i64,
+        at: i64,
+    ) -> Result<(), StorageError>;
+
+    /// 删一条。返回之前有没有。
+    fn config_object_delete(
+        &mut self,
+        kind: ConfigObjectKind,
+        id: &str,
+    ) -> Result<bool, StorageError>;
+}
+
 /// 八样东西合起来。桥只依赖这一个约束，换后端只换实现。
 pub trait Store:
     Transcript
@@ -758,6 +798,7 @@ pub trait Store:
     + Tasks
     + Policies
     + ModelFallbacks
+    + ConfigObjectsStore
 {
 }
 
@@ -771,6 +812,7 @@ impl<T> Store for T where
         + Tasks
         + Policies
         + ModelFallbacks
+        + ConfigObjectsStore
 {
 }
 
@@ -801,6 +843,10 @@ pub struct MemoryStore {
     /// 有没有被写过。和 sqlite 的 `policy_initialized` 标记同一个意思：
     /// 「导入过一份空的」和「从没导入过」必须分得开，否则重启会把清空当成首次导入。
     policy_initialized: bool,
+    /// 五类业务对象（连接/会话/人格/记忆/harness）的整份快照。
+    config_objects: ConfigObjects,
+    /// 和 `policy_initialized` 一样：区分「导入过但是空的」与「从没导入」。
+    config_objects_initialized: bool,
 }
 
 impl MemoryStore {
@@ -1380,6 +1426,60 @@ impl ModelFallbacks for MemoryStore {
     fn replace_model_fallbacks(&mut self, list: &[String]) -> Result<(), StorageError> {
         self.model_fallbacks = list.to_vec();
         Ok(())
+    }
+}
+
+impl ConfigObjectsStore for MemoryStore {
+    fn config_objects_load(&self) -> Result<Option<ConfigObjects>, StorageError> {
+        Ok(self
+            .config_objects_initialized
+            .then(|| self.config_objects.clone()))
+    }
+
+    fn config_objects_replace(
+        &mut self,
+        set: &ConfigObjects,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.config_objects = set.clone();
+        self.config_objects_initialized = true;
+        Ok(())
+    }
+
+    fn config_object_put(
+        &mut self,
+        kind: ConfigObjectKind,
+        id: &str,
+        toml: &str,
+        position: i64,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        let items = self.config_objects.get_mut(kind);
+        let object = ConfigObject {
+            id: id.to_owned(),
+            toml: toml.to_owned(),
+        };
+        match items.iter().position(|item| item.id == id) {
+            Some(index) => items[index] = object,
+            None => {
+                let index = (position.max(0) as usize).min(items.len());
+                items.insert(index, object);
+            }
+        }
+        self.config_objects_initialized = true;
+        Ok(())
+    }
+
+    fn config_object_delete(
+        &mut self,
+        kind: ConfigObjectKind,
+        id: &str,
+    ) -> Result<bool, StorageError> {
+        let items = self.config_objects.get_mut(kind);
+        let before = items.len();
+        items.retain(|item| item.id != id);
+        self.config_objects_initialized = true;
+        Ok(items.len() != before)
     }
 }
 

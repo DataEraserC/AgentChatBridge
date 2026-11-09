@@ -33,6 +33,7 @@ use thiserror::Error;
 use crate::config::{
     ClockPolicy, Config, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy, WakeVerdict,
 };
+use crate::config_objects::ConfigObjects;
 use crate::deps::{DependencyKind, DependencyRegistry};
 use crate::grants::{
     self, AccessTarget, AccessTargetKind, GrantCapability, GrantDecision, GrantSubject,
@@ -2390,6 +2391,25 @@ impl<S: Store> Bridge<S> {
     /// 当前生效的后备模型链（控制台展示用）。
     pub fn model_fallbacks(&self) -> &[String] {
         &self.model_fallbacks
+    }
+
+    /// 库里的业务对象快照（连接/会话/人格/记忆/harness）。
+    ///
+    /// 控制台的结构化表单要拿它当底稿：表单改的是库里那一份，不是文件。
+    /// 还没导入过时返回空集——控制台读配置不能因为「首次导入没跑」而 500。
+    pub fn config_objects(&self) -> Result<ConfigObjects, crate::storage::StorageError> {
+        Ok(self.store.config_objects_load()?.unwrap_or_default())
+    }
+
+    /// 整组覆盖业务对象。写完只置标记，轮次边界生效。
+    ///
+    /// 和策略、后备链同一个时机：一轮里换会话列表会让同一轮前后看到两套订阅。
+    pub fn replace_config_objects(&mut self, objects: &ConfigObjects) -> Result<(), String> {
+        self.store
+            .config_objects_replace(objects, now_millis())
+            .map_err(|error| error.to_string())?;
+        self.pending_policy_reload = true;
+        Ok(())
     }
 
     /// 整份替换后备链。写完只置标记，轮次边界生效。

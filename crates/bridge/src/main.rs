@@ -32,6 +32,7 @@ use acb_plugin_process_provider::{ProcessProviderConfig, ProcessProviderLoader};
 use acb_plugin_process_tools::{ProcessNotifier, ProcessToolLoader};
 use acb_plugin_trusted::TrustedLoader;
 
+mod config_objects;
 mod config_patch;
 mod console;
 use console::Console;
@@ -94,6 +95,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     let config_dir = options.config_dir_path();
     let loaded = Config::load(Path::new(&options.config), Some(&config_dir))?;
+    // 先开库：业务对象（连接/会话/人格/记忆/harness）以库为准，配置里那五段只在
+    // 库为空时被导入一次。库打不开就别往下走——用内存悄悄跑起来比起不来更糟。
+    let mut store = SqliteStore::open(&loaded.config.storage.path)?;
+    let loaded = config_objects::sync(&mut store, Path::new(&options.config), &config_dir, loaded)?;
     let config = loaded.config;
     let sources = loaded.sources;
     let duplicate_rules = loaded.duplicate_rules;
@@ -180,9 +185,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         write_health_token(&console.token);
     }
 
-    // 先开库：库打不开就别往下走。宁可起不来，也别用内存悄悄跑起来——
-    // 那样它看着一切正常，直到你重启才发现什么都没留下。
-    let store = SqliteStore::open(&config.storage.path)?;
     let counts = store.counts()?;
     println!(
         "{}",

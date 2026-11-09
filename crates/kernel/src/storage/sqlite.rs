@@ -14,11 +14,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT,
-    ModelFallbacks, Note, NoteKey, NoteKind, Notes, Policies, PolicyEffect, PrunePlan, RecordDraft,
-    Recorded, SessionMap, SessionMaps, StorageError, TaskRecord, TaskStatus, Tasks, TopicStatus,
-    Transcript, Watermarks,
+    ConfigObjectsStore, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply,
+    Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind, Notes, Policies, PolicyEffect,
+    PrunePlan, RecordDraft, Recorded, SessionMap, SessionMaps, StorageError, TaskRecord,
+    TaskStatus, Tasks, TopicStatus, Transcript, Watermarks,
 };
+use crate::config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 use crate::grants::{
     AccountGrant, BotAdminGrant, GrantRule, GrantsConfig, RoomGrant, SystemAdminGrant,
 };
@@ -46,7 +47,11 @@ use crate::grants::{
 ///          桥把 TOML 里的 `[grants]` 一次性导入（见 `engine::sync_policy`）。
 /// 13 → 14：加 `model_fallbacks` 表——主模型被拒（内容审核 / 限流 / 下线）时
 ///          按顺序改用的后备模型。纯新增，不用搬数据；空表 = 不重试。
-pub const SCHEMA_VERSION: i64 = 14;
+/// 14 → 15：加 `config_objects` 表——连接/会话/人格/记忆/harness 五类业务对象
+///          从配置文件搬进库。存的是每一条的 TOML 原文，读出来拼回合并文档再解析。
+///          纯新增，不用搬数据；首次启动时桥把文件里那五段一次性导入
+///          （见 `config_objects::import_once`）。
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"
@@ -215,6 +220,21 @@ CREATE TABLE IF NOT EXISTS model_fallbacks (
     model_ref  TEXT PRIMARY KEY,     -- provider/model
     position   INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
+);
+
+-- 业务对象（schema 15）。连接/会话/人格/记忆/harness 从配置文件搬进库。
+--
+-- 一张表装五类，是因为它们的行为完全一样：按 id 唯一、整类替换、读出来要能
+-- 拼回 TOML。分五张表会得到五份一模一样的代码，还要五处一起改。
+-- payload 是**这一条的 TOML 原文**（`[[sessions]]` 那一段），不是结构体 JSON：
+-- 解析、默认值、`token = { secret = ... }` 的引用解析都走原来那条路。
+CREATE TABLE IF NOT EXISTS config_objects (
+    kind       TEXT NOT NULL,        -- connection | session | persona | memory | harness
+    id         TEXT NOT NULL,        -- 对象自己的 id
+    payload    TEXT NOT NULL,        -- 含 [[kind]] 表头的 TOML 原文
+    position   INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, id)
 );
 "#;
 
@@ -2419,6 +2439,131 @@ impl ModelFallbacks for SqliteStore {
                 .map_err(io_error)?;
         }
         transaction.commit().map_err(io_error)?;
+        Ok(())
+    }
+}
+
+impl ConfigObjectsStore for SqliteStore {
+    fn config_objects_load(&self) -> Result<Option<ConfigObjects>, StorageError> {
+        let found: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'config_objects_initialized'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io_error)?;
+        if found.is_none() {
+            return Ok(None);
+        }
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT kind, id, payload FROM config_objects
+                 ORDER BY kind, position, id",
+            )
+            .map_err(io_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(io_error)?;
+        let mut out = ConfigObjects::default();
+        for row in rows {
+            let (kind, id, payload) = row.map_err(io_error)?;
+            let Some(kind) = ConfigObjectKind::parse(&kind) else {
+                // 不认识的 kind 说明有人手改过库。不能跳过——那等于悄悄少一个会话。
+                return Err(backend(acb_i18n::t!(
+                    "kernel.storage.config_object_kind_unknown",
+                    kind = kind
+                )));
+            };
+            out.get_mut(kind).push(ConfigObject { id, toml: payload });
+        }
+        Ok(Some(out))
+    }
+
+    fn config_objects_replace(&mut self, set: &ConfigObjects, at: i64) -> Result<(), StorageError> {
+        let transaction = self.conn.transaction().map_err(io_error)?;
+        transaction
+            .execute("DELETE FROM config_objects", [])
+            .map_err(io_error)?;
+        for kind in ConfigObjectKind::ALL {
+            for (index, object) in set.get(kind).iter().enumerate() {
+                transaction
+                    .execute(
+                        "INSERT INTO config_objects (kind, id, payload, position, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![kind.as_str(), object.id, object.toml, index as i64, at],
+                    )
+                    .map_err(io_error)?;
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('config_objects_initialized', ?1)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![at.to_string()],
+            )
+            .map_err(io_error)?;
+        transaction.commit().map_err(io_error)?;
+        Ok(())
+    }
+
+    fn config_object_put(
+        &mut self,
+        kind: ConfigObjectKind,
+        id: &str,
+        toml: &str,
+        position: i64,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                "INSERT INTO config_objects (kind, id, payload, position, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (kind, id) DO UPDATE SET
+                     payload = excluded.payload,
+                     position = excluded.position,
+                     updated_at = excluded.updated_at",
+                params![kind.as_str(), id, toml, position, at],
+            )
+            .map_err(io_error)?;
+        self.mark_config_objects_initialized(at)
+    }
+
+    fn config_object_delete(
+        &mut self,
+        kind: ConfigObjectKind,
+        id: &str,
+    ) -> Result<bool, StorageError> {
+        let changed = self
+            .conn
+            .execute(
+                "DELETE FROM config_objects WHERE kind = ?1 AND id = ?2",
+                params![kind.as_str(), id],
+            )
+            .map_err(io_error)?;
+        let at = now_ms();
+        self.mark_config_objects_initialized(at)?;
+        Ok(changed > 0)
+    }
+}
+
+impl SqliteStore {
+    fn mark_config_objects_initialized(&mut self, at: i64) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('config_objects_initialized', ?1)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![at.to_string()],
+            )
+            .map_err(io_error)?;
         Ok(())
     }
 }

@@ -116,6 +116,7 @@ dependencies = [
  "acb-proto",
  "libc",
  "serde_json",
+ "toml",
  "toml_edit",
 ]
 

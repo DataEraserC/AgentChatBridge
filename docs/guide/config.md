@@ -85,19 +85,34 @@ token = { secret = "main-session-token" }
 
 ### 控制台保存
 
-控制台的保存目标固定为 `<config_dir>/90-console.toml`，不再改写 `--config` 指向的文件；
-`config.d/` 不存在时会自动创建，旧覆盖层备份成 `90-console.toml.bak`。
+控制台保存有**两个落点**，按对象分：
 
-`90-console.toml` 是**覆盖层（overlay layer）**，与普通分片不同：
+| 改的是什么 | 落到哪 | 什么时候生效 |
+|---|---|---|
+| 连接 / 会话（含订阅、唤醒）/ 人格 / 记忆 / harness | **库**（`config_objects` 表，schema 15） | 下一个轮次边界 |
+| 权限与审批路由 | **库**（`policy_*` 四表，schema 13） | 下一个轮次边界 |
+| 模型后备链 | **库**（`model_fallbacks`，schema 14） | 下一个轮次边界 |
+| 其余引导/全局键（`delivery_limit` / `turn_timeout_secs` / `retention` / `default_on_turn_error` / `endpoint` / `console` / `file_relay` / `[tickets]`） | `<config_dir>/90-console.toml` | 见下方「热重载」 |
 
-- 它按**顶层 key 整体替换**下层（不做按 key 合并，也不做数组追加）。
-- 它**豁免** `connections` / `sessions` 的跨文件重复 id 检查。必须豁免，否则控制台
-  保存一份包含已有条目的完整文档时，会立刻和 base/分片里的同名 id 冲突，控制台就
-  无法编辑已有 connection/session。
-- 它最后加载，所以部署侧重新生成 base 不会冲掉控制台改动。
+**为什么业务对象进库**：它们以前只能写在文件里，控制台为了能改它们，写了一份按
+**顶层 key 整体替换**的覆盖层。覆盖层会把 base 与分片里的同名对象整类盖掉，而且
+不报错——实战里吞掉过 9 条 plugin 授权，几个月没人发现（见
+[配置来源审计](../plan/config-source-audit.md)）。
 
-runtime 策略分片仍按上面的普通合并规则处理。手工排查时可以直接看 `config.d/`：
-`90-console.toml` 是控制台写的，其余文件是部署/运维写的。
+规矩因此变成：
+
+- 首次启动时，桥把**合并后**的那五段（含当时覆盖层里的内容）抄进库，日志
+  `业务对象首次导入完成：连接 … 会话 …`，并打上 `meta.config_objects_initialized`。
+- 之后每次启动都用库里那一份；文件里还留着的同名片**不参与**，启动日志会说
+  `配置里还有已入库的段没删，本次已忽略`。
+- 在控制台的 TOML 编辑器里写这五段（或 `[grants]`）会被**直接拒绝**并列出键名：
+  改了不生效比报错更难查。
+- 结构化表单的 `session` / `subscription` / `persona` / `memory` / `harness` /
+  `connection` / `delete` 补丁改的是库；`global` 补丁仍然改覆盖层文件。
+
+`90-console.toml` 对**它自己还管的那些键**仍是覆盖层：按顶层 key 整体替换、最后加载、
+豁免重复 id 检查。手工排查时可以直接看 `config.d/`：`90-console.toml` 是控制台写的，
+其余文件是部署/运维写的。
 
 ### 已知限制
 

@@ -1305,6 +1305,23 @@ pub enum ConfigError {
     },
     #[error("{}", acb_i18n::t!("kernel.config.unknown_harness", session = session, harness = harness))]
     UnknownHarness { session: String, harness: String },
+    /// 入库的业务对象（connections / sessions / personas / memories / harnesses）
+    /// 原文有问题。五类对象存的是 TOML 原文，坏文本必须在加载时报出来，
+    /// 不能等到用的时候才发现少一条会话。
+    #[error("{}", acb_i18n::t!("kernel.config.object_not_array", kind = kind))]
+    ObjectNotArray { kind: String },
+    #[error("{}", acb_i18n::t!("kernel.config.object_missing_id", kind = kind))]
+    ObjectMissingId { kind: String },
+    #[error("{}", acb_i18n::t!("kernel.config.object_render_failed", kind = kind, id = id, detail = detail))]
+    ObjectRenderFailed {
+        kind: String,
+        id: String,
+        detail: String,
+    },
+    #[error("{}", acb_i18n::t!("kernel.config.object_parse_failed", kind = kind, detail = detail))]
+    ObjectParseFailed { kind: String, detail: String },
+    #[error("{}", acb_i18n::t!("kernel.config.object_snippet_shape", kind = kind, id = id))]
+    ObjectSnippetShape { kind: String, id: String },
     #[error("{}", acb_i18n::t!("kernel.config.bad_listen", address = address, detail = detail))]
     BadListen { address: String, detail: String },
     #[error("{}", acb_i18n::t!("kernel.config.file_relay_max_publish_bytes", value = value, detail = detail))]
@@ -1449,7 +1466,20 @@ impl Config {
     /// 完全一致。目录存在时只读取其中的 `*.toml`（按文件名字典序），子目录与其他后缀
     /// 忽略；`90-console.toml` 最后加载并覆盖它包含的顶层键。
     pub fn load(base_path: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
-        Self::load_mode(base_path, config_dir, SecretMode::Strict)
+        Self::load_mode(base_path, config_dir, SecretMode::Strict, None)
+    }
+
+    /// 加载时用库里的业务对象替换文件里的五类数组。
+    ///
+    /// `objects` 为 `None` 等同于 [`Config::load`]：完全按文件来（首次导入前的行为）。
+    /// 传 `Some` 时文件里那几段不再参与——库是唯一源（2026-11-07 用户裁定：
+    /// 业务对象只认库，`config.toml` 只当引导参数）。
+    pub fn load_with_objects(
+        base_path: &Path,
+        config_dir: Option<&Path>,
+        objects: Option<&crate::config_objects::ConfigObjects>,
+    ) -> Result<LoadedConfig, ConfigError> {
+        Self::load_mode(base_path, config_dir, SecretMode::Strict, objects)
     }
 
     /// 测试用加载入口，语义同 [`Config::parse_fixture`]；同样只在测试构建里存在。
@@ -1459,17 +1489,29 @@ impl Config {
         base_path: &Path,
         config_dir: Option<&Path>,
     ) -> Result<LoadedConfig, ConfigError> {
-        Self::load_mode(base_path, config_dir, SecretMode::Fixture)
+        Self::load_mode(base_path, config_dir, SecretMode::Fixture, None)
+    }
+
+    /// 测试用：带库对象注入的加载入口，语义同 [`Config::load_with_objects`]。
+    #[cfg(any(test, feature = "test-fixtures"))]
+    #[doc(hidden)]
+    pub fn load_fixture_with_objects(
+        base_path: &Path,
+        config_dir: Option<&Path>,
+        objects: Option<&crate::config_objects::ConfigObjects>,
+    ) -> Result<LoadedConfig, ConfigError> {
+        Self::load_mode(base_path, config_dir, SecretMode::Fixture, objects)
     }
 
     fn load_mode(
         base_path: &Path,
         config_dir: Option<&Path>,
         mode: SecretMode,
+        objects: Option<&crate::config_objects::ConfigObjects>,
     ) -> Result<LoadedConfig, ConfigError> {
         let base_text = read_config_file(base_path)?;
         let Some(config_dir) = config_dir.filter(|dir| dir.exists()) else {
-            return load_single(base_path, &base_text, mode);
+            return load_single_with_objects(base_path, &base_text, mode, objects);
         };
         if !config_dir.is_dir() {
             return Err(ConfigError::DirReadFailed {
@@ -1489,7 +1531,7 @@ impl Config {
             .cloned();
         if normal.is_empty() && console.is_none() {
             // 目录存在但没有任何分片：保持旧路径，错误信息和解析行为都不变。
-            return load_single(base_path, &base_text, mode);
+            return load_single_with_objects(base_path, &base_text, mode, objects);
         }
 
         let mut files = vec![parse_config_file(base_path, &base_text)?];
@@ -1532,6 +1574,9 @@ impl Config {
             apply_console_overlay(&mut merged, overlay.value.clone());
             sources.push(overlay.source);
         }
+        if let Some(objects) = objects {
+            objects.splice_into(&mut merged)?;
+        }
 
         finish_loaded(merged, sources, duplicate_rules, mode)
     }
@@ -1543,6 +1588,7 @@ impl Config {
         base_path: &Path,
         config_dir: &Path,
         overlay_text: &str,
+        objects: Option<&crate::config_objects::ConfigObjects>,
     ) -> Result<LoadedConfig, ConfigError> {
         let base_text = read_config_file(base_path)?;
         let fragments = if config_dir.exists() {
@@ -1583,6 +1629,9 @@ impl Config {
         check_duplicate_ids(std::slice::from_ref(&overlay))?;
         apply_console_overlay(&mut merged, overlay.value.clone());
         sources.push(overlay.source);
+        if let Some(objects) = objects {
+            objects.splice_into(&mut merged)?;
+        }
 
         finish_loaded(merged, sources, duplicate_rules, SecretMode::Strict)
     }
@@ -3787,6 +3836,33 @@ fn parse_config_file(path: &Path, text: &str) -> Result<ParsedConfigFile, Config
     })
 }
 
+/// 单文件加载 + 可选的库对象注入。
+///
+/// 没有对象时直接走 [`load_single`]（行为、错误信息一个字节都不变）；有对象时
+/// 先把五类数组换成库里的那一份，再走同一条收尾路径。
+fn load_single_with_objects(
+    base_path: &Path,
+    text: &str,
+    mode: SecretMode,
+    objects: Option<&crate::config_objects::ConfigObjects>,
+) -> Result<LoadedConfig, ConfigError> {
+    let Some(objects) = objects else {
+        return load_single(base_path, text, mode);
+    };
+    let mut merged: toml::Value =
+        toml::from_str(text).map_err(|error| ConfigError::ParseFailed {
+            detail: error.to_string(),
+        })?;
+    objects.splice_into(&mut merged)?;
+    let source = ConfigSource {
+        path: base_path.display().to_string(),
+        connections: array_count(&merged, "connections"),
+        sessions: array_count(&merged, "sessions"),
+        rules: rules_count(&merged),
+    };
+    finish_loaded(merged, vec![source], false, mode)
+}
+
 fn load_single(
     base_path: &Path,
     text: &str,
@@ -5962,6 +6038,56 @@ capability = ["room_write"]
         );
     }
 
+    #[test]
+    fn store_objects_replace_the_file_sections() {
+        let dir = TempDir::new("objects-inject");
+        let base_path = dir.path().join("base.toml");
+        let config_dir = dir.path().join("config.d");
+        std::fs::create_dir_all(&config_dir).expect("创建 config.d");
+        write_config(&base_path, &drop_in_base());
+
+        // 库里只有一条会话，id 和文件里的不同：注入之后文件那条必须消失。
+        let objects = crate::config_objects::ConfigObjects {
+            sessions: vec![crate::config_objects::ConfigObject {
+                id: "from-store".to_owned(),
+                toml: "[[sessions]]\nid = \"from-store\"\nharness = \"dsh\"\npersona = \"default\"\ntoken = { secret = \"t-main\" }\n"
+                    .to_owned(),
+            }],
+            personas: vec![crate::config_objects::ConfigObject {
+                id: "default".to_owned(),
+                toml: "[[personas]]\nid = \"default\"\nname = \"默认\"\ntext = \"来自库。\"\n"
+                    .to_owned(),
+            }],
+            harnesses: vec![crate::config_objects::ConfigObject {
+                id: "dsh".to_owned(),
+                toml: "[[harnesses]]\nid = \"dsh\"\nname = \"DSH\"\n".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let loaded =
+            Config::load_fixture_with_objects(&base_path, Some(&config_dir), Some(&objects))
+                .expect("注入后能加载");
+        let ids: Vec<&str> = loaded
+            .config
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["from-store"], "库里的会话整类替换文件里的");
+
+        // 不传对象时还是文件那一份（首次导入前的行为不变）。
+        let file_only = Config::load_fixture_with_objects(&base_path, Some(&config_dir), None)
+            .expect("按文件加载");
+        assert!(
+            file_only
+                .config
+                .sessions
+                .iter()
+                .any(|session| session.id == "main"),
+            "没有对象时走文件"
+        );
+    }
+
     // ---- 密钥来源 ----
 
     fn config_with_secrets(declarations: &str) -> String {
@@ -6213,6 +6339,7 @@ capability = ["room_write"]
             &base_path,
             &config_dir,
             "[[secrets.sources]]\nname = \"extra\"\nvariable = \"NOPE\"\n",
+            None,
         )
         .expect_err("覆盖层不能声明来源");
         assert!(matches!(error, ConfigError::ConsoleSecretSource), "{error}");

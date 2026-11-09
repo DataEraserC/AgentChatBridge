@@ -764,11 +764,47 @@ impl<S: Store + Send + 'static> Console<S> {
             );
         };
 
+        // 0. 已经入库的段不许再从文件改。以前覆盖层能整类盖掉，改了不生效还没提示
+        //    （实测吞过 9 条 plugin 授权）；现在宁可报错。
+        match crate::config_objects::migrated_keys_in(text) {
+            Ok(keys) if !keys.is_empty() => {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.config_key_migrated", keys = keys.join(", ")),
+                    Some(acb_i18n::t!("bridge.console.config_key_migrated_detail").to_owned()),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.config_parse_failed"),
+                    Some(error.to_string()),
+                );
+            }
+        }
+
+        let objects = {
+            let bridge = lock(&self.bridge);
+            match bridge.config_objects() {
+                Ok(objects) => objects,
+                Err(error) => {
+                    return config_error(
+                        500,
+                        acb_i18n::msg!("bridge.console.config_objects_read_failed"),
+                        Some(error.to_string()),
+                    );
+                }
+            }
+        };
+
         // 1. 校验：把这段文本当作 90-console 覆盖层，和 base + 其他分片一起解析。
+        //    五类业务对象一律用库里那一份——文件里就算写了也不参与。
         let new_config = match acb_kernel::Config::load_with_console_overlay(
             Path::new(&self.config_path),
             Path::new(&self.config_dir),
             text,
+            Some(&objects),
         ) {
             Ok(loaded) => loaded.config,
             Err(error) => {
@@ -781,7 +817,7 @@ impl<S: Store + Send + 'static> Console<S> {
         };
 
         // 2. 收尾（共用）：算影响清单 → 备份 → 落盘 → 暂存。
-        match self.finish_config_save(new_config, text, Vec::new()) {
+        match self.finish_config_save(new_config, Some(text), None, Vec::new()) {
             Ok(value) => (200, value.to_string()),
             Err((status, value)) => (status, value.to_string()),
         }
@@ -809,20 +845,88 @@ impl<S: Store + Send + 'static> Console<S> {
             return config_error(400, acb_i18n::msg!("bridge.console.ops_empty"), None);
         }
 
-        let (_path, text) = match self.console_document() {
+        // 补丁按落点分两组：对象类写库，`global` 写文件。混着改会让「改了没生效」
+        // 重新变成猜谜——文件里那五段已经不再参与合并了。
+        let mut object_ops = Vec::new();
+        let mut file_ops = Vec::new();
+        for op in ops {
+            match op
+                .get("op")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+            {
+                "session" | "subscription" | "persona" | "memory" | "harness" | "connection"
+                | "delete" => object_ops.push(op.clone()),
+                "global" => file_ops.push(op.clone()),
+                other => {
+                    return config_error(
+                        400,
+                        acb_i18n::msg!("bridge.patch.unknown_op", op = other),
+                        None,
+                    );
+                }
+            }
+        }
+
+        let (_path, current_text) = match self.console_document() {
             Ok(document) => document,
             Err(response) => return response,
         };
-        let (new_text, changes) = match crate::config_patch::apply_patch(&text, ops) {
-            Ok(result) => result,
-            Err(error) => {
-                return config_error(400, error.message, error.detail);
+        let (overlay_text, mut changes) = if file_ops.is_empty() {
+            (current_text, Vec::new())
+        } else {
+            match crate::config_patch::apply_patch(&current_text, &file_ops) {
+                Ok(result) => result,
+                Err(error) => {
+                    return config_error(400, error.message, error.detail);
+                }
             }
         };
+
+        let objects = {
+            let bridge = lock(&self.bridge);
+            match bridge.config_objects() {
+                Ok(objects) => objects,
+                Err(error) => {
+                    return config_error(
+                        500,
+                        acb_i18n::msg!("bridge.console.config_objects_read_failed"),
+                        Some(error.to_string()),
+                    );
+                }
+            }
+        };
+        // 对象侧：在「库里的那一份」上打补丁，改完再拆回一条一条。
+        let next_objects = if object_ops.is_empty() {
+            None
+        } else {
+            let document = crate::config_objects::document(&objects);
+            let (patched, object_changes) =
+                match crate::config_patch::apply_patch(&document, &object_ops) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        return config_error(400, error.message, error.detail);
+                    }
+                };
+            changes.extend(object_changes);
+            match crate::config_objects::document_to_objects(&patched) {
+                Ok(objects) => Some(objects),
+                Err(error) => {
+                    return config_error(
+                        400,
+                        acb_i18n::msg!("bridge.console.config_objects_parse_failed"),
+                        Some(error.to_string()),
+                    );
+                }
+            }
+        };
+
+        let effective = next_objects.as_ref().unwrap_or(&objects);
         let new_config = match acb_kernel::Config::load_with_console_overlay(
             Path::new(&self.config_path),
             Path::new(&self.config_dir),
-            &new_text,
+            &overlay_text,
+            Some(effective),
         ) {
             Ok(loaded) => loaded.config,
             Err(error) => {
@@ -833,7 +937,9 @@ impl<S: Store + Send + 'static> Console<S> {
                 );
             }
         };
-        match self.finish_config_save(new_config, &new_text, changes) {
+        // 只有真的动了文件侧才回写覆盖层；纯对象改动不碰任何文件。
+        let write_text = (!file_ops.is_empty()).then_some(overlay_text.as_str());
+        match self.finish_config_save(new_config, write_text, next_objects.as_ref(), changes) {
             Ok(value) => (200, value.to_string()),
             Err((status, value)) => (status, value.to_string()),
         }
@@ -844,7 +950,8 @@ impl<S: Store + Send + 'static> Console<S> {
     fn finish_config_save(
         &self,
         new_config: acb_kernel::Config,
-        text: &str,
+        text: Option<&str>,
+        objects: Option<&acb_kernel::ConfigObjects>,
         changes: Vec<acb_i18n::Message>,
     ) -> Result<serde_json::Value, (u16, serde_json::Value)> {
         let locale = acb_i18n::request_locale();
@@ -870,27 +977,45 @@ impl<S: Store + Send + 'static> Console<S> {
             }
         }
 
-        // 保存目标固定为 90-console.toml；目录不存在时自动创建。
-        let backup = match persist_console_config(&self.config_dir, text) {
-            Ok(backup) => backup,
-            Err(error) => {
-                return Err((
-                    500,
-                    json!({
-                        "error": acb_i18n::msg!(
-                            "bridge.console.write_config_failed",
-                            path = self.console_config_path().display().to_string()
-                        )
-                        .render(locale),
-                        "detail": error.to_string(),
-                        "saved": false
-                    }),
-                ));
-            }
+        // 文件侧：只有文本真的改过才写覆盖层（纯对象改动不碰文件）。
+        let backup = match text {
+            None => None,
+            Some(text) => match persist_console_config(&self.config_dir, text) {
+                Ok(backup) => backup,
+                Err(error) => {
+                    return Err((
+                        500,
+                        json!({
+                            "error": acb_i18n::msg!(
+                                "bridge.console.write_config_failed",
+                                path = self.console_config_path().display().to_string()
+                            )
+                            .render(locale),
+                            "detail": error.to_string(),
+                            "saved": false
+                        }),
+                    ));
+                }
+            },
         };
 
         {
             let mut bridge = lock(&self.bridge);
+            // 对象先落库再暂存：库写失败就整体失败，不能出现「内存里改了、库里没有」
+            // ——重启一次就回到改之前，用户会以为保存按钮坏了。
+            if let Some(objects) = objects {
+                if let Err(error) = bridge.replace_config_objects(objects) {
+                    return Err((
+                        500,
+                        json!({
+                            "error": acb_i18n::msg!("bridge.console.write_objects_failed")
+                                .render(locale),
+                            "detail": error,
+                            "saved": false
+                        }),
+                    ));
+                }
+            }
             bridge.stage_config(new_config);
         }
 

@@ -1114,5 +1114,19 @@
   "console.nav.policy": "Access",
   "bridge.console.model_fallbacks_body_invalid": "body must be JSON of the form {\"models\": [\"provider/model\", ...]}",
   "bridge.console.model_fallbacks_save_failed": "saving fallback models failed",
-  "console.nav.models": "Models"
+  "console.nav.models": "Models",
+  "kernel.config.object_not_array": "{kind} must be an array in the config",
+  "kernel.config.object_missing_id": "{kind} entry has no id and cannot be stored",
+  "kernel.config.object_render_failed": "failed to render {kind} {id} as TOML: {detail}",
+  "kernel.config.object_parse_failed": "stored {kind} snippet does not parse: {detail}",
+  "kernel.config.object_snippet_shape": "stored {kind} {id} snippet is not exactly one entry; refusing to load",
+  "kernel.storage.config_object_kind_unknown": "config_objects has an unknown kind: {kind}",
+  "bridge.main.config_objects_imported": "config objects imported: connections {connections}, sessions {sessions}, personas {personas}, memories {memories}, harnesses {harnesses}; the store is authoritative from now on",
+  "bridge.main.config_objects_from_store": "config objects loaded from store: connections {connections}, sessions {sessions}, personas {personas}, memories {memories}, harnesses {harnesses} (matching config sections are ignored)",
+  "bridge.console.config_key_migrated": "these sections live in the store now; editing the file has no effect: {keys}. Use the structured form for connections/sessions/personas/memories/harnesses and the Permissions tab for grants",
+  "bridge.console.config_key_migrated_detail": "Runtime business objects come from the store so that edits are never silently ignored; the config file keeps bootstrap settings only.",
+  "bridge.console.config_objects_read_failed": "failed to read config objects from the store",
+  "bridge.console.config_objects_parse_failed": "the edited config objects do not parse; this save was discarded",
+  "bridge.console.write_objects_failed": "failed to write config objects; this save did not take effect",
+  "bridge.main.config_objects_file_ignored": "config still has migrated sections; they were ignored this run: {keys}"
 }

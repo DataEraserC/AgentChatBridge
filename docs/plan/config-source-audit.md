@@ -150,3 +150,40 @@ effective rules: 1
    后者与历史一致）
 2. F1 走 A（改合并语义）还是 B（直接写库）？A 是一天量级，B 要连带 F2。
 3. 覆盖层里 `tickets.pending_ttl_secs = 1800` 这条要迁到哪：base、库、还是保持控制台独占？
+
+## 8. 落地（2026-11-09 晚，用户裁定走 B、不止血）
+
+裁定：**F1 走 B —— 控制台直接写库**；不做临时补规则（`F1a` 挂起）。因此这一节
+记录「已经改了什么」与「真机上还差哪几步」。
+
+### 8.1 代码（schema 15）
+
+| 位置 | 改动 |
+|---|---|
+| `crates/kernel/src/config_objects.rs`（新） | 五类对象的形状：`ConfigObjectKind` / `ConfigObject{id, toml}` / `ConfigObjects`；`from_merged` / `splice_into` / 渲染与解析 |
+| `crates/kernel/src/storage.rs` + `storage/sqlite.rs` | `ConfigObjectsStore` trait、`config_objects` 表、`meta.config_objects_initialized` 标记 |
+| `crates/kernel/src/config.rs` | `load_with_objects` / `load_with_console_overlay(.., objects)`：合并完覆盖层后用库里的五类数组**整类替换** |
+| `crates/bridge/src/config_objects.rs`（新） | 启动对齐（首次导入一次 / 之后以库为准）、覆盖层文档渲染与回拆、已入库键识别 |
+| `crates/bridge/src/main.rs` | 开库提前到配置加载之后；先 `sync` 再装配适配器/依赖表 |
+| `crates/bridge/src/console.rs` | 补丁分两组：对象类写库、`global` 写覆盖层；TOML 编辑器拒绝已入库键；纯对象改动不碰任何文件 |
+
+存的是**每一条的 TOML 原文**，不是结构体 JSON。这样解析、默认值、`token = { secret = ... }`
+的密钥引用全走原来那条路——密钥真值仍然只在 env/agenix，库里只有引用名。
+
+### 8.2 真机迁移步骤（待执行）
+
+1. 换代（schema 15）：`profile add` → `switch` → 重启桥；日志应出现
+   `业务对象首次导入完成：连接 1、会话 6、人格 2、记忆 2、harness 2`。
+2. 核对：`/api/config` 与旧值逐项对比；`--check` 的 `effective rules` 不受影响（仍是 1）。
+3. 把 `[tickets] pending_ttl_secs` 挪进 base（覆盖层里只有这一条是 base 没有的），
+   然后把 `90-console.toml` 归档到 `config.d/history/`（改后缀，加载器自然忽略）。
+4. 再重启一次，确认启动日志变成 `业务对象取自库：…`，且不再出现「配置里还有已入库的段」
+   之外的差异。
+5. 归档后 `config.active.toml` 可以删掉那五段（留着也行：会被忽略并打警告）。
+
+### 8.3 遗留
+
+- 策略侧那 9 条 `plugin` 规则仍然不在库里（`F1a` 挂起，用户裁定不止血）。真机验收后
+  建议一次性补录——现在补是「迁移收尾」，不是止血。
+- 会话增删之后驱动不会自动重启（`acb-drivers` 仍按启动时的会话表起进程），这条是
+  F2 的原生前置，未在本轮解决。

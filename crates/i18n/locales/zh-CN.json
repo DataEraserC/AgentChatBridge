@@ -1114,5 +1114,19 @@
   "console.nav.policy": "权限",
   "bridge.console.model_fallbacks_body_invalid": "请求体必须是 {\"models\": [\"provider/model\", ...]} 形式的 JSON",
   "bridge.console.model_fallbacks_save_failed": "保存后备模型失败",
-  "console.nav.models": "模型"
+  "console.nav.models": "模型",
+  "kernel.config.object_not_array": "{kind} 在配置里必须是数组",
+  "kernel.config.object_missing_id": "{kind} 这一条没有 id，没法入库",
+  "kernel.config.object_render_failed": "把 {kind} {id} 写成 TOML 失败：{detail}",
+  "kernel.config.object_parse_failed": "库里的 {kind} 原文解析失败：{detail}",
+  "kernel.config.object_snippet_shape": "库里 {kind} {id} 那一段不是恰好一条，拒绝加载",
+  "kernel.storage.config_object_kind_unknown": "config_objects 里有不认识的 kind：{kind}",
+  "bridge.main.config_objects_imported": "业务对象首次导入完成：连接 {connections}、会话 {sessions}、人格 {personas}、记忆 {memories}、harness {harnesses}；之后以库为准",
+  "bridge.main.config_objects_from_store": "业务对象取自库：连接 {connections}、会话 {sessions}、人格 {personas}、记忆 {memories}、harness {harnesses}（配置里那五段不再参与）",
+  "bridge.console.config_key_migrated": "这些段已经进库，改文件不生效：{keys}。连接/会话/人格/记忆/harness 请用结构化表单改，权限用「权限」页改",
+  "bridge.console.config_key_migrated_detail": "为了不再出现「改了没生效」，运行期业务对象以库为准；配置文件只留引导参数。",
+  "bridge.console.config_objects_read_failed": "读库里的业务对象失败",
+  "bridge.console.config_objects_parse_failed": "改完的业务对象解析不过，已放弃本次保存",
+  "bridge.console.write_objects_failed": "业务对象写库失败，本次保存没有生效",
+  "bridge.main.config_objects_file_ignored": "配置里还有已入库的段没删，本次已忽略（不影响运行）：{keys}"
 }
