@@ -52,6 +52,10 @@ fn queue_status(
 /// 管理页。单文件、零外部依赖：改页面就是改这个 HTML，编译时嵌进二进制。
 const CONSOLE_HTML: &str = include_str!("console.html");
 
+/// 概览页「最近失败」的统计窗口（秒）。比 in-band 去重窗口长，
+/// 因为要看的是「这段故障持续了多久」，不是「刚才那条通知发没发」。
+const RECENT_FAILURE_WINDOW_SECS: u64 = 900;
+
 /// 没带 token 打开 `/` 时给的一小块登录页：弹窗要 token，拼进 URL 重进。
 /// 跟旧 Node 版同一招——不让完整页面在未授权时先渲染出来。
 /// 文案全部来自 locale 表，按请求 locale 渲染；登录前拿不到 `/api/i18n`。
@@ -554,6 +558,19 @@ impl<S: Store + Send + 'static> Console<S> {
                 "rules": source.rules,
             })).collect::<Vec<_>>(),
             "rules": config.grants.rules.len(),
+            // 最近 15 分钟各房间的失败次数（**含被抑制的**）。群里「没人回话」时先看这里：
+            // 有计数 = 每轮都在失败、只是通知被限流了；没计数 = 真的没轮到它。
+            "recent_failures": bridge
+                .recent_failure_stats(RECENT_FAILURE_WINDOW_SECS)
+                .iter()
+                .map(|stat| json!({
+                    "session": stat.session,
+                    "room": stat.room,
+                    "count": stat.count,
+                    "last_at": stat.last_at,
+                    "class": stat.last_class,
+                }))
+                .collect::<Vec<_>>(),
             "queues": queue_status(&inbound, &route, self.route_worker.busy()),
             "dependencies": {
                 "status": dependencies["status"],

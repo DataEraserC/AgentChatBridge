@@ -241,6 +241,20 @@
       <div id="deps-note"></div>
       <div id="dependencies"></div>
     </div>
+    <div class="card">
+      <div class="card-head">
+        <h2 data-i18n="console.failures.title">Recent turn failures</h2>
+        <button type="button" class="info" data-tip-key="console.failures.intro" data-i18n-aria="console.ui.info.more" aria-label="More information">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>
+        </button>
+        <div class="spacer"></div>
+        <button type="button" class="btn ghost sm" onclick="loadStatus()">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14-5"/><path d="M4 4v6h6"/><path d="M4 13a8 8 0 0 0 14 5"/><path d="M20 20v-6h-6"/></svg>
+          <span data-i18n="console.deps.refresh">Refresh</span>
+        </button>
+      </div>
+      <div id="recent-failures"></div>
+    </div>
   </section>
   <!-- status-scope:end -->
 
@@ -515,6 +529,39 @@ function renderStatus(s) {
   ].join("");
 }
 
+/**
+ * 最近失败的轮次，按房间聚合。
+ *
+ * 为什么要有这一块：失败通知被去重/限流之后，群里看到的是「没人回话」，
+ * 与「桥挂了」长得一样。这里显示**含被抑制的**真实次数——
+ * 有计数 = 每轮都在失败、只是通知被压住了；没计数 = 真的没轮到它。
+ */
+function renderRecentFailures(items) {
+  const box = $("#recent-failures");
+  if (!box) return;
+  if (!items || !items.length) {
+    box.innerHTML = emptyBox("console.failures.empty");
+    return;
+  }
+  const label = (key) => esc(t(key));
+  const rows = items.map((item) => {
+    const cls = item.class || "";
+    const classKey = "console.deps.errorClass." + cls;
+    const classText = cls ? t(classKey) : "";
+    const classLabel = classText && classText !== classKey ? classText : t("console.deps.errorClass.unknown");
+    return `<tr>
+      <td class="wrap" data-label="${label("console.failures.col.room")}"><code>${esc(item.room)}</code><br><span class="muted">${esc(item.session)}</span></td>
+      <td class="num" data-label="${label("console.failures.col.count")}">${esc(item.count)}</td>
+      <td class="wrap" data-label="${label("console.failures.col.class")}">${esc(cls ? classLabel : t("console.failures.noClass"))}</td>
+      <td data-label="${label("console.failures.col.last")}">${esc(depTime(item.last_at))}</td>
+    </tr>`;
+  }).join("");
+  box.innerHTML = `<div class="table-wrap"><table class="table-responsive">
+    <thead><tr><th>${label("console.failures.col.room")}</th><th class="num">${label("console.failures.col.count")}</th>
+    <th>${label("console.failures.col.class")}</th><th>${label("console.failures.col.last")}</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
 async function loadStatus() {
   const box = $("#status");
   const note = $("#status-note");
@@ -527,6 +574,7 @@ async function loadStatus() {
     ]);
     statusCache = s;
     renderStatus(s);
+    renderRecentFailures(s.recent_failures || []);
     if (note) {
       note.innerHTML = s.staged_config
         ? `<div class="banner">${icon("alert")}<span>${esc(t("console.ui.status.staged"))}</span></div>`
@@ -534,8 +582,10 @@ async function loadStatus() {
     }
     renderMemoryWarning(memory);
   } catch (e) {
-    if (statusCache) renderStatus(statusCache);
-    else if (box) box.innerHTML = errorBox(e, "console.deps.statusError");
+    if (statusCache) {
+      renderStatus(statusCache);
+      renderRecentFailures(statusCache.recent_failures || []);
+    } else if (box) box.innerHTML = errorBox(e, "console.deps.statusError");
     if (note) note.innerHTML = `<div class="banner err">${icon("alert")}<div><span>${esc(e.message)}</span>${detailBlock(e.detail)}</div></div>`;
   }
   await loadDependencies();

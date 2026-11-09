@@ -16,11 +16,10 @@ use acb_kernel::{
     NoticeSink, Outbound, OutboundError, PLUGIN_API_VERSION, PluginError, PluginManager,
     ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, QuoteUnavailable,
     ReceiveDecision, ReceiveProvider, ReceiveRequest, RecordDraft, RoomId, RouteAction,
-    RouteContext, RouteDecision,
-    RoutePolicy, RouteProvider, RouteWorker, SendContext, SendHook, Sender, Sent, Transcript,
-    TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest, TurnFailure, TurnReason,
-    WakeContext, WakeDecision, WakePolicy, WakeProvider, WakeVerdict, Watermarks, drain_events,
-    unread,
+    RouteContext, RouteDecision, RoutePolicy, RouteProvider, RouteWorker, SendContext, SendHook,
+    Sender, Sent, Transcript, TurnErrorAction, TurnErrorPolicy, TurnErrorProvider,
+    TurnErrorRequest, TurnFailure, TurnReason, WakeContext, WakeDecision, WakePolicy, WakeProvider,
+    WakeVerdict, Watermarks, drain_events, unread,
 };
 use serde_json::{Value, json};
 
@@ -486,7 +485,14 @@ fn reaction(room: &str, sender: &str, target: &str, added: bool) -> RecordDraft 
         "reaction".to_owned(),
         "group_msg_emoji_like".to_owned(),
     ];
-    tags.push(if added { "reaction_add" } else { "reaction_remove" }.to_owned());
+    tags.push(
+        if added {
+            "reaction_add"
+        } else {
+            "reaction_remove"
+        }
+        .to_owned(),
+    );
     let draft = RecordDraft::event(
         room,
         Sender {
@@ -1735,7 +1741,12 @@ fn ack_accepts_records_read_this_turn_but_not_delivered() {
     assert_eq!(fetched["returned"], 2);
 
     let acked = bridge
-        .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [1, 2, 3]}))
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "ack_messages",
+            json!({"ids": [1, 2, 3]}),
+        )
         .expect("投递过和补读过的编号都能确认");
     assert_eq!(acked["watermark"], 3, "水位推到连续前沿");
 }
@@ -2359,15 +2370,8 @@ fn reaction_on_my_message_wakes_without_a_mention() {
         .expect("有那条")
         .clone();
     assert!(recorded.reply_to_self, "归属要留在记录上，不能只用来叫醒");
-    assert_eq!(
-        recorded.quote_of(),
-        Some("p-1"),
-        "目标消息要有可查询的指向"
-    );
-    assert!(
-        !recorded.suppressed,
-        "表情回应和引用同类，不该被默认静默"
-    );
+    assert_eq!(recorded.quote_of(), Some("p-1"), "目标消息要有可查询的指向");
+    assert!(!recorded.suppressed, "表情回应和引用同类，不该被默认静默");
 }
 
 #[test]
@@ -2411,10 +2415,7 @@ fn reaction_removal_is_recorded_without_waking() {
         .last()
         .expect("有那条")
         .clone();
-    assert!(
-        recorded.reply_to_self,
-        "归属照样要记下来，只是不拿来叫醒"
-    );
+    assert!(recorded.reply_to_self, "归属照样要记下来，只是不拿来叫醒");
 
     // 回应别人的话也照旧不醒。
     bridge
@@ -2766,6 +2767,86 @@ fn successful_turn_resets_failure_dedupe() {
 
     let sends = sends.lock().expect("没被毒死");
     assert_eq!(sends.len(), 2, "恢复后同一故障应重新通知：{sends:?}");
+}
+
+/// 连续失败必须留一个「还在出错」的下限：去重与每房间上限都不能变成永久静默。
+///
+/// 2026-11-09 现场：群 769843907 连续 6 轮 `400 content-blocked`，首条通知之后
+/// 全被抑制，房间里看到的是「没人回话」——和「桥挂了」完全无法区分。
+#[test]
+fn repeated_failure_reminds_after_remind_interval() {
+    // remind_secs 设成 1 秒，省得测试真等 10 分钟；room_limit=1 保证第 2 条起被抑制。
+    let text = format!(
+        "{}\n[notifications]\nenabled = false\n\n[notifications.in_band]\nwindow_secs = 600\nroom_limit = 1\nremind_secs = 1\n",
+        fallback_config()
+    );
+    let (mut bridge, sends) = group_bridge(&text);
+    let failure = TurnFailure {
+        component: "model".into(),
+        id: Some("main".into()),
+        class: "content_blocked".into(),
+    };
+    let fail_once = |bridge: &mut Bridge<MemoryStore>, said: &str| {
+        bridge
+            .ingest(message("qq:group/123", "10001", said, true))
+            .expect("能记下来");
+        let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
+        bridge
+            .end_turn_with_failure(
+                &delivery.ticket,
+                Some("400 content-blocked"),
+                Some(&failure),
+            )
+            .expect("能收工");
+        bridge.flush_notices();
+    };
+
+    fail_once(&mut bridge, "第一次");
+    assert_eq!(sends.lock().expect("没被毒死").len(), 1, "首条要通知");
+
+    // 立刻再来一次：同类故障被去重，且离上次通知不到 1 秒，不补提醒。
+    fail_once(&mut bridge, "第二次");
+    assert_eq!(
+        sends.lock().expect("没被毒死").len(),
+        1,
+        "去重窗口内不该刷屏"
+    );
+
+    // 等过 remind 间隔，再失败一次：抑制照旧，但要补一句「还在出错」。
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fail_once(&mut bridge, "第三次");
+    {
+        let sends = sends.lock().expect("没被毒死");
+        assert_eq!(sends.len(), 2, "连续失败要有一条提醒：{sends:?}");
+        let reminder = match &sends[1].1[0] {
+            Element::Text { text } => text.clone(),
+            other => panic!("提醒应是文本，收到 {other:?}"),
+        };
+        assert!(
+            (reminder.contains("还在出错") || reminder.contains("still failing"))
+                && reminder.contains("qq:group/123"),
+            "提醒要说清哪个房间还在错：{reminder}"
+        );
+        assert!(
+            reminder.contains("失败 3 次") || reminder.contains("3 failed turns"),
+            "提醒要带窗口内失败次数：{reminder}"
+        );
+    }
+
+    // 紧接着再失败：提醒本身也受节流，不会每轮刷。
+    fail_once(&mut bridge, "第四次");
+    assert_eq!(
+        sends.lock().expect("没被毒死").len(),
+        2,
+        "提醒必须节流，不能变成新的刷屏源"
+    );
+
+    // 概览用的计数含被抑制的失败，四次全算。
+    let stats = bridge.recent_failure_stats(900);
+    assert_eq!(stats.len(), 1, "只有一个房间在失败：{stats:?}");
+    assert_eq!(stats[0].room, "qq:group/123");
+    assert_eq!(stats[0].count, 4, "计数要含被抑制的轮次");
+    assert_eq!(stats[0].last_class.as_deref(), Some("content_blocked"));
 }
 
 /// v7 结构化失败：更新模型依赖；同一 component/id/class 即使文本不同也只发一条。
@@ -4289,7 +4370,10 @@ fn timed_out_send_is_recorded_as_unknown_with_a_queryable_id() {
     let list = bridge.task_list("main", None, 20, 0).expect("能列任务");
     let task = &list["tasks"][0];
     assert_eq!(task["handler"], "send_message");
-    assert_eq!(task["status"], "unknown", "超时不能记成失败，平台可能已经发出去了");
+    assert_eq!(
+        task["status"], "unknown",
+        "超时不能记成失败，平台可能已经发出去了"
+    );
     assert!(task["platform_id"].is_null(), "超时拿不到平台消息号");
     assert!(
         task["idempotency_key"]
@@ -4324,9 +4408,7 @@ fn successful_send_fills_platform_id_in_the_attempt_record() {
             json!({"async": false, "elements": [{"type": "text", "text": "你好"}]}),
         )
         .expect("能发送");
-    let key = receipt["idempotency_key"]
-        .as_str()
-        .expect("回执要带幂等键");
+    let key = receipt["idempotency_key"].as_str().expect("回执要带幂等键");
     assert!(key.starts_with("idem-"));
     assert!(
         receipt.get("task_id").is_none(),

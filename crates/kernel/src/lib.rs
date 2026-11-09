@@ -45,7 +45,9 @@ pub use config::{
 };
 pub use deps::{DependencyKind, DependencyRegistry, PlatformVersionInfo};
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
-pub use engine::{Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned, TaskRecord, TaskStatus};
+pub use engine::{
+    Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned, RoomFailureStat, TaskRecord, TaskStatus,
+};
 pub use event_queue::{
     EventQueue, EventReceiver, QueueSnapshot, QueueStats, SubmitError, drain_events,
 };

@@ -641,6 +641,12 @@ pub struct Bridge<S: Store> {
     pending_route_actions: Vec<PreparedRouteAction>,
     /// 已发出的 in-band 失败通知：同一故障在窗口内只发一条，按房间限流。
     turn_failures: VecDeque<TurnFailureNotice>,
+    /// (会话, 房间) → 上次**真的发出去**的失败提示时间（Unix 毫秒）。
+    /// 抑制分支靠它判断「这房间已经安静多久」，超过 `in_band.remind_secs` 补一条提醒。
+    failure_notice_at: HashMap<(String, RoomId), i64>,
+    /// 最近失败流水（**含被抑制的**）。`turn_failures` 只记已通知的、用来去重；
+    /// 这个用来回答「最近 N 分钟这个房间失败了几次」（控制台概览）。
+    recent_failures: VecDeque<FailureTick>,
     /// (会话, 房间) → 上次时钟轮时间（Unix 毫秒）。只活在本进程，重启后重新计间隔。
     clock_last: HashMap<(String, RoomId), i64>,
     /// (会话, 房间) → 上次唤醒（任意原因开轮）时间。只活在本进程；
@@ -706,6 +712,27 @@ struct TurnFailureNotice {
     /// v7 harness 给出的结构化分类；没有就是 None，按指纹去重。
     component: Option<String>,
     component_id: Option<String>,
+    class: Option<String>,
+    at: i64,
+}
+
+/// 控制台用的「某房间最近失败统计」。`count` 含被抑制的失败。
+#[derive(Debug, Clone)]
+pub struct RoomFailureStat {
+    pub session: String,
+    pub room: String,
+    pub count: usize,
+    pub last_at: i64,
+    pub last_class: Option<String>,
+}
+
+/// 一次失败的轮次。**含被抑制的**——去重与限流只决定「要不要说话」，
+/// 不决定「记不记账」：概览页要如实回答「这个房间最近到底失败了几次」。
+#[derive(Debug, Clone)]
+struct FailureTick {
+    session: String,
+    room: RoomId,
+    /// 结构化分类里的 class（`content_blocked` 等）；老 harness 只有文本时为 `None`。
     class: Option<String>,
     at: i64,
 }
@@ -916,6 +943,8 @@ impl<S: Store> Bridge<S> {
             pending_interrupts: Vec::new(),
             pending_route_actions: Vec::new(),
             turn_failures: VecDeque::new(),
+            failure_notice_at: HashMap::new(),
+            recent_failures: VecDeque::new(),
             clock_last: HashMap::new(),
             wake_last: HashMap::new(),
             memory,
@@ -4036,6 +4065,8 @@ impl<S: Store> Bridge<S> {
                 if let Some(failure) = failure {
                     self.note_structured_failure(&turn.config, &turn.session, failure, error, now);
                 }
+                // 失败流水照记，抑制不影响记账——概览页要的是真实次数。
+                self.record_failure_tick(&turn, structured_key, in_band, now);
                 match suppressed {
                     Some(reason) => {
                         self.deps.notice_turn_suppressed(
@@ -4066,11 +4097,15 @@ impl<S: Store> Bridge<S> {
                                 limit = in_band.room_limit
                             )
                         );
+                        // 抑制不等于永远不吭声：安静太久就补一条「还在出错」。
+                        self.maybe_remind_turn_failure(&turn, in_band, reason, error, now);
                     }
                     None => {
                         let sent =
                             self.notify_turn_error(&turn.config, &turn.session, &turn.room, error);
                         if sent > 0 {
+                            self.failure_notice_at
+                                .insert((turn.session.clone(), turn.room.clone()), now);
                             self.record_turn_failure(
                                 &turn.session,
                                 &turn.room,
@@ -4258,6 +4293,121 @@ impl<S: Store> Bridge<S> {
     fn clear_turn_failures(&mut self, session: &str, room: &RoomId) {
         self.turn_failures
             .retain(|item| item.session != session || item.room != *room);
+        // 也要清提醒节流：恢复之后再次出错，第一条照常发，不该被旧时间戳压住。
+        self.failure_notice_at
+            .remove(&(session.to_owned(), room.clone()));
+    }
+
+    /// 记一条失败流水（含被抑制的）。上限沿用 `max_entries`，不另外开配置。
+    fn record_failure_tick(
+        &mut self,
+        turn: &ActiveTurn,
+        structured: Option<(&str, Option<&str>, &str)>,
+        in_band: InBandNoticeConfig,
+        now: i64,
+    ) {
+        self.recent_failures.push_back(FailureTick {
+            session: turn.session.clone(),
+            room: turn.room.clone(),
+            class: structured.map(|(_, _, class)| class.to_owned()),
+            at: now,
+        });
+        while self.recent_failures.len() > in_band.max_entries as usize {
+            self.recent_failures.pop_front();
+        }
+    }
+
+    /// 连续失败时的「还在出错」提醒。
+    ///
+    /// 去重（同一故障只发一条）与每房间上限（窗口内最多 3 条）叠加，结果是连续失败时
+    /// **完全静默**：房间里只看到「没人回话」，和「桥挂了」没法区分。这里补一个下限——
+    /// 同一房间每 `remind_secs` 最多补一条，只说「还在错、错了多少次、最近一次是什么」。
+    ///
+    /// 只在抑制分支调用：没被抑制时那条通知本身就是最新信息，不需要再加一条。
+    fn maybe_remind_turn_failure(
+        &mut self,
+        turn: &ActiveTurn,
+        in_band: InBandNoticeConfig,
+        reason: TurnFailureSuppressed,
+        error: &str,
+        now: i64,
+    ) {
+        let key = (turn.session.clone(), turn.room.clone());
+        let elapsed = now.saturating_sub(self.failure_notice_at.get(&key).copied().unwrap_or(0));
+        if elapsed < (in_band.remind_secs as i64).saturating_mul(1000) {
+            return;
+        }
+        let window_ms = (in_band.window_secs as i64).saturating_mul(1000);
+        let cutoff = now.saturating_sub(window_ms);
+        let count = self
+            .recent_failures
+            .iter()
+            .filter(|tick| tick.room == turn.room && tick.at >= cutoff)
+            .count();
+        let text = acb_i18n::t!(
+            "kernel.engine.turn_error_reminder",
+            session = turn.session,
+            room = turn.room,
+            minutes = in_band.window_secs / 60,
+            count = count,
+            reason = reason.as_str(),
+            error = truncate_error(error)
+        );
+        match self.prepare_send(
+            turn.config.clone(),
+            &turn.session,
+            turn.room.clone(),
+            SendOrigin::TurnFailure,
+            vec![Element::text(text)],
+        ) {
+            Ok(prepared) => {
+                self.pending_notices.push(prepared);
+                self.failure_notice_at.insert(key, now);
+            }
+            // 连提醒都发不出去，至少留下原因——否则「为什么一直没人说话」查不出来。
+            Err(err) => eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.engine.turn_error_notice_assemble_failed",
+                    error = format!("{err:?}")
+                )
+            ),
+        }
+    }
+
+    /// 最近 `window_secs` 内各房间的失败次数，供控制台概览展示。
+    ///
+    /// 与去重表不同，这里**包含被抑制的失败**：用户要的是「这房间到底怎么了」，
+    /// 不是「系统决定说了几次」。
+    pub fn recent_failure_stats(&self, window_secs: u64) -> Vec<RoomFailureStat> {
+        let cutoff = now_millis().saturating_sub((window_secs as i64).saturating_mul(1000));
+        let mut stats: Vec<RoomFailureStat> = Vec::new();
+        for tick in &self.recent_failures {
+            if tick.at < cutoff {
+                continue;
+            }
+            match stats
+                .iter_mut()
+                .find(|stat| stat.session == tick.session && stat.room == tick.room.to_string())
+            {
+                Some(stat) => {
+                    stat.count += 1;
+                    if tick.at >= stat.last_at {
+                        stat.last_at = tick.at;
+                        stat.last_class = tick.class.clone();
+                    }
+                }
+                None => stats.push(RoomFailureStat {
+                    session: tick.session.clone(),
+                    room: tick.room.to_string(),
+                    count: 1,
+                    last_at: tick.at,
+                    last_class: tick.class.clone(),
+                }),
+            }
+        }
+        stats.sort_by(|left, right| right.last_at.cmp(&left.last_at));
+        stats
     }
 
     /// 把 harness 的结构化分类写进依赖表。未知 component 原样忽略。
@@ -11720,6 +11870,18 @@ fn with_attempt_note(mut error: ToolError, id: &str, key: Option<&str>) -> ToolE
             .push_str(&acb_i18n::t!("kernel.engine.send_attempt_key", key = key));
     }
     error
+}
+
+/// 错误原文压成一行并截断。失败信息可能带整段 JSON，提醒里只留能看懂的前半段。
+fn truncate_error(error: &str) -> String {
+    const LIMIT: usize = 160;
+    let flat = error.replace(['\n', '\r'], " ");
+    if flat.chars().count() <= LIMIT {
+        return flat;
+    }
+    let mut out: String = flat.chars().take(LIMIT).collect();
+    out.push('…');
+    out
 }
 
 fn now_millis() -> i64 {

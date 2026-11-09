@@ -97,8 +97,8 @@ fn parse_file_relay_max_publish_bytes(value: Option<toml::Value>) -> Result<u64,
             }
             Ok(bytes)
         }
-        toml::Value::String(text) => parse_byte_size(&text).map_err(|kind| {
-            ConfigError::BadFileRelayMaxPublish {
+        toml::Value::String(text) => {
+            parse_byte_size(&text).map_err(|kind| ConfigError::BadFileRelayMaxPublish {
                 value: text.clone(),
                 detail: match kind {
                     ByteSizeParseError::Expected => {
@@ -108,8 +108,8 @@ fn parse_file_relay_max_publish_bytes(value: Option<toml::Value>) -> Result<u64,
                         acb_i18n::t!("kernel.config.file_relay_size_too_large")
                     }
                 },
-            }
-        }),
+            })
+        }
         other => Err(ConfigError::BadFileRelayMaxPublish {
             value: other.to_string(),
             detail: acb_i18n::t!("kernel.config.file_relay_size_expected"),
@@ -554,6 +554,8 @@ pub const DEFAULT_IN_BAND_WINDOW_SECS: u64 = 600;
 pub const DEFAULT_IN_BAND_ROOM_LIMIT: u64 = 3;
 /// in-band 失败通知默认去重表上限。
 pub const DEFAULT_IN_BAND_MAX_ENTRIES: u64 = 256;
+/// 连续失败时补一条「还在出错」提醒的默认间隔（秒）。
+pub const DEFAULT_IN_BAND_REMIND_SECS: u64 = 600;
 
 /// 带外通知（ntfy 兼容 HTTP）。`active()` 为 false 时整层不加载。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -592,6 +594,12 @@ pub struct InBandNoticeConfig {
     pub room_limit: u64,
     /// 去重表上限。
     pub max_entries: u64,
+    /// 被抑制之后，同一房间最多隔多久补一条「还在出错」提醒（秒）。
+    ///
+    /// 为什么需要它：去重与每房间上限都是为了不刷屏，但两者叠加的结果是
+    /// **连续失败时完全静默**——首条之后一句都没有，房间里看到的是「没人回话」，
+    /// 与「桥挂了」无法区分（2026-11-09 连续 6 轮 content-blocked 就是这么误判的）。
+    pub remind_secs: u64,
 }
 
 impl Default for InBandNoticeConfig {
@@ -600,6 +608,7 @@ impl Default for InBandNoticeConfig {
             window_secs: DEFAULT_IN_BAND_WINDOW_SECS,
             room_limit: DEFAULT_IN_BAND_ROOM_LIMIT,
             max_entries: DEFAULT_IN_BAND_MAX_ENTRIES,
+            remind_secs: DEFAULT_IN_BAND_REMIND_SECS,
         }
     }
 }
@@ -1720,6 +1729,11 @@ impl Config {
                         raw.in_band.max_entries,
                         DEFAULT_IN_BAND_MAX_ENTRIES,
                     )?,
+                    remind_secs: notice_limit(
+                        "in_band.remind_secs",
+                        raw.in_band.remind_secs,
+                        DEFAULT_IN_BAND_REMIND_SECS,
+                    )?,
                 };
                 Some(NotificationsConfig {
                     enabled: raw.enabled,
@@ -1819,8 +1833,7 @@ impl Config {
                         detail: acb_i18n::t!("kernel.config.file_relay_public_base"),
                     });
                 }
-                let max_publish_bytes =
-                    parse_file_relay_max_publish_bytes(raw.max_publish_bytes)?;
+                let max_publish_bytes = parse_file_relay_max_publish_bytes(raw.max_publish_bytes)?;
                 Some(FileRelayConfig {
                     mode,
                     listen: address,
@@ -2290,9 +2303,8 @@ impl Config {
                         .map(|(key, _)| key)
                         .unwrap_or(pair)
                         .trim();
-                    (key.eq_ignore_ascii_case("token")
-                        || key.eq_ignore_ascii_case("access_token"))
-                    .then_some(key)
+                    (key.eq_ignore_ascii_case("token") || key.eq_ignore_ascii_case("access_token"))
+                        .then_some(key)
                 })
                 .next();
             if let Some(key) = sensitive {
@@ -3207,10 +3219,7 @@ fn plan_source(raw: &RawSecretSource, default_kind: &str) -> Result<SecretPlan, 
                     return Err(ConfigError::BadSecretSource {
                         name: name.to_owned(),
                         kind: kind.to_owned(),
-                        detail: acb_i18n::t!(
-                            "kernel.config.secret_format_unknown",
-                            format = other
-                        ),
+                        detail: acb_i18n::t!("kernel.config.secret_format_unknown", format = other),
                     });
                 }
             };
@@ -3240,12 +3249,12 @@ fn load_plan(name: &str, plan: &SecretPlan) -> Result<String, ConfigError> {
     match &plan.load {
         SecretLoad::Env { variable } => {
             let value = std::env::var(variable).ok();
-            value.filter(|value| !value.is_empty()).ok_or_else(|| {
-                ConfigError::MissingSecretEnv {
+            value
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ConfigError::MissingSecretEnv {
                     name: name.to_owned(),
                     variable: variable.clone(),
-                }
-            })
+                })
         }
         SecretLoad::File { path, format, key } => {
             read_secret_file(name, path, format, key.as_deref())
@@ -3335,7 +3344,8 @@ fn check_secret_file_security(
             return Err(ConfigError::InsecureSecretFile {
                 name: name.to_owned(),
                 path: path.to_owned(),
-                detail: acb_i18n::t!("kernel.config.secret_file_mode", mode = format!("{mode:o}")).to_owned(),
+                detail: acb_i18n::t!("kernel.config.secret_file_mode", mode = format!("{mode:o}"))
+                    .to_owned(),
             });
         }
         let owner = metadata.uid();
@@ -3358,12 +3368,7 @@ fn check_secret_file_security(
     Ok(())
 }
 
-fn parse_dotenv(
-    name: &str,
-    path: &str,
-    text: &str,
-    wanted: &str,
-) -> Result<String, ConfigError> {
+fn parse_dotenv(name: &str, path: &str, text: &str, wanted: &str) -> Result<String, ConfigError> {
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     for (index, raw_line) in text.lines().enumerate() {
         let line = raw_line.trim();
@@ -3547,6 +3552,7 @@ struct RawInBand {
     window_secs: Option<u64>,
     room_limit: Option<u64>,
     max_entries: Option<u64>,
+    remind_secs: Option<u64>,
 }
 
 fn default_enabled() -> bool {
@@ -3756,11 +3762,10 @@ fn parse_config_file(path: &Path, text: &str) -> Result<ParsedConfigFile, Config
         })?;
     // 逐文件先按 RawConfig 校验一次：fragment 里的未知字段/缺必填字段必须在
     // 这里带着文件名失败，不能等到合并后才报一个无来源的错误。
-    let _raw: RawConfig =
-        toml::from_str(text).map_err(|error| ConfigError::FileParseFailed {
-            path: label.clone(),
-            detail: error.to_string(),
-        })?;
+    let _raw: RawConfig = toml::from_str(text).map_err(|error| ConfigError::FileParseFailed {
+        path: label.clone(),
+        detail: error.to_string(),
+    })?;
     let source = ConfigSource {
         path: label,
         connections: array_count(&value, "connections"),
@@ -4104,13 +4109,15 @@ mod tests {
         let config = Config::parse_fixture(&config_with(&alias, ONE_SESSION)).expect("别名能解析");
         assert_eq!(config.connections[0].kind, "onebot11");
 
-        let canonical = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("旧写法");
+        let canonical =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("旧写法");
         assert_eq!(canonical.connections[0].kind, "onebot11");
     }
 
     #[test]
     fn tasks_policy_defaults_and_overrides() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert!(!config.tasks.wake_on_completion, "默认关闭，保持旧行为");
         assert_eq!(config.tasks.wait_max_ms, DEFAULT_TASK_WAIT_MAX_MS);
 
@@ -4134,7 +4141,8 @@ mod tests {
 
     #[test]
     fn tickets_policy_defaults_and_overrides() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.tickets.request_cooldown_secs, 60);
         assert_eq!(config.tickets.admin_cooldown_secs, 30);
 
@@ -4263,7 +4271,8 @@ mod tests {
 
     #[test]
     fn minimal_config_uses_documented_defaults() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("应当能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("应当能解析");
         let subscription = &config.sessions[0].subscriptions[0];
 
         assert!(config.sessions[0].prompts.is_empty(), "默认不注入上下文");
@@ -4282,7 +4291,8 @@ mod tests {
 
     #[test]
     fn access_defaults_to_the_builtin_grants_evaluator() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         let access = &config.sessions[0].access;
         assert_eq!(access.provider, ProviderId::builtin_grants_access());
     }
@@ -4364,7 +4374,8 @@ mod tests {
 
     #[test]
     fn transport_defaults_to_forward_websocket() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.connections[0].transport.as_str(), "ws-client");
     }
 
@@ -4449,8 +4460,7 @@ mod tests {
                 "{}\n[file_relay]\nlisten = \"0.0.0.0:3131\"\npublic_base = \"http://10.89.0.1:3131\"\nmax_publish_bytes = {literal}",
                 config_with(ONE_CONNECTION, ONE_SESSION)
             );
-            let error = Config::parse_fixture(&text)
-                .expect_err(&format!("{literal} 应当报错"));
+            let error = Config::parse_fixture(&text).expect_err(&format!("{literal} 应当报错"));
             let message = error.to_string();
             assert!(
                 message.contains("[file_relay].max_publish_bytes"),
@@ -4517,7 +4527,8 @@ mod tests {
             r#"kind = "onebot11""#,
             "kind = \"onebot11\"\ntransport = \"ws-server\"",
         );
-        let config = Config::parse_fixture(&config_with(&text, ONE_SESSION)).expect("config 层不拦");
+        let config =
+            Config::parse_fixture(&config_with(&text, ONE_SESSION)).expect("config 层不拦");
         assert_eq!(config.connections[0].transport, Transport::WsServer);
     }
 
@@ -4563,12 +4574,16 @@ mod tests {
             "{}\n[[grants.rules]]\nid = \"fixture-grant-8\"\nsubject = \"system\"\nplace = \"none\"\nscope = \"any\"\ncapability = [\"root\"]\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
-        assert!(Config::parse_fixture(&bad_capability).is_err(), "能力枚举必须封闭");
+        assert!(
+            Config::parse_fixture(&bad_capability).is_err(),
+            "能力枚举必须封闭"
+        );
     }
 
     #[test]
     fn deps_thresholds_default_and_validate() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(
             config.deps.failure_threshold,
             DEFAULT_DEPS_FAILURE_THRESHOLD
@@ -4592,7 +4607,10 @@ mod tests {
                 config_with(ONE_CONNECTION, ONE_SESSION)
             );
             assert!(
-                matches!(Config::parse_fixture(&text), Err(ConfigError::BadDepsConfig { .. })),
+                matches!(
+                    Config::parse_fixture(&text),
+                    Err(ConfigError::BadDepsConfig { .. })
+                ),
                 "{field} = 0 要拒绝"
             );
         }
@@ -4600,7 +4618,8 @@ mod tests {
 
     #[test]
     fn lkg_thresholds_default_and_validate() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.lkg.max_failures, DEFAULT_LKG_MAX_FAILURES);
         assert_eq!(config.lkg.window_secs, DEFAULT_LKG_WINDOW_SECS);
 
@@ -4626,7 +4645,8 @@ mod tests {
 
     #[test]
     fn provider_calls_timeout_defaults_and_validates() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(
             config.provider_calls.timeout_ms,
             DEFAULT_PROVIDER_CALL_TIMEOUT_MS
@@ -4659,7 +4679,8 @@ mod tests {
 
     #[test]
     fn notifications_are_optional_and_inactive_without_url_or_topic() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert!(config.notifications.is_none(), "没写整块就不加载");
 
         let missing_topic = format!(
@@ -4701,7 +4722,7 @@ mod tests {
         assert_eq!(notifications.in_band, InBandNoticeConfig::default());
 
         let custom = format!(
-            "{}\n[notifications]\nurl = \"https://ntfy.example\"\ntopic = {{ secret = \"acb\" }}\nmin_interval_secs = 60\n[notifications.in_band]\nwindow_secs = 30\nroom_limit = 5\nmax_entries = 100\n",
+            "{}\n[notifications]\nurl = \"https://ntfy.example\"\ntopic = {{ secret = \"acb\" }}\nmin_interval_secs = 60\n[notifications.in_band]\nwindow_secs = 30\nroom_limit = 5\nmax_entries = 100\nremind_secs = 120\n",
             config_with(ONE_CONNECTION, ONE_SESSION)
         );
         let config = Config::parse_fixture(&custom).expect("能解析");
@@ -4710,6 +4731,7 @@ mod tests {
         assert_eq!(notifications.in_band.window_secs, 30);
         assert_eq!(notifications.in_band.room_limit, 5);
         assert_eq!(notifications.in_band.max_entries, 100);
+        assert_eq!(notifications.in_band.remind_secs, 120);
 
         let bad_url = format!(
             "{}\n[notifications]\nurl = \"127.0.0.1:8080\"\ntopic = {{ secret = \"acb\" }}\n",
@@ -4739,7 +4761,8 @@ mod tests {
 
     #[test]
     fn queues_default_and_reject_zero() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.queues.inbound, DEFAULT_INBOUND_QUEUE);
         assert_eq!(config.queues.route, DEFAULT_ROUTE_QUEUE);
 
@@ -4915,8 +4938,8 @@ mod tests {
         token = { secret = "t-main" }
         "#
         );
-        let config =
-            Config::parse_fixture(&config_with(ONE_CONNECTION, &session)).expect("同 harness 要算一组");
+        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, &session))
+            .expect("同 harness 要算一组");
         let group = config.sessions_by_harness("dsh");
         assert_eq!(group.len(), 2);
         assert_eq!(group[1].id, "second");
@@ -5054,7 +5077,8 @@ mod tests {
     #[test]
     fn session_name_defaults_to_id_and_model_is_optional() {
         // 不写 name / model：name 默认 = id，model 为 None。
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         let session = &config.sessions[0];
         assert_eq!(session.name, "main");
         assert_eq!(session.model, None);
@@ -5072,7 +5096,8 @@ mod tests {
 
     #[test]
     fn harness_is_a_first_class_object() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.harnesses.len(), 1);
         let harness = config.harness("dsh").expect("有 dsh");
         assert_eq!(harness.id, "dsh");
@@ -5211,7 +5236,8 @@ mod tests {
 
     #[test]
     fn worktrees_root_defaults_and_can_be_overridden() {
-        let config = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
         assert_eq!(config.worktrees_root, DEFAULT_WORKTREES_ROOT);
 
         // worktrees_root 是顶层字段，得放在任何 [[...]] 表格之前。
@@ -6077,8 +6103,8 @@ capability = ["room_write"]
         let text = config_with_secrets(
             "[[secrets.sources]]\nname = \"t-main\"\nkind = \"file\"\npath = \"secrets/token\"",
         );
-        let error = acb_i18n::with_locale("zh-CN", || Config::parse(&text))
-            .expect_err("相对路径要拒绝");
+        let error =
+            acb_i18n::with_locale("zh-CN", || Config::parse(&text)).expect_err("相对路径要拒绝");
         assert!(
             matches!(error, ConfigError::BadSecretSource { ref detail, .. } if detail.contains("绝对路径")),
             "{error}"
@@ -6138,16 +6164,11 @@ capability = ["room_write"]
         write_config(&base_path, &base);
         write_config(
             &config_dir.join("10-secrets.toml"),
-            &format!(
-                "[[secrets.sources]]\nname = \"extra\"\nvariable = \"{variable_b}\"\n"
-            ),
+            &format!("[[secrets.sources]]\nname = \"extra\"\nvariable = \"{variable_b}\"\n"),
         );
         let loaded = Config::load(&base_path, Some(&config_dir)).expect("跨分片合并来源");
         let entries = loaded.secrets.entries();
-        let names: Vec<&str> = entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect();
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, vec!["extra", "t-main"]);
         unsafe {
             std::env::remove_var(variable_a);

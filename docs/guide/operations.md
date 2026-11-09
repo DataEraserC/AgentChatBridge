@@ -97,7 +97,9 @@ grep -aE "content-blocked|dsh\.unreachable|ETIMEDOUT" ~/.local/state/acb/bridge.
 ```
 
 - `400 content-blocked` → **模型侧内容审查拒了**，不是服务挂了。轮次会失败，
-  而「本轮出错」的通知每房间 10 分钟最多 3 条，超了就静默——所以表现为「完全没人回话」。
+  而「本轮出错」的通知每房间 10 分钟最多 3 条，超了不再逐条发——但从 2026-11-09 起，
+  被抑制期间每 `[notifications.in_band].remind_secs`（默认 600 秒）会补**一条**
+  「[还在出错] 最近 N 分钟失败 M 次」。一条提醒都没有，说明不是这条路径。
 - `dsh.unreachable / ETIMEDOUT`（`selectModel`）→ dsh 刚重启的冷启动窗口，
   30 秒～2.5 分钟内 `agentAvailable=false`，等一会儿或再发一次。
 - 都没有 → 用 `deploy/acb-status.sh` 看连接和端口。
@@ -109,6 +111,9 @@ grep -aE "content-blocked|dsh\.unreachable|ETIMEDOUT" ~/.local/state/acb/bridge.
 再从那一行往后看。
 
 控制台「依赖健康」表怎么读（3100 → 概览）：
+
+- **最近失败的轮次**（依赖表下面那块）是「到底有没有在失败」的权威计数，**含因去重/限流
+  没发出通知的轮次**。有计数 = 每轮都在失败、只是通知被压住了；计数为 0 = 真的没轮到它。
 
 - **harness 行**说的是「桥↔harness 的通道通不通」，看 `通道 N 条`。状态为「正常」+
   最后一句话是 `无法连接 ... selectModel ETIMEDOUT` 时，dsh 本身是活的，问题在模型侧。
