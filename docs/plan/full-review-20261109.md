@@ -140,13 +140,18 @@
 | `stop_order_is_reverse_dependency_order` | `supervisor/tests/component_runtime.rs:779` | **并发偶发** | 单跑通过（`running 1 test ... ok`）；并行时「order file」未就绪 |
 
 结论三条：
-
 1. **核心逻辑是绿的**：kernel 578、adapters 147、proto 33、bridge 24 等全过。
 2. **红全在 Trae 新加的部署层**，且其中 4 条暴露同一个设计问题：这些集成测试假设存在
    一种「自包含安装布局」（profile 里有 launcher），而我们的实际部署是 nix 提供
    launcher → 测试与部署模型不一致（正好是 D6 那条「nix 可选」的裂缝）。
 3. **`nix build` 不跑测试这件事必须马上补**：否则下一次改 `engine.rs` 的人和今天一样，
    不会知道这 1080 条是绿的还是红的。
+
+> **补记（2026-11-09 09:00）**：上表 8 条已全部修掉（`e33ece9`），根因都在测试自身：
+> 4 条把「本机装没装 acb」变成了隐式依赖、1 条 fixture 缺 `[endpoint].listen`、
+> 2 条依赖沙箱禁掉的 `utimensat`、1 条没等子进程写完文件就断言。现为
+> 1088 通过 / 0 失败。第 3 条由 `deploy/verify.sh` + `AGENTS.md` 接手（`6feb012`），
+> CI 仍是空的——那是批次 A 里还没做的一项。
 
 ### 3.2 测试本身的质量
 
