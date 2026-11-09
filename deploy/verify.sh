@@ -31,7 +31,27 @@ artifact_dir="${ACB_VERIFY_ARTIFACTS:-$repo_root/target/verify}"
 mkdir -p "$artifact_dir"
 
 baseline_file="deploy/verify-baseline.txt"
-node_bin="${ACB_VERIFY_NODE:-$(command -v node || true)}"
+
+# node 候选：先显式指定的，再 PATH，再 NixOS 的系统 profile。
+# managed Node 22 在某些沙箱里 undici 的 WASM 起不来（Cannot allocate Wasm
+# memory），那会让所有需要 fetch/WS 的 harness 测试整片红——这不是代码问题，
+# 换一个 node 就绿。所以这里保留候选列表，由 stage_node 在失败时自动切换。
+node_candidates=()
+add_node_candidate() {
+  local cand="$1" existing
+  [ -n "$cand" ] && [ -x "$cand" ] || return 0
+  for existing in "${node_candidates[@]:-}"; do
+    [ "$existing" = "$cand" ] && return 0
+  done
+  node_candidates+=("$cand")
+}
+add_node_candidate "${ACB_VERIFY_NODE:-}"
+add_node_candidate "$(command -v node || true)"
+add_node_candidate "/etc/profiles/per-user/$(id -un)/bin/node"
+add_node_candidate "/usr/bin/node"
+add_node_candidate "/usr/local/bin/node"
+node_bin="${node_candidates[0]:-}"
+
 base_ref="${ACB_VERIFY_BASE:-}"
 test_timeout="${ACB_VERIFY_TIMEOUT:-2400}"
 cargo_net_flag="--offline"
@@ -197,27 +217,52 @@ stage_test() {
 }
 
 # ---------------------------------------------------------------- harness JS
+node_run_suite() { # $1=test 目录 $2=日志 $3=node 可执行文件
+  ( cd "$(dirname "$1")" && timeout 600 "$3" --test test/*.test.mjs ) >"$2" 2>&1
+}
+
 stage_node() {
   stage_begin "harness JS 测试（node --test）"
   if [ -z "${node_bin:-}" ]; then
     record node SKIP "没有 node"
     return
   fi
-  local total_pass=0 total_fail=0 ran=0 dir
+  local total_pass=0 total_fail=0 ran=0 dir switched="" node_idx=0
+  node_bin="${node_candidates[0]}"
+
   for dir in harnesses/*/test; do
     [ -d "$dir" ] || continue
-    local name log out
+    if ! ls "$dir"/*.test.mjs >/dev/null 2>&1; then continue; fi
+    local name log out p fa
     name=$(basename "$(dirname "$dir")")
     log="$artifact_dir/node-$name.log"
-    if ! ls "$dir"/*.test.mjs >/dev/null 2>&1; then continue; fi
-    ( cd "$(dirname "$dir")" && timeout 600 "$node_bin" --test test/*.test.mjs ) >"$log" 2>&1
-    out=$(grep -aoE '# (pass|fail) [0-9]+' "$log" | tr -d '#' | tr -s ' ')
-    local p fa
-    p=$(printf '%s\n' "$out" | awk '/pass/{print $2}')
-    fa=$(printf '%s\n' "$out" | awk '/fail/{print $2}')
+    node_run_suite "$dir" "$log" "$node_bin"
+
+    # 这个 node 起不来 undici 的 WASM 时换一个重跑：那是运行环境问题，
+    # 不该让人以为是自己改坏了代码。
+    if grep -qE 'Cannot allocate Wasm memory|WebAssembly\.instantiate' "$log" \
+      && [ $((node_idx + 1)) -lt ${#node_candidates[@]} ]; then
+      local previous="$node_bin"
+      node_idx=$((node_idx + 1))
+      node_bin="${node_candidates[$node_idx]}"
+      switched="${switched:+$switched；}$(basename "$previous") → $node_bin"
+      printf '  %sundici WASM 起不来，改用 %s 重跑%s\n' "$c_dim" "$node_bin" "$c_off"
+      node_run_suite "$dir" "$log" "$node_bin"
+    fi
+
+    # node 22 的 spec reporter 打 `# pass N`，更新的版本打 `ℹ pass N`；
+    # 两种都要认。都认不出来时不能当成 0 失败——那会变成假绿。
+    out=$(grep -aoE '[#ℹ] (pass|fail) [0-9]+' "$log" | sed -E 's/^[#ℹ] //' | tr -s ' ')
+    p=$(printf '%s\n' "$out" | awk '/^pass/{print $2}')
+    fa=$(printf '%s\n' "$out" | awk '/^fail/{print $2}')
+    ran=$((ran + 1))
+    if [ -z "${p:-}" ] && [ -z "${fa:-}" ]; then
+      record node FAIL "harness $name：测试结果解析不出来（$log 末尾：$(tail -3 "$log" | tr '\n' ' ')）"
+      total_fail=$((total_fail + 1))
+      continue
+    fi
     total_pass=$((total_pass + ${p:-0}))
     total_fail=$((total_fail + ${fa:-0}))
-    ran=$((ran + 1))
     if [ "${fa:-0}" != "0" ]; then
       record node FAIL "harness $name：${fa:-?} 条失败（$log）"
     fi
@@ -228,6 +273,7 @@ stage_node() {
   fi
   if [ $total_fail -eq 0 ]; then
     record node OK "$ran 个 harness，$total_pass 条通过"
+    [ -n "$switched" ] && printf '  %s· node 切换过：%s%s\n' "$c_dim" "$switched" "$c_off"
   fi
 }
 
