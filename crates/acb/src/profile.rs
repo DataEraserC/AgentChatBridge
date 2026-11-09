@@ -323,6 +323,7 @@ pub fn command(args: &[String]) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         "list" => list_command(rest).map_err(Failure::from),
+        "history" => history_command(rest).map_err(Failure::from),
         "current" => current_command(rest).map_err(Failure::from),
         "add" => add_command(rest),
         "switch" => switch_command(rest),
@@ -366,6 +367,46 @@ fn list_command(args: &[String]) -> Result<ExitCode, String> {
         println!(
             "{marker} {id} label={label} created_at_ms={} source={source} config={config}",
             meta.created_at_ms
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 换代历史：`list` 的同一份数据，翻成正序（旧 → 新）。
+///
+/// `list` 回答「现在用哪个、还有哪些可选」，所以新的在最上面；`history` 回答
+/// 「怎么一路走来的」，所以旧的在前、当前的标 `*`。两者都不改动任何东西。
+fn history_command(args: &[String]) -> Result<ExitCode, String> {
+    let (positional, options) = parse_options(args, &["profile-dir"])?;
+    if !positional.is_empty() {
+        return Err("profile history takes no positional arguments".to_string());
+    }
+    let root = profile_root(&options);
+    let mut generations = load_generations(&root)?;
+    if generations.is_empty() {
+        println!("profile: empty ({})", root.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let current = current_id(&root)?;
+    generations.reverse();
+    println!("旧 → 新（共 {} 代，* = 当前）", generations.len());
+    for (id, meta) in &generations {
+        let marker = if current.as_deref() == Some(id.as_str()) {
+            "*"
+        } else {
+            " "
+        };
+        let label = meta.label.as_deref().unwrap_or("-");
+        let strategy = match &meta.payload {
+            Some(payload) => match payload.strategy {
+                Strategy::Store => "store",
+                Strategy::Copy => "copy",
+            },
+            None => "symlink",
+        };
+        println!(
+            "{marker} {id} at={} label={label} strategy={strategy} source={}:{}",
+            meta.created_at_ms, meta.source.kind, meta.source.path
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -1870,6 +1911,7 @@ fn print_help() {
     println!(
         "Usage:
   acbctl profile list    [--profile-dir DIR]
+  acbctl profile history [--profile-dir DIR]
   acbctl profile current [--profile-dir DIR]
   acbctl profile add <path> --strategy store|copy [--label LABEL] [--config PATH] [--version VERSION] [--profile-dir DIR]
   acbctl profile switch <gen-or-label> [--profile-dir DIR]

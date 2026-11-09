@@ -65,6 +65,7 @@ $XDG_DATA_HOME/acb/profile/          # 默认 ~/.local/share/acb/profile
 
 ```text
 acbctl profile list    [--profile-dir DIR]
+acbctl profile history [--profile-dir DIR]
 acbctl profile current [--profile-dir DIR]
 acbctl profile add <path> --strategy store|copy [--label LABEL] [--config PATH] [--version VERSION] [--profile-dir DIR]
 acbctl profile switch <gen-or-label> [--profile-dir DIR]
@@ -75,6 +76,8 @@ acbctl profile migrate --to copy [<gen-or-label>] [--profile-dir DIR]
 ```
 
 - `list`：退出 0；按 `created_at_ms` 倒序列出，`*` 标记 current。
+- `history`：退出 0；同一份数据按 `created_at_ms` 正序（旧 → 新）输出，`*` 标记 current，
+  每行带 payload 策略。`list` 看「还能选哪些」，`history` 看「怎么走到今天的」。
 - `current`：有 current 退出 0，无 current/损坏退出 1；额外打印 payload 策略。
 - `add`：校验产物布局，按显式策略创建 generation，写 `meta.json`，不自动 switch。
   `--strategy` 缺失或不支持时直接报错退出（也接受 `ACB_PROFILE_STRATEGY`），不静默降级。
