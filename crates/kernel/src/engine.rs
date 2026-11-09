@@ -6980,9 +6980,37 @@ impl<S: Store> Bridge<S> {
     /// 收工时把本轮/本会话积攒的 pending 票据聚合成一条私信发给 system admin。
     /// 发送失败就保持未通知状态，下一次收工再试。
     fn flush_ticket_approvals(&mut self, config: &Config, now: i64) {
-        let pending = self.access_tickets.pending_unannounced(now);
+        let mut pending = self.access_tickets.pending_unannounced(now);
         if pending.is_empty() {
             return;
+        }
+        // 建票时的路由是快照。空路由或上次投递失败的票，用**当前**配置重算一次：
+        // 管理员事后补上 approval_route 应该能救回还没过期的票，而不是眼看着它
+        // 一路 pending 到过期（2026-11-09 现场：补配置后旧票依然发不出去）。
+        // 已经通知成功的票不动——管理员看的那条消息不能被悄悄改目的地。
+        for ticket in pending.iter_mut() {
+            let stale = ticket.approval_route.is_empty() || ticket.route_unavailable.is_some();
+            if !stale {
+                continue;
+            }
+            let fresh: Vec<String> = self
+                .approval_route(config, &ticket.request_room)
+                .iter()
+                .map(|room| room.to_string())
+                .collect();
+            if fresh == ticket.approval_route {
+                continue;
+            }
+            if self.access_tickets.retarget(&ticket.id, fresh.clone()) {
+                ticket.approval_route = fresh;
+                ticket.route_unavailable = None;
+                ticket.route_unavailable_at = None;
+                eprintln!(
+                    "[access-ticket] event=retargeted ticket={} route={}",
+                    ticket.id,
+                    ticket.approval_route.join("|")
+                );
+            }
         }
         let admin_cooldown_ms = i64::try_from(config.tickets.admin_cooldown_secs)
             .unwrap_or(i64::MAX)
@@ -7010,6 +7038,12 @@ impl<S: Store> Bridge<S> {
             let ids: Vec<String> = tickets.iter().map(|ticket| ticket.id.clone()).collect();
             if route.is_empty() {
                 let reason = "no approval route (room/account/default)";
+                // 只在「第一次发现没路由」时回话，否则每次收工都刷一遍。
+                let first_time: Vec<AccessTicket> = tickets
+                    .iter()
+                    .filter(|ticket| ticket.route_unavailable_at.is_none())
+                    .cloned()
+                    .collect();
                 self.access_tickets
                     .mark_route_unavailable(&ids, reason, now);
                 for ticket in &tickets {
@@ -7017,6 +7051,9 @@ impl<S: Store> Bridge<S> {
                         "[access-ticket] event=route_unavailable ticket={} target=- reason=\"{}\"",
                         ticket.id, reason
                     );
+                }
+                if !first_time.is_empty() {
+                    self.notify_no_route(&first_time, now);
                 }
                 continue;
             }
@@ -7073,6 +7110,33 @@ impl<S: Store> Bridge<S> {
                 "[access-ticket] event=route_target_failed ticket={} target={} reason=\"{}\"",
                 ticket.id, target, reason
             );
+        }
+    }
+
+    /// 房间没配审批地点时，回申请房间说一句。
+    ///
+    /// 不回话的代价是完全静默：票据一路 pending，申请人以为申请成功了，
+    /// 管理员根本没收到——2026-11-09 就是这么丢了一张票，靠翻 dsh 会话记录
+    /// 才查清。回话要让「谁该动手」明确：管理员去控制台配审批路由。
+    /// 每张票只说一次（`route_unavailable_at` 有值就不再重复）。
+    fn notify_no_route(&self, tickets: &[AccessTicket], now: i64) {
+        let mut by_room: std::collections::BTreeMap<RoomId, Vec<&AccessTicket>> =
+            std::collections::BTreeMap::new();
+        for ticket in tickets {
+            by_room
+                .entry(ticket.request_room.clone())
+                .or_default()
+                .push(ticket);
+        }
+        for (room, items) in by_room {
+            let text = no_route_notice_text(&items, &room, now);
+            if let Err(error) = self.send_admin_text(&room, &text) {
+                eprintln!(
+                    "[access-ticket] event=no_route_notice_failed room={} error=\"{}\"",
+                    room,
+                    error.replace('"', "'")
+                );
+            }
         }
     }
 
@@ -10624,6 +10688,33 @@ fn access_command_not_routed_text(id: &str, routes: &[String], trusted: bool) ->
 
 /// 发给 system admin 的审批消息。只渲染 core 归一化后的目标/op/能力，
 /// 不渲染 agent 的自由文本。
+/// 「本房间没配审批地点」的告知文案。
+///
+/// 必须让两件事明确：申请人知道卡在哪一步、管理员照着房间键就能去配。
+/// 只说「审批失败」等于没说——这种票不是失败，是根本没人收到。
+fn no_route_notice_text(
+    tickets: &[&crate::tickets::AccessTicket],
+    room: &RoomId,
+    now: i64,
+) -> String {
+    let mut text = format!(
+        "[ACB 授权申请] {} 张票据没人能收到审批消息\n本房间（{}）没有配置审批地点，票据会一直挂着直到过期。\n请管理员在控制台「权限」页给它配 approval_route。\n",
+        tickets.len(),
+        room
+    );
+    for ticket in tickets {
+        let minutes = ((ticket.expires_at - now).max(0) + 59_999) / 60_000;
+        text.push_str(&format!(
+            "· {} 目标：{} 动作：{} 剩余约 {} 分钟\n",
+            ticket.id,
+            ticket.target.display(),
+            ticket.ops.join(", "),
+            minutes
+        ));
+    }
+    text
+}
+
 fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
     let mut text = format!("[ACB 授权申请] 待批准 {} 项\n", pending.len());
     let mut batches: Vec<&str> = pending

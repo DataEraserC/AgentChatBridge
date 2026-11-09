@@ -1472,3 +1472,77 @@ fn approval_from_an_untrusted_group_is_refused_with_a_reply() {
         "要说清为什么不能在这里批: {reply}"
     );
 }
+
+/// 房间没配审批地点时必须回话，且事后补路由要能救回这张还没过期的票。
+///
+/// 2026-11-09 现场：群 769843907 的票算出了空路由，静默回退到适配器的
+/// direct_room（bot 自己的私聊、没人订阅），票据一路 pending 到过期。
+/// 申请人以为申请成功了，管理员压根没收到——查清这件事靠的是翻 dsh 会话记录。
+#[test]
+fn no_route_notice_and_retarget_after_route_configured() {
+    let text = config().replace(
+        "        [grants.rooms.\"qq:group/123\"]\n        approval_route = [\"qq:private/admin\"]\n",
+        "",
+    );
+    assert!(
+        !text.contains("approval_route"),
+        "夹具里必须真的没有审批路由"
+    );
+    let (mut bridge, sends) = bridge_with(&text);
+    bridge
+        .ingest(message("qq:group/123", "user1", "帮我发个别的群", true))
+        .expect("能记下来");
+    let turn = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let request = bridge
+        .tool_call(
+            &turn,
+            &sessions(),
+            "access_request",
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["send_message_to"],
+                "params": {"elements": [{"type": "text", "text": "approved"}]}
+            }]}),
+        )
+        .expect("申请成功");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("票据 id")
+        .to_owned();
+    bridge.end_turn(&turn, None).expect("收工");
+
+    // 申请房间收到的是「没人收到审批」，而不是一条审批私信。
+    let notice = last_text_to(&sends, "qq:group/123");
+    assert!(
+        notice.contains("没有配置审批地点") && notice.contains(&id),
+        "要说清是哪张票没人收到: {notice}"
+    );
+    assert!(
+        !sends
+            .lock()
+            .expect("没被毒死")
+            .iter()
+            .any(|(room, _)| room.path == ["private", "admin"]),
+        "没有路由时不该往管理员私信里塞审批消息"
+    );
+
+    // 管理员补上路由——走的是控制台同一条路径（写库 + 轮次边界生效）。
+    let mut grants = bridge.config().grants.clone();
+    grants.rooms.insert(
+        "qq:group/123".to_owned(),
+        acb_kernel::RoomGrant {
+            approval_route: vec!["qq:private/admin".to_owned()],
+            ..Default::default()
+        },
+    );
+    bridge.replace_policy(&grants).expect("保存策略");
+
+    // 下一轮收工：边界应用新策略 → 路由重算 → 这张旧票终于发出去了。
+    bridge
+        .ingest(message("qq:group/123", "user1", "还在么", true))
+        .expect("能记下来");
+    let turn2 = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    bridge.end_turn(&turn2, None).expect("收工");
+    let dm = approval_dm(&sends);
+    assert!(dm.contains(&id), "补完路由后旧票应出现在审批私信里: {dm}");
+}

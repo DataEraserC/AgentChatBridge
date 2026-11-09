@@ -536,6 +536,30 @@ impl AccessTickets {
         }
     }
 
+    /// 用当前配置重算出的路由覆盖建票时的快照。
+    ///
+    /// 路由是申请那一刻算出来的：房间没配 `approval_route` 时算出空路由，
+    /// 票据就只能一路 pending 到过期——管理员事后补上配置也救不回来。
+    /// 只在「快照为空」或「上次投递失败」时由调用方使用；已经成功通知出去的
+    /// 票据不动，否则管理员正在看的那条消息会指向一个不再生效的目的地。
+    ///
+    /// 返回是否真的改了。
+    pub fn retarget(&mut self, id: &str, route: Vec<String>) -> bool {
+        let Some(ticket) = self.tickets.get_mut(id) else {
+            return false;
+        };
+        if ticket.state != TicketState::PendingApproval || ticket.announced {
+            return false;
+        }
+        if ticket.approval_route == route {
+            return false;
+        }
+        ticket.approval_route = route;
+        ticket.route_unavailable = None;
+        ticket.route_unavailable_at = None;
+        true
+    }
+
     /// 记录一次审批路由不可达；不改变票据状态，下一次收工继续重试。
     pub fn mark_route_unavailable(&mut self, ids: &[String], reason: &str, now: i64) {
         for id in ids {
@@ -1952,5 +1976,58 @@ mod tests {
             "单轮上限"
         );
         assert_eq!(tickets.len(), 1 + MAX_REQUESTS_PER_TURN);
+    }
+
+    #[test]
+    fn retarget_replaces_empty_snapshot_and_clears_failure() {
+        let mut tickets = AccessTickets::new();
+        let reply = tickets
+            .request(TicketRequest {
+                approval_route: Vec::new(),
+                ..request(1000, &["send_message_to"])
+            })
+            .expect("申请");
+        tickets.mark_route_unavailable(&[reply.id.clone()], "no route", 1500);
+        assert_eq!(
+            tickets.get(&reply.id).expect("还在簿上").route_unavailable,
+            Some("no route".to_owned())
+        );
+
+        // 管理员事后补上路由：重算发现能到私聊，快照换成新路由，失败标记清掉。
+        assert!(tickets.retarget(&reply.id, vec!["qq:private/10002".to_owned()]));
+        let ticket = tickets.get(&reply.id).expect("还在簿上");
+        assert_eq!(ticket.approval_route, vec!["qq:private/10002".to_owned()]);
+        assert_eq!(ticket.route_unavailable, None);
+        assert_eq!(ticket.route_unavailable_at, None);
+
+        // 同一份路由再算一次：没有变化就别报「改了」。
+        assert!(!tickets.retarget(&reply.id, vec!["qq:private/10002".to_owned()]));
+    }
+
+    #[test]
+    fn retarget_leaves_announced_and_finished_tickets_alone() {
+        let mut tickets = AccessTickets::new();
+        let replied = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("申请");
+        tickets.mark_announced(&[replied.id.clone()], 1200);
+
+        // 已经发出去的审批消息不能改目的地，否则管理员看着一条指向旧房间的消息。
+        assert!(!tickets.retarget(&replied.id, vec!["qq:private/9".to_owned()]));
+        assert_eq!(
+            tickets.get(&replied.id).expect("还在簿上").approval_route,
+            vec!["qq:private/10002".to_owned()]
+        );
+
+        // 已经过期的票同样不动：改了也不会再发。
+        let expired = tickets
+            .request(TicketRequest {
+                now: 1000,
+                ..request(1000, &["send_message_to"])
+            })
+            .expect("申请");
+        let expires_at = tickets.get(&expired.id).expect("还在簿上").expires_at;
+        tickets.sweep(expires_at + 1);
+        assert!(!tickets.retarget(&expired.id, vec!["qq:private/9".to_owned()]));
     }
 }
