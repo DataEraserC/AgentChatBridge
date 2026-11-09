@@ -1,0 +1,61 @@
+name: verify
+
+# 门禁：跑的就是开发者本地跑的那一条命令（deploy/verify.sh），
+# 不在这里另写一套 cargo 参数——否则两边一定会漂移，CI 绿而本地红。
+on:
+  push:
+    branches: [dev_20261025]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fmt 阶段要跟基线提交做 diff，浅克隆拿不到 → 取全历史。
+          fetch-depth: 0
+
+      - name: 安装工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装系统依赖
+        # 与 flake.nix 的 buildInputs 对齐（libgit2 走 vendored，但 zlib/openssl 要系统库）。
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev zlib1g-dev libgit2-dev
+
+      - name: 跑门禁
+        env:
+          # CI 没有本地 cargo 缓存，允许联网；本地默认 --offline。
+          ACB_VERIFY_ONLINE: "1"
+          # push：跟本次推送前的提交比；PR：跟目标分支比。
+          ACB_VERIFY_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: deploy/verify.sh
+
+      - name: 失败时打印日志
+        if: failure()
+        run: |
+          for f in target/verify/*.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"
+            tail -n 120 "$f"
+            echo "::endgroup::"
+          done

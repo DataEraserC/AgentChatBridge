@@ -92,21 +92,26 @@ stage_fmt() {
   if [ -z "$base_ref" ]; then
     base_ref=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
   fi
+  # 基线算不出来就跳过，不判红：「算不出对比范围」是假红，假红会教人忽略门禁。
+  # CI 的首次推送 event.before 是一串 0，也走这条路。
+  if [ -n "$base_ref" ] && ! git rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null 2>&1; then
+    record fmt SKIP "基线 ${base_ref} 不可解析（浅克隆或首次推送），跳过格式检查"
+    return
+  fi
+  if [ -z "$base_ref" ]; then
+    record fmt SKIP "没有可比较的基线（仓库未设上游分支），跳过格式检查"
+    return
+  fi
   local -a files=()
-  if [ -n "$base_ref" ]; then
-    while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(
-      { git diff --name-only --diff-filter=ACMR "$base_ref"...HEAD -- '*.rs' 2>/dev/null
-        git diff --name-only --diff-filter=ACMR -- '*.rs' 2>/dev/null
-        git ls-files --others --exclude-standard -- '*.rs' 2>/dev/null
-      } | sort -u
-    )
-    if [ ${#files[@]} -eq 0 ]; then
-      record fmt OK "相对 $base_ref 没有改动的 .rs 文件"
-      return
-    fi
-  else
-    while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(git ls-files -- '*.rs' 2>/dev/null)
-    printf '  %s（无上游分支可比，退化为全仓检查）%s\n' "$c_dim" "$c_off"
+  while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(
+    { git diff --name-only --diff-filter=ACMR "$base_ref"...HEAD -- '*.rs' 2>/dev/null
+      git diff --name-only --diff-filter=ACMR -- '*.rs' 2>/dev/null
+      git ls-files --others --exclude-standard -- '*.rs' 2>/dev/null
+    } | sort -u
+  )
+  if [ ${#files[@]} -eq 0 ]; then
+    record fmt OK "相对 $base_ref 没有改动的 .rs 文件"
+    return
   fi
   local out="$artifact_dir/fmt.log"
   : >"$out"
