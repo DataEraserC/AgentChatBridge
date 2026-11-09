@@ -101,12 +101,36 @@ fn run_loop<S: Store + Send + 'static>(
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(action) => {
                 stats.dequeued();
-                run_action(&bridge, action);
+                // 单个动作崩溃只丢这一个，worker 循环不能停：停了这个线程，
+                // 之后所有路由发送与后台任务都静默失效（2026-11-09 审查 P0-3）。
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_action(&bridge, action)
+                })) {
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "kernel.route_worker.action_panicked",
+                            error = panic_text(payload.as_ref())
+                        )
+                    );
+                }
                 busy.fetch_sub(1, Ordering::SeqCst);
             }
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+/// panic 的 payload 转成人能读的一句话。`&str` / `String` 覆盖绝大多数
+/// `panic!("…")`；其余（比如 `panic_any(结构体)`）只能给个占位。
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_owned()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        String::from("panic")
     }
 }
 
@@ -148,7 +172,18 @@ fn run_task<S: Store>(bridge: &Arc<Mutex<Bridge<S>>>, task: PreparedTask) {
     // 插件 handler 先取出来，命令/任务在锁外跑；取不到再回退内置 `exec`。
     let plugin_handler = lock(bridge).task_handler(&task.handler);
     let outcome = match plugin_handler {
-        Some(handler) => handler.handle(&task.task_id, &task.params),
+        // 插件是树外代码，panic 不能带走唯一的 route worker：转成普通失败，
+        // 任务按 `failed` 收尾，模型能查到原因，后面的动作照常处理。
+        Some(handler) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handler.handle(&task.task_id, &task.params)
+        })) {
+            Ok(outcome) => outcome,
+            Err(payload) => Err(acb_i18n::t!(
+                "kernel.route_worker.task_panicked",
+                handler = task.handler,
+                error = panic_text(payload.as_ref())
+            )),
+        },
         None => task::run(&task.handler, &task.params),
     };
     let outcome = match outcome {

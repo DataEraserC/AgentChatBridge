@@ -8608,8 +8608,23 @@ impl<S: Store> Bridge<S> {
         let record = self.store.append(draft)?;
         let mut watermark = 0;
         for subscriber in Self::subscribers_of(config, &room) {
-            let cursor = Cursor::new(subscriber.session, room.clone());
-            watermark = self.store.ack(&cursor, &[record.id])?;
+            let session = subscriber.session;
+            let cursor = Cursor::new(session.clone(), room.clone());
+            // 一个订阅者确认失败不能拖累其余订阅者：水位只推连续前沿，漏一个就留下
+            // 永久空洞，洞后面的消息会被反复重投。也不能把错误抛回给模型——消息已经
+            // 发出去了，抛错只会让它再发一遍（2026-11-09 审查 P0-2）。
+            match self.store.ack(&cursor, &[record.id]) {
+                Ok(acked) => watermark = acked,
+                Err(error) => eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.engine.ack_failed",
+                        session = session,
+                        record = record.id,
+                        error = format!("{error:?}")
+                    )
+                ),
+            }
         }
         Ok((record, watermark))
     }

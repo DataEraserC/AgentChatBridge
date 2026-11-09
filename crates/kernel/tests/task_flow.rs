@@ -98,6 +98,15 @@ impl RouteProvider for TaskRoute {
                     params: json!({"text": "plugin-ok"}),
                 }],
             };
+        } else if context.text.starts_with("/task panic") {
+            return RouteDecision::Handle {
+                store: false,
+                wake: false,
+                actions: vec![RouteAction::Task {
+                    handler: "test.panic".into(),
+                    params: json!({}),
+                }],
+            };
         } else if context.text.starts_with("/task quiet") {
             (vec!["sh", "-c", "printf quiet"], "never")
         } else if context.text.starts_with("/task error-ok") {
@@ -134,6 +143,16 @@ impl TaskHandler for EchoTask {
     }
 }
 
+/// 树外插件的常见故障：handler 自己 panic。core 必须把它收成 failed，
+/// 不能让唯一的 route worker 线程跟着死。
+struct PanicTask;
+
+impl TaskHandler for PanicTask {
+    fn handle(&self, _task_id: &str, _payload: &Value) -> Result<TaskOutcome, String> {
+        panic!("插件 handler 崩了");
+    }
+}
+
 fn bridge(wake_extra: &str) -> Arc<Mutex<Bridge<MemoryStore>>> {
     build_bridge(&config(wake_extra))
 }
@@ -153,6 +172,18 @@ fn build_bridge(text: &str) -> Arc<Mutex<Bridge<MemoryStore>>> {
             Arc::new(EchoTask),
         )
         .expect("注册任务 handler");
+    plugins
+        .register_task_handler(
+            ProviderDescriptor::new(
+                ProviderId::parse("test.panic").expect("合法"),
+                ExtensionPoint::Task,
+                PLUGIN_API_VERSION,
+                vec![Capability::TaskHandle],
+            ),
+            "test.panic",
+            Arc::new(PanicTask),
+        )
+        .expect("注册会 panic 的任务 handler");
     plugins
         .register_route(
             ProviderDescriptor::new(
@@ -282,6 +313,48 @@ fn plugin_task_handler_runs_in_the_route_worker() {
     );
     assert_eq!(task["result"]["outcome"], "sent");
     assert!(task["error"].is_null());
+
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = queue.submit(message("收工", false));
+    drain.join().expect("drain 收工");
+}
+
+#[test]
+fn panicking_plugin_task_is_failed_without_killing_the_route_worker() {
+    let bridge = bridge("");
+    let (queue, receiver) = EventQueue::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker = RouteWorker::spawn(Arc::clone(&bridge), Arc::clone(&shutdown));
+    let drain = {
+        let bridge = Arc::clone(&bridge);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            drain_events(bridge, receiver, shutdown, ControlRegistry::new(), worker)
+        })
+    };
+
+    // 第一条：插件 handler 自己 panic。任务要落成 failed，并且原因指得回 handler。
+    let _ = queue.submit(message("/task panic", false));
+    let failed = wait_for_task(
+        &bridge,
+        |task| task["handler"] == "test.panic" && task["status"] == "failed",
+        Duration::from_secs(3),
+    );
+    let error = failed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("test.panic"),
+        "失败原因应指回 handler，实际：{error}"
+    );
+    assert!(failed["result"].is_null(), "panic 之后不该有结果");
+
+    // 第二条：worker 线程没被带走，后面的动作照常执行。
+    let _ = queue.submit(message("/task plugin", false));
+    let ok = wait_for_task(
+        &bridge,
+        |task| task["handler"] == "test.echo" && task["status"] == "succeeded",
+        Duration::from_secs(3),
+    );
+    assert_eq!(ok["result"]["outcome"], "sent");
 
     shutdown.store(true, Ordering::Relaxed);
     let _ = queue.submit(message("收工", false));
@@ -548,7 +621,9 @@ wake_on_completion = true
             .any(|record| record.sender.id == "acb.task"),
         "唤醒的那一轮应能看到 acb.task 合成事件"
     );
-    lock(&bridge).end_turn(&delivery.ticket, None).expect("收工");
+    lock(&bridge)
+        .end_turn(&delivery.ticket, None)
+        .expect("收工");
 
     // 同房间的另一个订阅者不该被这条任务完成叫醒。
     assert!(
