@@ -26,6 +26,7 @@ path = "/var/lib/acb/bridge.db"
 | `policy_rooms` | 房间政策：信任、可信成员、审批路由 | 按房间键 `qq:group/123` |
 | `policy_accounts` | 账号级审批路由 | 按账号键 `qq:10001` |
 | `policy_admins` | `bot_admin` / `system_admin` 两个单例 | 按角色 |
+| `model_fallbacks` | 后备模型链：主模型被拒时按 `position` 从小到大换 | 按 `provider/model` |
 | `meta` | 结构版本号、`policy_initialized` 标记 | 一个键值对 |
 
 **策略为什么在库里**（schema 13 起）：`[grants]` 以前只能手改 `config.toml`，改错要重启，
@@ -175,7 +176,7 @@ EOF
 
 ## 结构版本
 
-`meta.schema_version` 记着这个库是第几版结构；当前 `SCHEMA_VERSION = 13`。
+`meta.schema_version` 记着这个库是第几版结构；当前 `SCHEMA_VERSION = 14`。
 
 - 库比程序**新** → 拒绝打开，报「库是第 N 版，本程序只认识第 M 版」。这是故意的：老程序往新库里写，比起不来严重得多。
 - 库比程序**老** → 就地升级（补列、建索引，最后才改版本号），老数据照旧读得出来。
@@ -194,6 +195,7 @@ EOF
 | 10 → 11 | `feedback` 加 `replies`（JSON 数组） | 维护方回复反馈并通知原会话；老反馈默认空数组 |
 | 11 → 12 | 加 `tasks` 表 | 后台任务与出站尝试要跨重启：`wait` 不能在重启后变成悬空引用；`running` 的残留项启动时置 `unknown` |
 | 12 → 13 | 加 `policy_rules` / `policy_rooms` / `policy_accounts` / `policy_admins` 四张表 | 权限与审批路由从 `config.toml` 搬进库（ADR-0009 的「业务对象只认库」）。新表由建表语句建，不搬数据；首次启动把 TOML 的 `[grants]` 一次性导入并打上 `meta.policy_initialized` |
+| 13 → 14 | 加 `model_fallbacks` 表 | 主模型被上游拒（内容审核 / 限流 / 下线）时按顺序换模型重放这一轮。纯新增、不搬数据；空表 = 不重试，行为与之前一致 |
 
 ## 已知限制
 
