@@ -36,6 +36,18 @@ impl Drop for TempDir {
     }
 }
 
+/// 让测试不受本机安装影响：把 profile 指到一个不存在 `current` 的空目录，使
+/// `profile::status()` 得到 `Missing`，`ACB_UNIT_BIN_DIR` 等回退值才真正生效。
+///
+/// 以前这里用 `env_remove("ACB_PROFILE_DIR")`，等于让解析退回开发者本机的
+/// `~/.local/share/acb/profile`：机器上装过 acb 时测试走真实 profile（nix 布局里
+/// 的 `bin/` 没有 launcher），没装过时走回退值——同一份测试两种行为。
+fn empty_profile_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("acb-empty-profile-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create empty profile dir");
+    dir
+}
+
 fn run_acb(values: &[(&str, &str)], extra_env: &[(&str, &str)], args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_acbctl"));
     for (key, _) in std::env::vars() {
@@ -43,7 +55,7 @@ fn run_acb(values: &[(&str, &str)], extra_env: &[(&str, &str)], args: &[&str]) -
             command.env_remove(key);
         }
     }
-    command.env_remove("ACB_PROFILE_DIR");
+    command.env("ACB_PROFILE_DIR", empty_profile_dir());
     command.env_remove("ACB_STATE_DIR");
     for (key, value) in values {
         command.env(key, value);
@@ -241,7 +253,7 @@ while :; do sleep 0.05; done
             parent.env_remove(key);
         }
     }
-    parent.env_remove("ACB_PROFILE_DIR");
+    parent.env("ACB_PROFILE_DIR", empty_profile_dir());
     parent.env_remove("ACB_STATE_DIR");
     parent
         .env("ACB_UNIT_BIN_DIR", &bin)
@@ -453,7 +465,9 @@ fn direct_mode_spawns_bridge() {
     fs::create_dir_all(&bin).expect("bin");
     fs::create_dir_all(&state).expect("state");
     let config = temp.path().join("config.toml");
-    fs::write(&config, "[endpoint]\n").expect("config");
+    // `[endpoint].listen` 是必填字段（kernel::config::EndpointConfig），只写表头会
+    // 解析失败——把「配置合法」这件事在 fixture 里做实，而不是等 acb-bridge 报错。
+    fs::write(&config, "[endpoint]\nlisten = \"127.0.0.1:17000\"\n").expect("config");
     let marker = temp.path().join("bridge-started");
 
     common::write_script(

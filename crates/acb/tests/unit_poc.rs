@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -166,18 +166,6 @@ fn assert_success(output: &Output) {
     );
 }
 
-fn set_old_mtime(path: &Path) {
-    let old = SystemTime::now()
-        .checked_sub(Duration::from_secs(3600))
-        .expect("one hour ago");
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .expect("open for mtime");
-    file.set_times(fs::FileTimes::new().set_modified(old))
-        .expect("set mtime");
-}
-
 fn mtime(path: &Path) -> SystemTime {
     fs::metadata(path)
         .expect("metadata")
@@ -219,9 +207,10 @@ fn second_install_is_unchanged_and_preserves_mtime() {
         );
     }
 
-    let bridge = root.join("acb-bridge.service");
-    set_old_mtime(&bridge);
-    let before = mtime(&bridge);
+    // 用「安装前的 mtime 快照」当标记，而不是先把 mtime 改成过去某个时刻：
+    // 后者依赖 utimensat，在沙箱里返回 EPERM，会让这条测试变成环境探测。
+    // 快照同样能证明「没被重写」——重写必然更新 mtime（纳秒精度）。
+    let before = mtime(&root.join("acb-bridge.service"));
 
     let second = install(&root, &values);
     assert_success(&second);
@@ -234,7 +223,7 @@ fn second_install_is_unchanged_and_preserves_mtime() {
     }
     assert_eq!(
         before,
-        mtime(&bridge),
+        mtime(&root.join("acb-bridge.service")),
         "unchanged install must not rewrite acb-bridge.service"
     );
 }
@@ -248,9 +237,11 @@ fn changed_value_updates_only_affected_file() {
     let first = install(&root, &values);
     assert_success(&first);
 
+    // 同上：用 mtime 快照当标记，不依赖 utimensat。
+    let mut before = Vec::new();
     for name in UNIT_NAMES {
         if name != "acb-opencode-serve.service" {
-            set_old_mtime(&root.join(name));
+            before.push((name, mtime(&root.join(name))));
         }
     }
     set_value(&mut values, "ACB_UNIT_OPENCODE_PORT", "4098");
@@ -271,13 +262,12 @@ fn changed_value_updates_only_affected_file() {
             );
         }
     }
-    for name in UNIT_NAMES {
-        if name != "acb-opencode-serve.service" {
-            assert!(
-                mtime(&root.join(name)) < SystemTime::now() - Duration::from_secs(1800),
-                "{name} was rewritten despite unchanged content"
-            );
-        }
+    for (name, stamp) in before {
+        assert_eq!(
+            stamp,
+            mtime(&root.join(name)),
+            "{name} was rewritten despite unchanged content"
+        );
     }
 }
 
@@ -480,7 +470,12 @@ fn install_scope_selects_stack_install_section() {
         &values,
         &[],
         &[
-            "unit", "install", "--root", root_arg.as_str(), "--scope", "container",
+            "unit",
+            "install",
+            "--root",
+            root_arg.as_str(),
+            "--scope",
+            "container",
         ],
     );
     assert!(!invalid.status.success());

@@ -776,8 +776,24 @@ startup_grace_secs = 0
     thread::sleep(Duration::from_millis(250));
     manager.stop_all(now_ms());
 
-    let text = fs::read_to_string(&order).expect("order file");
-    let entries: Vec<&str> = text.lines().collect();
+    // 子进程是异步收尾的：stop_all 返回不代表假组件已经把 TERM 处理完、把行写进
+    // order 文件。以前这里直接 read_to_string，和并行跑的其它用例抢时序，偶发
+    // 「order file: No such file」。改成等文件里出现两行再断言。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut entries: Vec<String> = Vec::new();
+    while Instant::now() < deadline {
+        if let Ok(text) = fs::read_to_string(&order) {
+            entries = text
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect();
+            if entries.len() >= 2 {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(entries, vec!["beta", "alpha"], "停止必须逆依赖序");
 }
 
