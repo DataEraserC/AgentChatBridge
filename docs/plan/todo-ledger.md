@@ -58,6 +58,8 @@
 | C5 | `endpoint.rs:931` | `write_frame` 阻塞写无超时 | 照做：设写超时 | next |
 | C6 | `endpoint.rs:373/278/284/336` | `abandon_turn`/`delete_session_map`/`upsert_session_map` 用 `let _ =` 吞错 | 照做：至少记日志，关键路径返错 | next |
 | C7 | `engine.rs:96/11345` | `PROMPT_TIMEOUT=50ms` 静默丢上下文；每次 `thread::spawn` 不 join | 拆两条：超时改可配置+记日志（先做）；线程池化（后做） | next |
+| C8 | `engine.rs:2916` | 审批命令写错（群内缺 nonce）或地点不对（不在 `approval_route` 里）一律 `return Ok(None)`：没订阅的房间彻底静默，订阅了的房间把 `/approve tk-…` 当普通消息喂给 agent | 照做：识别到命令就必回话（用法 / 拒绝原因 / 该去哪批）；`bt-` 整批不需要 nonce；审批消息里直接给可复制命令 | done |
+| C9 | 进程输出 | 桥与 launcher 的 stdout/stderr **不进 journal**（`_PID=61715/61716` 均 0 条），所有 `eprintln!` 诊断（队列拒绝、审批拒绝、投递失败）实际不可见 | 定去向：非 systemd 场景也要能留证 → 落 `<state>/logs/bridge.log`，与其它组件一致 | next |
 
 ## 4. 批次 C：流程（原本 4 条）
 
@@ -239,6 +241,8 @@ hold：B6 F7 E2 G6（等条件，见 §5）
 | `crates/kernel/tests/task_recovery.rs` | 新增：崩溃遗留任务变 `unknown`；已闭环的不动；排空快照不再计数 | C3 验收 |
 | `deploy/verify.sh` | harness 测试子进程设 `SAFE_DELETE_ENABLED=0`（沙箱批量删除拦截会造成假红） | 环境 |
 | `docs/plan/self-iteration-adversarial-review.md` 等 3 份 | 修 Vue 模板误解析（裸 `<id>`、双花括号插值、表格里含 `\|` 的行内代码） | E5 |
+| `crates/kernel/src/engine.rs` | 授权命令的拒绝分支改为回话（用法 / 拒绝原因 / 该去哪批）；群内 `bt-` 整批不再要求 nonce；审批消息每条附可直接复制的 `/approve <id> <nonce>` | C8 |
+| `crates/kernel/tests/{place_approval,access_ticket}_flow.rs` | 断言从「不算 Handled」改成「Handled + 回话内容」；新增可信群按 batch id 整批批准用例 | C8 验收 |
 
 `docs` 工作流长期红，真因不是构建环境，是文档里三处写法被 Vue 编译器当模板解析。
 本地 `vitepress build` 13 秒就能验，**不必等 CI**——这条已写进 `AGENTS.md` 的坑清单。
@@ -247,11 +251,11 @@ hold：B6 F7 E2 G6（等条件，见 §5）
 
 ## 12. 验证证据
 
-`./deploy/verify.sh`（37s，退出码 0）：
+`./deploy/verify.sh`（58s，退出码 0）：
 
 ```
-fmt            OK   4 个文件格式正确
-test           OK   通过 1092
+fmt            OK   3 个文件格式正确
+test           OK   通过 1093
 node           OK   5 个 harness，144 条通过
 guards         OK   3 条约束通过
 全部通过。
@@ -267,8 +271,9 @@ CI：push `2c372f3..2c12de8` 后 `verify` 工作流 **首次跑绿**；`docs` �
 - `cargo test -p acb-kernel --test task_recovery` → 1 passed（崩溃遗留任务变 unknown）
 - `cargo test -p acb-kernel --lib route_worker` → 2 passed（满队列交回、队列断掉整批交回）
 - `cargo test -p acb-kernel` → 31 个测试目标全绿
-- 基线 1090 → 1092：route_worker 新增 1 条（满队列交回；队列断掉那条与原用例合并计数），
-  task_recovery 新增 1 条
+- `cargo test -p acb-kernel --test place_approval_flow` → 16 passed（含新增「可信群按 batch id
+  整批批准不需要 nonce」）
+- 基线 1090 → 1093：route_worker 新增 1 条、task_recovery 新增 1 条、审批批处理新增 1 条
 
 **注意**：`cargo fmt --all` 会格式化全仓库（本仓库历史文件并不都合 rustfmt），
 不要用它；只对改动的文件跑 `rustfmt`，或者依赖门禁的 `skip_children` 逐文件检查。

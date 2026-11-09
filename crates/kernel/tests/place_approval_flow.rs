@@ -381,9 +381,15 @@ fn trusted_group_member_can_approve_non_member_cannot() {
     let nonce = nonce_of(&approval_text(&sends, "qq:private/admin"));
 
     let denied = approve(&mut bridge, "qq:group/456", "mallory", &id, &nonce);
+    // 拒绝也要回话：静默会让人以为是命令没生效，然后换个群再试。
     assert!(
-        !matches!(denied, Ingest::Handled { .. }),
-        "非 members 不能批准"
+        matches!(denied, Ingest::Handled { .. }),
+        "授权命令由 core 接管"
+    );
+    let refusal = sent_to(&sends, "qq:group/456").pop().unwrap_or_default();
+    assert!(
+        refusal.contains("审批名单"),
+        "要说清为什么不能批: {refusal}"
     );
 
     let handled = approve(&mut bridge, "qq:group/456", "alice", &id, &nonce);
@@ -419,8 +425,13 @@ fn untrusted_multi_party_group_cannot_approve() {
 
     let denied = approve(&mut bridge, "qq:group/128", "u1", &id, &nonce);
     assert!(
-        !matches!(denied, Ingest::Handled { .. }),
-        "未配置 trusted 的群不能批准"
+        matches!(denied, Ingest::Handled { .. }),
+        "未配置 trusted 的群不能批准，但仍然要回话"
+    );
+    let refusal = sent_to(&sends, "qq:group/128").pop().unwrap_or_default();
+    assert!(
+        refusal.contains("不是审批地点"),
+        "要说清这里不是审批地点: {refusal}"
     );
 }
 
@@ -443,16 +454,18 @@ fn group_approval_requires_ticket_id_and_nonce() {
         ))
         .expect("命令能入库");
     assert!(
-        !matches!(loose, Ingest::Handled { .. }),
-        "群内无 nonce 的宽松批准必须拒绝"
+        matches!(loose, Ingest::Handled { .. }),
+        "群内无 nonce 的宽松批准必须拒绝，并且要回话"
     );
+    let hint = sent_to(&sends, "qq:group/456").pop().unwrap_or_default();
+    assert!(hint.contains("nonce"), "要说明群内批准必须带 nonce: {hint}");
 
     let bare = bridge
         .ingest(message("qq:group/456", "alice", "/approve", false))
         .expect("命令能入库");
     assert!(
-        !matches!(bare, Ingest::Handled { .. }),
-        "群内无 id 的批准必须拒绝"
+        matches!(bare, Ingest::Handled { .. }),
+        "群内无 id 的批准必须拒绝，并且要回话"
     );
 
     // 同一张票据仍然 pending，带 id+nonce 后仍可正常批准。
@@ -596,8 +609,13 @@ fn cross_room_approval_checks_the_approving_room() {
     // u1 是申请房间 A 的 members，但不是批准房间 B 的成员：必须按 B 判定。
     let denied = approve(&mut bridge, "qq:group/456", "u1", &id, &nonce);
     assert!(
-        !matches!(denied, Ingest::Handled { .. }),
-        "不能用申请房间的成员表批准"
+        matches!(denied, Ingest::Handled { .. }),
+        "拒绝也算 core 接管了这条命令"
+    );
+    let refusal = sent_to(&sends, "qq:group/456").pop().unwrap_or_default();
+    assert!(
+        refusal.contains("审批名单"),
+        "不能用申请房间的成员表批准: {refusal}"
     );
 
     let handled = approve(&mut bridge, "qq:group/456", "alice", &id, &nonce);
@@ -618,8 +636,13 @@ fn cross_room_approval_checks_the_approving_room() {
         ))
         .expect("命令能入库");
     assert!(
-        !matches!(wrong_room, Ingest::Handled { .. }),
-        "只有路由目标可以批准"
+        matches!(wrong_room, Ingest::Handled { .. }),
+        "不在路由里的房间：拒绝并回话"
+    );
+    let refusal = sent_to(&sends, "qq:group/789").pop().unwrap_or_default();
+    assert!(
+        refusal.contains("qq:group/456"),
+        "可信群里要说清该去哪批: {refusal}"
     );
 }
 
@@ -861,4 +884,56 @@ fn all_target_send_failures_mark_the_ticket_failed() {
         "全部目标失败必须记录投递失败，不能静默: {ticket}"
     );
     assert!(sent_to(&sends, "qq:group/456").is_empty());
+}
+
+#[test]
+fn batch_approval_by_id_works_in_a_trusted_group_without_a_nonce() {
+    let (mut bridge, sends) = bridge();
+    bridge
+        .ingest(message("qq:group/124", "u1", "批量申请", true))
+        .expect("能入库");
+    let turn = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    let batch = bridge
+        .tool_call(
+            &turn,
+            &["main".to_owned()],
+            "access_request",
+            json!({"items": [
+                {"target": "qq:group/998", "ops": ["send_message_to"],
+                 "params": {"elements": [{"type": "text", "text": "one"}]}},
+                {"target": "qq:group/997", "ops": ["send_message_to"],
+                 "params": {"elements": [{"type": "text", "text": "two"}]}}
+            ]}),
+        )
+        .expect("批量申请");
+    let batch_id = batch["batch_id"].as_str().expect("batch id").to_owned();
+    bridge.end_turn(&turn, None).expect("收工");
+
+    let text = approval_text(&sends, "qq:group/456");
+    assert!(text.contains(&batch_id), "审批消息要带 batch id：{text}");
+    // 消息里直接给可复制的完整命令；群内批准必须带 nonce，让人自己拼就是坑人。
+    let first_id = batch["tickets"][0]["ticket"].as_str().expect("ticket id");
+    assert!(
+        text.contains(&format!("/approve {first_id} ")),
+        "审批消息要给出可直接复制的批准命令：{text}"
+    );
+
+    // 群内按 batch id 整批批准不需要 nonce：bt- 前缀本身就是绑定。
+    let handled = bridge
+        .ingest(message(
+            "qq:group/456",
+            "alice",
+            &format!("/approve {batch_id}"),
+            false,
+        ))
+        .expect("整批批准命令");
+    assert!(
+        matches!(handled, Ingest::Handled { .. }),
+        "可信群里 /approve bt-xxx 应当生效"
+    );
+    let confirmation = sent_to(&sends, "qq:group/456").pop().unwrap_or_default();
+    assert!(
+        confirmation.contains("整批"),
+        "要回执整批结果：{confirmation}"
+    );
 }

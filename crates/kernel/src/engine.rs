@@ -2912,10 +2912,35 @@ impl<S: Store> Bridge<S> {
         let first = parts.next();
         let second = parts.next();
 
+        // 命令被认出来之后，任何一条拒绝都必须回话。以前这些分支一律掉回普通入站：
+        // 没被订阅的房间彻底静默，订阅了的房间则是 agent 收到一句 `/approve tk-…`
+        // 然后自己猜。用户看到的结果都是「没反应」。
+        if !allowed {
+            eprintln!(
+                "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} result=deny reason={}",
+                verb,
+                room,
+                draft.sender.id,
+                subject.as_str(),
+                place.as_str(),
+                trusted_group,
+                place.as_str(),
+                deny_reason,
+            );
+            if matches!(place, Place::None) {
+                return Ok(None);
+            }
+            return self.reply_access_command(draft, room, access_command_deny_text(deny_reason));
+        }
+
         // 群内批准必须绑定 ticket id；无 nonce / 只有宽松指令一律拒绝。
+        // 整批票据例外：`bt-` 本身就是绑定，处理器按批次批准时不需要 nonce。
         if matches!(place, Place::Room(RoomScope::MultiParty)) {
             let bound = match verb.as_str() {
-                "/approve" | "/deny" => first.is_some() && second.is_some(),
+                "/approve" | "/deny" => match first {
+                    Some(id) => second.is_some() || id.starts_with("bt-"),
+                    None => false,
+                },
                 "/revoke" => first.is_some(),
                 _ => false,
             };
@@ -2929,23 +2954,8 @@ impl<S: Store> Bridge<S> {
                     place.as_str(),
                     trusted_group,
                 );
-                return Ok(None);
+                return self.reply_access_command(draft, room, access_command_usage(&verb));
             }
-        }
-
-        if !allowed {
-            eprintln!(
-                "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} result=deny reason={}",
-                verb,
-                room,
-                draft.sender.id,
-                subject.as_str(),
-                place.as_str(),
-                trusted_group,
-                place.as_str(),
-                deny_reason,
-            );
-            return Ok(None);
         }
 
         // 只能批准路由到本房间的票据；B 房间批准校验的是 B 房间的授权与路由。
@@ -2971,21 +2981,27 @@ impl<S: Store> Bridge<S> {
                         place.as_str(),
                         id,
                     );
-                    return Ok(None);
+                    let routes = self
+                        .access_tickets
+                        .get(id)
+                        .map(|ticket| ticket.approval_route.clone())
+                        .unwrap_or_default();
+                    return self.reply_access_command(
+                        draft,
+                        room,
+                        &access_command_not_routed_text(id, &routes, trusted_group),
+                    );
                 }
             }
         }
         if let Some(batch_id) = first.filter(|id| id.starts_with("bt-")) {
-            let routed = self
-                .access_tickets
-                .for_batch(batch_id)
-                .iter()
-                .all(|ticket| {
-                    ticket
-                        .approval_route
-                        .iter()
-                        .any(|target| target == &room.to_string())
-                });
+            let tickets = self.access_tickets.for_batch(batch_id);
+            let routed = tickets.iter().all(|ticket| {
+                ticket
+                    .approval_route
+                    .iter()
+                    .any(|target| target == &room.to_string())
+            });
             if !routed {
                 eprintln!(
                     "[access-approval] verb={} room={} sender={} subject={} place={} trusted_group={} approval_place={} result=deny reason=not_routed_here batch={}",
@@ -2998,7 +3014,15 @@ impl<S: Store> Bridge<S> {
                     place.as_str(),
                     batch_id,
                 );
-                return Ok(None);
+                let routes: Vec<String> = tickets
+                    .iter()
+                    .flat_map(|ticket| ticket.approval_route.iter().cloned())
+                    .collect();
+                return self.reply_access_command(
+                    draft,
+                    room,
+                    &access_command_not_routed_text(batch_id, &routes, trusted_group),
+                );
             }
         }
 
@@ -3172,6 +3196,30 @@ impl<S: Store> Bridge<S> {
         }
         if let Err(error) = self.send_admin_text(room, &confirmation) {
             eprintln!("[access-ticket] confirmation failed: {error}");
+        }
+        Ok(Some(Ingest::Handled {
+            stored: Some(record.id),
+            woke: Vec::new(),
+        }))
+    }
+
+    /// 命令被认出来但没法执行时的回话通道。
+    ///
+    /// 只拒绝不回话，用户分不清「没收到」「没权限」「写错了」，实际都当成「没反应」，
+    /// 然后换三个群再试一遍。入库照旧（审计留痕），但不再叫醒 agent。
+    fn reply_access_command(
+        &mut self,
+        draft: &RecordDraft,
+        room: &RoomId,
+        text: &str,
+    ) -> Result<Option<Ingest>, BridgeError> {
+        let record = self.store.append(draft.clone())?;
+        if let Err(error) = self.send_admin_text(room, text) {
+            eprintln!(
+                "[access-approval] reply_failed room={} reason=\"{}\"",
+                room,
+                error.replace('"', "'")
+            );
         }
         Ok(Some(Ingest::Handled {
             stored: Some(record.id),
@@ -10368,6 +10416,41 @@ fn ticket_json(ticket: &crate::tickets::AccessTicket) -> Value {
     })
 }
 
+/// 授权命令的正确写法。群内 `/approve` 必须带 nonce，这一点从消息里看不出来，
+/// 所以命令写错时必须把它说回去。
+fn access_command_usage(verb: &str) -> &'static str {
+    match verb {
+        "/deny" => "用法：/deny <ticket-id> <nonce> 或 /deny <batch_id>",
+        "/revoke" => "用法：/revoke <ticket-id>",
+        _ => {
+            "用法：/approve <ticket-id> <nonce> 或 /approve <batch_id>（群内批准必须带消息里的 nonce）"
+        }
+    }
+}
+
+/// 拒绝原因的人话版本。原文里的 reason 是给日志看的标识，不是给人看的。
+fn access_command_deny_text(reason: &str) -> &'static str {
+    match reason {
+        "not_admin" => "这里不能审批：票据只能由系统管理员批准。",
+        "group_not_trusted" => "本群不是审批地点：这张票据要在审批路由指定的群或私聊里批准。",
+        "not_group_member" => "你不在本群的审批名单里，不能批准票据。",
+        _ => "这里不能审批票据。",
+    }
+}
+
+/// 票据存在、但不在本房间审批时，把「该去哪」说清楚。
+///
+/// 只有可信群才列具体目标——公开群里报出审批房间等于把管理员的落脚点广播出去。
+fn access_command_not_routed_text(id: &str, routes: &[String], trusted: bool) -> String {
+    let mut targets: Vec<&str> = routes.iter().map(String::as_str).collect();
+    targets.sort_unstable();
+    targets.dedup();
+    if !trusted || targets.is_empty() {
+        return format!("票据 {id} 不在本房间审批：请到审批路由指定的房间批准。");
+    }
+    format!("票据 {id} 不在本房间审批，请到：{}", targets.join(" 或 "))
+}
+
 /// 发给 system admin 的审批消息。只渲染 core 归一化后的目标/op/能力，
 /// 不渲染 agent 的自由文本。
 fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
@@ -10444,6 +10527,12 @@ fn approval_batch_text(pending: &[crate::tickets::AccessTicket]) -> String {
                 crate::tickets::escape_reason_for_display(reason)
             ));
         }
+        // 直接给出可复制的完整命令：群内审批要求 id + nonce，让人从上面几行里
+        // 手动拼，拼错的形式（只贴 id）恰好会被静默拒绝。
+        text.push_str(&format!(
+            "   批准：/approve {} {}\n",
+            ticket.id, ticket.nonce
+        ));
     }
     text.push_str("批准整批：/approve <batch_id>\n");
     text.push_str("批准单张：/approve <ticket-id> <nonce>\n");

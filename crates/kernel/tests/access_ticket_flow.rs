@@ -259,6 +259,18 @@ fn field(text: &str, name: &str) -> String {
         .to_owned()
 }
 
+/// 发往某房间的最后一条消息。拒绝审批必须有回话，不能静默。
+fn last_text_to(sends: &Sends, room: &str) -> String {
+    sends
+        .lock()
+        .expect("没被毒死")
+        .iter()
+        .filter(|(target, _)| target.to_string() == room)
+        .next_back()
+        .map(|(_, elements)| text_of(elements))
+        .expect("没有发往该房间的消息")
+}
+
 #[test]
 fn single_request_approve_and_use_once() {
     let (mut bridge, sends) = bridge();
@@ -747,9 +759,15 @@ fn bot_admin_can_approve_but_ordinary_user_cannot() {
             false,
         ))
         .expect("命令能入库");
+    // 拒绝也要回话，否则用户只能反复换地方重试。
     assert!(
-        !matches!(denied, Ingest::Handled { .. }),
-        "普通用户不能审批"
+        matches!(denied, Ingest::Handled { .. }),
+        "授权命令由 core 接管，不再落到普通路由"
+    );
+    let refusal = last_text_to(&sends, "qq:private/user1");
+    assert!(
+        refusal.contains("不能审批"),
+        "非管理员要收到拒绝原因: {refusal}"
     );
 
     let handled = bridge
@@ -1422,8 +1440,8 @@ fn ticket_and_normal_call_share_unknown_op_rejection() {
 }
 
 #[test]
-fn approval_from_a_group_is_ignored() {
-    let (mut bridge, _sends) = bridge();
+fn approval_from_an_untrusted_group_is_refused_with_a_reply() {
+    let (mut bridge, sends) = bridge();
     bridge
         .ingest(message(
             "qq:group/123",
@@ -1432,16 +1450,25 @@ fn approval_from_a_group_is_ignored() {
             false,
         ))
         .expect("群消息照常入库");
-    // 群里的同名账号不是审批入口；消息仍走普通路由/入库路径。
-    assert!(matches!(
-        bridge
-            .ingest(message(
-                "qq:group/123",
-                "admin",
-                "/approve tk-1 abcd",
-                false
-            ))
-            .expect("群消息照常入库"),
-        Ingest::Recorded { .. } | Ingest::NotSubscribed { .. }
-    ));
+    // 群里的同名账号不是审批入口；但命令被认出来之后必须回话——
+    // 静默会让人以为命令没生效，然后换个群再发一遍。
+    assert!(
+        matches!(
+            bridge
+                .ingest(message(
+                    "qq:group/123",
+                    "admin",
+                    "/approve tk-1 abcd",
+                    false
+                ))
+                .expect("群消息照常入库"),
+            Ingest::Handled { .. }
+        ),
+        "授权命令由 core 接管"
+    );
+    let reply = last_text_to(&sends, "qq:group/123");
+    assert!(
+        reply.contains("不是审批地点"),
+        "要说清为什么不能在这里批: {reply}"
+    );
 }
