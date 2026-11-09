@@ -119,6 +119,9 @@ trait PolicySource {
             place,
             capability,
             target,
+            // CLI 只回答「这个目标对这套主体/场所是否成立」，没有 turn 概念；
+            // access_request 的发起房间只能由运行时提供，这里按缺省处理（deny）。
+            origin: None,
             subscriptions: self.subscriptions(),
             platform_op: None,
             policy_version,
@@ -209,12 +212,7 @@ fn collect_rooms(config: &Config) -> BTreeSet<RoomId> {
             rooms.insert(room);
         }
     }
-    for rule in config
-        .grants
-        .rules
-        .iter()
-        .chain(config.grants.deny.iter())
-    {
+    for rule in config.grants.rules.iter().chain(config.grants.deny.iter()) {
         if let Some(target) = &rule.target {
             if target.kind == AccessTargetKind::Room {
                 if let Ok(room) = RoomId::parse(&target.id) {
@@ -227,9 +225,10 @@ fn collect_rooms(config: &Config) -> BTreeSet<RoomId> {
 }
 
 fn room_scope(room: &RoomId) -> RoomScope {
-    let direct = room.path.first().is_some_and(|segment| {
-        matches!(segment.as_str(), "private" | "direct" | "dm" | "friend")
-    });
+    let direct = room
+        .path
+        .first()
+        .is_some_and(|segment| matches!(segment.as_str(), "private" | "direct" | "dm" | "friend"));
     if direct {
         RoomScope::Direct
     } else {
@@ -483,14 +482,20 @@ fn target_subscribed(target: &AccessTarget, subscriptions: &[RoomId]) -> bool {
         AccessTargetKind::Connection => subscriptions
             .iter()
             .any(|room| room.connection == target.id),
-        AccessTargetKind::Account | AccessTargetKind::PlatformOp => target
-            .sub
-            .as_deref()
-            .is_some_and(|connection| subscriptions.iter().any(|room| room.connection == connection)),
-        AccessTargetKind::Member | AccessTargetKind::Message | AccessTargetKind::File => target
-            .sub
-            .as_deref()
-            .is_some_and(|room| subscriptions.iter().any(|listed| listed.to_string() == room)),
+        AccessTargetKind::Account | AccessTargetKind::PlatformOp => {
+            target.sub.as_deref().is_some_and(|connection| {
+                subscriptions
+                    .iter()
+                    .any(|room| room.connection == connection)
+            })
+        }
+        AccessTargetKind::Member | AccessTargetKind::Message | AccessTargetKind::File => {
+            target.sub.as_deref().is_some_and(|room| {
+                subscriptions
+                    .iter()
+                    .any(|listed| listed.to_string() == room)
+            })
+        }
         AccessTargetKind::PluginTool => !subscriptions.is_empty(),
     }
 }
@@ -552,7 +557,9 @@ fn explain_command(args: &[String]) -> Result<ExitCode, CliError> {
                         .map_err(|_| CliError::usage("--policy-version must be an integer"))?;
                 }
                 "place" => {
-                    place = Some(PlaceArg::parse(&flag_value(args, &mut index, inline, name)?)?);
+                    place = Some(PlaceArg::parse(&flag_value(
+                        args, &mut index, inline, name,
+                    )?)?);
                 }
                 "capability" => {
                     capability = Some(parse_capability(&flag_value(
@@ -872,10 +879,7 @@ fn push_rooms(selection: &mut Selection, value: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn matrix_rooms(
-    source: &dyn PolicySource,
-    selection: &Selection,
-) -> Result<Vec<RoomId>, CliError> {
+fn matrix_rooms(source: &dyn PolicySource, selection: &Selection) -> Result<Vec<RoomId>, CliError> {
     let all_rooms = source.rooms();
     match &selection.rooms {
         Some(requested) => {
@@ -909,9 +913,8 @@ fn cells_for(
     rooms: &[RoomId],
     selection: &Selection,
 ) -> Result<Vec<Cell>, CliError> {
-    let mut cells = Vec::with_capacity(
-        rooms.len() * selection.subjects.len() * selection.capabilities.len(),
-    );
+    let mut cells =
+        Vec::with_capacity(rooms.len() * selection.subjects.len() * selection.capabilities.len());
     for room in rooms {
         for subject in &selection.subjects {
             for capability in &selection.capabilities {
@@ -1254,7 +1257,11 @@ fn filter_cells(cells: Vec<Cell>, selection: &Selection) -> Vec<Cell> {
             "private" => selection.place.includes(RoomScope::Direct),
             _ => selection.place == PlaceFilter::All,
         })
-        .filter(|cell| rooms.as_ref().is_none_or(|rooms| rooms.contains(&cell.room)))
+        .filter(|cell| {
+            rooms
+                .as_ref()
+                .is_none_or(|rooms| rooms.contains(&cell.room))
+        })
         .collect()
 }
 
@@ -1591,8 +1598,11 @@ room = "private/9"
             &selection,
         )
         .expect("矩阵");
-        let before: BTreeMap<String, Cell> =
-            cells.iter().cloned().map(|cell| (cell.key(), cell)).collect();
+        let before: BTreeMap<String, Cell> = cells
+            .iter()
+            .cloned()
+            .map(|cell| (cell.key(), cell))
+            .collect();
         let after = before.clone();
         let (count, changes) = compare_cells(&before, &after);
         assert!(count > 0);
@@ -1629,9 +1639,11 @@ room = "private/9"
         let (count, changes) = compare_cells(&before, &after);
         assert!(count > 0);
         assert!(!changes.is_empty());
-        assert!(changes.iter().any(|change| change
-            .after
-            .as_ref()
-            .is_some_and(|cell| cell.basis == "rule:group-1-plugin")));
+        assert!(changes.iter().any(|change| {
+            change
+                .after
+                .as_ref()
+                .is_some_and(|cell| cell.basis == "rule:group-1-plugin")
+        }));
     }
 }

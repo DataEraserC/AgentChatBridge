@@ -638,14 +638,19 @@ impl GrantsConfig {
     }
 }
 
-/// 一次评估的目标。
 /// 一次授权评估的全部输入。把参数收成一个结构，避免 evaluator 接口继续膨胀。
 #[derive(Debug, Clone, Copy)]
 pub struct GrantQuery<'a> {
     pub subject: GrantSubject,
     pub place: Place,
     pub capability: GrantCapability,
+    /// 被评估的目标。除 `access_request` 外，目标可达性靠它判。
     pub target: &'a AccessTarget,
+    /// 发起这次判定的房间（turn 所在房间）。控制台等无房间场景为 `None`。
+    ///
+    /// 只有 `access_request` 用它：申请能不能发，取决于「在哪申请」，
+    /// 不取决于「要申请谁」——后者正是申请想打开的东西。
+    pub origin: Option<&'a RoomId>,
     pub subscriptions: &'a [RoomId],
     /// 当前评估的平台方法名；只有 `platform_call` 的能力检查会填。
     pub platform_op: Option<&'a str>,
@@ -766,6 +771,30 @@ impl fmt::Display for GrantDecision {
     }
 }
 
+/// `access_request` 的默认判定：只看**发起位置**是否在会话订阅内。
+///
+/// 目标可达性刻意不在这里判。票据的用途就是打开一个会话还没订阅的目标；
+/// 若申请阶段先要求目标可达，票据就永远用不上（2026-11-09 裁定）。
+/// 目标该不该给，由审批人看过目标后决定，不由发起方预先证明。
+pub(crate) fn origin_access(query: &GrantQuery<'_>) -> GrantDecision {
+    match query.origin {
+        Some(origin) if query.subscriptions.iter().any(|listed| listed == origin) => {
+            GrantDecision::allow(
+                "base:request_origin",
+                format!("request originates from subscribed room {origin}"),
+            )
+        }
+        Some(origin) => GrantDecision::deny(
+            "base:origin_not_subscribed",
+            format!("request originates from {origin}, which the session does not subscribe"),
+        ),
+        None => GrantDecision::deny(
+            "base:no_origin",
+            "access_request has no originating room; only console/admin paths may omit it",
+        ),
+    }
+}
+
 pub(crate) fn base_access(query: &GrantQuery<'_>) -> GrantDecision {
     if target_is_reachable(query.target, query.subscriptions) {
         GrantDecision::allow(
@@ -855,12 +884,33 @@ mod tests {
         target: &AccessTarget,
         subscriptions: &[RoomId],
     ) -> GrantDecision {
+        decide_policy_from(
+            grants,
+            subject,
+            place,
+            capability,
+            target,
+            None,
+            subscriptions,
+        )
+    }
+
+    fn decide_policy_from(
+        grants: &GrantsConfig,
+        subject: GrantSubject,
+        place: Place,
+        capability: GrantCapability,
+        target: &AccessTarget,
+        origin: Option<&RoomId>,
+        subscriptions: &[RoomId],
+    ) -> GrantDecision {
         CorePolicy::new()
             .decide(&GrantQuery {
                 subject,
                 place,
                 capability,
                 target,
+                origin,
                 subscriptions,
                 platform_op: None,
                 policy_version: 7,
@@ -870,34 +920,47 @@ mod tests {
     }
 
     #[test]
-    fn access_request_defaults_to_subscriptions_except_admin_private() {
+    fn access_request_depends_on_origin_not_target() {
         let grants = GrantsConfig::default();
+        let origin = RoomId::parse("qq:group/123").expect("房间");
         let target = RoomId::parse("qq:group/999").expect("房间");
-        let subscriptions = Vec::new();
-        let decide = |subject, place, subscriptions: &[RoomId]| {
-            decide_policy(
+        let subscribed = vec![origin.clone()];
+        let decide = |subject, place, from: Option<&RoomId>, subs: &[RoomId]| {
+            decide_policy_from(
                 &grants,
                 subject,
                 place,
                 GrantCapability::AccessRequest,
                 &AccessTarget::room(&target),
-                subscriptions,
+                from,
+                subs,
             )
         };
+        let group = Place::Room(RoomScope::MultiParty);
+
         assert!(
-            !decide(
-                GrantSubject::User,
-                Place::Room(RoomScope::MultiParty),
-                &subscriptions
-            )
-            .allow,
-            "群友默认不能申请未订阅目标"
+            decide(GrantSubject::User, group, Some(&origin), &subscribed).allow,
+            "群友可以从自己订阅的房间申请未订阅目标——目标可达性交给审批判"
+        );
+        assert!(
+            !decide(GrantSubject::User, group, None, &subscribed).allow,
+            "没有发起房间时 fail closed"
+        );
+        let outside = RoomId::parse("qq:group/777").expect("房间");
+        assert!(
+            !decide(GrantSubject::User, group, Some(&outside), &subscribed).allow,
+            "发起房间不在本会话订阅内时拒绝"
+        );
+        assert!(
+            !decide(GrantSubject::User, group, Some(&origin), &[]).allow,
+            "会话没订阅任何房间时拒绝"
         );
         assert!(
             decide(
                 GrantSubject::SystemAdmin,
                 Place::Room(RoomScope::Direct),
-                &subscriptions
+                None,
+                &subscribed
             )
             .allow,
             "system_admin 私信可以申请任意目标"
@@ -906,20 +969,11 @@ mod tests {
             decide(
                 GrantSubject::BotAdmin,
                 Place::Room(RoomScope::Direct),
-                &subscriptions
-            )
-            .allow,
-            "bot_admin 私信可以申请任意目标"
-        );
-        let subscribed = vec![target.clone()];
-        assert!(
-            decide(
-                GrantSubject::User,
-                Place::Room(RoomScope::MultiParty),
+                None,
                 &subscribed
             )
             .allow,
-            "已订阅目标默认可申请"
+            "bot_admin 私信可以申请任意目标"
         );
     }
 

@@ -882,16 +882,9 @@ impl<S: Store> Bridge<S> {
     ) -> Self {
         let memory = MemoryRepo::new(config.worktrees_root.clone());
         plugins.set_provider_timeout_ms(config.provider_calls.timeout_ms);
-        let relay = config
-            .file_relay
-            .as_ref()
-            .map(|cfg| {
-                crate::relay::FileRelay::new(
-                    &cfg.dir,
-                    &cfg.public_base,
-                    cfg.max_publish_bytes,
-                )
-            });
+        let relay = config.file_relay.as_ref().map(|cfg| {
+            crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base, cfg.max_publish_bytes)
+        });
         // 启动时把房间政策落一条审计：某群何时被放开必须可查。
         audit_grants_config(None, &config.grants);
         let policy: Arc<dyn Policy> = Arc::new(CorePolicy::new());
@@ -1793,7 +1786,12 @@ impl<S: Store> Bridge<S> {
         };
         let records = self
             .store
-            .task_list(session, wanted.map(TaskStatus::as_str), offset, limit.clamp(1, TASK_LIST_LIMIT))
+            .task_list(
+                session,
+                wanted.map(TaskStatus::as_str),
+                offset,
+                limit.clamp(1, TASK_LIST_LIMIT),
+            )
             .map_err(internal)?;
         let total = records.1;
         let tasks: Vec<Value> = records.0.iter().map(task_json).collect();
@@ -2228,16 +2226,9 @@ impl<S: Store> Bridge<S> {
             return;
         };
         self.memory = MemoryRepo::new(config.worktrees_root.clone());
-        self.relay = config
-            .file_relay
-            .as_ref()
-            .map(|cfg| {
-                crate::relay::FileRelay::new(
-                    &cfg.dir,
-                    &cfg.public_base,
-                    cfg.max_publish_bytes,
-                )
-            });
+        self.relay = config.file_relay.as_ref().map(|cfg| {
+            crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base, cfg.max_publish_bytes)
+        });
         // 依赖表跟配置走：新增的登记为 unknown，移除的直接删掉。
         self.deps.retain_config(&config);
         self.plugins
@@ -4937,6 +4928,7 @@ impl<S: Store> Bridge<S> {
                     capability,
                     target: &target,
                     subscriptions: &subscriptions,
+                    origin: Some(&ctx.room),
                     platform_op: Some(spec.name.as_ref()),
                     policy_version: self.config_version as i64,
                     grants: &ctx.config.grants,
@@ -5418,6 +5410,7 @@ impl<S: Store> Bridge<S> {
             capability: GrantCapability::Plugin,
             target: &plugin_target,
             subscriptions: &subscriptions,
+            origin: Some(&ctx.room),
             platform_op: None,
             policy_version: self.config_version as i64,
             grants: &ctx.config.grants,
@@ -5669,6 +5662,7 @@ impl<S: Store> Bridge<S> {
                 capability: GrantCapability::AccessRequest,
                 target: &target,
                 subscriptions: &subscriptions,
+                origin: Some(&ctx.room),
                 platform_op: None,
                 policy_version: self.config_version as i64,
                 grants: &ctx.config.grants,
@@ -7148,8 +7142,10 @@ impl<S: Store> Bridge<S> {
             return 0;
         }
 
-        let mut groups: std::collections::BTreeMap<(String, String, Option<String>), Vec<AccessTicket>> =
-            std::collections::BTreeMap::new();
+        let mut groups: std::collections::BTreeMap<
+            (String, String, Option<String>),
+            Vec<AccessTicket>,
+        > = std::collections::BTreeMap::new();
         for ticket in expired {
             groups
                 .entry((
@@ -7167,7 +7163,9 @@ impl<S: Store> Bridge<S> {
             let Ok(room) = RoomId::parse(&room_text) else {
                 continue;
             };
-            let origin = tickets.iter().find_map(|ticket| ticket.origin_sender.clone());
+            let origin = tickets
+                .iter()
+                .find_map(|ticket| ticket.origin_sender.clone());
             self.append_ticket_event(&room, ticket_expiry_text(&tickets), now);
             wakes.entry((session, room_text)).or_insert(origin);
         }
@@ -7245,6 +7243,7 @@ impl<S: Store> Bridge<S> {
                     capability,
                     target: &target,
                     subscriptions: &subscriptions,
+                    origin: origin_room,
                     platform_op: None,
                     policy_version: self.config_version as i64,
                     grants: &config.grants,
@@ -10985,6 +10984,7 @@ impl<S: Store> Bridge<S> {
             capability,
             target: &target,
             subscriptions: &subscriptions,
+            origin: Some(room),
             platform_op: Some(spec.name.as_ref()),
             policy_version: self.config_version as i64,
             grants: &config.grants,
@@ -11292,9 +11292,10 @@ fn outbound_error(error: OutboundError) -> ToolError {
 
 /// 给一次尝试的报错补上「去哪查」：记录 id 与幂等键。
 fn with_attempt_note(mut error: ToolError, id: &str, key: Option<&str>) -> ToolError {
-    error
-        .message
-        .push_str(&acb_i18n::t!("kernel.engine.send_attempt_recorded", id = id));
+    error.message.push_str(&acb_i18n::t!(
+        "kernel.engine.send_attempt_recorded",
+        id = id
+    ));
     if let Some(key) = key {
         error
             .message
@@ -11986,11 +11987,7 @@ fn with_file_hint(detail: String) -> String {
 /// 把唤醒原因补上「是哪条记录触发的」：水位编号必有，平台消息号/回应目标有就带。
 ///
 /// 只拼编号、计数和人话，正文一律不进理由；房间和会话由外层渲染，不重复。
-fn wake_reason_with_record(
-    reason: Option<String>,
-    record: &Record,
-    unread: u32,
-) -> Option<String> {
+fn wake_reason_with_record(reason: Option<String>, record: &Record, unread: u32) -> Option<String> {
     let mut text = reason?;
     if matches!(record.kind, RecordKind::Message) {
         match record.platform_id.as_deref().filter(|id| !id.is_empty()) {
@@ -11999,10 +11996,7 @@ fn wake_reason_with_record(
         }
     } else if let Some(target) = record.quote_of() {
         // 表情回应这类事件指着的就是那条被回应的消息。
-        text.push_str(&format!(
-            "，触发事件 #{}（目标是消息 {target}）",
-            record.id
-        ));
+        text.push_str(&format!("，触发事件 #{}（目标是消息 {target}）", record.id));
     } else {
         text.push_str(&format!("，触发事件 #{}", record.id));
     }

@@ -146,7 +146,7 @@ fn config() -> &'static str {
         [sessions.subscriptions.wake]
         at_mention = true
 
-        # 审批目标房间必须被某个会话订阅，路由才算可达。
+        # 审批路由写出的房间不要求被订阅：订阅只约束唤醒，不约束审批投递。
         [[sessions.subscriptions]]
         connection = "qq"
         room = "private/admin"
@@ -681,41 +681,30 @@ fn config_without_request_rule() -> String {
 }
 
 #[test]
-fn group_user_defaults_to_subscribed_targets_only() {
+fn group_user_can_request_an_unsubscribed_target_from_a_subscribed_room() {
     let (mut bridge, sends) = bridge_with(&config_without_request_rule());
     bridge
         .ingest(message("qq:group/123", "user1", "想申请", true))
         .expect("能记下来");
     let ticket = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
 
-    let denied = bridge
+    // 申请阶段只判「能不能发起申请」，不判目标可达：目标正是票据想打开的东西，
+    // 交给审批人看（2026-11-09 裁定）。这里 target 不在会话订阅内，仍应受理。
+    let allowed = bridge
         .tool_call(
             &ticket,
             &sessions(),
             "access_request",
             json!({"items": [{"target": "qq:group/999", "ops": ["notes:list"]}]}),
         )
-        .expect_err("默认不允许申请未订阅目标");
-    assert_eq!(denied.code, ErrorCode::ToolNotAllowed);
-    assert!(
-        denied.message.contains("access_request_denied"),
-        "错误要带稳定码：{}",
-        denied.message
-    );
-    assert!(
-        sends.lock().expect("没被毒死").is_empty(),
-        "被拒的申请不能产生审批私信"
-    );
-
-    let allowed = bridge
-        .tool_call(
-            &ticket,
-            &sessions(),
-            "access_request",
-            json!({"items": [{"target": "qq:group/123", "ops": ["notes:list"]}]}),
-        )
-        .expect("已订阅目标默认可申请");
+        .expect("订阅房间内可以申请未订阅目标");
     assert_eq!(allowed["tickets"][0]["state"], "pending_approval");
+    bridge.end_turn(&ticket, None).expect("收工");
+    assert_eq!(
+        sends.lock().expect("没被毒死").len(),
+        1,
+        "受理后应给审批人发一条私信"
+    );
 }
 
 #[test]

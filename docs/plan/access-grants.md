@@ -387,17 +387,24 @@ admin_cooldown_secs = 30     # 同一个 system admin 收到两条审批私信�
 `access_request` 不再无条件建票；申请前必须过 `evaluate_access_request`，再跑一遍
 fail-closed 预检。deny / 预检失败都不建票、不发审批私信，并留一行审计。
 
-默认规则表：
+默认规则表（**2026-11-09 修订**：申请阶段只判「在哪申请」，不判「申请谁」）：
 
-| subject | place | 目标 | 结果 |
+| subject | place | 判定依据 | 结果 |
 |---|---|---|---|
-| `system_admin` / `bot_admin` | `private` / `console` | 任意已配置连接上的房间 | allow（`base:admin_private`） |
-| 其它主体 | `group` / `private` / `console` | 本会话已订阅的房间 | allow（`base:subscription`） |
-| 其它主体 | 任意 | 未订阅目标 | deny（`base:not_subscribed`） |
+| `system_admin` / `bot_admin` | `private` / `console` | 任意目标 | allow（`base:admin_private`） |
+| 其它主体 | 任意 | **发起房间在本会话订阅内** | allow（`base:request_origin`） |
+| 其它主体 | 任意 | 发起房间不在订阅内 | deny（`base:origin_not_subscribed`） |
+| 其它主体 | 任意 | 没有发起房间（非控制台路径） | deny（`base:no_origin`） |
 
-显式 `[[grants.rules]]` 可以放开跨目标：`scope = "subscribed"` / `"room"` / `"connection"`，
-`capability` 必须包含 `access_request`。规则命中后覆盖默认表；匹配到规则但没列出
-该能力时按 deny 处理（fail closed）。
+修订前的实现在申请阶段用**目标房间**做订阅可达性判定，导致「想申请一个还没订阅的房间」
+必然被拒——而打开未订阅目标正是票据的唯一用途。现在目标可达性完全交给审批人：
+审批私信里有目标、op 与参数摘要，批不批由人决定，不由发起方预先证明。
+`access_request` 仍是独立的 capability（`capability = ["access_request"]`），
+它管的是「能不能发起申请」；未订阅目标能不能碰，由批准后的票据决定。
+
+显式 `[[grants.rules]]` 仍然可以授予 `access_request`（`scope = "subscribed"` / `"room"` /
+`"connection"`），作用是给发起路径留一条可审计的显式来源；不再是无它就不能申请的开关。
+匹配到规则但没列出该能力时按 deny 处理（fail closed）。
 
 申请前预检（任何一条失败都整批拒绝）：
 
@@ -407,8 +414,8 @@ fail-closed 预检。deny / 预检失败都不建票、不发审批私信，并�
 4. `critical` 允许申请；也允许规则显式授予（写了就直调，强烈不建议）。`account_secret` 仍不可常驻授予；
 5. 冷却与额度不变：会话 60s、管理员全局 30s、每轮 3 组、每会话活票上限 8。
 
-`access_request` 本身不受规则授予影响：即使没有任何 `destructive` / `critical` 规则，
-申请永远可以发起；规则只决定直调路径。
+`access_request` 的准入与 `destructive` / `critical` 的规则授予无关：即使一条高风险规则都没有，
+申请照样可以发起；规则只决定直调路径。
 
 审批身份（2026-11-05 更新）：`Room(Direct)` / `Console` 仍要求
 `grants.subject_for(...) ∈ {system_admin, bot_admin}`；`Room(MultiParty)` 改由

@@ -12,7 +12,7 @@
 
 use crate::grants::{
     GrantCapability, GrantDecision, GrantQuery, GrantSubject, Place, RoomScope, base_access,
-    scope_matches,
+    origin_access, scope_matches,
 };
 
 /// 判定实现失败。core 收到任何错误都必须 deny（fail-closed）。
@@ -52,12 +52,15 @@ impl CorePolicy {
                     Some("base:plugin")
                 }
             }
-            // 管理员在私信/控制台可以申请任意目标；其余按订阅边界。
+            // 管理员在私信/控制台可以申请任意目标；其余只看发起位置。
+            //
+            // 申请这一刻判的是「能不能发起申请」，不是「能不能碰目标」：
+            // 目标可达性是票据想突破的东西，留给审批人判（2026-11-09 裁定）。
             GrantCapability::AccessRequest => {
                 if is_admin(request.subject) && is_private_place(request.place) {
                     Some("base:admin_private")
-                } else if base_access(request).allow {
-                    Some("base:subscription")
+                } else if origin_access(request).allow {
+                    Some("base:request_origin")
                 } else {
                     None
                 }
@@ -82,6 +85,7 @@ impl CorePolicy {
                 "admin:no_plugin_grant",
                 "admin subject has no matching plugin grant",
             ),
+            GrantCapability::AccessRequest => origin_access(request),
             GrantCapability::AccountSecret => GrantDecision::deny(
                 "account_secret_ticket_only",
                 "account_secret requires an access_request ticket",

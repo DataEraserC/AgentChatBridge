@@ -3,6 +3,10 @@
 //! 票据只放宽「能不能碰这个房间」的目标判定；它不替代
 //! `[grants]` 规则，也不自动授予 `plugin` 全权。
 //!
+//! 申请这一步判的是「能不能发起申请」（`access_request` capability），
+//! 依据是**发起房间**在本会话订阅内，而不是目标房间可达——目标可达正是
+//! 票据要打开的东西（2026-11-09 裁定，见 `docs/plan/access-grants.md` §6）。
+//!
 //! 状态只活在本进程：重启后 pending / active 票据全部失效，不发通知、不恢复。
 //! 这是 fail closed 的取舍，见 `docs/plan/access-grants.md`。
 
