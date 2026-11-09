@@ -133,7 +133,8 @@
 
 | id | 目标 | 现状 | 判定 | 状态 |
 |---|---|---|---|---|
-| F1 | 控制台不再写 `90-console.toml` 覆盖层 | `console.rs:145/574` 仍写覆盖层，顶层 key 整体替换下层 = bug 根源。**权限已脱离这条路**（F3 起走 `/api/policy` 直写库），连接/会话/人格仍走覆盖层 | **最高优先**：先让控制台写库（或至少写独立片段而不是覆盖层），再做表迁移 | next |
+| F1 | 控制台不再写 `90-console.toml` 覆盖层 | **审计已做完**：[config-source-audit.md](config-source-audit.md)。实测覆盖层已含 13/14 个顶层键（base 只剩 `[secrets]`），**它才是真源**；顶层 key 整体替换 → 写进 base/分片的同名对象无声消失（探针实证：新增会话不生效）。连接/会话/人格/记忆/harness 全挂在这条路上 | **最高优先，但方案待裁定**：改合并语义（1 天）vs 直接写库（等于提前做 F2）。见审计 §6/§7 | doing |
+| F1a | 止血：把 plugin 授权补回库 | 覆盖层吃掉 `70-grants-issue.toml` 的 9 条 `plugin` 规则 → F3 首次导入只拿到 1 条规则（`allow=1 deny=0 rooms=7`）；此后 `bridge.log` 实测 **12 次** `admin:no_plugin_grant`（含管理员私信），system_admin 调不动任何插件工具 | 用 `/api/policy` 补两条 `scope=subscribed`（`place=group`/`private`）即可覆盖原 9 条；补完删掉 70 片的 `[grants]`，否则它继续当「看着生效实际无效」的假来源 | next |
 | F2 | sessions 进库 + 能动态新增 | 会话仍在 toml；`acbctl sessions` 只读；控制台只有 GET + reset | 做，但要先解决三个前置：端口显式化、token 来源、drivers 重起 | next |
 | F3 | grants/rooms 进库 | **已完成**（schema 13）：`policy_rules`/`policy_rooms`/`policy_accounts`/`policy_admins` 四表；启动时一次性导入 TOML 并打 `policy_initialized`，之后库为唯一来源；控制台「权限」页 + `GET/POST /api/policy`，保存后轮次边界生效 | 做完了。顺带解决了 C11：审批路由改完下一张票就走新路由，不再有「建票时快照」 | done |
 | F4 | 插件注册进库 | `[[tool_plugins]]` 在 `80-issue-tools.toml`，command 是 nix store 路径（会 GC 失效） | 做，并在 L1 里顺手把 command 改成 `command_kind` 声明 + 指纹校验 | next |
@@ -253,6 +254,17 @@ hold：B6 F7 E2 G6（等条件，见 §5）
 本地 `vitepress build` 13 秒就能验，**不必等 CI**——这条已写进 `AGENTS.md` 的坑清单。
 
 验证：`./deploy/verify.sh` — 见 §12。
+
+### 2026-11-09 17:05 追加：C12 换代 + F1 配置来源审计
+
+- 换代：`gen-1794215544362-ebf3ce70`（label `c12-failure-reminder`，store 策略，
+  `--config` 指活配置），重启后 `deploy/acb-status.sh` 全绿；`/api/status` 已带
+  `recent_failures`（当前空 = 没有失败轮次）。库 schema 14 不变，无需迁移。
+- 审计产出 [config-source-audit.md](config-source-audit.md)：加载链 4 源实测、合并语义、
+  写入面 7 条、对象×真源 14 行、5 条硬证据；结论是「真源已是覆盖层」+「9 条 plugin 规则
+  被吃、12 次实测拒绝」，并给出三步切割与 3 个待裁定项。
+- 探针方式（可复用）：复制配置目录到 `/tmp`，加一个只含新会话的分片，跑
+  `acb-bridge --check --config <副本>`，对比 `config source` 声明数与 `sessions:` 实际数。
 
 ## 12. 验证证据
 
