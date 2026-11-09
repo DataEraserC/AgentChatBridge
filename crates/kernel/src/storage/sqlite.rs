@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT,
-    Note, NoteKey, NoteKind, Notes, Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded,
-    SessionMap, SessionMaps, StorageError, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript,
-    Watermarks,
+    ModelFallbacks, Note, NoteKey, NoteKind, Notes, Policies, PolicyEffect, PrunePlan, RecordDraft,
+    Recorded, SessionMap, SessionMaps, StorageError, TaskRecord, TaskStatus, Tasks, TopicStatus,
+    Transcript, Watermarks,
 };
 use crate::grants::{
     AccountGrant, BotAdminGrant, GrantRule, GrantsConfig, RoomGrant, SystemAdminGrant,
@@ -44,7 +44,9 @@ use crate::grants::{
 /// 12 → 13：加 `policy_*` 四张表——权限规则、房间政策、审批路由、管理员从
 ///          `config.toml` 搬进库。新表由建表语句建，不用搬数据；首次启动时
 ///          桥把 TOML 里的 `[grants]` 一次性导入（见 `engine::sync_policy`）。
-pub const SCHEMA_VERSION: i64 = 13;
+/// 13 → 14：加 `model_fallbacks` 表——主模型被拒（内容审核 / 限流 / 下线）时
+///          按顺序改用的后备模型。纯新增，不用搬数据；空表 = 不重试。
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"
@@ -204,6 +206,14 @@ CREATE TABLE IF NOT EXISTS policy_accounts (
 CREATE TABLE IF NOT EXISTS policy_admins (
     role       TEXT PRIMARY KEY,     -- bot_admin | system_admin
     payload    TEXT NOT NULL,        -- BotAdminGrant / SystemAdminGrant
+    updated_at INTEGER NOT NULL
+);
+
+-- 后备模型链：主模型被拒时按 position 从小到大换。顺序本身就是语义，
+-- 所以不用自增主键排序（删一条再插会打乱顺序）。
+CREATE TABLE IF NOT EXISTS model_fallbacks (
+    model_ref  TEXT PRIMARY KEY,     -- provider/model
+    position   INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 "#;
@@ -2370,6 +2380,45 @@ impl SqliteStore {
                 params![role, payload, at],
             )
             .map_err(io_error)?;
+        Ok(())
+    }
+}
+
+impl ModelFallbacks for SqliteStore {
+    fn model_fallbacks(&self) -> Result<Vec<String>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT model_ref FROM model_fallbacks ORDER BY position, model_ref")
+            .map_err(io_error)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(io_error)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item.map_err(io_error)?);
+        }
+        Ok(out)
+    }
+
+    fn replace_model_fallbacks(&mut self, list: &[String]) -> Result<(), StorageError> {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let transaction = self.conn.transaction().map_err(io_error)?;
+        transaction
+            .execute("DELETE FROM model_fallbacks", [])
+            .map_err(io_error)?;
+        for (index, model_ref) in list.iter().enumerate() {
+            transaction
+                .execute(
+                    "INSERT INTO model_fallbacks (model_ref, position, updated_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![model_ref, index as i64, at],
+                )
+                .map_err(io_error)?;
+        }
+        transaction.commit().map_err(io_error)?;
         Ok(())
     }
 }

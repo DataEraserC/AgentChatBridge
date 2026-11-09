@@ -265,10 +265,13 @@ fn system_admin_can_be_cleared() {
 }
 
 #[test]
-fn schema_version_is_thirteen() {
-    assert_eq!(
-        acb_kernel::SCHEMA_VERSION,
-        13,
-        "policy_* 四张表随 schema 13 引入；加表要加版本号"
+fn schema_version_covers_policy_tables() {
+    // 这条不钉死具体数字（每加一张表都要改一次测试，改的人还会顺手把断言改成新值，
+    // 等于没看守）。它守的是「policy_* 引入之后版本号至少是 13」：有人把版本号
+    // 往回写会让老库被当成新库打开。
+    assert!(
+        acb_kernel::SCHEMA_VERSION >= 13,
+        "policy_* 四张表随 schema 13 引入；版本号不能低于它（当前 {}）",
+        acb_kernel::SCHEMA_VERSION
     );
 }

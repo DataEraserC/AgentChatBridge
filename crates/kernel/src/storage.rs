@@ -735,14 +735,42 @@ pub trait Policies {
     ) -> Result<(), StorageError>;
 }
 
+/// 模型后备链。主模型被拒（内容审核 / 限流 / 模型下线）时按顺序往下换。
+///
+/// 为什么进库而不是留在配置里：它决定「这个桥用什么模型说话」，是会热改、要审计、
+/// 与启动无关的业务对象——和 `[grants]` 同一类。配置里只留引导参数。
+pub trait ModelFallbacks {
+    /// 按优先级从高到低。空 = 没有后备链，主模型失败就照常报错。
+    fn model_fallbacks(&self) -> Result<Vec<String>, StorageError>;
+
+    /// 整份替换。顺序即优先级；空列表 = 清空。
+    fn replace_model_fallbacks(&mut self, list: &[String]) -> Result<(), StorageError>;
+}
+
 /// 八样东西合起来。桥只依赖这一个约束，换后端只换实现。
 pub trait Store:
-    Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks + Tasks + Policies
+    Transcript
+    + Watermarks
+    + Notes
+    + Deliveries
+    + SessionMaps
+    + Feedbacks
+    + Tasks
+    + Policies
+    + ModelFallbacks
 {
 }
 
 impl<T> Store for T where
-    T: Transcript + Watermarks + Notes + Deliveries + SessionMaps + Feedbacks + Tasks + Policies
+    T: Transcript
+        + Watermarks
+        + Notes
+        + Deliveries
+        + SessionMaps
+        + Feedbacks
+        + Tasks
+        + Policies
+        + ModelFallbacks
 {
 }
 
@@ -768,6 +796,8 @@ pub struct MemoryStore {
     tasks: Vec<TaskRecord>,
     /// 策略整份挂在这里。
     policy: GrantsConfig,
+    /// 后备模型链（顺序即优先级）。
+    model_fallbacks: Vec<String>,
     /// 有没有被写过。和 sqlite 的 `policy_initialized` 标记同一个意思：
     /// 「导入过一份空的」和「从没导入过」必须分得开，否则重启会把清空当成首次导入。
     policy_initialized: bool,
@@ -1338,6 +1368,17 @@ impl Policies for MemoryStore {
     ) -> Result<(), StorageError> {
         self.policy.system_admin = value.cloned();
         self.policy_initialized = true;
+        Ok(())
+    }
+}
+
+impl ModelFallbacks for MemoryStore {
+    fn model_fallbacks(&self) -> Result<Vec<String>, StorageError> {
+        Ok(self.model_fallbacks.clone())
+    }
+
+    fn replace_model_fallbacks(&mut self, list: &[String]) -> Result<(), StorageError> {
+        self.model_fallbacks = list.to_vec();
         Ok(())
     }
 }

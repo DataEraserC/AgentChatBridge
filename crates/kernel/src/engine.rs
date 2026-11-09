@@ -660,6 +660,11 @@ pub struct Bridge<S: Store> {
     /// 库。控制台保存策略时没有新配置可暂存，但同样必须在轮次边界生效——一轮
     /// 判定到一半换掉权限，会让同一轮的两次判定用两套规则。
     pending_policy_reload: bool,
+    /// 后备模型链（顺序即优先级），来自库表 `model_fallbacks`。
+    ///
+    /// 为什么不挂在 `config` 上：它跟 `[grants]` 一样，以库为准，配置里没有对应段。
+    /// 轮次边界重读，和策略同一个时机——一轮里换模型会让同一轮的上下文前后不一致。
+    model_fallbacks: Vec<String>,
     /// 等待在轮次边界执行的动态插件卸载。
     pending_unloads: Vec<ProviderId>,
     /// 等待在轮次边界执行的动态插件重新加载。
@@ -917,6 +922,7 @@ impl<S: Store> Bridge<S> {
             relay,
             staged_config: None,
             pending_policy_reload: false,
+            model_fallbacks: Vec::new(),
             pending_unloads: Vec::new(),
             pending_reloads: Vec::new(),
             plugin_errors: HashMap::new(),
@@ -935,6 +941,7 @@ impl<S: Store> Bridge<S> {
         // 策略以库为准（schema 13）。启动时对齐一次：库里没有就导入 `config.toml`
         // 的这份，库里有就以库为准。审计跟着一起落。
         bridge.sync_policy_from_store();
+        bridge.reload_model_fallbacks();
         bridge
     }
 
@@ -2307,6 +2314,7 @@ impl<S: Store> Bridge<S> {
             self.config_version += 1;
         }
         self.adopt_store_policy();
+        self.reload_model_fallbacks();
     }
 
     /// 把库里的策略读进来。变了就落审计、配置版本 +1；没变什么都不做。
@@ -2332,6 +2340,54 @@ impl<S: Store> Bridge<S> {
                 eprintln!("[policy] 重新读库失败，继续用当前策略：{error}");
             }
         }
+    }
+
+    /// 把库里的后备模型链读进来。变了就把配置版本 +1（控制台的「配置版本」要能看出来）。
+    fn reload_model_fallbacks(&mut self) {
+        match self.store.model_fallbacks() {
+            Ok(list) => {
+                if list != self.model_fallbacks {
+                    self.model_fallbacks = list;
+                    self.config_version += 1;
+                }
+            }
+            Err(error) => {
+                // 读失败**不清空**：清空等于「模型被拒就再也不重试」，而库抖动是暂时的。
+                eprintln!("[model] 读后备链失败，继续用当前这一份：{error}");
+            }
+        }
+    }
+
+    /// 当前生效的后备模型链（控制台展示用）。
+    pub fn model_fallbacks(&self) -> &[String] {
+        &self.model_fallbacks
+    }
+
+    /// 整份替换后备链。写完只置标记，轮次边界生效。
+    ///
+    /// 校验在这里做而不是在 HTTP 层：`provider/model` 的拆分规则只有一处（驱动侧
+    /// 按第一个 `/` 拆），放两处必然对不上。写库前先判，坏值一个字节都不落。
+    pub fn replace_model_fallbacks(&mut self, list: &[String]) -> Result<(), String> {
+        for model_ref in list {
+            let (provider, model) = model_ref
+                .split_once('/')
+                .ok_or_else(|| format!("模型要写成 provider/model，这一项不是：{model_ref:?}"))?;
+            if provider.trim().is_empty() || model.trim().is_empty() {
+                return Err(format!("provider 和模型名都不能为空：{model_ref:?}"));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for model_ref in list {
+            if !seen.insert(model_ref.as_str()) {
+                return Err(format!("后备链里有重复项：{model_ref:?}"));
+            }
+        }
+        self.store
+            .replace_model_fallbacks(list)
+            .map_err(|error| error.to_string())?;
+        // 和策略同一个时机生效：一轮里换模型会让同一轮的前后上下文不一致。
+        self.pending_policy_reload = true;
+        Ok(())
     }
 
     /// 启动时把策略对齐到库。
@@ -8142,6 +8198,8 @@ impl<S: Store> Bridge<S> {
                 name: session.name.clone(),
                 harness: session.harness.clone(),
                 model: session.model.clone(),
+                // 后备链是全局的：会话自己的 model 优先，被拒了才按这条链往下走。
+                model_fallbacks: self.model_fallbacks.clone(),
             });
         // 人格卡：桥原样下发，怎么塞进模型上下文由 harness 适配器决定。
         let persona = turn_config

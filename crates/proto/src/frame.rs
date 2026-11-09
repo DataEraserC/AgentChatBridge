@@ -129,6 +129,14 @@ pub struct SessionInfo {
     /// 用哪个模型；没配就是 `None`，由 harness 侧决定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// 主模型被拒（内容审核 / 限流 / 模型不可用）时按顺序改用的后备模型，
+    /// 每项是 `provider/model`。空 = 不重试。
+    ///
+    /// 为什么不升协议版本：这是**可选字段**，老驱动不认识就忽略（serde 默认丢弃
+    /// 未知字段），行为退化成「不重试」，不会解析失败。链本身由桥持有（库表
+    /// `model_fallbacks`），驱动只照单办事，不自己猜该换哪个。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_fallbacks: Vec<String>,
 }
 
 /// 一条「acb 会话 ↔ harness 内部会话」的映射，握手时随 `Ready` 下发，
@@ -409,6 +417,7 @@ mod tests {
                 name: "main".into(),
                 harness: "dsh".into(),
                 model: None,
+                model_fallbacks: Vec::new(),
             }),
             persona: None,
             more: None,
@@ -580,6 +589,34 @@ mod tests {
             Frame::TurnEnd { failure, .. } => assert!(failure.is_none()),
             other => panic!("应当解成 turn_end，实际是 {}", other.kind()),
         }
+    }
+
+    #[test]
+    fn session_info_tolerates_missing_model_fallbacks() {
+        // 后备链是后加的字段：老桥发来的 session_info 没有它，新驱动必须照常解出来，
+        // 否则一次升级就会让所有还没换代的桥连不上新驱动。
+        let legacy = r#"{"id":"main","name":"main","harness":"dsh","model":"trae/x"}"#;
+        let info: SessionInfo = serde_json::from_str(legacy).expect("缺字段要能解");
+        assert_eq!(info.model.as_deref(), Some("trae/x"));
+        assert!(info.model_fallbacks.is_empty(), "缺字段 = 不重试");
+    }
+
+    #[test]
+    fn session_info_carries_model_fallbacks_in_order() {
+        let info = SessionInfo {
+            id: "main".into(),
+            name: "main".into(),
+            harness: "dsh".into(),
+            model: Some("trae/a".into()),
+            model_fallbacks: vec!["trae/b".into(), "trae/c".into()],
+        };
+        let wire = serde_json::to_string(&info).expect("序列化");
+        let back: SessionInfo = serde_json::from_str(&wire).expect("反序列化");
+        assert_eq!(
+            back.model_fallbacks,
+            vec!["trae/b", "trae/c"],
+            "顺序就是优先级"
+        );
     }
 
     #[test]
