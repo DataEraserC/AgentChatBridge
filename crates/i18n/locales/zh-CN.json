@@ -1086,5 +1086,11 @@
   "kernel.config.secret_dotenv_no_equal": "这一行没有 =",
   "kernel.config.secret_dotenv_empty_key": "= 前面的键为空",
   "kernel.config.secret_dotenv_duplicate": "键 {key} 重复",
-  "kernel.config.secret_dotenv_missing": "文件里没有键 {key}"
+  "kernel.config.secret_dotenv_missing": "文件里没有键 {key}",
+  "kernel.storage.policy_payload_invalid": "策略对象 {what} 的 JSON 不合法：{error}",
+  "bridge.console.policy_body_invalid": "请求体必须是 {\"grants\": {...}} 形式的 JSON",
+  "bridge.console.policy_grants_required": "请求体里没有 grants 字段",
+  "bridge.console.policy_shape_invalid": "策略结构不合法",
+  "bridge.console.policy_save_failed": "保存策略失败",
+  "console.nav.policy": "权限"
 }

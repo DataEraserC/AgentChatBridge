@@ -425,6 +425,10 @@ impl<S: Store + Send + 'static> Console<S> {
                 let discarded = bridge.discard_staged_config();
                 (200, json!({"ok": true, "discarded": discarded}).to_string())
             }
+            // 策略（权限规则 / 房间信任 / 审批路由 / 管理员）。自 schema 13 起这些东西
+            // 在库里，不在 config.toml；所以它不走上面那条「改文件再暂存」的路。
+            ("GET", "/api/policy") => self.policy_view(),
+            ("POST", "/api/policy") => self.save_policy(body),
             _ => error_response(404, acb_i18n::msg!("bridge.console.no_endpoint"), None),
         }
     }
@@ -557,6 +561,83 @@ impl<S: Store + Send + 'static> Console<S> {
             },
         })
         .to_string()
+    }
+
+    /// 策略快照：权限规则、房间政策、审批路由、管理员。
+    ///
+    /// 这是**库里**的东西（schema 13），不是配置文件。`source` 写在返回里，
+    /// 免得有人以为这个页面改的是 `config.toml`——那两个地方都能改权限时，
+    /// 「为什么这条规则不生效」就变成了猜谜。
+    fn policy_view(&self) -> (u16, String) {
+        let bridge = lock(&self.bridge);
+        let grants = &bridge.config().grants;
+        (
+            200,
+            json!({
+                "source": "database",
+                "grants": grants,
+                "pending_reload": bridge.has_pending_policy_reload(),
+                "config_version": bridge.config_version(),
+            })
+            .to_string(),
+        )
+    }
+
+    /// 整份保存策略：`{"grants": {...}}`，形状与 `GET /api/policy` 回来的一致。
+    ///
+    /// 为什么整份而不是逐条 op：页面上就是一张表单，改完一次提交；整份在事务里
+    /// 一次落地，不会出现「规则改了一半」的中间态。代价是两个人同时编辑会互相
+    /// 覆盖——当前控制台是单人运维工具，先按这个来，将来要多人再拆 ops。
+    fn save_policy(&self, body: &str) -> (u16, String) {
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.policy_body_invalid"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let Some(raw) = parsed.get("grants") else {
+            return config_error(
+                400,
+                acb_i18n::msg!("bridge.console.policy_grants_required"),
+                None,
+            );
+        };
+        let grants: acb_kernel::GrantsConfig = match serde_json::from_value(raw.clone()) {
+            Ok(grants) => grants,
+            Err(error) => {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.policy_shape_invalid"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+
+        let mut bridge = lock(&self.bridge);
+        let rooms = grants.rooms.len();
+        let rules = grants.rules.len() + grants.deny.len();
+        match bridge.replace_policy(&grants) {
+            Ok(()) => (
+                200,
+                json!({
+                    "ok": true,
+                    "rules": rules,
+                    "rooms": rooms,
+                    // 轮次边界才生效，如实说清楚，免得人去群里试然后怀疑没保存。
+                    "pending_reload": true,
+                })
+                .to_string(),
+            ),
+            Err(error) => config_error(
+                400,
+                acb_i18n::msg!("bridge.console.policy_save_failed"),
+                Some(error),
+            ),
+        }
     }
 
     /// 配置 TOML 原文。**只在鉴权之后给**——原文里就是明文密钥，管理员编辑用。
@@ -1850,7 +1931,8 @@ room = "group/123"
             SAVE_BASE.replace("delivery_limit = 10", "delivery_limit = 20"),
         )
         .expect("重写 base");
-        let second = acb_kernel::Config::load_fixture(&base, Some(&config_dir)).expect("重生成后加载");
+        let second =
+            acb_kernel::Config::load_fixture(&base, Some(&config_dir)).expect("重生成后加载");
         assert_eq!(second.config.delivery_limit, 50, "控制台改动仍在");
 
         let console_text = console_text.replace("delivery_limit = 50", "delivery_limit = 60");

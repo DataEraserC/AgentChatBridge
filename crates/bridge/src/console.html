@@ -207,6 +207,7 @@
   <button data-tab="sessions" data-i18n="console.nav.sessions">Sessions</button>
   <button data-tab="feedback" data-i18n="console.nav.feedback">Feedback</button>
   <button data-tab="plugins" data-i18n="console.nav.plugins">Plugins</button>
+  <button data-tab="policy" data-i18n="console.nav.policy">Access</button>
   <button data-tab="config" data-i18n="console.nav.config">Config</button>
 </nav>
 
@@ -258,6 +259,9 @@
       <p class="err" id="plugins-error"></p>
       <div id="plugins"></div>
     </div>
+  </section>
+  <section id="tab-policy">
+    <div id="policy"></div>
   </section>
   <section id="tab-config">
     <div class="notice" data-i18n="console.ui.pending.tab">This tab is not localized yet.</div>
@@ -842,6 +846,277 @@ function wakeText(w) {
   return parts.join("，") || "（全关）";
 }
 
+// ---------------------------------------------------------------------------
+// 策略（权限规则 / 房间信任 / 审批路由 / 管理员）
+//
+// 自 schema 13 起这些东西在**数据库**里，不在 config.toml：改完不用动文件，
+// 也不用重启，下一次开轮生效。所以这个页面的保存走 /api/policy，不走
+// /api/config/patch——那条路是改文件再暂存，语义完全不同。
+//
+// 2026-11-09 的教训：审批路由以前只能手写 TOML，漏配一个群没有任何提示，
+// 票据建出去就一路 pending 到过期（事后补配置也救不回来，路由是创建时快照）。
+// ---------------------------------------------------------------------------
+let policyCache = null;
+
+// 当前策略的深拷贝。表单改一个字段后整份提交——后端一次事务写到底，
+// 不会出现「规则改了一半」的中间态。
+function policyDraft() {
+  return JSON.parse(JSON.stringify((policyCache && policyCache.grants) || {}));
+}
+
+async function savePolicy(next) {
+  try {
+    await api("/api/policy", { method: "POST", body: JSON.stringify({ grants: next }) });
+    await loadPolicy();
+    return true;
+  } catch (e) {
+    reportError(e.message);
+    return false;
+  }
+}
+
+async function loadPolicy() {
+  const r = await api("/api/policy");
+  policyCache = r;
+  const g = r.grants || {};
+  const rooms = Object.entries(g.rooms || {});
+  const accounts = Object.entries(g.accounts || {});
+  const rules = (g.rules || []).map((x) => ({ ...x, effect: "allow" }))
+    .concat((g.deny || []).map((x) => ({ ...x, effect: "deny" })));
+
+  const routeText = (v) => (v && v.length)
+    ? v.map(esc).join("<br>")
+    : '<span class="muted">（回退账号级 → 适配器私聊）</span>';
+  const listText = (v) => (v && v.length) ? v.map(esc).join("<br>") : '<span class="muted">—</span>';
+
+  const roomRows = rooms.map(([room, grant]) => `<tr>
+    <td class="wrap">${esc(room)}</td>
+    <td>${esc(grant.trust || "untrusted")}</td>
+    <td class="wrap">${listText(grant.members)}</td>
+    <td class="wrap">${routeText(grant.approval_route)}</td>
+    <td><button class="mini" onclick="editRoomPolicy('${esc(room)}')">编辑</button><button class="mini danger" onclick="delRoomPolicy('${esc(room)}')">删</button></td>
+  </tr>`).join("");
+
+  const accountRows = accounts.map(([key, grant]) => `<tr>
+    <td>${esc(key)}</td><td class="wrap">${routeText(grant.approval_route)}</td>
+    <td><button class="mini" onclick="editAccountRoute('${esc(key)}')">编辑</button><button class="mini danger" onclick="delAccountRoute('${esc(key)}')">删</button></td>
+  </tr>`).join("");
+
+  const ruleRows = rules.map((rule) => `<tr>
+    <td>${rule.effect === "deny" ? '<span class="err">deny</span>' : "allow"}</td>
+    <td>${esc(rule.id)}</td>
+    <td>${esc(rule.subject)}</td><td>${esc(rule.place)}</td><td>${esc(rule.scope)}</td>
+    <td class="wrap">${(rule.capability || []).map(esc).join(", ")}</td>
+    <td><button class="mini" onclick="editRule('${rule.effect}','${esc(rule.id)}')">编辑</button><button class="mini danger" onclick="delRule('${rule.effect}','${esc(rule.id)}')">删</button></td>
+  </tr>`).join("");
+
+  const pending = r.pending_reload
+    ? `<div class="banner">${icon("alert")}<span>改动已入库，下一次开轮生效（一轮之内看到的策略不变）。</span></div>`
+    : "";
+  const raw = (v, empty) => v ? `<code class="wrap">${esc(JSON.stringify(v))}</code>` : `<span class="muted">${empty}</span>`;
+
+  $("#policy").innerHTML = `${pending}
+  <div class="card"><h2>房间政策与审批路由<button class="mini" onclick="addRoomPolicy()" style="float:right">+ 新房间</button></h2>
+    <p class="muted">审批路由决定申请票据递给谁。<b>没配的房间会回退到账号级，再回退到适配器私聊</b>——那个房间没人订阅，票据会一路 pending 到过期，而且事后补配置救不回来（路由是建票时的快照）。</p>
+    <p class="muted">权威来源：<b>${esc(r.source === "database" ? "数据库（config.toml 的 [grants] 已不再生效）" : r.source)}</b></p>
+    <div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>房间</th><th>信任</th><th>可信成员</th><th>审批路由</th><th></th></tr></thead>
+      <tbody>${roomRows || '<tr><td colspan="5" class="muted">还没有房间政策</td></tr>'}</tbody></table></div></div>
+
+  <div class="card"><h2>账号级审批路由<button class="mini" onclick="addAccountRoute()" style="float:right">+ 新账号</button></h2>
+    <p class="muted">键形如 <code>qq:10001</code>（连接:账号）。房间没配时用它。</p>
+    <div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>账号</th><th>审批路由</th><th></th></tr></thead>
+      <tbody>${accountRows || '<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table></div></div>
+
+  <div class="card"><h2>管理员</h2><div class="kv">
+    <div class="k">bot_admin</div><div class="wrap">${raw(g.bot_admin && g.bot_admin.accounts, "未配置")}</div>
+    <div class="k">system_admin</div><div class="wrap">${raw(g.system_admin, "未配置")}</div></div>
+    <p><button class="mini" onclick="editAdmins()">编辑管理员</button></p></div>
+
+  <div class="card"><h2>授权规则<button class="mini" onclick="addRule('allow')" style="float:right">+ allow 规则</button></h2>
+    <p class="muted">deny 只做减法，和 allow 的顺序无关；命中 deny 一律拒绝。能力清单与主体/场所的取值见文档。</p>
+    <div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>效果</th><th>id</th><th>主体</th><th>场所</th><th>范围</th><th>能力</th><th></th></tr></thead>
+      <tbody>${ruleRows || '<tr><td colspan="7" class="muted">无</td></tr>'}</tbody></table></div>
+    <p><button class="mini" onclick="addRule('deny')">+ deny 规则</button></p></div>`;
+}
+
+function editRoomPolicy(room) {
+  const current = (policyCache?.grants?.rooms || {})[room] || {};
+  formFrame(`房间政策：${esc(room)}`, `
+    <div class="form-row"><label>信任</label><select id="pr-trust">
+      <option value="untrusted">untrusted（默认）</option>
+      <option value="trusted">trusted（可信）</option></select>
+      <span class="hint">只影响「按 trust 生效」的判断；成员名单非空时以名单为准</span></div>
+    <div class="form-row"><label>可信成员</label><input type="text" id="pr-members" placeholder="逗号分隔；留空 = 按 trust 生效" style="max-width:420px"></div>
+    <div class="form-row"><label>审批路由</label><input type="text" id="pr-route" placeholder="qq:group/498587179, qq:private/323622442" style="max-width:420px">
+      <span class="hint">票据申请递到这里。群内批准要带消息里的 nonce；留空 = 回退账号级 → 适配器私聊（通常没人看）</span></div>`,
+    async () => {
+      const next = policyDraft();
+      next.rooms = next.rooms || {};
+      next.rooms[room] = {
+        trust: document.getElementById("pr-trust").value,
+        members: csv(document.getElementById("pr-members").value),
+        approval_route: csv(document.getElementById("pr-route").value),
+      };
+      return savePolicy(next);
+    });
+  document.getElementById("pr-trust").value = current.trust || "untrusted";
+  document.getElementById("pr-members").value = (current.members || []).join(", ");
+  document.getElementById("pr-route").value = (current.approval_route || []).join(", ");
+}
+
+function addRoomPolicy() {
+  const room = prompt("房间键（形如 qq:group/769843907）：");
+  if (!room) return;
+  const next = policyDraft();
+  next.rooms = next.rooms || {};
+  if (next.rooms[room.trim()]) { alert("这个房间已经有政策了，直接编辑它。"); return; }
+  next.rooms[room.trim()] = { trust: "untrusted", members: [], approval_route: [] };
+  savePolicy(next).then((ok) => { if (ok) editRoomPolicy(room.trim()); });
+}
+
+async function delRoomPolicy(room) {
+  if (!confirm(`删除房间政策「${room}」？\n删掉后这个房间就没有审批路由了，票据会回退到账号级/适配器私聊。`)) return;
+  const next = policyDraft();
+  delete (next.rooms || {})[room];
+  await savePolicy(next);
+}
+
+function editAccountRoute(key) {
+  const current = (policyCache?.grants?.accounts || {})[key] || {};
+  formFrame(`账号审批路由：${esc(key)}`, `
+    <div class="form-row"><label>审批路由</label><input type="text" id="pa-route" placeholder="qq:private/323622442" style="max-width:420px">
+      <span class="hint">这个账号下所有房间的兜底审批地点</span></div>`,
+    async () => {
+      const next = policyDraft();
+      next.accounts = next.accounts || {};
+      next.accounts[key] = { approval_route: csv(document.getElementById("pa-route").value) };
+      return savePolicy(next);
+    });
+  document.getElementById("pa-route").value = (current.approval_route || []).join(", ");
+}
+
+function addAccountRoute() {
+  const key = prompt("账号键（形如 qq:10001）：");
+  if (!key) return;
+  const next = policyDraft();
+  next.accounts = next.accounts || {};
+  next.accounts[key.trim()] = { approval_route: [] };
+  savePolicy(next).then((ok) => { if (ok) editAccountRoute(key.trim()); });
+}
+
+async function delAccountRoute(key) {
+  if (!confirm(`删除账号审批路由「${key}」？`)) return;
+  const next = policyDraft();
+  delete (next.accounts || {})[key];
+  await savePolicy(next);
+}
+
+function editAdmins() {
+  const bot = ((policyCache?.grants?.bot_admin || {}).accounts || [])
+    .map((a) => `${a.connection}:${a.account}`).join(", ");
+  const sys = policyCache?.grants?.system_admin;
+  const sysText = sys ? `${sys.connection}:${sys.account}` : "";
+  formFrame("管理员", `
+    <div class="form-row"><label>bot_admin</label><input type="text" id="pad-bot" placeholder="qq:10001, qq:10002" style="max-width:420px">
+      <span class="hint">逗号分隔；留空 = 没有 bot 管理员</span></div>
+    <div class="form-row"><label>system_admin</label><input type="text" id="pad-sys" placeholder="qq:10001（只能一个）" style="max-width:420px">
+      <span class="hint">最高权限持有者；留空 = 不设</span></div>`,
+    async () => {
+      const next = policyDraft();
+      const botList = csv(document.getElementById("pad-bot").value).map((item) => {
+        const [connection, account] = item.split(":");
+        return { connection, account };
+      }).filter((a) => a.connection && a.account);
+      const sysOne = csv(document.getElementById("pad-sys").value)[0];
+      if (botList.length) next.bot_admin = { accounts: botList };
+      else delete next.bot_admin;
+      if (sysOne) {
+        const [connection, account] = sysOne.split(":");
+        if (!connection || !account) { showFormError("system_admin 要写成 连接:账号"); return false; }
+        next.system_admin = { connection, account };
+      } else delete next.system_admin;
+      return savePolicy(next);
+    });
+  document.getElementById("pad-bot").value = bot;
+  document.getElementById("pad-sys").value = sysText;
+}
+
+const RULE_SUBJECTS = [["system", "system"], ["system_admin", "system_admin"], ["bot_admin", "bot_admin"], ["user", "user"]];
+const RULE_PLACES = [["private", "private（私信）"], ["group", "group（群）"], ["console", "console"], ["none", "none"]];
+const RULE_SCOPES = [["subscribed", "subscribed"], ["room", "room"], ["connection", "connection"], ["platform_op", "platform_op"]];
+const RULE_CAPS = ["room_read", "room_write", "connection_read", "platform", "destructive", "critical", "account_read", "account_secret", "access_request", "plugin"];
+const selectOf = (id, pairs, value) => `<select id="${id}">${pairs.map(([v, label]) =>
+  `<option value="${esc(v)}"${v === value ? " selected" : ""}>${esc(label)}</option>`).join("")}</select>`;
+
+function editRule(effect, id) {
+  const list = (policyCache?.grants?.[effect === "deny" ? "deny" : "rules"] || []);
+  const current = list.find((r) => r.id === id) || {
+    id: "", subject: "user", place: "group", scope: "subscribed", capability: [],
+  };
+  const target = current.target || {};
+  formFrame(`${effect === "deny" ? "拒绝" : "允许"}规则：${esc(id)}`, `
+    <div class="form-row"><label>规则 id</label><input type="text" id="ru-id" value="${esc(current.id)}" style="max-width:260px">
+      <span class="hint">稳定标识，审计里靠它追溯；改 id 等于新建一条</span></div>
+    <div class="form-row"><label>主体</label>${selectOf("ru-subject", RULE_SUBJECTS, current.subject)}</div>
+    <div class="form-row"><label>场所</label>${selectOf("ru-place", RULE_PLACES, current.place)}</div>
+    <div class="form-row"><label>范围</label>${selectOf("ru-scope", RULE_SCOPES, current.scope)}</div>
+    <div class="form-row"><label>目标</label><input type="text" id="ru-target-id" value="${esc(target.id || "")}" placeholder="room / connection / platform_op 的具体标识" style="max-width:340px">
+      <span class="hint">scope = subscribed 时留空；target 的 kind 跟着 scope 走</span></div>
+    <div class="form-row"><label>能力</label><input type="text" id="ru-caps" value="${esc((current.capability || []).join(", "))}" placeholder="room_read, room_write" style="max-width:420px">
+      <span class="hint">可选：${RULE_CAPS.join(" / ")}</span></div>`,
+    async () => {
+      const newId = document.getElementById("ru-id").value.trim();
+      if (!newId) { showFormError("规则 id 不能为空"); return false; }
+      const caps = csv(document.getElementById("ru-caps").value);
+      if (!caps.length) { showFormError("至少要选一项能力"); return false; }
+      const bad = caps.filter((c) => !RULE_CAPS.includes(c));
+      if (bad.length) { showFormError("不认识的能力：" + bad.join(", ")); return false; }
+      const scope = document.getElementById("ru-scope").value;
+      const targetId = document.getElementById("ru-target-id").value.trim();
+      const rule = {
+        id: newId,
+        subject: document.getElementById("ru-subject").value,
+        place: document.getElementById("ru-place").value,
+        scope,
+        capability: caps,
+      };
+      if (targetId) {
+        const kind = scope === "connection" ? "connection"
+          : scope === "platform_op" ? "platform_op" : "room";
+        rule.target = { kind, id: targetId };
+      }
+      const next = policyDraft();
+      const field = effect === "deny" ? "deny" : "rules";
+      next[field] = next[field] || [];
+      next[field] = next[field].filter((r) => r.id !== id);
+      next[field].push(rule);
+      return savePolicy(next);
+    });
+}
+
+function addRule(effect) {
+  const next = policyDraft();
+  const field = effect === "deny" ? "deny" : "rules";
+  const list = next[field] || [];
+  let n = list.length + 1;
+  while (list.some((r) => r.id === `rule-${n}`)) n += 1;
+  const id = `rule-${n}`;
+  list.push({ id, subject: "user", place: "group", scope: "subscribed", capability: ["room_read"] });
+  next[field] = list;
+  savePolicy(next).then((ok) => { if (ok) editRule(effect, id); });
+}
+
+async function delRule(effect, id) {
+  if (!confirm(`删除规则「${id}」？\n删掉一条 allow 可能让人立刻失去权限。`)) return;
+  const next = policyDraft();
+  const field = effect === "deny" ? "deny" : "rules";
+  next[field] = (next[field] || []).filter((r) => r.id !== id);
+  await savePolicy(next);
+}
+
 let tomlEditorText = null;
 let tomlResult = null;
 let cfgCache = null;
@@ -965,6 +1240,7 @@ const tabs = {
   sessions: loadSessions,
   feedback: loadFeedback,
   plugins: loadPlugins,
+  policy: loadPolicy,
   config: loadConfig,
 };
 

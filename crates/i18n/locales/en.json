@@ -1086,5 +1086,11 @@
   "kernel.config.secret_dotenv_no_equal": "line has no =",
   "kernel.config.secret_dotenv_empty_key": "key before = is empty",
   "kernel.config.secret_dotenv_duplicate": "key {key} is duplicated",
-  "kernel.config.secret_dotenv_missing": "file has no key {key}"
+  "kernel.config.secret_dotenv_missing": "file has no key {key}",
+  "kernel.storage.policy_payload_invalid": "policy payload for {what} is not valid JSON: {error}",
+  "bridge.console.policy_body_invalid": "body must be JSON of the form {\"grants\": {...}}",
+  "bridge.console.policy_grants_required": "missing \"grants\" in body",
+  "bridge.console.policy_shape_invalid": "policy shape is not valid",
+  "bridge.console.policy_save_failed": "saving policy failed",
+  "console.nav.policy": "Access"
 }
