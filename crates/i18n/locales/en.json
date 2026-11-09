@@ -1092,5 +1092,8 @@
   "bridge.console.policy_grants_required": "missing \"grants\" in body",
   "bridge.console.policy_shape_invalid": "policy shape is not valid",
   "bridge.console.policy_save_failed": "saving policy failed",
-  "console.nav.policy": "Access"
+  "console.nav.policy": "Access",
+  "bridge.console.model_fallbacks_body_invalid": "body must be JSON of the form {\"models\": [\"provider/model\", ...]}",
+  "bridge.console.model_fallbacks_save_failed": "saving fallback models failed",
+  "console.nav.models": "Models"
 }

@@ -429,6 +429,8 @@ impl<S: Store + Send + 'static> Console<S> {
             // 在库里，不在 config.toml；所以它不走上面那条「改文件再暂存」的路。
             ("GET", "/api/policy") => self.policy_view(),
             ("POST", "/api/policy") => self.save_policy(body),
+            ("GET", "/api/model-fallbacks") => self.model_fallbacks_view(),
+            ("POST", "/api/model-fallbacks") => self.save_model_fallbacks(body),
             _ => error_response(404, acb_i18n::msg!("bridge.console.no_endpoint"), None),
         }
     }
@@ -635,6 +637,76 @@ impl<S: Store + Send + 'static> Console<S> {
             Err(error) => config_error(
                 400,
                 acb_i18n::msg!("bridge.console.policy_save_failed"),
+                Some(error),
+            ),
+        }
+    }
+
+    /// 后备模型链（库表 `model_fallbacks`，schema 14）。
+    ///
+    /// 和策略同一个语义：库是唯一来源，改完轮次边界生效。
+    fn model_fallbacks_view(&self) -> (u16, String) {
+        let bridge = lock(&self.bridge);
+        (
+            200,
+            json!({
+                "source": "database",
+                "models": bridge.model_fallbacks(),
+                "pending_reload": bridge.has_pending_policy_reload(),
+                "config_version": bridge.config_version(),
+            })
+            .to_string(),
+        )
+    }
+
+    /// 整份保存后备链：`{"models": ["provider/model", ...]}`，顺序即优先级。
+    ///
+    /// 校验在 kernel 里做（`provider/model` 的拆分规则只有一处）。这里只负责
+    /// 把 JSON 变成 `Vec<String>`，以及把拒绝原因原样带回去——「哪一项写错了」
+    /// 比「保存失败」有用得多。
+    fn save_model_fallbacks(&self, body: &str) -> (u16, String) {
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.model_fallbacks_body_invalid"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let Some(raw) = parsed.get("models") else {
+            return config_error(
+                400,
+                acb_i18n::msg!("bridge.console.model_fallbacks_body_invalid"),
+                None,
+            );
+        };
+        let models: Vec<String> = match serde_json::from_value(raw.clone()) {
+            Ok(models) => models,
+            Err(error) => {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.model_fallbacks_body_invalid"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+
+        let mut bridge = lock(&self.bridge);
+        match bridge.replace_model_fallbacks(&models) {
+            Ok(()) => (
+                200,
+                json!({
+                    "ok": true,
+                    "models": models,
+                    "pending_reload": true,
+                })
+                .to_string(),
+            ),
+            Err(error) => config_error(
+                400,
+                acb_i18n::msg!("bridge.console.model_fallbacks_save_failed"),
                 Some(error),
             ),
         }

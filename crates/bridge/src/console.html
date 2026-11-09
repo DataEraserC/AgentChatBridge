@@ -208,6 +208,7 @@
   <button data-tab="feedback" data-i18n="console.nav.feedback">Feedback</button>
   <button data-tab="plugins" data-i18n="console.nav.plugins">Plugins</button>
   <button data-tab="policy" data-i18n="console.nav.policy">Access</button>
+  <button data-tab="models" data-i18n="console.nav.models">Models</button>
   <button data-tab="config" data-i18n="console.nav.config">Config</button>
 </nav>
 
@@ -262,6 +263,9 @@
   </section>
   <section id="tab-policy">
     <div id="policy"></div>
+  </section>
+  <section id="tab-models">
+    <div id="models"></div>
   </section>
   <section id="tab-config">
     <div class="notice" data-i18n="console.ui.pending.tab">This tab is not localized yet.</div>
@@ -942,6 +946,84 @@ async function loadPolicy() {
     <p><button class="mini" onclick="addRule('deny')">+ deny 规则</button></p></div>`;
 }
 
+// ---------------------------------------------------------------------------
+// 模型后备链（库表 model_fallbacks，schema 14）
+//
+// 为什么需要：上游 router 会用 400 content-blocked 拒掉一整轮（2026-11-09 现场：
+// 连着 6 轮全被拒，而「本轮出错」的通知每房间 10 分钟只发 3 条，用户看到的就是
+// 完全没人回话）。有后备链时驱动会换个模型把这一轮重放一遍。
+//
+// 语义只到「换模型重放」：这一轮已经调过桥工具（可能已经发过话）就不重放，
+// 宁可失败也不让群里出现两条相近的回复。
+// ---------------------------------------------------------------------------
+let modelsCache = null;
+
+async function loadModels() {
+  const r = await api("/api/model-fallbacks");
+  modelsCache = r;
+  const list = r.models || [];
+  const rows = list.map((m, i) => `<tr>
+    <td>${i + 1}</td>
+    <td class="wrap"><code>${esc(m)}</code></td>
+    <td>
+      <button class="mini" onclick="moveModel(${i}, -1)"${i === 0 ? " disabled" : ""}>上移</button>
+      <button class="mini" onclick="moveModel(${i}, 1)"${i === list.length - 1 ? " disabled" : ""}>下移</button>
+      <button class="mini danger" onclick="delModel(${i})">删</button>
+    </td></tr>`).join("");
+  const pending = r.pending_reload
+    ? `<div class="banner">${icon("alert")}<span>改动已入库，下一次开轮生效（正在跑的这一轮仍用旧链）。</span></div>`
+    : "";
+  $("#models").innerHTML = `${pending}
+  <div class="card"><h2>后备模型链<button class="mini" onclick="addModel()" style="float:right">+ 加一个</button></h2>
+    <p class="muted">主模型被上游拒（<b>内容审核 / 限流 / 模型下线</b>）时，驱动按这个顺序换模型，把这一轮<b>重放</b>一遍。
+    顺序就是优先级，写成 <code>provider/model</code>（如 <code>trae/deepseek-v4.1-flash</code>）。</p>
+    <p class="muted">两条边界：① 这一轮已经调过桥工具（可能已经说过话）就<b>不重放</b>，避免群里出现两条相近回复；
+    ② 会话自己的 <code>model</code> 永远排在最前面，这里的链只在它失败后启用。</p>
+    <p class="muted">权威来源：<b>${esc(r.source === "database" ? "数据库" : r.source)}</b></p>
+    <div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>#</th><th>模型</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="3" class="muted">空的 = 主模型失败就照常报错，不重试</td></tr>'}</tbody></table></div></div>`;
+}
+
+async function saveModels(next) {
+  try {
+    await api("/api/model-fallbacks", {
+      method: "POST",
+      body: JSON.stringify({ models: next }),
+    });
+    await loadModels();
+    return true;
+  } catch (e) {
+    reportError(e.detail ? `${e.message}（${e.detail}）` : e.message);
+    return false;
+  }
+}
+
+function addModel() {
+  formFrame("加一个后备模型", `
+    <div class="form-row"><label>模型</label><input type="text" id="mm-ref" placeholder="trae/deepseek-v4.1-flash" style="max-width:420px">
+      <span class="hint">写成 provider/model；追加到链尾（优先级最低）</span></div>`,
+    async () => {
+      const ref = document.getElementById("mm-ref").value.trim();
+      if (!ref) { reportError("模型不能为空"); return false; }
+      return saveModels([...(modelsCache?.models || []), ref]);
+    });
+}
+
+async function delModel(index) {
+  const next = [...(modelsCache?.models || [])];
+  next.splice(index, 1);
+  await saveModels(next);
+}
+
+async function moveModel(index, delta) {
+  const next = [...(modelsCache?.models || [])];
+  const target = index + delta;
+  if (target < 0 || target >= next.length) return;
+  [next[index], next[target]] = [next[target], next[index]];
+  await saveModels(next);
+}
+
 function editRoomPolicy(room) {
   const current = (policyCache?.grants?.rooms || {})[room] || {};
   formFrame(`房间政策：${esc(room)}`, `
@@ -1241,6 +1323,7 @@ const tabs = {
   feedback: loadFeedback,
   plugins: loadPlugins,
   policy: loadPolicy,
+  models: loadModels,
   config: loadConfig,
 };
 
