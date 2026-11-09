@@ -101,6 +101,12 @@ ADR 里写的是「当时认为对的决定」，不是事实。所以：
 - **nix 只认 git 跟踪的文件**，新加的文件先 `git add`，否则构建里看不见。
 - **常驻进程不要挂在 AI 会话的 shell 里**，会话一撤 socket 全废；用 systemd 用户单元。
 - **harness 侧测试用系统 node**。沙箱里的 managed node 22 跑 http/WS 会挂。
+- **文档里会被 Vue 编译器当模板**：`issue/<id>` 这种不在反引号里的尖括号、`{{ }}`、
+  以及表格单元格里带 `|` 的行内代码（会把代码切断，露出 `<toml>` 之类）都会让
+  `vitepress build` 报 `Element is missing end tag`。改完 `docs/` 本地跑一次
+  `cd docs && node node_modules/vitepress/bin/vitepress.js build`（13 秒）。
+- **`cargo fmt --all` 不要跑**：本仓库历史文件并不都合 rustfmt，它会重排几十个无关文件。
+  只对改动的文件跑 `rustfmt`。
 - 改了 harness 的工具清单要重启对应 harness——MCP 工具列表是进程启动时的快照。
 
 ## 9. 汇报格式
