@@ -1548,7 +1548,11 @@ fn migrate_one(root: &Path, id: &str) -> Result<bool, String> {
 fn validate_payload(source: &Path) -> Result<(), Failure> {
     // payload 只校验它自己该带的东西：acbl 的 launcher / supervisor / unit 模板
     // 已剥离到 acbl 包，不再出现在 generation 里。
-    let dirs = ["bin", "harnesses"];
+    //
+    // `examples/lua` 在列表里是因为 unit 的 ACB_LUA_DIR 指向
+    // `<profile>/current/examples/lua`：缺它这一代会启动失败，而失败发生在
+    // 换代之后（旧代已不认识迁移过的库），代价是整桥停机。必须在入代前拦住。
+    let dirs = ["bin", "harnesses", "examples/lua"];
     let files = [
         "bin/acb-bridge",
         "deploy/start-drivers.sh",
