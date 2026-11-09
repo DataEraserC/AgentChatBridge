@@ -97,7 +97,7 @@
 事实：
 
 - 当前 issue 服务有 `subscriptions` 与 `event_deliveries` 的 outbox，见 [issue-service/lib.rs](file:///home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/crates/issue-service/src/lib.rs#L820-L845)。新文档说“不写订阅表”，但代码里已经有一套；迁移期会出现两套投递。
-- ACB 的房间来自静态 `[[sessions.rooms]]`/订阅配置；issue 数量是动态的。把“每个 issue = 一个房间”意味着房间注册、房间级 retention、每个连接一个镜像房间。`issue-platform-adapter.md` 自己也写明“同一个 issue/<id> 在两条连接上各自成为房间”，见 [issue-platform-adapter.md](file:///home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/docs/plan/issue-platform-adapter.md#L20-L45)。这会让同一条评论落两份记录，retention 与未读也按两份算。
+- ACB 的房间来自静态 `[[sessions.rooms]]`/订阅配置；issue 数量是动态的。把“每个 issue = 一个房间”意味着房间注册、房间级 retention、每个连接一个镜像房间。`issue-platform-adapter.md` 自己也写明“同一个 `issue/<id>` 在两条连接上各自成为房间”，见 [issue-platform-adapter.md](file:///home/nixos/Documents/code/qq-bridge-fork/.agents/worktrees/qqab-arch/docs/plan/issue-platform-adapter.md#L20-L45)。这会让同一条评论落两份记录，retention 与未读也按两份算。
 - “参与关系推导”需要 `room_members`/`bindings`；当前只有静态 subscriptions 与 grants，没有可写的参与关系表。`@` 提及没有 mentions 实体，只能从正文解析；平台 display name → actor 的身份映射也不存在。
 - 内源故障（探针失败、插件崩溃）走这条链会把“秒级恢复”变成“开单-分诊-领取-修复-验收”。
 - `platform_call` 的“core 不解释 issue 语义”成立，方向正确；但给 `platform_call` 授权用的是房间可达性，一旦可见房间改为参与关系推导，grants 的判定点也要跟着改，不是“加两张表”那么小。

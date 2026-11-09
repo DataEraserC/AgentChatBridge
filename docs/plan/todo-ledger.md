@@ -16,8 +16,11 @@
 
 1. **XY 检查**：用户描述的解法 ≠ 用户的问题。每条待办先问「不按这个做，用户的痛还在不在」。
    在 → 说明这是解法不是问题，要回到问题重找方案；不在 → 可以照做。
-2. **有消费者的才做**：没有实际使用方的能力（插件存储、策略插件）不排期，只留设计。
-   真机当前只有 1 个外置插件、6 个会话、1 条权限规则——规模不支持大迁移先行。
+2. **区分「消费者」与「前提」。** 基础设施类能力（插件存储、策略引擎、动态会话）的消费者
+   要靠它自己才可能出现——用「现在没人用」否决它是循环论证（用户 2026-11-09 指出）。
+   判据改为：**有没有一个端到端可验的最小闭环**（能写一个不动 core 就接入的示例 ≈ 有）；
+   没有闭环的设计稿就是纸面设计，不算「已经做了」。
+   反向仍然成立：不许照 2000 行设计稿全量实现，先做闭环，再做深。
 3. **改判要留痕**：判定为 `drop` 或改方向的，必须写「原方案 → 新方案 → 理由」，
    并且给一条可反驳的条件（什么情况下该翻回来）。
 
@@ -30,7 +33,7 @@
 | A1 | `deploy/verify.sh` 一条命令跑全部测试 + 修 8 条红 | 照做 | 已落地：fmt/测试/harness/guards 四段，日志落 `target/verify/` | `./deploy/verify.sh` 退出码 0；1089 + 144 + 3 guards | done |
 | A2 | 修 `HANDOFF.md:30`「nix build 会自动跑 cargo test」 | 照做 | `flake.nix:44` 是 `doCheck=false`，该句已证伪 | `grep -n "自动跑" HANDOFF.md` 无命中 | done |
 | A3 | `config.toml.bak*` 改 0600 或删 | 照做（改权限不删） | 三份 0644、共含 15 处明文 token；已 gitignore 未入库，删了就丢回滚面 | `ls -l config.toml.bak*` 全 `-rw-------` | done |
-| A4 | 控制台从 `0.0.0.0:3100` 收回回环 | **改判：hold** | 见 §5 改判记录 | — | hold |
+| A4 | 控制台从 `0.0.0.0:3100` 收回回环 | **改判：保持监听，改为加固** | 用户 2026-11-09 明确答「别的机器也要用」→ 收回回环等于砍掉功能。改为 TLS + cookie 安全属性 + Origin/CSRF 校验 | `curl -k https://<ip>:3100/` 能开；`Set-Cookie` 含 `HttpOnly`；跨站 POST 返回 403 | next |
 | A5 | 日志脱敏 + `secrets resolve` 加显式开关 | **改判：只做日志** | `secrets resolve` 打印明文是部署脚本的**唯一用途**（`start-drivers.sh:69` 靠它取 token）；加开关要改 6 个脚本，收益为负。真正的泄露点是连接 URL 连 `access_token` 进日志 | `grep -n "access_token" ` 日志输出应为 `***` | next |
 
 ## 2. 批次 B：P0（会丢消息 / 卡死全桥）
@@ -48,9 +51,9 @@
 
 | id | 位置 | 问题 | 判定 | 状态 |
 |---|---|---|---|---|
-| C1 | `route_worker.rs:57` | 路由队列满 → 动作被拒但任务留 `Pending`，`tasks op=wait` 永远等 | 照做（一行：拒绝路径 `finish_task(failed)`） | next |
+| C1 | `route_worker.rs:57` | 路由队列满 → 动作被拒但任务留 `Pending`，`tasks op=wait` 永远等 | 照做：`enqueue` 把被拒任务交回调用方落 `failed`；队列断掉时整批交回，不 `break` | done |
 | C2 | `task.rs:117` | 孙进程继承 stdout → `read_to_string` 永久卡死 | 照做：独立 reader + deadline + kill 进程组 | next |
-| C3 | `engine.rs:1430/3510` | 尝试记录崩溃后永远 `running`，`drain_snapshot` 还把它算作在跑 | 照做：启动把孤儿 `pending/running` 置 `unknown` | next |
+| C3 | `engine.rs:1430/3510` | 尝试记录崩溃后永远 `running`，`drain_snapshot` 还把它算作在跑 | 照做：启动时把遗留 `pending/running` 置 `unknown`（不是 `failed`，消息可能已发出） | done |
 | C4 | `engine.rs:4144/3814` | `notify_turn_error` 入队即 `sent += 1`，失败不回滚 + 指纹已记 → 同类失败被抑制 | 照做：发送成功才记指纹 | next |
 | C5 | `endpoint.rs:931` | `write_frame` 阻塞写无超时 | 照做：设写超时 | next |
 | C6 | `endpoint.rs:373/278/284/336` | `abandon_turn`/`delete_session_map`/`upsert_session_map` 用 `let _ =` 吞错 | 照做：至少记日志，关键路径返错 | next |
@@ -64,17 +67,20 @@
 | E2 | plan 三态化，45 篇打标签 | **drop** | 见 §5 | drop |
 | E3 | 变更单模板（一页） | **改判：并入 AGENTS.md** | 单独一页模板没人填；把「改了什么/怎么验/剩什么」写进提交尾注足够 | drop |
 | E4 | 三个可执行断言 | 照做（缩到 2 条） | 已做：AGENTS.md 行数预算、禁止本机配置状态入库。第三条「文档承诺必须有实现」无法自动判定，人工 review | done |
+| E5 | docs 构建长期红，信号被污染 | 照做 | 真因三处：① `issue/<id>` 不在反引号内被当 Vue 标签；② `${{NAME}}` 命中 Vue 插值；③ 表格单元格里的 `|` 把行内代码切断，`<toml>` 漏成标签。已修，本地 `vitepress build` 13s 通过 | done |
 
 ## 5. 改判记录（原方案 → 新方案 → 理由 → 何时翻回）
 
 ### A4 控制台绑定地址
 - 原：从 `0.0.0.0:3100` 收回 `127.0.0.1`。
-- 新：**暂不动**，先做「拿不到 token 就进不去」之外的两件事——① 改配置的接口加 Origin 校验；
-  ② 登录 cookie 加 `HttpOnly`+`SameSite=Strict`。之后再按用户实际访问方式决定绑哪。
-- 理由：这是典型 XY。真实风险是「明文 HTTP + token 当 cookie + 无 CSRF」，不是绑定地址；
-  直接改回环会砍掉远程访问能力，而我没证据用户是否依赖它（`ss` 显示当前无连接，但只说明此刻没连）。
-- 翻回条件：用户确认「从不远程开控制台」→ 立即改回环，成本 1 行。
-- **需要用户回答**：你平时是在本机浏览器开 3100，还是从别的机器/手机开？
+- 判：**不收回。** 用户 2026-11-09 答「别的机器也要用」，远程访问是功能不是漏洞。
+- 新：保持监听，补齐三件——① TLS（自签或用户自己的证书，配置项给证书路径）；
+  ② 登录 cookie 加 `HttpOnly` + `SameSite=Strict` + `Secure`；③ 改配置的接口校验
+  `Origin`/`Referer` 并加 CSRF token，token 不再出现在 URL 里。
+- 理由：真实风险是「明文 HTTP + 凭据当 cookie + 无 CSRF」，不是监听地址。绑回环是
+  用砍功能的方式消症状。
+- 翻回条件：若用户改用 SSH 端口转发访问（`ssh -L 3100:127.0.0.1:3100`），则监听改回环、
+  TLS 可省——因为隧道已经加密且不出本机。
 
 ### B6 轮次看门狗
 - 原：桥侧加 `turn_timeout`，超时强制结束轮次。
@@ -93,13 +99,27 @@
 - 翻回条件：真的有人按 plan 标签做决策时。
 
 ### D3/D5 插件存储与配置
-- 原：按 `acb-policy-store.md` §3.12/§6.5 全量实现 `StorageHandle`、`plugin_<id>_*` 分表、
+- 原：按 `acb-policy-store.md` §3.12/§3.13/§6.5 全量实现 `StorageHandle`、`plugin_<id>_*` 分表、
   `plugin_config` + schema 校验。
-- 新：**hold**。真机只有 1 个外置插件（`issue.tools`），且它是独立进程 + 自有库（C 档），
-  根本不需要 B 档分表。
-- 理由：没有消费者。先让 sessions/grants 进库（有 6 个会话、7 条规则在用），插件存储等有第二个
-  真实插件再说。
-- 翻回条件：出现「需要 core 代管数据」的插件（不是独立进程），或现有 `issue.tools` 要迁进 B 档。
+- 第一次改判：**hold** —— 理由「真机只有 1 个外置插件，没有消费者」。
+  **这条理由被用户 2026-11-09 驳回，成立**：插件存储是「怎么会有用户」的前提，
+  用它缺用户来否决它是循环论证。设计原则 §0-2 已据此改写。
+- 第二次改判：**做，但拆两级，每级必须有端到端可验的示例。**
+  - **L1 插件配置闭环**（先做，服务主线）：`plugin_registry` + `plugin_config` 两张表；
+    插件随包声明 config schema；core 只做类型/枚举/密钥扫描校验，不解释业务字段；
+    控制台按 schema 渲染表单；agent 通过一个新工具读写（单独能力 `plugin_config_write`）；
+    **验收 = 把 `issue.tools` 的 3 个配置项从 toml 搬进库，改一次配置不重启桥生效。**
+  - **L2 插件自带存储**（L1 之后）：`StorageHandle`（前缀强制走 SQLite authorizer）、
+    `plugin_migrations`、声明式迁移。
+    **验收 = 写一个只有 200 行、只依赖插件接口的示例插件，它建自己的表、存自己的数据，
+    全程没有一行改动 `crates/kernel` 的业务代码。** 达不到这条就算 L2 没做完。
+  - 不在本轮：`plugin_secret_refs`（走已有 secrets）、external 档的跨库审计、
+    限流令牌桶、`.so`/进程外的 C ABI 映射面。
+- 理由：用户要的是「外部开发者能自主接入、agent 能自己改」。这两件事的瓶颈都不是
+  「表够不够全」，而是「有没有一条别人能照着走通的路」。全量照稿实现会先花两周造出
+  没人验过的接口，再花两周发现接口不对。
+- 翻回条件（改成 hold 的唯一条件）：L1 做完后连续两个月没有第三个插件出现，
+  且 L2 的示例插件写不出来——说明插件模型本身不对，那时应该重设计而不是继续加表。
 
 ## 6. 产品批：配置单源（用户的真实痛点）
 
@@ -110,8 +130,8 @@
 | F1 | 控制台不再写 `90-console.toml` 覆盖层 | `console.rs:145/574` 仍写覆盖层，顶层 key 整体替换下层 = bug 根源 | **最高优先**：先让控制台写库（或至少写独立片段而不是覆盖层），再做表迁移 | next |
 | F2 | sessions 进库 + 能动态新增 | 会话仍在 toml；`acbctl sessions` 只读；控制台只有 GET + reset | 做，但要先解决三个前置：端口显式化、token 来源、drivers 重起 | next |
 | F3 | grants/rooms 进库 | 仍在 toml（1 条规则 + 6 个房间覆盖） | 跟 F1 一起做才有意义（否则又是两个源） | next |
-| F4 | 插件注册进库 | `[[tool_plugins]]` 在 `80-issue-tools.toml`，command 是 nix store 路径（会 GC 失效） | hold（见 §5 D3/D5） | hold |
-| F5 | 插件配置 `plugin_config` + `StorageHandle` | 0 实现 | hold（同上） | hold |
+| F4 | 插件注册进库 | `[[tool_plugins]]` 在 `80-issue-tools.toml`，command 是 nix store 路径（会 GC 失效） | 做，并在 L1 里顺手把 command 改成 `command_kind` 声明 + 指纹校验 | next |
+| F5 | 插件配置 `plugin_config` + `StorageHandle` | 0 实现 | 做：拆 L1（配置闭环）/ L2（自带存储），见 §5 D3/D5 | next |
 | F6 | agent 能改配置（工具 + 能力 + 审批） | 29 个工具里 0 个能写配置；能力枚举 10 项无配置类 | 依赖 F1/F2；先把能力加上，工具后跟 | next |
 | F7 | 权限判定插件化（`policy_binding`） | `Policy` trait 已就位，`CorePolicy` 在 core；无外部实现、无白名单 | hold（没有外部实现需求） | hold |
 
@@ -123,7 +143,7 @@
 | id | 问题 | 判定 | 状态 |
 |---|---|---|---|
 | G1 | 群消息提示注入：昵称/正文原样拼进投递文本，agent 有 shell | **做两件低成本的事**：① 昵称剥换行与控制字符；② 聊天正文加重边界标记（不只插件片段有） | next |
-| G2 | 控制台明文 HTTP + token 当 cookie | 见 A4：先 Origin 校验 + cookie 属性 | next |
+| G2 | 控制台明文 HTTP + token 出现在 URL（`?token=`） | **实测**：cookie 已带 `HttpOnly; SameSite=Strict`（`console.rs:321`），没有 Origin 校验。真正缺的是 TLS 与「token 不进 URL」——按 A4 做 | next |
 | G3 | 文件中继 `0.0.0.0:3131` 无鉴权，凭据是 24h 有效的能力 URL | 改绑 podman 网关地址（容器仍可达，局域网不可达）+ 落盘权限收紧 | next |
 | G4 | Lua 插件进程内全信任（`io`/`os`/`package`） | **真机已启用 3 个**（`lua.stop_command`/`lua.wake_policy`/`lua.three_hour_clock`）。风险面是「能写 lua 目录的人 = 能执行命令」，不是群成员。判定：文档写清这一条，暂不改沙箱（改了要重写 3 个脚本） | next（文档） |
 | G5 | token 明文面 | 见 A3 + A5 | doing |
@@ -141,21 +161,22 @@
 ## 9. 建议执行顺序
 
 ```
-本轮：A2 A3 + B2 B3 B4（已完成三条 P0，改动小、可测）
-下一轮：C1 C3（都是一行级修复）+ G5 日志脱敏
-再下轮：B1 B5（结构性，要设计）+ F1（断第二写入口）
-之后：F2 F3（会话与权限进库）
-hold：A4 B6 F4 F5 F7 E2 G6（等条件，见 §5）
+已完成：A2 A3 B2 B3 B4 + 门禁假红
+下一轮：C1 C3（一行级）+ A4（TLS/cookie/CSRF，用户要用远程）
+再下轮：B1 B5（结构性）+ F1（断「控制台写覆盖层」这条第二写入口）
+之后：F2 F3（会话与权限进库）→ F4 F5-L1（插件配置闭环）→ F5-L2（插件自带存储）
+hold：B6 F7 E2 G6（等条件，见 §5）
 ```
 
-理由：先把「静默丢消息/卡死」这一类清掉（用户感知最强、修复最确定），
-再动结构（F1），最后才做迁移（F2/F3）。反过来会在旧结构上叠加新结构，漂移更难查。
+理由：先把「静默丢消息/卡死」清掉（用户感知最强、修复最确定），再断第二写入口（F1），
+再做迁移（F2/F3）。插件 L1 排在 F2/F3 之后，因为它要复用同一套「库里读配置」的机制——
+先有机制再有插件，顺序反了要写两遍。
 
 ## 10. 分支与推送状态
 
-- 本地未推送：13 个提交（含门禁、CI、access_request 修复、payload 修复）。
-- CI（`.github/workflows/verify.yml`）只在推送后才会真正跑过一次，**尚未验证**。
-  这本身是个待办：推送后看一眼 Actions 是否绿。
+- 已推送：`2c372f3..2c12de8`（17 个提交）到 `origin/dev_20261025`，2026-11-09 11:16。
+- CI（`.github/workflows/verify.yml`）：推送后需看 Actions 结果，**尚未确认**。
+  若 Actions 红而本地绿，优先查两者差异（node 版本、缺少 nix 依赖）。
 
 ## 11. 本轮执行记录（2026-11-09）
 

@@ -25,7 +25,7 @@
 2. 两种来源：`kind = "env"`（变量名）/ `kind = "file"`（绝对路径）。
    `file` 支持 `format = "raw"`（一文件一值，默认）和 `format = "dotenv"`（KEY=VALUE，
    兼容现有 agenix `acb.env` / `ntfy-acb-topic.env`）。
-3. **删除 `${NAME}` / `${{NAME}}` 文本插值**（同一个改动里删干净，不留兼容层）。
+3. **删除 `${NAME}` / <code v-pre>${{NAME}}</code> 文本插值**（同一个改动里删干净，不留兼容层）。
    非密钥部署常量（端口、model、路径、数字）改为字面量或由 Nix 生成到配置分片。
 4. 解析是**启动期一次性、全量、fail-closed**：任一来源缺失/不可读/权限不合规/
    值为空/引用未知，都算配置错误，`acb-bridge` 以 78 退出（systemd 不重启）。
@@ -45,7 +45,7 @@
 
 | 位置 | 事实 |
 |---|---|
-| `crates/kernel/src/config.rs:1219-1278` | `expand_env_vars`（:1224）在 TOML 解析**之前**对整段文本做字符串展开，支持 `${NAME}`、`${{NAME}}` 和 `:-默认` |
+| `crates/kernel/src/config.rs:1219-1278` | `expand_env_vars`（:1224）在 TOML 解析**之前**对整段文本做字符串展开，支持 `${NAME}`、<code v-pre>${{NAME}}</code> 和 `:-默认` |
 | `crates/kernel/src/config.rs:1295-1302` | `Config::parse` 先展开再 `toml::from_str` |
 | `crates/kernel/src/config.rs:2982-2999` | 分片文件 `parse_config_file` 同样逐文件展开 |
 | `crates/kernel/src/config.rs:1280-1287` | `escape_toml_string` 只服务于插值 |
@@ -271,7 +271,7 @@ token = { secret = "dsh-dev-token" }
 
 ---
 
-## 4. `${NAME}` / `${{NAME}}` 怎么退场
+## 4. `${NAME}` / <code v-pre>${{NAME}}</code> 怎么退场
 
 ### 4.1 推荐：同一个改动里直接删除，不留兼容层
 
@@ -298,7 +298,7 @@ token = { secret = "dsh-dev-token" }
 | 通知 topic / token | `${NTFY_ACB_TOPIC}` 等 | `{ secret = "<name>" }` |
 | `endpoint.listen`、`console.listen`、`file_relay.listen/public_base/dir` | `${ACB_*_LISTEN}` | 字面量，或由 Nix 生成到配置分片 |
 | `storage.path`、`worktrees_root` | `${...}` | 字面量，或 Nix 生成 |
-| `delivery_limit`、`turn_timeout_secs`、布尔量 | `${{...}}` | 字面量 |
+| `delivery_limit`、`turn_timeout_secs`、布尔量 | <code v-pre>${{...}}</code> | 字面量 |
 | session `model` | `${ACB_MODEL_DSH}` | 字面量（模型名不是密钥） |
 | 测试 fixture | `${PATH}` 等 | 删除插值测试；密钥 fixture 改用来源 |
 

@@ -1412,7 +1412,7 @@ policy-store 加密保护“整个库/列 + 备份”。agenix 的轮换是替�
 | 命令 | 作用 | 输入 | 输出/退出 |
 |---|---|---|---|
 | `acbctl seed --from-nix --if-empty` | 空库写入 Nix seed；非空跳过并日志 | seed 文件/路径 | 0 成功/跳过；2 校验失败 |
-| `acbctl import --dry-run|--apply <toml>` | 导入旧 TOML | 路径/格式 | dry-run diff；apply 事务 |
+| `acbctl import --dry-run\|--apply <toml>` | 导入旧 TOML | 路径/格式 | dry-run diff；apply 事务 |
 | `acbctl export [--format=toml|json]` | 库→可 review 快照（脱敏） | 输出路径 | 快照 + hash |
 | `acbctl reload [--rotate-session <id>]` | 优雅重载策略/会话/插件 | 无/会话 id | 0 成功；失败回滚上一版本 |
 | `acbctl reconcile [--dry-run]` | 全局 preset 渲染/清理 | 无 | 渲染数/跳过数/degraded |
@@ -1420,7 +1420,7 @@ policy-store 加密保护“整个库/列 + 备份”。agenix 的轮换是替�
 | `acbctl preset show <session>` | 打印生效 preset 内容 | session id | 内容 + generation/schema |
 | `acbctl sessions list|add|update|disable|remove` | 会话 CRUD | JSON/字段 | 行 id/版本 |
 | `acbctl plugins list|add|update|disable|remove` | 插件 CRUD | JSON/字段 | 行 id/版本 |
-| `acbctl plugins config get|set|unset <plugin> [key]` | 插件自定义运行期参数 | JSON/字段 | 校验结果；旧/新值默认脱敏；bump `plugin:<id>` |
+| `acbctl plugins config get\|set\|unset <plugin> [key]` | 插件自定义运行期参数 | JSON/字段 | 校验结果；旧/新值默认脱敏；bump `plugin:<id>` |
 | `acbctl plugins config show <plugin>` | 打印插件生效参数 | 插件 id | 脱敏后的 key/type/value |
 | `acbctl grant ...` | 授权/委托 | principal/role/cap/scope | assignment id/pending |
 | `acbctl revoke <assignment-id>` | 撤销+级联 | id | 撤销数 |
