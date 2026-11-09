@@ -44,6 +44,13 @@ fn payload(root: &Path, name: &str) -> PathBuf {
     fs::create_dir_all(dir.join("harnesses/opencode/plugin")).expect("opencode plugin");
     fs::create_dir_all(dir.join("harnesses/shared")).expect("shared harness");
     fs::create_dir_all(dir.join("deploy")).expect("deploy");
+    // unit 的 ACB_LUA_DIR 指向 <profile>/current/examples/lua，校验把它列为必需。
+    fs::create_dir_all(dir.join("examples/lua")).expect("examples/lua");
+    fs::write(
+        dir.join("examples/lua/example.lua"),
+        "-- profile test fixture\n",
+    )
+    .expect("lua example");
     for file in [
         "harnesses/dsh/src/driver.mjs",
         "harnesses/dsh/dsh-mcp.patch.yml",
@@ -1108,6 +1115,35 @@ fn add_names_the_missing_payload_entry() {
         text.contains("deploy/start-drivers.sh (file)"),
         "{text}"
     );
+}
+
+#[test]
+fn add_rejects_payload_without_lua_examples() {
+    // 2026-11-09 升级事故：payload 漏了 examples/lua，换代后才发现桥起不来，
+    // 那时库已经被新程序迁到新 schema，旧代回不去。校验必须在入代前拦住。
+    let temp = TempDir::new("missing-lua");
+    let profile = temp.path().join("profile");
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[endpoint]\n").expect("config");
+    let source = payload(temp.path(), "no-lua");
+    fs::remove_dir_all(source.join("examples")).expect("drop examples");
+    let env = profile_env(&profile, &config);
+
+    let output = run_acb(
+        &env,
+        &[
+            "profile",
+            "add",
+            source.to_str().unwrap(),
+            "--label",
+            "bad",
+            "--strategy",
+            "copy",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("examples/lua (directory)"), "{text}");
 }
 
 #[test]
