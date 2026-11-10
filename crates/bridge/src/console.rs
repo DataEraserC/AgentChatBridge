@@ -459,6 +459,26 @@ impl<S: Store + Send + 'static> Console<S> {
             // 动态插件卸载/重载：只入队，真正的 dlclose/dlopen 在轮次边界执行。
             ("POST", "/api/plugins/unload") => self.plugin_action(body, false),
             ("POST", "/api/plugins/reload") => self.plugin_action(body, true),
+            // 插件配置页（schema 17）：按 manifest 渲染表单，读写校验都在 kernel。
+            ("GET", p) if p.starts_with("/api/plugins/") && p.ends_with("/admin") => {
+                self.plugin_admin(p)
+            }
+            ("POST", p) if p.starts_with("/api/plugins/") && p.ends_with("/config") => {
+                self.plugin_config_update(p, body)
+            }
+            ("POST", p)
+                if p.starts_with("/api/plugins/")
+                    && p.contains("/records/")
+                    && p.ends_with("/delete") =>
+            {
+                self.plugin_record_delete(p, body)
+            }
+            ("GET", p) if p.starts_with("/api/plugins/") && p.contains("/records/") => {
+                self.plugin_records(p)
+            }
+            ("POST", p) if p.starts_with("/api/plugins/") && p.contains("/records/") => {
+                self.plugin_record_put(p, body)
+            }
             // 动态扩展目录：模块级目录与轮次边界重载。
             ("GET", "/api/extensions") => (200, self.extensions(query)),
             ("POST", "/api/extensions/reload") => self.reload_extensions(body),
@@ -1162,6 +1182,157 @@ impl<S: Store + Send + 'static> Console<S> {
                 409,
                 acb_i18n::msg!("bridge.console.plugin_action_failed"),
                 Some(error.to_string()),
+            ),
+        }
+    }
+
+    /// 拆 `/api/plugins/<id>/<rest>`。id 里不允许出现斜杠。
+    fn plugin_path_parts(path: &str) -> Option<(String, Vec<&str>)> {
+        let rest = path.strip_prefix("/api/plugins/")?;
+        let mut parts = rest.split('/');
+        let id = parts.next()?.to_owned();
+        if id.is_empty() {
+            return None;
+        }
+        Some((id, parts.collect()))
+    }
+
+    /// `GET /api/plugins/<id>/admin`：配置形状 + 生效值 + 资源计数 + 密钥引用名。
+    fn plugin_admin(&self, path: &str) -> (u16, String) {
+        let Some((id, parts)) = Self::plugin_path_parts(path) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        if parts != ["admin"] {
+            return error_response(404, acb_i18n::msg!("bridge.console.not_found"), None);
+        }
+        let bridge = lock(&self.bridge);
+        match bridge.plugin_admin_view(&id) {
+            Ok(view) => (200, view.to_string()),
+            Err(error) => {
+                error_response(404, acb_i18n::msg!("bridge.console.not_found"), Some(error))
+            }
+        }
+    }
+
+    /// `POST /api/plugins/<id>/config`：只提交要改的键，校验在 kernel。
+    fn plugin_config_update(&self, path: &str, body: &str) -> (u16, String) {
+        let Some((id, parts)) = Self::plugin_path_parts(path) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        if parts != ["config"] {
+            return error_response(404, acb_i18n::msg!("bridge.console.not_found"), None);
+        }
+        let value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_response(
+                    400,
+                    acb_i18n::msg!("bridge.console.invalid_json"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let Some(assignments) = value.get("config").and_then(serde_json::Value::as_object) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        let mut bridge = lock(&self.bridge);
+        match bridge.plugin_set_config(&id, assignments) {
+            Ok(written) => (200, json!({"ok": true, "written": written}).to_string()),
+            Err(error) => error_response(
+                400,
+                acb_i18n::msg!("bridge.console.bad_request"),
+                Some(error),
+            ),
+        }
+    }
+
+    /// `GET /api/plugins/<id>/records/<resource>`。
+    fn plugin_records(&self, path: &str) -> (u16, String) {
+        let Some((id, parts)) = Self::plugin_path_parts(path) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        if parts.len() != 2 || parts[0] != "records" {
+            return error_response(404, acb_i18n::msg!("bridge.console.not_found"), None);
+        }
+        let resource = parts[1];
+        let bridge = lock(&self.bridge);
+        match bridge.plugin_records(&id, resource) {
+            Ok(records) => (
+                200,
+                json!({"resource": resource, "records": records}).to_string(),
+            ),
+            Err(error) => error_response(
+                400,
+                acb_i18n::msg!("bridge.console.bad_request"),
+                Some(error),
+            ),
+        }
+    }
+
+    /// `POST /api/plugins/<id>/records/<resource>`：body 是记录对象本身。
+    fn plugin_record_put(&self, path: &str, body: &str) -> (u16, String) {
+        let Some((id, parts)) = Self::plugin_path_parts(path) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        if parts.len() != 2 || parts[0] != "records" {
+            return error_response(404, acb_i18n::msg!("bridge.console.not_found"), None);
+        }
+        let resource = parts[1];
+        let value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_response(
+                    400,
+                    acb_i18n::msg!("bridge.console.invalid_json"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let record = value.get("record").unwrap_or(&value);
+        let record_id = value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| record.get("id").and_then(serde_json::Value::as_str));
+        let mut bridge = lock(&self.bridge);
+        match bridge.plugin_put_record(&id, resource, record_id, record) {
+            Ok(record_id) => (200, json!({"ok": true, "id": record_id}).to_string()),
+            Err(error) => error_response(
+                400,
+                acb_i18n::msg!("bridge.console.bad_request"),
+                Some(error),
+            ),
+        }
+    }
+
+    /// `POST /api/plugins/<id>/records/<resource>/delete`，body `{"id": "..."}`。
+    fn plugin_record_delete(&self, path: &str, body: &str) -> (u16, String) {
+        let Some((id, parts)) = Self::plugin_path_parts(path) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        if parts.len() != 3 || parts[0] != "records" || parts[2] != "delete" {
+            return error_response(404, acb_i18n::msg!("bridge.console.not_found"), None);
+        }
+        let resource = parts[1];
+        let value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_response(
+                    400,
+                    acb_i18n::msg!("bridge.console.invalid_json"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let Some(record_id) = value.get("id").and_then(serde_json::Value::as_str) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        let mut bridge = lock(&self.bridge);
+        match bridge.plugin_delete_record(&id, resource, record_id) {
+            Ok(deleted) => (200, json!({"ok": true, "deleted": deleted}).to_string()),
+            Err(error) => error_response(
+                400,
+                acb_i18n::msg!("bridge.console.bad_request"),
+                Some(error),
             ),
         }
     }

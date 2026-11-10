@@ -35,6 +35,8 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
         "enable" => toggle_command(&args[1..], true),
         "disable" => toggle_command(&args[1..], false),
         "check" => check_all_command(&args[1..]),
+        "config" => config_command(&args[1..]),
+        "records" => records_command(&args[1..]),
         "export" => export_command(&args[1..]),
         "import" => import_command(&args[1..]),
         other => Err(format!("unknown plugin subcommand: {other}")),
@@ -235,6 +237,117 @@ fn check_all_command(args: &[String]) -> Result<ExitCode, String> {
     if bad > 0 {
         return Ok(ExitCode::from(EXIT_NOT_FOUND));
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `plugin config ID [--set KEY=VALUE]...`：不带 --set 就是读，带就写。
+fn config_command(args: &[String]) -> Result<ExitCode, String> {
+    let mut config = PathBuf::from("config.toml");
+    let mut config_dir = None;
+    let mut id = None;
+    let mut sets: Vec<(String, String)> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                index += 1;
+                config = PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| "--config needs a value".to_string())?,
+                );
+            }
+            "--config-dir" => {
+                index += 1;
+                config_dir = Some(PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| "--config-dir needs a value".to_string())?,
+                ));
+            }
+            "--set" => {
+                index += 1;
+                let pair = args
+                    .get(index)
+                    .ok_or_else(|| "--set needs KEY=VALUE".to_string())?;
+                let (key, value) = pair
+                    .split_once('=')
+                    .ok_or_else(|| format!("--set expects KEY=VALUE, got {pair}"))?;
+                sets.push((key.to_owned(), value.to_owned()));
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown option: {value}"));
+            }
+            value => {
+                if id.is_some() {
+                    return Err(format!("unexpected argument: {value}"));
+                }
+                id = Some(value.to_string());
+            }
+        }
+        index += 1;
+    }
+    let id = id.ok_or_else(|| "plugin id is required".to_string())?;
+    let loaded = load(&config, config_dir)?;
+    let mut store = open(&loaded)?;
+    let plugins = store
+        .plugins_load()
+        .map_err(|error| format!("read plugins: {error}"))?
+        .unwrap_or_default();
+    let plugin = plugins
+        .into_iter()
+        .find(|plugin| plugin.id == id)
+        .ok_or_else(|| format!("plugin {id} not found"))?;
+
+    if sets.is_empty() {
+        let view = acb_kernel::plugin_admin::config_view(&store, &plugin)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": view.schema,
+                "effective": view.effective,
+                "stored": view.stored,
+            }))
+            .map_err(|error| error.to_string())?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let mut assignments = serde_json::Map::new();
+    for (key, raw) in sets {
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::Value::String(raw.clone()));
+        assignments.insert(key, value);
+    }
+    let written =
+        acb_kernel::plugin_admin::set_config(&mut store, &plugin, &assignments, now_ms())?;
+    println!("written: {}", written.join(", "));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `plugin records ID RESOURCE`：列出通用资源记录。
+fn records_command(args: &[String]) -> Result<ExitCode, String> {
+    let parsed = options_with_positional(args, 2)?;
+    let id = &parsed.positional[0];
+    let resource = &parsed.positional[1];
+    let loaded = load(&parsed.config, parsed.config_dir)?;
+    let store = open(&loaded)?;
+    let plugin = store
+        .plugins_load()
+        .map_err(|error| format!("read plugins: {error}"))?
+        .unwrap_or_default()
+        .into_iter()
+        .find(|plugin| plugin.id == *id)
+        .ok_or_else(|| format!("plugin {id} not found"))?;
+    let records = acb_kernel::plugin_admin::list_records(&store, &plugin, resource)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &records
+                .into_iter()
+                .map(|record| serde_json::json!({"id": record.record_id, "value": record.value}))
+                .collect::<Vec<_>>()
+        )
+        .map_err(|error| error.to_string())?
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -515,6 +628,8 @@ fn print_help() {
   acbctl plugin enable ID [--config PATH] [--config-dir DIR]
   acbctl plugin disable ID [--config PATH] [--config-dir DIR]
   acbctl plugin check [--config PATH] [--config-dir DIR]
+  acbctl plugin config ID [--set KEY=VALUE]... [--config PATH] [--config-dir DIR]
+  acbctl plugin records ID RESOURCE [--config PATH] [--config-dir DIR]
   acbctl plugin export [--config PATH] [--config-dir DIR]
   acbctl plugin import [--file PATH] [--config PATH] [--config-dir DIR]"
     );

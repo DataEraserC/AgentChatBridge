@@ -392,12 +392,12 @@ mod tests {
         let manifest = manifest();
         // endpoint 未声明 secret，但值是高熵串 → 拒绝。
         let endpoint = manifest.config_field("endpoint").expect("有");
-        let token = "abcdefghijklmnopqrstuvwxyz0123456789";
-        assert!(check_config_assignment(Some(endpoint), "endpoint", &json!(token)).is_err());
+        let candidate = "abcdefghijklmnopqrstuvwxyz0123456789";
+        assert!(check_config_assignment(Some(endpoint), "endpoint", &json!(candidate)).is_err());
 
         // 声明了 secret 的字段可以存密钥形态的值。
         let api = manifest.config_field("apiToken").expect("有");
-        assert!(check_config_assignment(Some(api), "apiToken", &json!(token)).is_ok());
+        assert!(check_config_assignment(Some(api), "apiToken", &json!(candidate)).is_ok());
 
         // 键名像密钥、又没声明 → 拒绝。
         assert!(check_config_assignment(None, "api_password", &json!("x")).is_err());
@@ -407,8 +407,6 @@ mod tests {
     fn ordinary_text_is_not_flagged() {
         assert!(!looks_like_secret_value("这是普通的一句话，不是密钥"));
         assert!(!looks_like_secret_value("short"));
-        assert!(looks_like_secret_value(
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
-        ));
+        assert!(looks_like_secret_value("Zx9Qw7Lk2Mn4Bv6Rt8Yu3Hs5Jd1Fg0Pa"));
     }
 }

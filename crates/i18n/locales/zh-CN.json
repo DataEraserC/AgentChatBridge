@@ -222,6 +222,8 @@
   "bridge.console.body_json_text": "body 要是 JSON：{\"text\": \"…\"}",
   "bridge.console.body_text_required": "body 里要有 text 字段（配置 TOML 原文）",
   "bridge.console.body_plugin_id": "body 里要有字符串字段 id",
+  "bridge.console.bad_request": "请求不合法",
+  "bridge.console.not_found": "找不到目标",
   "bridge.console.invalid_json": "body 不是合法 JSON",
   "bridge.console.plugin_unload_queued": "已排队卸载 {id}；在下一个轮次边界执行（有轮次在跑时会等它们结束）",
   "bridge.console.plugin_reload_queued": "已排队重新加载 {id}；在下一个轮次边界执行（有轮次在跑时会等它们结束）",

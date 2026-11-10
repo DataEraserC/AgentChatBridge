@@ -222,6 +222,8 @@
   "bridge.console.body_json_text": "body must be JSON: {\"text\": \"...\"}",
   "bridge.console.body_text_required": "body must contain a text field (raw config TOML)",
   "bridge.console.body_plugin_id": "body must contain a string field `id`",
+  "bridge.console.bad_request": "bad request",
+  "bridge.console.not_found": "not found",
   "bridge.console.invalid_json": "body is not valid JSON",
   "bridge.console.plugin_unload_queued": "queued unload of {id}; it runs at the next turn boundary (active turns are allowed to finish)",
   "bridge.console.plugin_reload_queued": "queued reload of {id}; it runs at the next turn boundary (active turns are allowed to finish)",

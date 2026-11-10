@@ -2411,6 +2411,116 @@ impl<S: Store> Bridge<S> {
         Ok(self.store.plugins_load()?.unwrap_or_default())
     }
 
+    /// 按 id 取一条注册记录。控制台的插件配置页从这里拿 manifest 与存储策略。
+    pub fn registry_plugin(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::plugin_registry::RegistryPlugin>, String> {
+        Ok(self
+            .store
+            .plugins_load()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default()
+            .into_iter()
+            .find(|plugin| plugin.id == id))
+    }
+
+    /// 插件配置页的聚合视图（配置形状、生效值、资源计数、密钥引用名）。
+    pub fn plugin_admin_view(&self, id: &str) -> Result<serde_json::Value, String> {
+        let plugin = self
+            .registry_plugin(id)?
+            .ok_or_else(|| format!("plugin {id} not found"))?;
+        crate::plugin_admin::admin_view(&self.store, &plugin)
+    }
+
+    /// 改插件配置。只写提到的键；校验与密钥规则都在 `plugin_admin` 里。
+    pub fn plugin_set_config(
+        &mut self,
+        id: &str,
+        assignments: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Vec<String>, String> {
+        let plugin = self
+            .registry_plugin(id)?
+            .ok_or_else(|| format!("plugin {id} not found"))?;
+        let written =
+            crate::plugin_admin::set_config(&mut self.store, &plugin, assignments, now_millis())?;
+        self.pending_policy_reload = true;
+        Ok(written)
+    }
+
+    pub fn plugin_records(
+        &self,
+        id: &str,
+        resource: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let plugin = self
+            .registry_plugin(id)?
+            .ok_or_else(|| format!("plugin {id} not found"))?;
+        let records = crate::plugin_admin::list_records(&self.store, &plugin, resource)?;
+        Ok(records
+            .into_iter()
+            .map(|record| {
+                serde_json::json!({
+                    "id": record.record_id,
+                    "value": record.value,
+                })
+            })
+            .collect())
+    }
+
+    /// 写一条资源记录。`record_id` 缺省时从 manifest 的 `id_field` 取。
+    pub fn plugin_put_record(
+        &mut self,
+        id: &str,
+        resource: &str,
+        record_id: Option<&str>,
+        value: &serde_json::Value,
+    ) -> Result<String, String> {
+        let plugin = self
+            .registry_plugin(id)?
+            .ok_or_else(|| format!("plugin {id} not found"))?;
+        let manifest = crate::plugin_manifest::PluginManifest::parse(&plugin.manifest_json)?;
+        let decl = manifest
+            .resource(resource)
+            .ok_or_else(|| format!("unknown resource: {resource}"))?;
+        let record_id = match record_id {
+            Some(text) if !text.trim().is_empty() => text.to_owned(),
+            _ => {
+                let id_field = decl
+                    .id_field
+                    .as_deref()
+                    .ok_or_else(|| format!("{resource} 没有声明 id_field"))?;
+                value
+                    .get(id_field)
+                    .ok_or_else(|| format!("{resource} 的记录缺少 {id_field}"))?
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("{id_field} 必须是字符串"))?
+            }
+        };
+        crate::plugin_admin::put_record(
+            &mut self.store,
+            &plugin,
+            resource,
+            &record_id,
+            value,
+            now_millis(),
+        )?;
+        Ok(record_id)
+    }
+
+    pub fn plugin_delete_record(
+        &mut self,
+        id: &str,
+        resource: &str,
+        record_id: &str,
+    ) -> Result<bool, String> {
+        let plugin = self
+            .registry_plugin(id)?
+            .ok_or_else(|| format!("plugin {id} not found"))?;
+        crate::plugin_admin::delete_record(&mut self.store, &plugin, resource, record_id)
+    }
+
     /// 整组覆盖业务对象。写完只置标记，轮次边界生效。
     ///
     /// 和策略、后备链同一个时机：一轮里换会话列表会让同一轮前后看到两套订阅。
