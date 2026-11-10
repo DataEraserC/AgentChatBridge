@@ -136,6 +136,7 @@ Usage:
   acbctl grants explain|matrix|diff
   acbctl secrets check|resolve|migrate
   acbctl settings list|set|delete
+  acbctl plugin list|show|add|remove|enable|disable|check|export|import
   acbctl sessions [--config PATH]
   acbctl sessions set-port <id> <port> [--config PATH]
   acbctl sessions scan [--dsh-home DIR] [--known PRESET]... [--json]
