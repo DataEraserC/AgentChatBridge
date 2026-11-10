@@ -130,6 +130,114 @@ fn error_response(
 }
 
 /// 配置保存失败：除了 error/detail 还带 `saved: false`（页面据此留在编辑器）。
+/// 新建会话时临时补出来的令牌来源。`Drop` 里回滚，除非显式 `commit`。
+#[derive(Default)]
+struct SessionSecretMint {
+    fragment_path: Option<PathBuf>,
+    /// `Some(None)` = 原来没有这个文件；`Some(Some(text))` = 原内容。
+    fragment_previous: Option<Option<String>>,
+    token_paths: Vec<PathBuf>,
+    names: Vec<String>,
+    committed: bool,
+}
+
+impl SessionSecretMint {
+    fn contains(&self, name: &str) -> bool {
+        self.names.iter().any(|listed| listed == name)
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for SessionSecretMint {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Some(path) = &self.fragment_path {
+            match &self.fragment_previous {
+                Some(Some(text)) => {
+                    let _ = std::fs::write(path, text);
+                }
+                Some(None) => {
+                    let _ = std::fs::remove_file(path);
+                }
+                None => {}
+            }
+        }
+        for path in &self.token_paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn valid_secret_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+}
+
+fn write_private_file(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()
+}
+
+/// base 与 `config.d/*.toml` 里声明过的来源名。只读名字，不碰值。
+fn declared_secret_names(config_path: &Path, config_dir: &Path) -> Vec<String> {
+    fn collect(path: &Path, out: &mut Vec<String>) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(value) = text.parse::<toml::Value>() else {
+            return;
+        };
+        let Some(sources) = value
+            .get("secrets")
+            .and_then(|secrets| secrets.get("sources"))
+            .and_then(toml::Value::as_array)
+        else {
+            return;
+        };
+        for source in sources {
+            if let Some(name) = source.get("name").and_then(toml::Value::as_str) {
+                let name = name.trim();
+                if !name.is_empty() {
+                    out.push(name.to_owned());
+                }
+            }
+        }
+    }
+
+    let mut names = Vec::new();
+    collect(config_path, &mut names);
+    if let Ok(entries) = std::fs::read_dir(config_dir) {
+        let mut fragments: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "toml")
+            })
+            .collect();
+        fragments.sort();
+        for fragment in fragments {
+            collect(&fragment, &mut names);
+        }
+    }
+    names
+}
+
 fn config_error(status: u16, message: acb_i18n::Message, detail: Option<String>) -> (u16, String) {
     let locale = acb_i18n::request_locale();
     let mut body = json!({"error": message.render(locale), "saved": false});
@@ -957,6 +1065,17 @@ impl<S: Store + Send + 'static> Console<S> {
             }
         }
 
+        // 新建会话必须带一个专属接入令牌。以前这里要求名字已经在 `[secrets]` 里声明，
+        // 于是「在页面上加会话」必然失败（`references undeclared secret source`）——
+        // 页面上根本没法声明来源。现在缺什么就当场补：生成 32 字节 token 写 0600
+        // 文件，并往 `config.d/50-session-secrets.toml` 追加一条来源声明；
+        // 后面校验失败会整体回滚（`SessionSecretMint` 的 Drop）。
+        let _mint = match self.prepare_session_secrets(&mut object_ops) {
+            Ok(mint) => mint,
+            Err(response) => return response,
+        };
+        let mut _mint = _mint;
+
         let (_path, current_text) = match self.console_document() {
             Ok(document) => document,
             Err(response) => return response,
@@ -1028,10 +1147,113 @@ impl<S: Store + Send + 'static> Console<S> {
         };
         // 只有真的动了文件侧才回写覆盖层；纯对象改动不碰任何文件。
         let write_text = (!file_ops.is_empty()).then_some(overlay_text.as_str());
-        match self.finish_config_save(new_config, write_text, next_objects.as_ref(), changes) {
+        let result =
+            self.finish_config_save(new_config, write_text, next_objects.as_ref(), changes);
+        if result.is_ok() {
+            _mint.commit();
+        }
+        match result {
             Ok(value) => (200, value.to_string()),
             Err((status, value)) => (status, value.to_string()),
         }
+    }
+
+    /// 给「新建会话」补上令牌来源。返回的守卫在校验失败时把改动撤掉。
+    fn prepare_session_secrets(
+        &self,
+        ops: &mut Vec<serde_json::Value>,
+    ) -> Result<SessionSecretMint, (u16, String)> {
+        let mut mint = SessionSecretMint::default();
+        let declared =
+            declared_secret_names(Path::new(&self.config_path), Path::new(&self.config_dir));
+        for op in ops.iter_mut() {
+            if op.get("op").and_then(serde_json::Value::as_str) != Some("session") {
+                continue;
+            }
+            let id = op
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let Some(create) = op
+                .get_mut("create")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                continue;
+            };
+            let name = create
+                .get("secret")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{id}-token"));
+            if name.is_empty() {
+                continue;
+            }
+            if !valid_secret_name(&name) {
+                return Err(config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.secret_name_invalid", name = name.clone()),
+                    None,
+                ));
+            }
+            create.insert("secret".to_owned(), serde_json::Value::String(name.clone()));
+            if declared.contains(&name) || mint.contains(&name) {
+                continue;
+            }
+            self.mint_session_secret(&name, &mut mint)?;
+        }
+        Ok(mint)
+    }
+
+    fn mint_session_secret(
+        &self,
+        name: &str,
+        mint: &mut SessionSecretMint,
+    ) -> Result<(), (u16, String)> {
+        let dir = Path::new(&self.config_dir);
+        let token_dir = dir.join("secrets");
+        if let Err(error) = std::fs::create_dir_all(&token_dir) {
+            return Err(self.mint_error(format!("create {}: {error}", token_dir.display())));
+        }
+        let token_path = token_dir.join(format!("{name}.token"));
+        let token = match acb_kernel::crypto::random_token() {
+            Ok(token) => token,
+            Err(error) => return Err(self.mint_error(error)),
+        };
+        if let Err(error) = write_private_file(&token_path, &format!("{token}\n")) {
+            return Err(self.mint_error(format!("write {}: {error}", token_path.display())));
+        }
+        mint.token_paths.push(token_path.clone());
+
+        let fragment = dir.join("50-session-secrets.toml");
+        let previous = std::fs::read_to_string(&fragment).ok();
+        if mint.fragment_previous.is_none() {
+            mint.fragment_previous = Some(previous.clone());
+            mint.fragment_path = Some(fragment.clone());
+        }
+        let mut text = previous.unwrap_or_default();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&format!(
+            "\n# auto-generated by console for session token {name}\n[[secrets.sources]]\nname = \"{name}\"\nkind = \"file\"\npath = \"{}\"\nformat = \"raw\"\n",
+            token_path.display()
+        ));
+        if let Err(error) = std::fs::write(&fragment, text) {
+            return Err(self.mint_error(format!("write {}: {error}", fragment.display())));
+        }
+        mint.names.push(name.to_owned());
+        Ok(())
+    }
+
+    fn mint_error(&self, detail: String) -> (u16, String) {
+        config_error(
+            500,
+            acb_i18n::msg!("bridge.console.secret_mint_failed"),
+            Some(detail),
+        )
     }
 
     /// 保存收尾（解析已通过）：算影响清单 → 备份旧文件 → 落盘 → 暂存进桥。

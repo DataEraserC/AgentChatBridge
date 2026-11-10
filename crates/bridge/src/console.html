@@ -2255,7 +2255,6 @@ function addSession() {
         harness: document.getElementById("ns-harness").value,
         secret: g("ns-secret"),
       };
-      if (!create.secret) { showFormError(t("console.config.errors.secretRequired")); return false; }
       create.persona = document.getElementById("ns-persona").value;
       if (!create.persona) { showFormError(t("console.config.errors.personaRequired")); return false; }
       if (g("ns-name")) create.name = g("ns-name");

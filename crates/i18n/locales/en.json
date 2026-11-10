@@ -1299,7 +1299,7 @@
   "console.config.field.secretHint": "declared under [secrets]; never paste the secret itself here",
   "console.config.field.secretEditHint": "empty keeps it; a single - clears it",
   "console.config.field.secretAddHint": "optional; a name declared under [secrets]",
-  "console.config.field.sessionSecretHint": "declared under [secrets]; the harness uses it to reach the bridge, and drivers need a restart to pick it up",
+  "console.config.field.sessionSecretHint": "leave empty to auto-generate \"<session>-token\" into config.d; the harness uses it to reach the bridge, and drivers need a restart to pick it up",
   "console.config.field.connectionId": "Connection id",
   "console.config.field.platform": "Platform",
   "console.config.field.platformHint": "platform identifier (the connection name is part of room routing)",
@@ -1368,5 +1368,7 @@
   "console.ui.theme.system": "System",
   "console.ui.theme.light": "Light",
   "console.ui.theme.dark": "Dark",
-  "kernel.engine.wake_empty_dropped": "wake had nothing left to deliver; skipped empty turn: session {session} room {room}"
+  "kernel.engine.wake_empty_dropped": "wake had nothing left to deliver; skipped empty turn: session {session} room {room}",
+  "bridge.console.secret_name_invalid": "secret source names allow letters, digits, underscore, dot and dash only: {name}",
+  "bridge.console.secret_mint_failed": "could not generate a session token"
 }

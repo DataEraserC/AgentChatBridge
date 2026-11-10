@@ -1299,7 +1299,7 @@
   "console.config.field.secretHint": "名字在 [secrets] 里声明，这里不写密钥本身",
   "console.config.field.secretEditHint": "留空不改；填单个 - 表示清除",
   "console.config.field.secretAddHint": "可选；先在 [secrets] 里声明的名字",
-  "console.config.field.sessionSecretHint": "名字在 [secrets] 里声明；harness 连桥用，驱动要重启才能拿到值",
+  "console.config.field.sessionSecretHint": "留空 = 自动生成「<会话id>-token」并写进 config.d；harness 连桥用，驱动要重启才能拿到值",
   "console.config.field.connectionId": "连接 id",
   "console.config.field.platform": "平台",
   "console.config.field.platformHint": "平台标识（连接名参与房间路由）",
@@ -1368,5 +1368,7 @@
   "console.ui.theme.system": "跟随系统",
   "console.ui.theme.light": "浅色",
   "console.ui.theme.dark": "深色",
-  "kernel.engine.wake_empty_dropped": "唤醒到点时已无未投记录，跳过空投递：会话 {session} 房间 {room}"
+  "kernel.engine.wake_empty_dropped": "唤醒到点时已无未投记录，跳过空投递：会话 {session} 房间 {room}",
+  "bridge.console.secret_name_invalid": "密钥来源名只能用字母、数字、下划线、点、横线：{name}",
+  "bridge.console.secret_mint_failed": "自动生成会话令牌失败"
 }

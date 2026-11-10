@@ -130,6 +130,16 @@ impl AcbKey {
     }
 }
 
+/// 生成一个会话接入令牌：32 字节随机数的 hex。只用于「控制台新建会话」时
+/// 自动配一个专用 token，和 `ACB_KEY` 无关，也不进日志。
+pub fn random_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| "system random unavailable".to_owned())?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 pub fn is_encrypted(value: &str) -> bool {
     value.starts_with("v1:")
 }
