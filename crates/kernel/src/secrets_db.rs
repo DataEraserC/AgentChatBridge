@@ -52,7 +52,8 @@ fn storage_path(base_path: &Path, config_dir: Option<&Path>) -> Option<PathBuf> 
         }
     }
 
-    let mut found = None;
+    // 没写 `[storage]` 就用默认值：与 `SqliteStore::open` 一样按进程 cwd 解析。
+    let mut found = Some(PathBuf::from(crate::config::DEFAULT_STORAGE_PATH));
     read_into(base_path, &mut found);
     if let Some(dir) = config_dir.filter(|dir| dir.is_dir()) {
         let mut fragments: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -141,12 +142,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_storage_means_empty_preset() {
-        let preset = preload(
+    fn absent_storage_falls_back_to_default_path() {
+        // 现场 `config.active.toml` 没有 `[storage]`，库走默认 `state/acb.db`
+        // （相对进程 cwd）。这里断言回落到默认值，而不是「没有存储」。
+        let path = storage_path(
             Path::new("/nonexistent/acb/config.toml"),
             Some(Path::new("/nonexistent/acb/config.d")),
         )
-        .expect("preload");
-        assert!(preset.is_empty());
+        .expect("默认路径");
+        assert_eq!(path, PathBuf::from(crate::config::DEFAULT_STORAGE_PATH));
     }
 }
