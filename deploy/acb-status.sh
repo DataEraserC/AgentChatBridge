@@ -67,7 +67,11 @@ if (( $(estab_count 3080) >= 1 )); then ok "驱动→dsh 已连接"; else warn "
 
 say "== 接口 =="
 # /healthz 也要鉴权（401 是常态，不是故障）。令牌走 acbctl，与系统单元同一个来源。
-TOKEN=$(acbctl secrets resolve console-token 2>/dev/null | tail -1)
+# 配置从 2026-11 起在 ~/.local/share/acb/config，库路径是相对 state/ 写的，
+# 所以必须在该目录下、并且显式给 --config，否则会去 cwd 开一个空库。
+ACB_HOME=${ACB_HOME:-$HOME/.local/share/acb}
+ACB_CONFIG=${ACB_CONFIG_FILE:-$ACB_HOME/config/config.active.toml}
+TOKEN=$(cd "$ACB_HOME" 2>/dev/null && acbctl secrets resolve console-token --config "$ACB_CONFIG" 2>/dev/null | tail -1)
 if [[ -z $TOKEN ]]; then
   warn "取不到控制台令牌（acbctl secrets resolve console-token 失败），跳过接口探测"
 elif curl -fsS --max-time 5 -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3100/healthz >/dev/null 2>&1; then
@@ -76,7 +80,7 @@ else
   die "控制台 /healthz 不通（令牌有值但请求失败）"
 fi
 if command -v acbctl >/dev/null 2>&1; then
-  say "  · acbctl status：$(acbctl status --summary 2>&1 | head -1)"
+  say "  · acbctl status：$(cd "$ACB_HOME" 2>/dev/null && acbctl status --summary 2>&1 | head -1)"
 fi
 
 say "== 本次启动以来的错误（各日志最后 3 条命中）=="
@@ -87,7 +91,9 @@ say "== 本次启动以来的错误（各日志最后 3 条命中）=="
 anchor_of() {
   case $(basename "$1") in
     bridge.log)  printf '^acb-config: generation=' ;;
-    drivers.log) printf '^起驱动：' ;;
+    # 新格式带时间戳前缀（"2026-.. drivers: 起驱动：…"），老格式裸行；
+    # 两种都认，取最后一次启动块，避免把上一轮启动的陈错算到本轮。
+    drivers.log) printf 'drivers: 起驱动：\|^起驱动：' ;;
     *)           printf '' ;;
   esac
 }
