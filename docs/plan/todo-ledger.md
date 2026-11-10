@@ -328,3 +328,21 @@ CI：push `2c372f3..2c12de8` 后 `verify` 工作流 **首次跑绿**；`docs` �
 
 验证：`/api/policy` 规则 13 条、DB `policy_rules` 13 行；下一条 access 日志应出现
 `basis=...rule:admin-account-write-group` 且不再开票。
+
+### 2026-11-10 22:30 P2.5 库内密钥（上半：桥侧已生效）
+
+1. 代码：`Config::load_with_secrets` 接受 `SecretPreset`（来源名→明文）；命中即标
+   `kind=db`、不读文件；`kernel::secrets_db::preload` 先按 `[storage].path`（默认
+   `state/acb.db`，按 cwd）开库解密。快照用 `OnceLock` 挂在进程上，库对象/控制台
+   覆盖层的重载路径同样吃得到。bridge 与 `acbctl` 启动都先 preload。
+2. 现场：`~/.local/share/acb/secrets/acb.key`（0600，64 hex）生成；unit 加 drop-in
+   `10-secrets-key.conf` 注入 `ACB_KEY_FILE`。`acbctl secrets migrate` 迁入 8 个来源
+   （kid `bd316e15df6cedc8`，全部 encrypted=1）；`resolve --session dsh-dev` 与文件
+   sha256 一致。
+3. 换代：`gen-1794321068510-e92068ce`（label `p25-secrets2`）；bridge 日志首行
+   `secrets: 8 name(s) loaded from store`。
+4. 验收：把 `session-tokens.env` 移走后 `acb-bridge --check` 仍通过（6 个会话的 token
+   全部来自库）；移回文件；`acb-status.sh` 全绿。
+5. 仍差：驱动侧 `ACBCTL_BIN` 指向的 acbl 包还是旧构建（没有 preload），删掉
+   `session-tokens.env` 会让驱动拿不到 token。要等用新 acbl 做一次
+   `nixos-rebuild switch`，之后归档该文件才算 P2.5 收口。
