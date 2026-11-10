@@ -8298,7 +8298,7 @@ impl<S: Store> Bridge<S> {
             Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
                 format!(
-                    "{} denied ({}): {}；需要显式授予该能力或走票据",
+                    "{} denied ({}): {}；需要显式授予该能力",
                     capability.as_str(),
                     decision.basis,
                     decision.reason
