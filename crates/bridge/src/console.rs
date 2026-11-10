@@ -199,28 +199,29 @@ impl<S: Store + Send + 'static> Console<S> {
     }
 
     /// 编辑器当前展示的文本：有控制台覆盖层就展示它，否则展示 base。
+    /// 控制台可编辑的那份文档：**只**是覆盖层 `90-console.toml`。
+    ///
+    /// 以前没有覆盖层时退回 `config.toml` 全文，导致表单补丁把 base（含 `[secrets]`、
+    /// `[storage]` 这些启动参数）当成覆盖层回灌，解析期直接报
+    /// 「90-console.toml must not declare [secrets]」——2026-11-10 现场复现：
+    /// 页面上任何一次保存都失败。覆盖层不存在时给空文档，合并由 base 负责。
     fn console_document(&self) -> Result<(String, String), (u16, String)> {
         let overlay = self.console_config_path();
-        let (path, text) = if overlay.exists() {
-            let text = std::fs::read_to_string(&overlay);
-            (overlay, text)
-        } else {
-            (
-                PathBuf::from(&self.config_path),
-                std::fs::read_to_string(&self.config_path),
-            )
-        };
-        text.map(|text| (path.display().to_string(), text))
-            .map_err(|error| {
+        let text = if overlay.exists() {
+            std::fs::read_to_string(&overlay).map_err(|error| {
                 error_response(
                     500,
                     acb_i18n::msg!(
                         "bridge.console.read_config_failed",
-                        path = path.display().to_string()
+                        path = overlay.display().to_string()
                     ),
                     Some(error.to_string()),
                 )
-            })
+            })?
+        } else {
+            String::new()
+        };
+        Ok((overlay.display().to_string(), text))
     }
 
     /// 守着监听端口，来一个请求处理一个。
