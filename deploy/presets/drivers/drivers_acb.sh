@@ -46,12 +46,19 @@ PRESET_RETRY_SECS=${ACB_PRESETS_RETRY_SECS:-30}
 preset_fp=""
 preset_fp_done=""
 preset_last_try=0
+preset_last_fp=""
 
 refresh_presets() {
   local fp=$1 now
   now=$(date +%s)
   [[ -x $PRESETS_INSTALLER ]] || return 0
   [[ $fp == "$preset_fp_done" ]] && return 0
+  # 会话表变了就是新事件：立刻装，不要被上一次失败的退避挡住——否则新会话
+  # 会先起驱动、preset 还在路上，第一条消息必报 Unknown agent preset。
+  if [[ $fp != "$preset_last_fp" ]]; then
+    preset_last_fp=$fp
+    preset_last_try=0
+  fi
   (( now - preset_last_try >= PRESET_RETRY_SECS )) || return 0
   preset_last_try=$now
   if "$PRESETS_INSTALLER" >>"$STATE_DIR/presets.log" 2>&1; then
