@@ -892,11 +892,16 @@ async function openPluginConfig(id) {
   const resources = (manifest.resources || []).map((resource) => `
     <div class="form-row"><label>${esc(resource.label || resource.name)}</label>
       <button class="mini" onclick="openPluginRecords('${esc(id)}','${esc(resource.name)}')">查看记录</button></div>`).join("");
+  const actions = (manifest.actions || []).map((action) => `
+    <div class="form-row"><label>${esc(action.label || action.name)}</label>
+      <button class="mini" onclick="runPluginAction('${esc(id)}','${esc(action.name)}')">执行</button>
+      <span class="hint">${esc(action.description || "")} risk=${esc(action.risk || "high")}${action.requires_ticket ? " · 需票据" : ""}</span></div>`).join("");
   formFrame(`插件配置 — ${esc(id)}`, `
     ${view.missingRequired?.length ? `<p class="err">还缺必填项：${view.missingRequired.map(esc).join(", ")}</p>` : ""}
     ${configRows || '<p class="muted">这个插件没有声明配置项。</p>'}
     ${secretRows}
-    ${resources ? `<div class="card"><h3>资源</h3>${resources}</div>` : ""}`,
+    ${resources ? `<div class="card"><h3>资源</h3>${resources}</div>` : ""}
+    ${actions ? `<div class="card"><h3>动作</h3>${actions}</div>` : ""}`,
     async () => {
       const config = {};
       for (const field of fields) {
@@ -909,6 +914,18 @@ async function openPluginConfig(id) {
       loadPlugins();
       return result;
     });
+}
+
+async function runPluginAction(id, action) {
+  if (!confirm(`执行动作「${action}」？`)) return;
+  try {
+    const reply = await api("/api/plugins/" + encodeURIComponent(id) + "/action", {
+      method: "POST", body: JSON.stringify({ action, args: {} }),
+    });
+    alert(JSON.stringify(reply.result, null, 2));
+  } catch (e) {
+    alert(e.message);
+  }
 }
 
 async function openPluginRecords(id, resource) {

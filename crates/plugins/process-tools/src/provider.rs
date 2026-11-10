@@ -88,9 +88,30 @@ impl CallError {
     }
 }
 
+/// 一次子进程调用：工具调用或插件动作。两条路共用队列与重启策略。
+enum CallKind {
+    Tool { name: String, arguments: Value },
+    Action { name: String, arguments: Value },
+}
+
+impl CallKind {
+    fn method(&self) -> &'static str {
+        match self {
+            Self::Tool { .. } => "call_tool",
+            Self::Action { .. } => "run_action",
+        }
+    }
+
+    fn params(&self) -> Value {
+        match self {
+            Self::Tool { name, arguments } => json!({"name": name, "arguments": arguments}),
+            Self::Action { name, arguments } => json!({"action": name, "arguments": arguments}),
+        }
+    }
+}
+
 struct CallRequest {
-    tool: String,
-    args: Value,
+    kind: CallKind,
     reply: SyncSender<Result<Value, CallError>>,
 }
 
@@ -393,8 +414,10 @@ impl ToolProvider for ProcessToolProvider {
         }
         let (tx, rx) = sync_channel(1);
         let request = CallRequest {
-            tool: tool.to_owned(),
-            args,
+            kind: CallKind::Tool {
+                name: tool.to_owned(),
+                arguments: args,
+            },
             reply: tx,
         };
         match self.calls.try_send(request) {
@@ -427,6 +450,50 @@ impl ToolProvider for ProcessToolProvider {
         match self.inner.unhealthy_reason() {
             Some(reason) => Health::Unhealthy(reason),
             None => Health::Healthy,
+        }
+    }
+}
+
+impl ProcessToolProvider {
+    /// 执行 manifest 声明的动作。动作结果不做 `{"result": ...}` 拆包——那是工具协议的形状。
+    pub fn run_action(&self, action: &str, args: Value) -> Result<Value, ToolError> {
+        if let Some(reason) = self.inner.unhealthy_reason() {
+            return Err(ToolError::new(
+                ErrorCode::Internal,
+                format!("plugin {} unavailable: {reason}", self.inner.id),
+            ));
+        }
+        let (tx, rx) = sync_channel(1);
+        let request = CallRequest {
+            kind: CallKind::Action {
+                name: action.to_owned(),
+                arguments: args,
+            },
+            reply: tx,
+        };
+        match self.calls.try_send(request) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                return Err(ToolError::new(
+                    ErrorCode::Timeout,
+                    format!("plugin {} action queue is full", self.inner.id),
+                ));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(ToolError::new(
+                    ErrorCode::Internal,
+                    format!("plugin {} supervisor stopped", self.inner.id),
+                ));
+            }
+        }
+        let timeout = Duration::from_millis(self.inner.config.timeout()) + CALL_GRACE;
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(error.into_tool_error(&self.inner.id)),
+            Err(_) => Err(ToolError::new(
+                ErrorCode::Timeout,
+                format!("plugin {} did not reply in time", self.inner.id),
+            )),
         }
     }
 }
@@ -503,11 +570,7 @@ fn supervisor_loop(
             continue;
         };
         let timeout = Duration::from_millis(inner.config.timeout());
-        let result = current.call(
-            "call_tool",
-            json!({"name": request.tool, "arguments": request.args}),
-            timeout,
-        );
+        let result = current.call(request.kind.method(), request.kind.params(), timeout);
         match result {
             Ok(value) => {
                 let _ = request.reply.send(Ok(value));

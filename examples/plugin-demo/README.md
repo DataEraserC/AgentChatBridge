@@ -42,5 +42,5 @@ acbctl plugin records demo.tools notes --config ~/.local/share/acb/config/config
 
 ## 说明
 
-- 动作 `ping` 已声明，子进程也已经实现 `run_action`；核心侧的动作执行器在下一阶段接上。
+- 动作 `ping` 从控制台配置弹窗点「执行」触发；核心按 plugin id 找到同一子进程的队列，复用超时与重启策略。
 - 配置通过 `ACB_PLUGIN_<KEY>` 环境变量传给子进程，密钥不进环境变量。

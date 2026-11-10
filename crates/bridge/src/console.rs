@@ -158,6 +158,8 @@ pub struct Console<S: Store> {
     deps: DependencyRegistry,
     /// 记忆管家状态文件；未启用时 `None`。
     memory_steward: Option<PathBuf>,
+    /// 插件动作执行器（按 plugin id 找）。没有动作的插件不会有条目。
+    plugin_actions: Vec<Arc<dyn acb_kernel::PluginActionRunner>>,
 }
 
 impl<S: Store + Send + 'static> Console<S> {
@@ -174,6 +176,7 @@ impl<S: Store + Send + 'static> Console<S> {
         route_worker: RouteWorker,
         deps: DependencyRegistry,
         memory_steward: Option<PathBuf>,
+        plugin_actions: Vec<Arc<dyn acb_kernel::PluginActionRunner>>,
     ) -> Self {
         Self {
             bridge,
@@ -186,6 +189,7 @@ impl<S: Store + Send + 'static> Console<S> {
             route_worker,
             deps,
             memory_steward,
+            plugin_actions,
         }
     }
 
@@ -465,6 +469,9 @@ impl<S: Store + Send + 'static> Console<S> {
             }
             ("POST", p) if p.starts_with("/api/plugins/") && p.ends_with("/config") => {
                 self.plugin_config_update(p, body)
+            }
+            ("POST", p) if p.starts_with("/api/plugins/") && p.ends_with("/action") => {
+                self.plugin_run_action(p, body)
             }
             ("POST", p)
                 if p.starts_with("/api/plugins/")
@@ -1241,6 +1248,52 @@ impl<S: Store + Send + 'static> Console<S> {
             Err(error) => error_response(
                 400,
                 acb_i18n::msg!("bridge.console.bad_request"),
+                Some(error),
+            ),
+        }
+    }
+
+    /// `POST /api/plugins/<id>/action`，body `{"action": "...", "args": {...}}`。
+    fn plugin_run_action(&self, path: &str, body: &str) -> (u16, String) {
+        let Some((id, parts)) = Self::plugin_path_parts(path) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        if parts != ["action"] {
+            return error_response(404, acb_i18n::msg!("bridge.console.not_found"), None);
+        }
+        let value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_response(
+                    400,
+                    acb_i18n::msg!("bridge.console.invalid_json"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let Some(action) = value.get("action").and_then(serde_json::Value::as_str) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        let args = value
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let Some(runner) = self
+            .plugin_actions
+            .iter()
+            .find(|runner| runner.plugin_id() == id)
+        else {
+            return error_response(
+                404,
+                acb_i18n::msg!("bridge.console.not_found"),
+                Some(format!("plugin {id} has no running action runner")),
+            );
+        };
+        match runner.run(action, args) {
+            Ok(result) => (200, json!({"ok": true, "result": result}).to_string()),
+            Err(error) => error_response(
+                502,
+                acb_i18n::msg!("bridge.console.plugin_action_failed"),
                 Some(error),
             ),
         }

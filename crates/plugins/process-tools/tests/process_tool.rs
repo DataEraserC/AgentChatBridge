@@ -196,3 +196,18 @@ fn plugin_config_reaches_child_as_env() {
         serde_json::json!("true")
     );
 }
+
+#[test]
+fn unknown_action_is_a_clean_error() {
+    let provider =
+        ProcessToolProvider::spawn(config("process.action", &["echo"], 500)).expect("能启动");
+    // 夹具只实现 call_tool；run_action 应当收到一个明确的 JSON-RPC 错误，而不是挂住。
+    let error = provider
+        .run_action("ping", serde_json::json!({}))
+        .expect_err("夹具不认识 run_action");
+    let text = format!("{error:?}");
+    assert!(
+        text.contains("unknown method") || text.contains("Rpc"),
+        "{text}"
+    );
+}

@@ -278,8 +278,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         plugins.install_loader_owned(Arc::new(DynamicLoader::new(&config.plugins)))?;
     }
     // 外置进程工具：清单来自库，只有启用且命令可执行的才装；第一方工具仍走进程内 ToolLoader。
+    // 动作执行器跟着 provider 走：控制台点「执行」时调用同一队列。
+    let mut action_runners: Vec<Arc<dyn acb_kernel::PluginActionRunner>> = Vec::new();
     if !tool_plugins.is_empty() {
-        plugins.install_loader_owned(Arc::new(ProcessToolLoader::new(&tool_plugins)))?;
+        let loader = Arc::new(ProcessToolLoader::new(&tool_plugins));
+        plugins.install_loader_owned(Arc::clone(&loader) as Arc<dyn acb_kernel::PluginLoader>)?;
+        action_runners = loader.action_runners();
     }
     // 外置进程策略 provider：核心不认识 wasm，只按命令启动宿主并转发 decide。
     // 列表为空 = 不装宿主；配置里有但宿主起不来 = 启动期硬失败。
@@ -438,6 +442,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 route_worker.clone(),
                 deps.clone(),
                 steward_status.clone(),
+                action_runners,
             ));
             let shutdown = Arc::clone(&shutdown);
             std::thread::spawn(move || {

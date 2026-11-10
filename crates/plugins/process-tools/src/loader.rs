@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use acb_kernel::{
-    Capability, ExtensionPoint, LoaderKind, LoaderManifest, PLUGIN_API_VERSION, PluginError,
-    PluginLoader, PluginManager, PluginMetadata, PluginSource, ProviderDescriptor, ProviderId,
-    ToolPluginConfig, ToolProvider,
+    Capability, ExtensionPoint, LoaderKind, LoaderManifest, PLUGIN_API_VERSION, PluginActionRunner,
+    PluginError, PluginLoader, PluginManager, PluginMetadata, PluginSource, ProviderDescriptor,
+    ProviderId, ToolPluginConfig, ToolProvider,
 };
 
 use crate::provider::ProcessToolProvider;
@@ -24,6 +24,21 @@ impl ProcessToolLoader {
             configs: configs.to_vec(),
             providers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 动作执行器列表。控制台按 plugin id 找；没起来的插件不会有。
+    pub fn action_runners(&self) -> Vec<Arc<dyn PluginActionRunner>> {
+        self.providers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(id, provider)| {
+                Arc::new(crate::action::ProcessActionRunner::new(
+                    id.to_string(),
+                    Arc::clone(provider),
+                )) as Arc<dyn PluginActionRunner>
+            })
+            .collect()
     }
 
     /// 按 id 取已启动的 provider（控制台/诊断用）。
