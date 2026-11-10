@@ -61,7 +61,8 @@
   header .spacer { flex: 1; }
   header select.locale-switch { width: auto; min-width: 96px; height: var(--control-h); font-size: var(--text-aux); }
 
-  nav { display: flex; gap: var(--space-1); padding: 0 var(--space-4); background: var(--bg); border-bottom: 1px solid var(--border); overflow-x: auto; }
+  nav { display: flex; gap: var(--space-1); padding: 0 var(--space-4); background: var(--bg); border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+  nav::-webkit-scrollbar { display: none; }
   nav button { flex: 0 0 auto; padding: var(--space-2) var(--space-3); background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-muted); font: var(--text-body)/1 var(--font-sans); cursor: pointer; }
   nav button.active { color: var(--text-strong); border-bottom-color: var(--accent); }
   nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -76,6 +77,16 @@
   .card-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
   .card-head h2 { margin: 0; }
   .card-head .spacer { flex: 1; }
+  .toolbar { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+  .toolbar h2 { margin: 0; }
+  .toolbar .spacer { flex: 1; }
+  .toolbar .count { color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
+  .card-head .count { color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
+  .card-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+  .head-actions { display: flex; gap: var(--space-2); margin-left: auto; }
+  .card-note { margin: var(--space-2) 0 0; color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); overflow-wrap: anywhere; }
+  .sub { display: flex; flex-direction: column; gap: var(--space-1); }
+  .sub + .sub { margin-top: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--border); }
 
   .notice { padding: var(--space-2) var(--space-3); margin-bottom: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
 
@@ -91,6 +102,7 @@
   .mini { margin-left: var(--space-1); vertical-align: middle; }
   .mini.danger, .btn.danger, .act.danger { color: var(--err); }
   .btn.danger, .act.danger { background: var(--err); border-color: var(--err); color: #fff; }
+  .btn.ghost.danger, .act.ghost.danger { background: none; border-color: var(--err); color: var(--err); }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -117,8 +129,15 @@
   th, td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
   th { color: var(--text-muted); font-weight: 500; white-space: nowrap; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.actions { white-space: nowrap; }
+  td.actions button + button { margin-left: var(--space-2); }
   td.wrap { overflow-wrap: anywhere; }
-  table.table-responsive { min-width: 720px; }
+  table.table-responsive { min-width: 640px; }
+  td.id-cell { white-space: nowrap; }
+  td.id-cell code { overflow-wrap: anywhere; }
+  .fb-title-text { margin: 0; color: var(--text-strong); font-size: var(--text-body); line-height: var(--leading-body); overflow-wrap: anywhere; }
+  .fb-replies { margin-top: var(--space-3); padding-top: var(--space-2); border-top: 1px solid var(--border); color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); overflow-wrap: anywhere; }
+  .fb-replies > div + div { margin-top: var(--space-1); }
 
   .pill { display: inline-flex; align-items: center; gap: var(--space-1); height: var(--control-sm); padding: 0 var(--space-2); border-radius: 999px; font-size: var(--text-aux); line-height: 1; white-space: nowrap; }
   .pill.dep-up, .pill.resolved { background: var(--ok-weak); color: var(--ok); }
@@ -127,8 +146,8 @@
   .pill.acked, .pill.pending { background: var(--warn-weak); color: var(--warn); }
   .pill.unloadable { background: var(--accent-weak); color: var(--accent); }
 
-  .kv { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: var(--space-1) var(--space-3); font-size: var(--text-body); }
-  .kv .k { color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
+  .kv { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: var(--space-2) var(--space-3); font-size: var(--text-body); align-items: start; }
+  .kv .k { padding-top: 2px; color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); overflow-wrap: anywhere; }
   .secret { color: var(--warn); letter-spacing: 2px; }
   .muted { color: var(--text-muted); }
   .err { color: var(--err); }
@@ -166,10 +185,13 @@
   @media (max-width: 720px) {
     header { flex-wrap: wrap; padding: var(--space-2) var(--space-3); }
     header .spacer { display: none; }
-    header .brand { flex: 1 1 auto; }
+    header .brand { flex: 1 1 100%; }
+    header #logout { margin-left: auto; }
     nav { padding: 0 var(--space-3); }
     main { padding: var(--space-3); }
     .card { padding: var(--space-3); margin-bottom: var(--space-3); }
+    .card-head, .toolbar { flex-wrap: wrap; }
+    .head-actions { flex: 1 1 100%; justify-content: flex-end; }
     .stat { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .kv { grid-template-columns: 1fr; gap: var(--space-1); }
     .kv .k { margin-top: var(--space-2); }
@@ -177,6 +199,14 @@
     .form-row input[type="text"], .form-row select { flex: 1 1 100%; width: 100%; }
     #modal { padding: 0; }
     #modal-box { width: 100%; min-height: 100%; padding: var(--space-4); border-radius: 0; }
+    /* 窄屏把表格拆成「标签-值」卡片：thead 隐藏，每个 td 用 data-label 自带标签 */
+    table.table-responsive, table.table-responsive tbody, table.table-responsive tr, table.table-responsive td { display: block; width: 100%; }
+    table.table-responsive { min-width: 0; }
+    table.table-responsive thead { display: none; }
+    table.table-responsive tr { padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
+    table.table-responsive tr:last-child { border-bottom: 0; }
+    table.table-responsive td { padding: var(--space-1) 0; border: 0; }
+    table.table-responsive td[data-label]::before { content: attr(data-label); display: block; color: var(--text-muted); font-size: var(--text-aux); line-height: var(--leading-aux); }
   }
 
   @media (pointer: coarse) {
@@ -259,21 +289,51 @@
   <!-- status-scope:end -->
 
   <section id="tab-sessions">
-    <div class="notice" data-i18n="console.ui.pending.tab">This tab is not localized yet.</div>
+    <div class="toolbar">
+      <h2 data-i18n="console.sessions.title">Sessions</h2>
+      <button type="button" class="info" data-tip-key="console.sessions.intro" data-i18n-aria="console.ui.info.more" aria-label="More information">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>
+      </button>
+      <span class="count" id="sessions-count"></span>
+      <div class="spacer"></div>
+      <button type="button" class="btn ghost sm" onclick="loadSessions()">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14-5"/><path d="M4 4v6h6"/><path d="M4 13a8 8 0 0 0 14 5"/><path d="M20 20v-6h-6"/></svg>
+        <span data-i18n="console.sessions.refresh">Refresh</span>
+      </button>
+    </div>
+    <div id="sessions-note"></div>
     <div id="sessions"></div>
   </section>
   <section id="tab-feedback">
-    <div class="notice" data-i18n="console.ui.pending.tab">This tab is not localized yet.</div>
-    <div class="card"><h2 data-i18n="console.ui.feedback.title">Agent feedback</h2><div id="feedback"></div></div>
+    <div class="toolbar">
+      <h2 data-i18n="console.ui.feedback.title">Agent feedback</h2>
+      <button type="button" class="info" data-tip-key="console.feedback.intro" data-i18n-aria="console.ui.info.more" aria-label="More information">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>
+      </button>
+      <span class="count" id="feedback-count"></span>
+      <div class="spacer"></div>
+      <button type="button" class="btn ghost sm" onclick="loadFeedback()">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14-5"/><path d="M4 4v6h6"/><path d="M4 13a8 8 0 0 0 14 5"/><path d="M20 20v-6h-6"/></svg>
+        <span data-i18n="console.feedback.refresh">Refresh</span>
+      </button>
+    </div>
+    <div id="feedback-note"></div>
+    <div id="feedback"></div>
   </section>
   <section id="tab-plugins">
-    <div class="notice" data-i18n="console.ui.pending.tab">This tab is not localized yet.</div>
-    <div class="card">
-      <h2><span data-i18n="console.plugins.title">Plugin lifecycle</span><button class="mini" onclick="loadPlugins()" style="float:right" data-i18n="console.plugins.refresh">Refresh</button></h2>
-      <p class="muted" data-i18n="console.plugins.intro">Root catalog and hot-unload state.</p>
-      <p class="err" id="plugins-error"></p>
-      <div id="plugins"></div>
+    <div class="toolbar">
+      <h2 data-i18n="console.plugins.title">Plugin lifecycle</h2>
+      <button type="button" class="info" data-tip-key="console.plugins.intro" data-i18n-aria="console.ui.info.more" aria-label="More information">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>
+      </button>
+      <div class="spacer"></div>
+      <button type="button" class="btn ghost sm" onclick="loadPlugins()">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14-5"/><path d="M4 4v6h6"/><path d="M4 13a8 8 0 0 0 14 5"/><path d="M20 20v-6h-6"/></svg>
+        <span data-i18n="console.plugins.refresh">Refresh</span>
+      </button>
     </div>
+    <div id="plugins-note"></div>
+    <div id="plugins"></div>
   </section>
   <section id="tab-policy">
     <div id="policy"></div>
@@ -732,74 +792,163 @@ async function loadDependencies() {
 // 会话 / 反馈 / 插件 / 配置：本轮保留旧渲染逻辑，只继承 token。
 // ---------------------------------------------------------------------------
 async function loadSessions() {
-  const [{ sessions }, status] = await Promise.all([api("/api/sessions"), api("/api/status")]);
-  const busy = new Set(status.busy_sessions || []);
-  $("#sessions").innerHTML = sessions.length ? sessions.map((s) => {
-    const map = s.map;
-    return `<div class="card"><h2>${esc(s.name || s.id)} <span class="muted">(${esc(s.id)})</span>${busy.has(s.id) ? ' <span class="warn">● 正在跑一轮</span>' : ""}</h2>
-    <div class="kv">
-      <div class="k">harness</div><div>${esc(s.harness)}</div>
-      <div class="k">人格</div><div>${esc(s.persona || "—")}</div>
-      <div class="k">模型</div><div>${esc(s.model || "由 harness 侧决定")}</div>
-      <div class="k">记忆</div><div>${esc((s.memories||[]).join(", ") || "无")}</div>
-      <div class="k">订阅</div><div>${(s.subscriptions||[]).map(esc).join("<br>") || "无"}</div>
-      <div class="k">harness 侧映射</div><div>${map ? esc(map.harness_session) + '<br><span class="muted">更新于 ' + esc(new Date(map.updated_at).toLocaleString(locale)) + '</span>' : '<span class="muted">还没有（harness 连上后声明）</span>'}</div>
+  const box = $("#sessions");
+  const note = $("#sessions-note");
+  const count = $("#sessions-count");
+  note.innerHTML = "";
+  box.innerHTML = loadingBox();
+  try {
+    const [{ sessions }, status] = await Promise.all([api("/api/sessions"), api("/api/status")]);
+    const busy = new Set(status.busy_sessions || []);
+    count.textContent = sessions.length ? t("console.sessions.count", { n: sessions.length }) : "";
+    box.innerHTML = sessions.length
+      ? sessions.map((s) => sessionCard(s, busy.has(s.id))).join("")
+      : `<div class="card">${emptyBox("console.sessions.empty")}</div>`;
+  } catch (e) {
+    count.textContent = "";
+    box.innerHTML = "";
+    note.innerHTML = errorBox(e, "console.sessions.loadFailed");
+  }
+}
+
+function sessionCard(s, isBusy) {
+  const map = s.map;
+  const memories = (s.memories || []);
+  const subs = (s.subscriptions || []);
+  const none = `<span class="muted">${esc(t("console.sessions.none"))}</span>`;
+  const row = (labelKey, value) => `<div class="k">${esc(t(labelKey))}</div><div>${value}</div>`;
+  return `<div class="card">
+    <div class="card-head">
+      <h2>${esc(s.name || s.id)}</h2>
+      ${s.name && s.name !== s.id ? `<code class="muted">${esc(s.id)}</code>` : ""}
+      ${isBusy ? `<span class="pill pending">${esc(t("console.sessions.busy"))}</span>` : ""}
+      <div class="head-actions">
+        <button class="act" onclick="interruptSession('${esc(s.id)}')" ${isBusy ? "" : "disabled"}>${esc(t("console.sessions.interrupt"))}</button>
+        <button class="act ghost danger" onclick="resetSession('${esc(s.id)}')">${esc(t("console.sessions.reset"))}</button>
+      </div>
     </div>
-    <p><button class="act" onclick="interruptSession('${esc(s.id)}')" ${busy.has(s.id) ? "" : "disabled"}>打断当前轮</button>
-    <button class="act danger" onclick="resetSession('${esc(s.id)}')">断开映射并重置会话</button></p>
-    <div id="reset-note-${esc(s.id)}" class="muted"></div></div>`;
-  }).join("") : '<div class="card"><p class="empty">没有会话</p></div>';
+    <div class="kv">
+      ${row("console.sessions.field.harness", esc(s.harness))}
+      ${row("console.sessions.field.persona", s.persona ? esc(s.persona) : none)}
+      ${row("console.sessions.field.model", s.model ? esc(s.model) : `<span class="muted">${esc(t("console.sessions.modelByHarness"))}</span>`)}
+      ${row("console.sessions.field.memories", memories.length ? memories.map(esc).join("<br>") : none)}
+      ${row("console.sessions.field.map", map
+        ? `${esc(map.harness_session)}<br><span class="muted">${esc(t("console.sessions.mapUpdated", { at: new Date(map.updated_at).toLocaleString(locale) }))}</span>`
+        : `<span class="muted">${esc(t("console.sessions.mapNone"))}</span>`)}
+    </div>
+    <div class="kv" style="margin-top:var(--space-2)">
+      <div class="k">${esc(t("console.sessions.field.subscriptions"))}</div>
+      <div class="sub">${subs.length ? subs.map((sub) => `<div><code>${esc(sub.room)}</code><br><span class="muted">${esc(wakeText(sub.wake))}</span></div>`).join("") : none}</div>
+    </div>
+    <div id="reset-note-${esc(s.id)}" class="card-note"></div>
+  </div>`;
 }
 
 async function interruptSession(id) {
-  if (!confirm("打断会话 " + id + " 正在跑的这一轮？dsh 侧会被取消（aborted），桥按失败发通知。")) return;
+  if (!confirm(t("console.sessions.confirmInterrupt", { id }))) return;
   const note = $("#reset-note-" + id);
   try {
     const r = await api("/api/session/" + encodeURIComponent(id) + "/interrupt", { method: "POST", body: "{}" });
-    note.textContent = "✓ " + (r.note || "interrupt 指令已发出");
+    note.textContent = "✓ " + (r.note || t("console.sessions.interruptSent"));
     setTimeout(loadSessions, 1500);
   } catch (e) { note.innerHTML = '<span class="err">' + esc(e.message) + "</span>"; }
 }
 
 async function resetSession(id) {
-  if (!confirm("确定重置会话 " + id + " ？harness 侧会收到 reset，桥侧映射断开。")) return;
+  if (!confirm(t("console.sessions.confirmReset", { id }))) return;
   const note = $("#reset-note-" + id);
   try {
     const r = await api("/api/session/" + encodeURIComponent(id) + "/reset", { method: "POST", body: "{}" });
-    note.textContent = "✓ " + (r.note || "reset 指令已发出");
+    note.textContent = "✓ " + (r.note || t("console.sessions.resetSent"));
     setTimeout(loadSessions, 1500);
   } catch (e) { note.innerHTML = '<span class="err">' + esc(e.message) + "</span>"; }
 }
 
 async function loadFeedback() {
-  const { feedback } = await api("/api/feedback?limit=50");
-  $("#feedback").innerHTML = feedback.length ? `<div class="table-wrap"><table class="table-responsive">
-    <thead><tr><th>#</th><th>状态</th><th>类型</th><th>标题</th><th>来源</th><th class="num">次数</th><th>最近</th><th></th></tr></thead>
-    <tbody>${feedback.map((f) => `<tr>
-      <td class="num">${f.id}</td>
-      <td><span class="pill ${esc(f.status)}">${esc(f.status)}</span></td>
-      <td>${esc(f.kind || "—")}${f.severity && f.severity !== "info" ? '<br><span class="muted">' + esc(f.severity) + "</span>" : ""}</td>
-      <td class="wrap">${esc(f.title)}${f.body ? '<br><span class="muted">' + esc(String(f.body).slice(0, 160)) + "</span>" : ""}${f.suggestion ? '<br><span class="muted">建议：' + esc(String(f.suggestion).slice(0, 120)) + "</span>" : ""}${(f.replies || []).map((r) => '<br><span class="muted">回复（' + esc(r.author) + "）：" + esc(r.text) + "</span>").join("")}</td>
-      <td class="wrap">${esc(f.tool || "—")}${f.session ? '<br><span class="muted">' + esc(f.session) + "</span>" : ""}</td>
-      <td class="num">${f.occurrences || 1}${f.repeats ? "（重复）" : ""}</td>
-      <td class="muted">${esc(new Date(f.last_at).toLocaleString(locale))}</td>
-      <td><button class="act" onclick="replyFeedback(${f.id})">回复</button> <button class="act ghost" onclick="resolveFeedback(${f.id})">标记</button></td>
-    </tr>`).join("")}</tbody></table></div>` : '<p class="empty">没有反馈记录</p>';
+  const box = $("#feedback");
+  const note = $("#feedback-note");
+  const count = $("#feedback-count");
+  note.innerHTML = "";
+  box.innerHTML = loadingBox();
+  try {
+    const { feedback } = await api("/api/feedback?limit=50");
+    count.textContent = feedback.length ? t("console.feedback.count", { n: feedback.length }) : "";
+    if (!feedback.length) { box.innerHTML = `<div class="card">${emptyBox("console.feedback.empty")}</div>`; return; }
+    box.innerHTML = feedback.map(feedbackCard).join("");
+    bindFeedbackButtons();
+  } catch (e) {
+    count.textContent = "";
+    box.innerHTML = "";
+    note.innerHTML = errorBox(e, "console.feedback.loadFailed");
+  }
+}
+
+function feedbackCard(f) {
+  const meta = (labelKey, value) => `<div class="k">${esc(t(labelKey))}</div><div>${value}</div>`;
+  const body = f.body ? `<p class="card-note">${esc(String(f.body).slice(0, 400))}</p>` : "";
+  const suggestion = f.suggestion
+    ? `<p class="card-note">${esc(t("console.feedback.suggestion", { text: String(f.suggestion).slice(0, 240) }))}</p>`
+    : "";
+  const replies = (f.replies || []).length
+    ? `<div class="fb-replies">${f.replies.map((r) => `<div>${esc(t("console.feedback.replyFrom", { author: r.author, text: r.text }))}</div>`).join("")}</div>`
+    : "";
+  const kind = [f.kind, f.severity && f.severity !== "info" ? f.severity : null].filter(Boolean).join(" · ");
+  return `<div class="card">
+    <div class="card-head">
+      <span class="pill ${esc(f.status)}">${esc(t("console.ui.state." + f.status))}</span>
+      <code class="muted">#${f.id}</code>
+      ${kind ? `<span class="muted">${esc(kind)}</span>` : ""}
+      <div class="head-actions">
+        <button class="act" data-feedback-reply="${f.id}">${esc(t("console.feedback.reply"))}</button>
+        <button class="act ghost" data-feedback-status="${f.id}">${esc(t("console.feedback.mark"))}</button>
+      </div>
+    </div>
+    <p class="fb-title-text">${esc(f.title)}</p>
+    ${body}${suggestion}
+    <div class="kv" style="margin-top:var(--space-3)">
+      ${meta("console.feedback.col.source", `${esc(f.tool || "—")}${f.session ? `<br><span class="muted">${esc(f.session)}</span>` : ""}`)}
+      ${meta("console.feedback.col.count", `${f.occurrences || 1}${f.repeats ? " · " + esc(t("console.feedback.repeated")) : ""}`)}
+      ${meta("console.feedback.col.last", `<span class="muted">${esc(new Date(f.last_at).toLocaleString(locale))}</span>`)}
+    </div>
+    ${replies}
+  </div>`;
+}
+
+function bindFeedbackButtons() {
+  document.querySelectorAll("[data-feedback-reply]").forEach((el) => {
+    el.addEventListener("click", () => replyFeedback(Number(el.dataset.feedbackReply)));
+  });
+  document.querySelectorAll("[data-feedback-status]").forEach((el) => {
+    el.addEventListener("click", () => resolveFeedback(Number(el.dataset.feedbackStatus)));
+  });
 }
 
 async function replyFeedback(id) {
-  const text = prompt("回复内容？会作为事件通知原会话。", "");
-  if (!text) return;
-  try { await api("/api/feedback/" + id + "/reply", { method: "POST", body: JSON.stringify({ text }) }); loadFeedback(); }
-  catch (e) { alert(e.message); }
+  formFrame(esc(t("console.feedback.replyTitle", { id })), `
+    <div class="form-row"><label>${esc(t("console.feedback.replyLabel"))}</label>
+      <textarea id="fb-reply" placeholder="${esc(t("console.feedback.replyPlaceholder"))}"></textarea></div>
+    <p class="hint">${esc(t("console.feedback.replyHint"))}</p>`,
+    async () => {
+      const text = document.getElementById("fb-reply").value.trim();
+      if (!text) { showFormError(t("console.feedback.replyRequired")); return false; }
+      await api("/api/feedback/" + id + "/reply", { method: "POST", body: JSON.stringify({ text }) });
+      loadFeedback();
+    });
 }
 
 async function resolveFeedback(id) {
-  const status = prompt("改成什么状态？open / acked / resolved / wontfix", "resolved");
-  if (!status) return;
-  const note = prompt("备注（可空）", "") ?? "";
-  try { await api("/api/feedback/" + id + "/status", { method: "POST", body: JSON.stringify({ status, note }) }); loadFeedback(); }
-  catch (e) { alert(e.message); }
+  const options = ["open", "acked", "resolved", "wontfix"];
+  formFrame(esc(t("console.feedback.markTitle", { id })), `
+    <div class="form-row"><label>${esc(t("console.feedback.statusLabel"))}</label>
+      <select id="fb-status">${options.map((s) => `<option value="${s}"${s === "resolved" ? " selected" : ""}>${esc(t("console.ui.state." + s))}</option>`).join("")}</select></div>
+    <div class="form-row"><label>${esc(t("console.feedback.noteLabel"))}</label>
+      <input type="text" id="fb-note" placeholder="${esc(t("console.feedback.notePlaceholder"))}"></div>`,
+    async () => {
+      const status = document.getElementById("fb-status").value;
+      const note = document.getElementById("fb-note").value;
+      await api("/api/feedback/" + id + "/status", { method: "POST", body: JSON.stringify({ status, note }) });
+      loadFeedback();
+    });
 }
 
 const pluginStateClass = (state) => (state === "pending_unload" || state === "pending_reload" ? "pending" : state);
@@ -971,27 +1120,30 @@ async function deletePluginRecord(id, resource, recordId) {
 
 function pluginRegistryTable(registry) {
   if (!registry || !registry.length) return "";
+  const label = (key) => ` data-label="${esc(t(key))}"`;
   const rows = registry.map((plugin) => `<tr>
-    <td class="wrap"><code>${esc(plugin.id)}</code><br><span class="muted">${esc(plugin.commandKind)}</span></td>
-    <td>${esc(plugin.kind)}</td>
-    <td>${plugin.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill">停用</span>'}</td>
-    <td>${plugin.degraded ? `<span class="err">${esc(plugin.degraded)}</span>` : (plugin.fingerprintOk ? '<span class="muted">ok</span>' : '<span class="err">指纹漂移</span>')}</td>
-    <td>${esc(plugin.storage?.kind || "")}</td>
-    <td>${esc((plugin.policy?.capabilities || []).join(", "))}</td>
-    <td><button class="mini" onclick="openPluginConfig('${esc(plugin.id)}')">配置</button></td>
+    <td class="id-cell"${label("console.plugins.col.id")}><code>${esc(plugin.id)}</code><br><span class="muted">${esc(plugin.commandKind)}</span></td>
+    <td${label("console.plugins.registry.col.kind")}>${esc(plugin.kind)}</td>
+    <td${label("console.plugins.registry.col.state")}>${plugin.enabled ? `<span class="pill ok">${esc(t("console.plugins.registry.enabled"))}</span>` : `<span class="pill">${esc(t("console.plugins.registry.disabled"))}</span>`}</td>
+    <td${label("console.plugins.registry.col.check")}>${plugin.degraded ? `<span class="err">${esc(plugin.degraded)}</span>` : (plugin.fingerprintOk ? '<span class="muted">ok</span>' : `<span class="err">${esc(t("console.plugins.registry.drift"))}</span>`)}</td>
+    <td${label("console.plugins.registry.col.storage")}>${esc(plugin.storage?.kind || "")}</td>
+    <td${label("console.plugins.registry.col.caps")}>${esc((plugin.policy?.capabilities || []).join(", "))}</td>
+    <td><button class="mini" onclick="openPluginConfig('${esc(plugin.id)}')">${esc(t("console.plugins.registry.configure"))}</button></td>
   </tr>`).join("");
-  return `<div class="card"><h2>注册表<button class="mini" onclick="loadPlugins()" style="float:right">刷新</button></h2>
-    <p class="muted">命令、策略、存储与能力声明都以库为准；degraded 的插件会在启动时跳过安装。</p>
+  return `<div class="card">
+    <div class="card-head"><h2>${esc(t("console.plugins.registry.title"))}</h2>
+      <button type="button" class="info" data-tip-key="console.plugins.registry.intro" aria-label="${esc(t("console.ui.info.more"))}">${icon("info")}</button></div>
     <div class="table-wrap"><table class="table-responsive">
-      <thead><tr><th>id</th><th>种类</th><th>状态</th><th>检查</th><th>存储</th><th>能力</th><th></th></tr></thead>
+      <thead><tr><th>id</th><th>${esc(t("console.plugins.registry.col.kind"))}</th><th>${esc(t("console.plugins.registry.col.state"))}</th>
+      <th>${esc(t("console.plugins.registry.col.check"))}</th><th>${esc(t("console.plugins.registry.col.storage"))}</th>
+      <th>${esc(t("console.plugins.registry.col.caps"))}</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div></div>`;
 }
 
 async function loadPlugins() {
   const box = $("#plugins");
-  const error = $("#plugins-error");
-  error.className = "err";
-  error.textContent = "";
+  const note = $("#plugins-note");
+  note.innerHTML = "";
   box.innerHTML = loadingBox();
   try {
     const { plugins, registry } = await api("/api/plugins");
@@ -1008,7 +1160,7 @@ async function loadPlugins() {
         ? `<br><span class="err">${esc(t("console.plugins.lastError", { error: p.lastError }))}</span>`
         : "";
       return `<tr>
-        <td class="wrap"><code>${esc(p.id)}</code><br><span class="muted">${esc(summary)}</span>${lastError}</td>
+        <td class="wrap id-cell"><code>${esc(p.id)}</code><br><span class="muted">${esc(summary)}</span>${lastError}</td>
         <td>${esc(p.extension)}</td>
         <td>${esc(p.source)}${p.kind ? '<br><span class="muted">kind: ' + esc(p.kind) + "</span>" : ""}</td>
         <td><span class="pill ${esc(pluginStateClass(p.state))}">${esc(t("console.plugins.state." + p.state))}</span></td>
@@ -1017,14 +1169,17 @@ async function loadPlugins() {
         <td>${pluginActions(p)}</td>
       </tr>`;
     }).join("");
-    box.innerHTML = registryHtml + `<div class="table-wrap"><table class="table-responsive">
+    box.innerHTML = registryHtml + `<div class="card">
+      <div class="card-head"><h2>${esc(t("console.plugins.startup.title"))}</h2>
+        <button type="button" class="info" data-tip-key="console.plugins.startup.intro" aria-label="${esc(t("console.ui.info.more"))}">${icon("info")}</button></div>
+      <div class="table-wrap"><table class="table-responsive">
       <thead><tr><th>${esc(t("console.plugins.col.id"))}</th><th>${esc(t("console.plugins.col.extension"))}</th>
       <th>${esc(t("console.plugins.col.source"))}</th><th>${esc(t("console.plugins.col.state"))}</th>
       <th>${esc(t("console.plugins.col.refs"))}</th><th>${esc(t("console.plugins.col.health"))}</th>
-      <th>${esc(t("console.plugins.col.actions"))}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      <th>${esc(t("console.plugins.col.actions"))}</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
   } catch (e) {
     box.innerHTML = "";
-    error.textContent = t("console.plugins.actionFailed", { error: e.message });
+    note.innerHTML = errorBox(e, "console.ui.state.error");
   }
 }
 
@@ -1051,16 +1206,16 @@ async function pluginAction(id, action, state) {
 function wakeText(w) {
   if (!w) return "—";
   const parts = [];
-  if (w.at_mention) parts.push("@我");
-  if (w.reply) parts.push("引用我");
-  if (w.name_mention && (w.names || []).length) parts.push("叫名字(" + w.names.join("/") + ")");
-  if (w.poke) parts.push("拍我");
-  if (w.accumulate) parts.push("攒" + w.accumulate + "条");
-  if ((w.event_tags || []).length) parts.push("标签:" + w.event_tags.join("/"));
-  if ((w.events || []).length) parts.push("事件:" + w.events.join("/"));
-  if ((w.keywords || []).length) parts.push("关键词:" + w.keywords.join("/"));
-  if ((w.ignore_speakers || []).length) parts.push("无视:" + w.ignore_speakers.join("/"));
-  return parts.join("，") || "（全关）";
+  if (w.at_mention) parts.push(t("console.wake.atMention"));
+  if (w.reply) parts.push(t("console.wake.reply"));
+  if (w.name_mention && (w.names || []).length) parts.push(t("console.wake.nameMention", { names: w.names.join("/") }));
+  if (w.poke) parts.push(t("console.wake.poke"));
+  if (w.accumulate) parts.push(t("console.wake.accumulate", { n: w.accumulate }));
+  if ((w.event_tags || []).length) parts.push(t("console.wake.eventTags", { tags: w.event_tags.join("/") }));
+  if ((w.events || []).length) parts.push(t("console.wake.events", { tags: w.events.join("/") }));
+  if ((w.keywords || []).length) parts.push(t("console.wake.keywords", { tags: w.keywords.join("/") }));
+  if ((w.ignore_speakers || []).length) parts.push(t("console.wake.ignore", { tags: w.ignore_speakers.join("/") }));
+  return parts.join(t("console.wake.separator")) || t("console.wake.off");
 }
 
 // ---------------------------------------------------------------------------
