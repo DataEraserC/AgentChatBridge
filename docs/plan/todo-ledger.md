@@ -312,3 +312,19 @@ CI：push `2c372f3..2c12de8` 后 `verify` 工作流 **首次跑绿**；`docs` �
 3. `acbctl profile add … --strategy store --label console-ui` → `gen-1794316491779-df056b0f`；`profile switch` 后重启单元。
 4. 验收：`acbctl status` unit active / endpoint open / console 200；`acb-status.sh` 全绿（5 条 ESTAB、驱动→dsh 通、/healthz 带令牌通、三段日志无错误）；线上 `/` 返回的 HTML 含新界面标记（`fb-replies`、`data-theme`、`console.config.sessions.title`），`/proc/<pid>/exe` 指向新 store 路径。
 5. 顺手修 `deploy/acb-status.sh`：令牌解析补 `--config` 与 cwd；drivers.log 启动锚点认时间戳前缀（此前把上一轮启动的陈错报成本轮）。
+
+### 2026-11-10 21:35 私信写入的审批死胡同（已用策略补口）
+
+现场：管理员（323622442）在群 973928169 让 dsh-dev「测试给我发私信」→ 目标
+`qq:private/323622442` 不在 dsh-dev 订阅里 → 判跨房间写 → 开票
+`tk-4c7fd7ce25e57668-1`。审批发到群 498587179/962657331，管理员在群里点
+`/approve` 同样被拒（`place=group` 时 `base-system-admin-private` 的
+`scope=subscribed` 不成立，审批检查又把 subscriptions 传成空表），票据 10 分钟后过期。
+
+改动：给 `system_admin` 补两条 `scope=connection`（target `qq`）的 `room_write`
+规则——`admin-account-write-group`（place=group）与 `admin-account-write-private`
+（place=private）。只给 `room_write`，不给 `room_read`。经 `/api/policy` 落库，
+`config_version=4`，`pending_reload=false`。
+
+验证：`/api/policy` 规则 13 条、DB `policy_rules` 13 行；下一条 access 日志应出现
+`basis=...rule:admin-account-write-group` 且不再开票。
