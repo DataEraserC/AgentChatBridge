@@ -74,8 +74,9 @@ NODE=${ACB_NODE_BIN:-}
 [[ -x $NODE ]] || fail "找不到 node（用 ACB_NODE_BIN 指定）"
 
 ACBCTL=${ACBCTL_BIN:-}
-[[ -n $ACBCTL ]] || ACBCTL=$(command -v acbctl || true)
-[[ -n $ACBCTL && -x $ACBCTL ]] || ACBCTL=$PREFIX/bin/acbctl
+# 优先用**本次启动的 payload**里的 acbctl：PATH 上的可能是旧代（只认旧 schema）。
+[[ -n $ACBCTL ]] || ACBCTL=$PREFIX/bin/acbctl
+[[ -n $ACBCTL && -x $ACBCTL ]] || ACBCTL=$(command -v acbctl || true)
 [[ -x $ACBCTL ]] || fail "找不到 acbctl（用 ACBCTL_BIN 指定）"
 
 CONFIG=${ACB_CONFIG_FILE:-$ACB_DATA/config/config.toml}

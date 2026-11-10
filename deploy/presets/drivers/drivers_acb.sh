@@ -46,8 +46,9 @@ DRIVER=${ACB_DRIVER_SCRIPT:-}
 [[ -f $DRIVER ]] || fail "找不到 driver.mjs：$DRIVER"
 
 ACBCTL=${ACBCTL_BIN:-}
-[[ -n $ACBCTL ]] || ACBCTL=$(command -v acbctl || true)
-[[ -n $ACBCTL && -x $ACBCTL ]] || ACBCTL=$PREFIX/bin/acbctl
+# 优先用**本次启动的 payload**里的 acbctl：PATH 上的可能是旧代（只认旧 schema）。
+[[ -n $ACBCTL ]] || ACBCTL=$PREFIX/bin/acbctl
+[[ -n $ACBCTL && -x $ACBCTL ]] || ACBCTL=$(command -v acbctl || true)
 [[ -x $ACBCTL ]] || fail "找不到 acbctl（用 ACBCTL_BIN 指定）"
 
 [[ -f $CONFIG ]] || fail "找不到 kernel 配置（用 ACB_CONFIG_FILE 指定）：$CONFIG"
