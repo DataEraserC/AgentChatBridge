@@ -7,13 +7,15 @@
 # 仓库在持久子卷；日志写到仓库 state/logs/，不再用 ~/qqab-scratch。
 #
 # 用法：deploy/acb-up.sh
-# 密钥：桥自己消费的来源写在 config.toml 的 [secrets]；dsh/opencode 的 key 仍走各自环境。
+# 密钥：桥自己消费的来源写在运行配置（ACB_CONFIG_FILE 或 $ACB_DATA/config/config.toml）的 [secrets]；dsh/opencode 的 key 仍走各自环境。
 set -uo pipefail
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
+ACB_DATA=${ACB_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/acb}
+CONFIG=${ACB_CONFIG_FILE:-$ACB_DATA/config/config.toml}
 LOGDIR=${ACB_LOG_DIR:-$REPO/state/logs}
 UNITDIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 BRIDGE=$REPO/result/bin/acb-bridge
@@ -28,7 +30,7 @@ fail() { echo "✗ $*" >&2; exit 1; }
 
 [[ -x $BRIDGE ]] || fail "没有 $BRIDGE，先跑：nix build .#acb-bridge"
 [[ -f $REPO/harnesses/dsh/dsh-mcp.patch.yml ]] || fail "没有 dsh-mcp.patch.yml"
-[[ -f $REPO/config.toml ]] || fail "没有 $REPO/config.toml"
+[[ -f $CONFIG ]] || fail "没有 $CONFIG（用 ACB_CONFIG_FILE 指定运行配置）"
 [[ -f $HERE/start-dsh.sh ]] || fail "没有 deploy/start-dsh.sh"
 [[ -f $HERE/start-drivers.sh ]] || fail "没有 deploy/start-drivers.sh"
 [[ -f $HERE/opencode-serve.sh ]] || fail "没有 deploy/opencode-serve.sh"
@@ -105,7 +107,7 @@ token_line=$(grep -o 'http://127\.0\.0\.1:3080/?token=[A-Za-z0-9_-]*' "$LOGDIR/d
 [[ -n $token_line ]] && echo "dsh UI： $token_line"
 
 echo -n "桥自述： "
-curl -s --max-time 5 -H "Authorization: Bearer $("$ACBCTL" secrets resolve --console --config "$REPO/config.toml" 2>/dev/null)" \
+curl -s --max-time 5 -H "Authorization: Bearer $("$ACBCTL" secrets resolve --console --config "$CONFIG" 2>/dev/null)" \
   http://127.0.0.1:3100/api/status || echo "（取不到，看日志）"
 echo
 echo "日志目录：$LOGDIR"

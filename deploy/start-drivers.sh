@@ -10,7 +10,8 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
-CONFIG=$REPO/config.toml
+ACB_DATA=${ACB_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/acb}
+CONFIG=${ACB_CONFIG_FILE:-$ACB_DATA/config/config.toml}
 DRIVER=$REPO/harnesses/dsh/src/driver.mjs
 PATCH=$REPO/harnesses/dsh/dsh-mcp.patch.yml
 

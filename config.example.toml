@@ -1,4 +1,8 @@
-# 桥的示例配置。字段语义见 docs/adr/0017-multi-agent-model.md 与 docs/adr/0002-subscription-model.md。
+# 桥的示例配置。
+# 注意：业务对象（连接/人格/记忆/harness/会话/权限）自 schema 15 起以数据库为唯一来源；
+# 这份文件只描述形状，照抄不会生效。真机运行配置只保留启动必需段。
+#
+# 字段语义见 docs/adr/0017-multi-agent-model.md 与 docs/adr/0002-subscription-model.md。
 #
 # 五个一等对象，从下往上（ADR-0017）：
 #   连接   = 一条通到平台的管道（适配器 + 连接方式 + 地址 + 登录账号）。一个账号一条，

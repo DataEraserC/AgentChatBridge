@@ -310,6 +310,7 @@ stage_guards() {
     if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then leaked="$leaked $f"; fi
   done
   if git ls-files -- 'state/*' | grep -q .; then leaked="$leaked state/"; fi
+  if git ls-files -- 'config.deprecated/*' | grep -q .; then leaked="$leaked config.deprecated/"; fi
   if [ -n "$leaked" ]; then
     problems+=("本机文件被 git 跟踪：$leaked")
   else
