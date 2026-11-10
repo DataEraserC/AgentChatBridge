@@ -589,7 +589,11 @@ impl<S: Store + Send + 'static> Console<S> {
     /// 「为什么这条规则不生效」就变成了猜谜。
     fn policy_view(&self) -> (u16, String) {
         let bridge = lock(&self.bridge);
-        let grants = &bridge.config().grants;
+        let mut grants = bridge.config().grants.clone();
+        // 内置角色只做展示/迁移；库里还没有角色时先把它们端出来，避免页面空白。
+        if grants.roles.is_empty() {
+            grants.roles = acb_kernel::grants::builtin_roles();
+        }
         (
             200,
             json!({

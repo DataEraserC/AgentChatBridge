@@ -437,6 +437,52 @@ pub struct PolicyAssignment {
     pub needs_review: bool,
 }
 
+/// 内置角色的展示定义。求值仍走 floor；它们只让控制台能看懂「系统里本来有哪几类主体」。
+pub fn builtin_roles() -> Vec<PolicyRole> {
+    vec![
+        PolicyRole {
+            id: "builtin-system".to_owned(),
+            name: "system".to_owned(),
+            description: "桥自身/无人类发送者".to_owned(),
+            builtin: true,
+            capabilities: vec![GrantCapability::RoomRead, GrantCapability::RoomWrite],
+        },
+        PolicyRole {
+            id: "builtin-system-admin".to_owned(),
+            name: "system_admin".to_owned(),
+            description: "最高权限持有者".to_owned(),
+            builtin: true,
+            capabilities: vec![
+                GrantCapability::RoomRead,
+                GrantCapability::RoomWrite,
+                GrantCapability::ConnectionRead,
+                GrantCapability::AccessApprove,
+                GrantCapability::AccessRequest,
+            ],
+        },
+        PolicyRole {
+            id: "builtin-bot-admin".to_owned(),
+            name: "bot_admin".to_owned(),
+            description: "机器人管理员".to_owned(),
+            builtin: true,
+            capabilities: vec![
+                GrantCapability::RoomRead,
+                GrantCapability::RoomWrite,
+                GrantCapability::ConnectionRead,
+                GrantCapability::AccessApprove,
+                GrantCapability::AccessRequest,
+            ],
+        },
+        PolicyRole {
+            id: "builtin-user".to_owned(),
+            name: "user".to_owned(),
+            description: "普通用户".to_owned(),
+            builtin: true,
+            capabilities: vec![GrantCapability::RoomRead, GrantCapability::RoomWrite],
+        },
+    ]
+}
+
 /// 一次判定里的主体上下文。用于把 `account` / `member` 指派匹配到具体的人。
 #[derive(Debug, Clone, Copy)]
 pub struct Actor<'a> {

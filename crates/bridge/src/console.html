@@ -937,6 +937,9 @@ async function loadPolicy() {
   const accounts = Object.entries(g.accounts || {});
   const rules = (g.rules || []).map((x) => ({ ...x, effect: "allow" }))
     .concat((g.deny || []).map((x) => ({ ...x, effect: "deny" })));
+  const roles = g.roles || [];
+  const assignments = g.assignments || [];
+  const roleName = (id) => (roles.find((role) => role.id === id)?.name) || id;
 
   const routeText = (v) => (v && v.length)
     ? v.map(esc).join("<br>")
@@ -962,6 +965,19 @@ async function loadPolicy() {
     <td>${esc(rule.subject)}</td><td>${esc(rule.place)}</td><td>${esc(rule.scope)}</td>
     <td class="wrap">${(rule.capability || []).map(esc).join(", ")}</td>
     <td><button class="mini" onclick="editRule('${rule.effect}','${esc(rule.id)}')">编辑</button><button class="mini danger" onclick="delRule('${rule.effect}','${esc(rule.id)}')">删</button></td>
+  </tr>`).join("");
+
+  const roleRows = roles.map((role) => `<tr>
+    <td>${esc(role.id)}</td><td>${esc(role.name)}</td>
+    <td class="wrap">${(role.capabilities || []).map(esc).join(", ")}</td>
+    <td>${role.builtin ? '<span class="muted">内置</span>' : ""}</td>
+    <td><button class="mini" onclick="editRole('${esc(role.id)}')">编辑</button><button class="mini danger" onclick="delRole('${esc(role.id)}')"${role.builtin ? " disabled" : ""}>删</button></td>
+  </tr>`).join("");
+  const assignmentRows = assignments.map((a) => `<tr>
+    <td>${esc(a.id)}</td><td>${esc(a.subject_kind)}</td><td class="wrap">${esc(a.subject_id)}</td>
+    <td>${esc(roleName(a.role_id))}</td><td>${esc(a.scope_kind)}</td><td class="wrap">${esc(a.scope_id || "—")}</td>
+    <td>${a.needs_review ? '<span class="err">待复核</span>' : ""}</td>
+    <td><button class="mini" onclick="editAssignment('${esc(a.id)}')">编辑</button><button class="mini danger" onclick="delAssignment('${esc(a.id)}')">删</button></td>
   </tr>`).join("");
 
   const pending = r.pending_reload
@@ -994,6 +1010,18 @@ async function loadPolicy() {
       <thead><tr><th>效果</th><th>id</th><th>主体</th><th>场所</th><th>范围</th><th>能力</th><th></th></tr></thead>
       <tbody>${ruleRows || '<tr><td colspan="7" class="muted">无</td></tr>'}</tbody></table></div>
     <p><button class="mini" onclick="addRule('deny')">+ deny 规则</button></p></div>`;
+
+  $("#policy").innerHTML += `
+  <div class="card"><h2>角色<button class="mini" onclick="addRole()" style="float:right">+ 新角色</button></h2>
+    <p class="muted">角色是一组固定能力的集合；指派时存能力快照，角色日后扩容不会追认旧指派。内置角色只用于展示/迁移，求值仍走 floor。</p>
+    <div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>id</th><th>名称</th><th>能力</th><th>来源</th><th></th></tr></thead>
+      <tbody>${roleRows || '<tr><td colspan="5" class="muted">还没有角色</td></tr>'}</tbody></table></div></div>
+  <div class="card"><h2>指派<button class="mini" onclick="addAssignment()" style="float:right">+ 新指派</button></h2>
+    <p class="muted">按主体（固定主体 / 账号 / 成员）和范围（全局 / 连接 / 房间）授予角色。票据审批要求审批人同时具备 access_approve 和票据申请的能力。</p>
+    <div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>id</th><th>主体种类</th><th>主体</th><th>角色</th><th>范围</th><th>范围 id</th><th>状态</th><th></th></tr></thead>
+      <tbody>${assignmentRows || '<tr><td colspan="8" class="muted">还没有指派</td></tr>'}</tbody></table></div></div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,7 +1207,7 @@ function editAdmins() {
 const RULE_SUBJECTS = [["system", "system"], ["system_admin", "system_admin"], ["bot_admin", "bot_admin"], ["user", "user"]];
 const RULE_PLACES = [["private", "private（私信）"], ["group", "group（群）"], ["console", "console"], ["none", "none"]];
 const RULE_SCOPES = [["subscribed", "subscribed"], ["room", "room"], ["connection", "connection"], ["platform_op", "platform_op"]];
-const RULE_CAPS = ["room_read", "room_write", "connection_read", "platform", "destructive", "critical", "account_read", "account_secret", "access_request", "plugin"];
+const RULE_CAPS = ["room_read", "room_write", "connection_read", "platform", "destructive", "critical", "account_read", "account_secret", "access_request", "plugin", "access_approve", "config_read", "config_write", "policy_write", "plugin_admin"];
 const selectOf = (id, pairs, value) => `<select id="${id}">${pairs.map(([v, label]) =>
   `<option value="${esc(v)}"${v === value ? " selected" : ""}>${esc(label)}</option>`).join("")}</select>`;
 
@@ -1246,6 +1274,119 @@ async function delRule(effect, id) {
   const next = policyDraft();
   const field = effect === "deny" ? "deny" : "rules";
   next[field] = (next[field] || []).filter((r) => r.id !== id);
+  await savePolicy(next);
+}
+
+// ---------------------------------------------------------------------------
+// 角色与指派（schema 16）
+// ---------------------------------------------------------------------------
+
+const ROLE_CAPS = RULE_CAPS.filter((cap) => cap !== "account_secret");
+const ASSIGN_SUBJECTS = [["subject", "固定主体"], ["account", "账号"], ["member", "群成员"]];
+const ASSIGN_SCOPES = [["global", "global"], ["connection", "connection"], ["room", "room"]];
+
+function editRole(id) {
+  const current = (policyCache?.grants?.roles || []).find((role) => role.id === id) || {
+    id, name: id, description: "", capabilities: [],
+  };
+  formFrame(`角色：${esc(id)}`, `
+    <div class="form-row"><label>名称</label><input type="text" id="ro-name" value="${esc(current.name)}" style="max-width:320px"></div>
+    <div class="form-row"><label>说明</label><input type="text" id="ro-desc" value="${esc(current.description || "")}" style="max-width:420px"></div>
+    <div class="form-row"><label>能力</label><input type="text" id="ro-caps" value="${esc((current.capabilities || []).join(", "))}" placeholder="room_read, room_write, access_approve" style="max-width:520px">
+      <span class="hint">可选：${ROLE_CAPS.join(" / ")}；account_secret 只能走票据，不能放进角色</span></div>`,
+    async () => {
+      const name = document.getElementById("ro-name").value.trim();
+      if (!name) { showFormError("角色名称不能为空"); return false; }
+      const caps = csv(document.getElementById("ro-caps").value);
+      if (!caps.length) { showFormError("角色至少需要一个能力"); return false; }
+      const bad = caps.filter((cap) => !ROLE_CAPS.includes(cap));
+      if (bad.length) { showFormError("不认识或不允许的能力：" + bad.join(", ")); return false; }
+      const next = policyDraft();
+      next.roles = next.roles || [];
+      next.roles = next.roles.filter((role) => role.id !== id);
+      next.roles.push({
+        id, name,
+        description: document.getElementById("ro-desc").value.trim(),
+        builtin: false,
+        capabilities: caps,
+      });
+      return savePolicy(next);
+    });
+}
+
+function addRole() {
+  const roles = policyCache?.grants?.roles || [];
+  let n = roles.length + 1;
+  while (roles.some((role) => role.id === `role-${n}`)) n += 1;
+  const id = `role-${n}`;
+  const next = policyDraft();
+  next.roles = next.roles || [];
+  next.roles.push({ id, name: id, description: "", builtin: false, capabilities: ["room_read"] });
+  savePolicy(next).then((ok) => { if (ok) editRole(id); });
+}
+
+async function delRole(id) {
+  const used = (policyCache?.grants?.assignments || []).filter((a) => a.role_id === id);
+  if (used.length) { alert(`还有 ${used.length} 条指派引用这个角色，先删指派。`); return; }
+  if (!confirm(`删除角色「${id}」？`)) return;
+  const next = policyDraft();
+  next.roles = (next.roles || []).filter((role) => role.id !== id);
+  await savePolicy(next);
+}
+
+function editAssignment(id) {
+  const current = (policyCache?.grants?.assignments || []).find((a) => a.id === id) || {
+    id, subject_kind: "account", subject_id: "", role_id: "", scope_kind: "connection", scope_id: "",
+  };
+  const roles = policyCache?.grants?.roles || [];
+  formFrame(`指派：${esc(id)}`, `
+    <div class="form-row"><label>主体种类</label>${selectOf("as-kind", ASSIGN_SUBJECTS, current.subject_kind)}</div>
+    <div class="form-row"><label>主体</label><input type="text" id="as-subject" value="${esc(current.subject_id)}" placeholder="qq:323622442 或 qq:group/1#12345" style="max-width:420px">
+      <span class="hint">account 写 连接:账号；member 写 连接:房间#成员；subject 写 system_admin 等固定名</span></div>
+    <div class="form-row"><label>角色</label><select id="as-role">${roles.map((role) => `<option value="${esc(role.id)}"${role.id === current.role_id ? " selected" : ""}>${esc(role.name)}</option>`).join("")}</select></div>
+    <div class="form-row"><label>范围</label>${selectOf("as-scope", ASSIGN_SCOPES, current.scope_kind)}</div>
+    <div class="form-row"><label>范围 id</label><input type="text" id="as-scope-id" value="${esc(current.scope_id || "")}" placeholder="global 留空；connection 写 qq；room 写 qq:group/1" style="max-width:420px"></div>`,
+    async () => {
+      const subject = document.getElementById("as-subject").value.trim();
+      const roleId = document.getElementById("as-role").value;
+      const role = roles.find((item) => item.id === roleId);
+      if (!subject) { showFormError("主体不能为空"); return false; }
+      if (!role) { showFormError("先选一个角色"); return false; }
+      const scope = document.getElementById("as-scope").value;
+      const scopeId = document.getElementById("as-scope-id").value.trim();
+      if (scope !== "global" && !scopeId) { showFormError("这个范围需要 scope id"); return false; }
+      const next = policyDraft();
+      next.assignments = next.assignments || [];
+      next.assignments = next.assignments.filter((a) => a.id !== id);
+      next.assignments.push({
+        id,
+        subject_kind: document.getElementById("as-kind").value,
+        subject_id: subject,
+        role_id: roleId,
+        scope_kind: scope,
+        scope_id: scope === "global" ? null : scopeId,
+        capability_snapshot: [...role.capabilities],
+        role_snapshot: { id: role.id, name: role.name, capabilities: [...role.capabilities] },
+        needs_review: false,
+      });
+      return savePolicy(next);
+    });
+}
+
+function addAssignment() {
+  const roles = policyCache?.grants?.roles || [];
+  if (!roles.length) { alert("先建一个角色。"); return; }
+  const assignments = policyCache?.grants?.assignments || [];
+  let n = assignments.length + 1;
+  while (assignments.some((a) => a.id === `assign-${n}`)) n += 1;
+  const id = `assign-${n}`;
+  editAssignment(id);
+}
+
+async function delAssignment(id) {
+  if (!confirm(`删除指派「${id}」？`)) return;
+  const next = policyDraft();
+  next.assignments = (next.assignments || []).filter((a) => a.id !== id);
   await savePolicy(next);
 }
 
