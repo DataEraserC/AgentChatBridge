@@ -858,6 +858,32 @@ pub trait PluginsStore {
     ) -> Result<bool, StorageError>;
 }
 
+/// 一条授权/配置写入审计。先落盘再执行：事故时能回答「谁在什么时候、
+/// 依据哪条规则、改了什么」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEntry {
+    pub at: i64,
+    pub session: Option<String>,
+    pub subject: String,
+    pub place: String,
+    pub capability: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub decision: String,
+    pub basis: String,
+    pub policy_version: i64,
+    pub approver: Option<String>,
+    pub request_id: Option<String>,
+}
+
+pub trait AuditStore {
+    /// 写一行。写失败必须让调用方知道——静默丢审计比拒绝执行更糟。
+    fn audit_put(&mut self, entry: &AuditEntry) -> Result<(), StorageError>;
+
+    /// 最近 N 行，按时间倒序。控制台/诊断用。
+    fn audit_recent(&self, limit: usize) -> Result<Vec<AuditEntry>, StorageError>;
+}
+
 /// 插件数据：配置项、通用资源记录、密钥引用。
 ///
 /// 这是 L1 的落点：插件把「自己的配置」交给桥存，桥按 manifest 校验；资源记录
@@ -941,6 +967,7 @@ pub trait Store:
     + SettingsStore
     + PluginsStore
     + PluginDataStore
+    + AuditStore
 {
 }
 
@@ -959,6 +986,7 @@ impl<T> Store for T where
         + SettingsStore
         + PluginsStore
         + PluginDataStore
+        + AuditStore
 {
 }
 
@@ -1004,6 +1032,8 @@ pub struct MemoryStore {
     plugin_records: BTreeMap<(String, String, String), serde_json::Value>,
     /// 插件密钥引用：(plugin_id, name) → secret id。
     plugin_secret_refs: BTreeMap<(String, String), i64>,
+    /// 授权/配置写入审计，按写入顺序。
+    audit: Vec<AuditEntry>,
 }
 
 impl MemoryStore {
@@ -1689,6 +1719,17 @@ impl SettingsStore for MemoryStore {
 
     fn settings_delete(&mut self, key: &str) -> Result<bool, StorageError> {
         Ok(self.settings.remove(key).is_some())
+    }
+}
+
+impl AuditStore for MemoryStore {
+    fn audit_put(&mut self, entry: &AuditEntry) -> Result<(), StorageError> {
+        self.audit.push(entry.clone());
+        Ok(())
+    }
+
+    fn audit_recent(&self, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
+        Ok(self.audit.iter().rev().take(limit).cloned().collect())
     }
 }
 

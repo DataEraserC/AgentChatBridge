@@ -15,11 +15,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ConfigObjectsStore, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply,
-    Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind, Notes, PluginDataStore,
-    PluginsStore, Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded, SecretsStore,
-    SessionMap, SessionMaps, SettingsStore, StorageError, StoredPluginConfig, StoredPluginRecord,
-    StoredSecret, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript, Watermarks,
+    AuditEntry, AuditStore, ConfigObjectsStore, Cursor, Deliveries, FEEDBACK_CAP, Feedback,
+    FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind,
+    Notes, PluginDataStore, PluginsStore, Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded,
+    SecretsStore, SessionMap, SessionMaps, SettingsStore, StorageError, StoredPluginConfig,
+    StoredPluginRecord, StoredSecret, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript,
+    Watermarks,
 };
 use crate::config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 use crate::grants::{
@@ -3493,6 +3494,68 @@ impl PluginDataStore for SqliteStore {
                 row.get::<_, String>(0).map_err(io_error)?,
                 row.get::<_, i64>(1).map_err(io_error)?,
             ));
+        }
+        Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 授权/配置写入审计（schema 16）
+// ---------------------------------------------------------------------------
+
+impl AuditStore for SqliteStore {
+    fn audit_put(&mut self, entry: &AuditEntry) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                "INSERT INTO policy_audit (
+                    at, session, subject, place, capability, target_kind, target_id,
+                    decision, basis, policy_version, approver, request_id
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    entry.at,
+                    entry.session,
+                    entry.subject,
+                    entry.place,
+                    entry.capability,
+                    entry.target_kind,
+                    entry.target_id,
+                    entry.decision,
+                    entry.basis,
+                    entry.policy_version,
+                    entry.approver,
+                    entry.request_id,
+                ],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+
+    fn audit_recent(&self, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT at, session, subject, place, capability, target_kind, target_id,
+                        decision, basis, policy_version, approver, request_id
+                 FROM policy_audit ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(io_error)?;
+        let mut rows = stmt.query(params![limit as i64]).map_err(io_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(io_error)? {
+            out.push(AuditEntry {
+                at: row.get(0).map_err(io_error)?,
+                session: row.get(1).map_err(io_error)?,
+                subject: row.get(2).map_err(io_error)?,
+                place: row.get(3).map_err(io_error)?,
+                capability: row.get(4).map_err(io_error)?,
+                target_kind: row.get(5).map_err(io_error)?,
+                target_id: row.get(6).map_err(io_error)?,
+                decision: row.get(7).map_err(io_error)?,
+                basis: row.get(8).map_err(io_error)?,
+                policy_version: row.get(9).map_err(io_error)?,
+                approver: row.get(10).map_err(io_error)?,
+                request_id: row.get(11).map_err(io_error)?,
+            });
         }
         Ok(out)
     }
