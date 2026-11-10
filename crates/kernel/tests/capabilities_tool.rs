@@ -17,10 +17,12 @@ const AT: i64 = 1_793_000_000_000;
 
 /// `capabilities scope=surface` 是每轮都要拉的内部视图。修改工具目录或
 /// purpose 文案时，回到这里确认没把每轮成本推上去。
-const SURFACE_BYTE_BUDGET: usize = 2048;
+// 管理面工具（config/policy/plugin_config/plugin_action）让目录多出约 150 字节。
+// 预算从 2048 提到 2560：surface 仍远小于一次投递的正文，且新增工具必须能被发现。
+const SURFACE_BYTE_BUDGET: usize = 2560;
 
 /// 加 `view` 之前的 surface 输出，逐字节锁住默认行为。
-const LEGACY_SURFACE: &str = r#"{"catalog":[{"purpose":"翻房间历史记录，补齐上下文","tool":"get_history"},{"purpose":"按水位编号精确回看记录","tool":"fetch_records"},{"purpose":"阻塞等同房间下一条消息","tool":"wait_message"},{"purpose":"房间共享笔记（list/set/del）","tool":"notes"},{"purpose":"查最近平台事件","tool":"get_platform_events"},{"purpose":"看本会话的策略 provider","tool":"describe_plugins"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_list"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_read"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_write"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_reload"},{"purpose":"查后台任务（list/get/wait）","tool":"tasks"},{"purpose":"记录卡点反馈","tool":"report_feedback"},{"purpose":"查反馈记录（list/get）","tool":"feedback"},{"purpose":"回复反馈","tool":"feedback_reply"},{"purpose":"列插件工具","tool":"plugin_tools"},{"purpose":"调用插件工具","tool":"plugin_tool_call"},{"purpose":"读记忆文件","tool":"memory_read"},{"purpose":"写记忆文件","tool":"memory_write"},{"purpose":"列记忆目录","tool":"memory_list"},{"purpose":"搜记忆文本","tool":"memory_search"},{"purpose":"记忆 git（status/log/diff/add/commit/push）","tool":"memory_git"}],"counts":{"catalog":21,"hidden":6,"resident":8,"tools_total":29,"visible":23},"place":"group","resident":["send_message","send_message_to","list_rooms","capabilities","platform_call","access_request","access_ticket_get","ack_messages"],"room":"qq:group/123","scope":"surface","session":"main","subject":"user"}"#;
+const LEGACY_SURFACE: &str = r#"{"catalog":[{"purpose":"翻房间历史记录，补齐上下文","tool":"get_history"},{"purpose":"按水位编号精确回看记录","tool":"fetch_records"},{"purpose":"阻塞等同房间下一条消息","tool":"wait_message"},{"purpose":"房间共享笔记（list/set/del）","tool":"notes"},{"purpose":"查最近平台事件","tool":"get_platform_events"},{"purpose":"看本会话的策略 provider","tool":"describe_plugins"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_list"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_read"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_write"},{"direct_executable":false,"reason":"admin_only","requestable":false,"ticket_required":false,"tool":"extensions_reload"},{"purpose":"查后台任务（list/get/wait）","tool":"tasks"},{"purpose":"记录卡点反馈","tool":"report_feedback"},{"purpose":"查反馈记录（list/get）","tool":"feedback"},{"purpose":"回复反馈","tool":"feedback_reply"},{"purpose":"列插件工具","tool":"plugin_tools"},{"purpose":"调用插件工具","tool":"plugin_tool_call"},{"purpose":"读记忆文件","tool":"memory_read"},{"purpose":"写记忆文件","tool":"memory_write"},{"purpose":"列记忆目录","tool":"memory_list"},{"purpose":"搜记忆文本","tool":"memory_search"},{"purpose":"记忆 git（status/log/diff/add/commit/push）","tool":"memory_git"},{"purpose":"读写连接/会话/人格/记忆/harness（get/list/set/delete）","tool":"config"},{"purpose":"读或整份替换授权策略（get/set）","tool":"policy"},{"purpose":"读写插件配置（get/set）","tool":"plugin_config"},{"purpose":"执行插件声明的动作","tool":"plugin_action"}],"counts":{"catalog":25,"hidden":6,"resident":8,"tools_total":33,"visible":27},"place":"group","resident":["send_message","send_message_to","list_rooms","capabilities","platform_call","access_request","access_ticket_get","ack_messages"],"room":"qq:group/123","scope":"surface","session":"main","subject":"user"}"#;
 
 type Sends = Arc<Mutex<Vec<(RoomId, String)>>>;
 
@@ -1087,7 +1089,7 @@ fn all_view_exposes_every_tool_including_filtered_ones() {
 
     assert_eq!(value["counts"]["tools_total"], TOOL_NAMES.len());
     assert_eq!(value["counts"]["resident"], RESIDENT_TOOLS.len());
-    assert_eq!(value["counts"]["visible"], 23);
+    assert_eq!(value["counts"]["visible"], 27);
     assert_eq!(value["counts"]["permission_hidden"], 4);
     assert!(
         value.to_string().len() <= 4096,

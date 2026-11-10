@@ -69,16 +69,17 @@ use crate::tickets::{
     MAX_REQUESTS_PER_TURN, PENDING_TTL_MS, TicketReply, TicketRequest, TicketState, UnverifiedOp,
 };
 use crate::tools::{
-    AccessRequestArgs, AccessTicketGetArgs, AckArgs, CapabilitiesArgs, DEFAULT_COLUMNS,
-    DEFAULT_PAGE_LIMIT, DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs, DescribePluginsArgs, EventsArgs,
-    ExtensionsListArgs, ExtensionsReadArgs, ExtensionsReloadArgs, ExtensionsWriteArgs,
+    AccessRequestArgs, AccessTicketGetArgs, AckArgs, CapabilitiesArgs, ConfigToolArgs,
+    DEFAULT_COLUMNS, DEFAULT_PAGE_LIMIT, DEFAULT_WAIT_TIMEOUT_MS, DelNoteArgs, DescribePluginsArgs,
+    EventsArgs, ExtensionsListArgs, ExtensionsReadArgs, ExtensionsReloadArgs, ExtensionsWriteArgs,
     FeedbackArgs, FeedbackGetArgs, FeedbackListArgs, FeedbackReplyArgs, FeedbackToolArgs,
     FetchRecordsArgs, HistoryArgs, MAX_PAGE_LIMIT, MAX_WAIT_TIMEOUT_MS, MemoryAddArgs, MemoryArgs,
     MemoryBlameArgs, MemoryCommitArgs, MemoryGitToolArgs, MemoryListArgs, MemoryLogArgs,
     MemorySearchArgs, MemoryWriteArgs, NotesArgs, NotesToolArgs, ON_DEMAND_TOOLS, PlatformCallArgs,
-    PlatformListArgs, PlatformToolArgs, PluginToolCallArgs, PluginToolScope, PluginToolsArgs,
-    RECORD_COLUMNS, RESIDENT_TOOLS, SendArgs, SendToArgs, SetNoteArgs, TOOL_NAMES, TasksToolArgs,
-    WaitMessageArgs, catalog_entry, is_known, is_on_demand, is_resident,
+    PlatformListArgs, PlatformToolArgs, PluginActionToolArgs, PluginConfigToolArgs,
+    PluginToolCallArgs, PluginToolScope, PluginToolsArgs, PolicyToolArgs, RECORD_COLUMNS,
+    RESIDENT_TOOLS, SendArgs, SendToArgs, SetNoteArgs, TOOL_NAMES, TasksToolArgs, WaitMessageArgs,
+    catalog_entry, is_known, is_on_demand, is_resident,
 };
 
 /// 一轮最多投多少条。剩下的下一轮再投，免得一次塞爆上下文。
@@ -629,6 +630,8 @@ pub struct Bridge<S: Store> {
     by_ticket: HashMap<Ticket, String>,
     /// 一次性访问票据簿。只活在本进程；重启后 pending/active 全部失效。
     access_tickets: AccessTickets,
+    /// 插件动作执行器；main 装完 provider 之后注入，空表 = 没有可执行动作的插件。
+    action_runners: Vec<std::sync::Arc<dyn crate::plugin_action::PluginActionRunner>>,
     /// 刚收工的轮次。留 [`TURN_GRACE`]：补确认、写反馈还要用到票上的会话与房间。
     ended: HashMap<Ticket, EndedTurn>,
     ticket_seq: u64,
@@ -937,6 +940,7 @@ impl<S: Store> Bridge<S> {
             active: HashMap::new(),
             by_ticket: HashMap::new(),
             access_tickets: AccessTickets::new(),
+            action_runners: Vec::new(),
             ended: HashMap::new(),
             ticket_seq: 0,
             ticket_prefix: ticket_prefix(),
@@ -5305,6 +5309,23 @@ impl<S: Store> Bridge<S> {
                     )),
                 }
             }
+            // 管理面：不设身份分支，全部经 management_gate 问 Policy 并写审计。
+            "config" => {
+                let parsed: ConfigToolArgs = parse(args)?;
+                self.manage_config(&ctx, parsed)
+            }
+            "policy" => {
+                let parsed: PolicyToolArgs = parse(args)?;
+                self.manage_policy(&ctx, parsed)
+            }
+            "plugin_config" => {
+                let parsed: PluginConfigToolArgs = parse(args)?;
+                self.manage_plugin_config(&ctx, parsed)
+            }
+            "plugin_action" => {
+                let parsed: PluginActionToolArgs = parse(args)?;
+                self.manage_plugin_action(&ctx, parsed)
+            }
             other => Err(ToolError::new(
                 ErrorCode::ToolNotAllowed,
                 acb_i18n::t!("kernel.engine.unknown_tool", tool = other),
@@ -8233,6 +8254,286 @@ impl<S: Store> Bridge<S> {
             "{}",
             decision.audit_line(subject, place, capability, &target.display(), session)
         );
+    }
+
+    /// 管理面统一闸门：先问 Policy，审计落盘，再执行。
+    ///
+    /// 不写任何身份分支——`config_*` 在 core 里没有 floor，能不能写完全由策略数据决定。
+    /// 审计写失败就不执行：宁可拒绝，也不留一条查不到来源的配置变更。
+    fn management_gate(
+        &mut self,
+        ctx: &TurnCtx,
+        capability: GrantCapability,
+        target: &AccessTarget,
+    ) -> Result<(), ToolError> {
+        let subject = ctx
+            .config
+            .grants
+            .subject_for(&ctx.room.connection, ctx.origin_sender.as_deref());
+        let place = self.room_place(&ctx.room, ctx.origin_sender.is_some());
+        let actor = crate::grants::Actor {
+            connection: &ctx.room.connection,
+            account: ctx.origin_sender.as_deref(),
+            room: Some(&ctx.room),
+            member: ctx.origin_sender.as_deref(),
+        };
+        let subscriptions: Vec<RoomId> = Vec::new();
+        let query = crate::grants::GrantQuery {
+            subject,
+            place,
+            capability,
+            actor: Some(&actor),
+            target,
+            subscriptions: &subscriptions,
+            origin: Some(&ctx.room),
+            platform_op: None,
+            policy_version: self.config_version as i64,
+            grants: &ctx.config.grants,
+        };
+        let decision = policy_decision(self.policy.as_ref(), &query);
+        self.write_management_audit(ctx, subject, place, capability, target, &decision)?;
+        if decision.allow {
+            Ok(())
+        } else {
+            Err(ToolError::new(
+                ErrorCode::ToolNotAllowed,
+                format!(
+                    "{} denied ({}): {}；需要显式授予该能力或走票据",
+                    capability.as_str(),
+                    decision.basis,
+                    decision.reason
+                ),
+            ))
+        }
+    }
+
+    fn write_management_audit(
+        &mut self,
+        ctx: &TurnCtx,
+        subject: GrantSubject,
+        place: Place,
+        capability: GrantCapability,
+        target: &AccessTarget,
+        decision: &GrantDecision,
+    ) -> Result<(), ToolError> {
+        let entry = crate::storage::AuditEntry {
+            at: now_millis(),
+            session: Some(ctx.session.clone()),
+            subject: subject.as_str().to_owned(),
+            place: place.as_str().to_owned(),
+            capability: capability.as_str().to_owned(),
+            target_kind: target.kind.as_str().to_owned(),
+            target_id: target.id.clone(),
+            decision: if decision.allow { "allow" } else { "deny" }.to_owned(),
+            basis: decision.basis.clone(),
+            policy_version: decision.policy_version,
+            approver: ctx.origin_sender.clone(),
+            request_id: None,
+        };
+        self.audit_grant(&ctx.session, subject, place, capability, target, decision);
+        self.store.audit_put(&entry).map_err(|error| {
+            ToolError::new(ErrorCode::Internal, format!("audit write failed: {error}"))
+        })
+    }
+
+    /// `config` 工具：业务对象的读写删。`value` 必须是这一条对象的 TOML 原文。
+    fn manage_config(
+        &mut self,
+        ctx: &TurnCtx,
+        args: crate::tools::ConfigToolArgs,
+    ) -> Result<Value, ToolError> {
+        let kind = match &args.section {
+            Some(section) => crate::config_objects::ConfigObjectKind::parse(section)
+                .ok_or_else(|| bad_request(format!("unknown section: {section}")))?,
+            None => {
+                return Err(bad_request(
+                    "section is required (connection/session/persona/memory/harness)".to_owned(),
+                ));
+            }
+        };
+        let target = AccessTarget::connection(&ctx.room.connection);
+        match args.action.as_str() {
+            "list" => {
+                self.management_gate(ctx, GrantCapability::ConfigRead, &target)?;
+                let objects = self
+                    .store
+                    .config_objects_load()
+                    .map_err(|error| internal(error.to_string()))?
+                    .unwrap_or_default();
+                Ok(json!({
+                    "section": kind.as_str(),
+                    "items": objects.get(kind).iter().map(|object| json!({
+                        "id": object.id,
+                        "toml": object.toml,
+                    })).collect::<Vec<_>>(),
+                }))
+            }
+            "get" => {
+                self.management_gate(ctx, GrantCapability::ConfigRead, &target)?;
+                let id = args
+                    .id
+                    .as_deref()
+                    .ok_or_else(|| bad_request("id is required".to_owned()))?;
+                let objects = self
+                    .store
+                    .config_objects_load()
+                    .map_err(|error| internal(error.to_string()))?
+                    .unwrap_or_default();
+                let object = objects
+                    .get(kind)
+                    .iter()
+                    .find(|object| object.id == id)
+                    .ok_or_else(|| bad_request(format!("{} {id} not found", kind.as_str())))?;
+                Ok(json!({"id": object.id, "toml": object.toml}))
+            }
+            "set" => {
+                self.management_gate(ctx, GrantCapability::ConfigWrite, &target)?;
+                let id = args
+                    .id
+                    .as_deref()
+                    .ok_or_else(|| bad_request("id is required".to_owned()))?;
+                let raw = args
+                    .value
+                    .as_deref()
+                    .ok_or_else(|| bad_request("value (TOML) is required".to_owned()))?;
+                let parsed: toml::Value = toml::from_str(raw)
+                    .map_err(|error| bad_request(format!("invalid TOML: {error}")))?;
+                let item = parsed
+                    .get(kind.toml_key())
+                    .and_then(|value| value.as_array())
+                    .and_then(|items| items.first())
+                    .cloned()
+                    .ok_or_else(|| {
+                        bad_request(format!(
+                            "value must contain a [[{}]] table",
+                            kind.toml_key()
+                        ))
+                    })?;
+                // 用和首次导入同一套渲染器：形状不对在这里就被拒。
+                let rendered = crate::config_objects::render_object(kind, &item)
+                    .map_err(|error| bad_request(error.to_string()))?;
+                if rendered.id != id {
+                    return Err(bad_request(format!(
+                        "value 里的 id 是 {}，和参数 id（{id}）不一致",
+                        rendered.id
+                    )));
+                }
+                let objects = self
+                    .store
+                    .config_objects_load()
+                    .map_err(|error| internal(error.to_string()))?
+                    .unwrap_or_default();
+                let position = objects
+                    .get(kind)
+                    .iter()
+                    .position(|object| object.id == id)
+                    .unwrap_or(objects.get(kind).len());
+                self.store
+                    .config_object_put(kind, id, &rendered.toml, position as i64, now_millis())
+                    .map_err(|error| internal(error.to_string()))?;
+                self.pending_policy_reload = true;
+                Ok(json!({"ok": true, "id": id, "section": kind.as_str()}))
+            }
+            "delete" => {
+                self.management_gate(ctx, GrantCapability::ConfigWrite, &target)?;
+                let id = args
+                    .id
+                    .as_deref()
+                    .ok_or_else(|| bad_request("id is required".to_owned()))?;
+                let removed = self
+                    .store
+                    .config_object_delete(kind, id)
+                    .map_err(|error| internal(error.to_string()))?;
+                self.pending_policy_reload = true;
+                Ok(json!({"ok": true, "removed": removed}))
+            }
+            other => Err(bad_request(format!("unknown config action: {other}"))),
+        }
+    }
+
+    fn manage_policy(
+        &mut self,
+        ctx: &TurnCtx,
+        args: crate::tools::PolicyToolArgs,
+    ) -> Result<Value, ToolError> {
+        let target = AccessTarget::connection(&ctx.room.connection);
+        match args.action.as_str() {
+            "get" => {
+                self.management_gate(ctx, GrantCapability::ConfigRead, &target)?;
+                Ok(serde_json::to_value(&ctx.config.grants).unwrap_or(Value::Null))
+            }
+            "set" => {
+                self.management_gate(ctx, GrantCapability::PolicyWrite, &target)?;
+                let raw = args
+                    .grants
+                    .ok_or_else(|| bad_request("grants is required".to_owned()))?;
+                let grants: crate::grants::GrantsConfig = serde_json::from_value(raw)
+                    .map_err(|error| bad_request(format!("invalid grants: {error}")))?;
+                self.replace_policy(&grants)
+                    .map_err(|error| bad_request(error))?;
+                Ok(json!({"ok": true}))
+            }
+            other => Err(bad_request(format!("unknown policy action: {other}"))),
+        }
+    }
+
+    fn manage_plugin_config(
+        &mut self,
+        ctx: &TurnCtx,
+        args: crate::tools::PluginConfigToolArgs,
+    ) -> Result<Value, ToolError> {
+        let target = AccessTarget::connection(&ctx.room.connection);
+        match args.action.as_str() {
+            "get" => {
+                self.management_gate(ctx, GrantCapability::ConfigRead, &target)?;
+                self.plugin_admin_view(&args.plugin)
+                    .map_err(|error| bad_request(error))
+            }
+            "set" => {
+                self.management_gate(ctx, GrantCapability::ConfigWrite, &target)?;
+                let config = args
+                    .config
+                    .ok_or_else(|| bad_request("config is required".to_owned()))?;
+                let written = self
+                    .plugin_set_config(&args.plugin, &config)
+                    .map_err(|error| bad_request(error))?;
+                Ok(json!({"ok": true, "written": written}))
+            }
+            other => Err(bad_request(format!(
+                "unknown plugin_config action: {other}"
+            ))),
+        }
+    }
+
+    fn manage_plugin_action(
+        &mut self,
+        ctx: &TurnCtx,
+        args: crate::tools::PluginActionToolArgs,
+    ) -> Result<Value, ToolError> {
+        let target = AccessTarget::connection(&ctx.room.connection);
+        self.management_gate(ctx, GrantCapability::PluginAdmin, &target)?;
+        let runner = self
+            .action_runners
+            .iter()
+            .find(|runner| runner.plugin_id() == args.plugin)
+            .cloned()
+            .ok_or_else(|| {
+                bad_request(format!(
+                    "plugin {} has no running action runner",
+                    args.plugin
+                ))
+            })?;
+        runner
+            .run(&args.action, args.args.unwrap_or_else(|| json!({})))
+            .map_err(|error| ToolError::new(ErrorCode::Internal, error))
+    }
+
+    /// 安装插件动作执行器（main 在装完 provider 之后调）。
+    pub fn set_plugin_actions(
+        &mut self,
+        runners: Vec<std::sync::Arc<dyn crate::plugin_action::PluginActionRunner>>,
+    ) {
+        self.action_runners = runners;
     }
 
     /// 能不能对 `room` 做 `action`。
@@ -12013,6 +12314,10 @@ fn clip_chars(text: &str, max: usize) -> String {
 
 fn internal(error: impl std::fmt::Display) -> ToolError {
     ToolError::new(ErrorCode::Internal, error.to_string())
+}
+
+fn bad_request(error: impl std::fmt::Display) -> ToolError {
+    ToolError::new(ErrorCode::BadRequest, error.to_string())
 }
 
 /// 把元素里的本机文件收进中继，换成平台取得到的 URL。返回 (原路径, URL) 列表。

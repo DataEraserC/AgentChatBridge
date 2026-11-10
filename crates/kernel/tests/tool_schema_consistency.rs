@@ -145,7 +145,7 @@ fn on_demand_names_match_the_shared_schema() {
     assert_eq!(kernel.len(), 2, "按需集合固定 2 个");
 }
 
-/// issue 工具只走 process-tools 插件面，不占 core 的 29 个工具位。
+/// issue 工具只走 process-tools 插件面，不占 core 的工具位。
 #[test]
 fn issue_tools_stay_off_the_core_tool_surface() {
     const ISSUE_TOOLS: [&str; 8] = [
@@ -159,14 +159,14 @@ fn issue_tools_stay_off_the_core_tool_surface() {
         "issue_my_work",
     ];
 
-    assert_eq!(TOOL_NAMES.len(), 29, "core 工具数固定 29");
+    assert_eq!(TOOL_NAMES.len(), 33, "core 工具数固定 33（含管理面 4 个）");
     let js = js_tool_names(&tools_mjs());
-    assert_eq!(js.len(), 29, "harness 共享工具面也只能是 29");
+    assert_eq!(js.len(), 33, "harness 共享工具面也要是 33");
 
     for name in ISSUE_TOOLS {
         assert!(
             !TOOL_NAMES.contains(&name),
-            "{name} 不能进 core TOOL_NAMES（29 + 8 会超过 30 上限）"
+            "{name} 不能进 core TOOL_NAMES（会挤占 core 工具位）"
         );
         assert!(!RESIDENT_TOOLS.contains(&name), "{name} 不能进常驻层");
         assert!(!ON_DEMAND_TOOLS.contains(&name), "{name} 不能进按需层");

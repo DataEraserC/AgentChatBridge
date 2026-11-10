@@ -54,6 +54,11 @@ pub const TOOL_NAMES: &[&str] = &[
     "memory_search",
     // 记忆：git 层。单入口，op = status / log / diff / blame / add / commit / push / branch。
     "memory_git",
+    // 管理面：不设身份分支，一律先问 Policy（config_read/config_write/policy_write/plugin_admin）。
+    "config",
+    "policy",
+    "plugin_config",
+    "plugin_action",
 ];
 
 /// 常驻工具：**显式白名单**，每条 harness 都永远注入这一层。
@@ -203,6 +208,26 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
         purpose: "记忆 git（status/log/diff/add/commit/push）",
         when: "提交/推送/看历史时",
     },
+    ToolCatalogEntry {
+        name: "config",
+        purpose: "读写连接/会话/人格/记忆/harness（get/list/set/delete）",
+        when: "被明确要求改桥配置、且持有 config_read/config_write 时",
+    },
+    ToolCatalogEntry {
+        name: "policy",
+        purpose: "读或整份替换授权策略（get/set）",
+        when: "被明确要求调整权限、且持有 policy_write 时",
+    },
+    ToolCatalogEntry {
+        name: "plugin_config",
+        purpose: "读写插件配置（get/set）",
+        when: "调整插件参数、且持有 config_write 时",
+    },
+    ToolCatalogEntry {
+        name: "plugin_action",
+        purpose: "执行插件声明的动作",
+        when: "插件提供动作、且持有 plugin_admin 时",
+    },
 ];
 
 /// 这个工具是否在常驻白名单里。
@@ -299,6 +324,51 @@ pub struct CapabilitiesArgs {
 #[derive(Debug, Deserialize)]
 pub struct AckArgs {
     pub ids: Vec<u64>,
+}
+
+/// 管理面：业务对象读写。`value` 是这一条的 TOML 原文。
+#[derive(Debug, Deserialize)]
+pub struct ConfigToolArgs {
+    /// get / list / set / delete
+    pub action: String,
+    /// connection / session / persona / memory / harness
+    #[serde(default)]
+    pub section: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    /// set 时必需：一条对象的 TOML，形如 `[[sessions]]\nid = "..."`。
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+/// 管理面：读或整份替换策略。
+#[derive(Debug, Deserialize)]
+pub struct PolicyToolArgs {
+    /// get / set
+    pub action: String,
+    /// set 时的整份 `[grants]` 形状。
+    #[serde(default)]
+    pub grants: Option<serde_json::Value>,
+}
+
+/// 管理面：插件配置。
+#[derive(Debug, Deserialize)]
+pub struct PluginConfigToolArgs {
+    /// get / set
+    pub action: String,
+    pub plugin: String,
+    /// set 时：要写的键值；只写提到的键。
+    #[serde(default)]
+    pub config: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// 管理面：执行插件动作。
+#[derive(Debug, Deserialize)]
+pub struct PluginActionToolArgs {
+    pub plugin: String,
+    pub action: String,
+    #[serde(default)]
+    pub args: Option<serde_json::Value>,
 }
 
 /// 查流水。

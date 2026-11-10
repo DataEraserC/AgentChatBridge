@@ -161,9 +161,12 @@ fn issue_tools_are_plugin_only_and_do_not_take_core_slots() {
             json!({"scope": "surface"}),
         )
         .expect("算 surface");
-    assert_eq!(surface["counts"]["tools_total"], 29, "core 工具数仍是 29");
+    assert_eq!(
+        surface["counts"]["tools_total"], 33,
+        "core 工具数含管理面 4 个"
+    );
     assert_eq!(surface["counts"]["resident"], 8, "常驻层仍是 8");
-    assert_eq!(surface["counts"]["catalog"], 21, "目录层仍是 21");
+    assert_eq!(surface["counts"]["catalog"], 25, "目录层含管理面 4 个");
 
     let resident: Vec<&str> = surface["resident"]
         .as_array()

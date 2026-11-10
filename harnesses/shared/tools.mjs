@@ -877,6 +877,69 @@ add 暂存改动（path 留空=全部）；commit 提交已暂存内容（要 me
       additionalProperties: false,
     },
   },
+  {
+    name: "config",
+    description: `读写桥的业务对象（连接/会话/人格/记忆/harness）。这不是普通工具：
+core 会按 config_read / config_write 判定，没有显式授予就拒绝（管理员也不例外），
+每次判定都写审计。value 必须是这一条对象的 TOML 原文，形如 [[sessions]] 开头的一段。`,
+    schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["get", "list", "set", "delete"] },
+        section: {
+          type: "string",
+          enum: ["connection", "session", "persona", "memory", "harness"],
+        },
+        id: { type: "string", description: "get/set/delete 必填：对象 id" },
+        value: { type: "string", description: "set 必填：这一条对象的 TOML 原文" },
+      },
+      required: ["action", "section"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "policy",
+    description: `读或整份替换授权策略。set 需要 policy_write；没有显式授予一律拒绝。
+改策略等于改所有人的权限，先把现状 get 出来，再整份交回。`,
+    schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["get", "set"] },
+        grants: { type: "object", description: "set 必填：整份 [grants] 形状" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "plugin_config",
+    description: `读写插件配置。值按插件 manifest 校验（类型/枚举/范围/密钥形态）；
+只写提交的键。get 返回 schema、生效值与缺失的必填项。`,
+    schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["get", "set"] },
+        plugin: { type: "string", description: "插件 id，如 demo.tools" },
+        config: { type: "object", description: "set 用：要写的键值" },
+      },
+      required: ["action", "plugin"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "plugin_action",
+    description: `执行插件 manifest 里声明的动作。需要 plugin_admin；动作失败会原样返回原因。`,
+    schema: {
+      type: "object",
+      properties: {
+        plugin: { type: "string" },
+        action: { type: "string" },
+        args: { type: "object", description: "动作参数，形状看插件声明" },
+      },
+      required: ["plugin", "action"],
+      additionalProperties: false,
+    },
+  },
 ]
 
 /** 名字 → 工具，方便按名查。 */

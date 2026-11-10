@@ -343,6 +343,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         Bridge::with_outbounds_lkg(config.clone(), store, outbounds, plugins, lkg_path)
             .with_dependencies(deps.clone()),
     ));
+    {
+        let mut guard = bridge
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.set_plugin_actions(action_runners.clone());
+    }
 
     // provider id 写错要在启动时死，不能等第一轮才报。
     {
