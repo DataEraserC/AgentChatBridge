@@ -363,3 +363,17 @@ CI：push `2c372f3..2c12de8` 后 `verify` 工作流 **首次跑绿**；`docs` �
 `poll_turn` / `poll_turn_for` 改循环，丢空轮后继续找下一个就绪会话。时钟、
 后台任务、票据结果、直接唤醒不受影响（它们本来就是「没消息也让模型看一眼」）。
 换代 `gen-1794322200728-b2320450`（label `nowake-empty`）。
+
+### 2026-11-10 23:30 控制台保存全线报错（覆盖层回灌 base）
+
+现象：页面上任何一次保存都返回「补丁后的配置解析不过，一个字节都没写」，
+detail 为 `90-console.toml must not declare [secrets]`。
+
+原因：没有 `90-console.toml` 时 `console_document()` 退回 `config.toml` 全文，
+表单补丁把整份 base（含 `[secrets]`/`[storage]`）当覆盖层送校验。
+
+修法：控制台可编辑文档固定为覆盖层本身，文件不存在时给空文档；TOML 编辑器同样
+只编辑覆盖层。新增 `tests/console_overlay.rs` 两条断言（空覆盖层可合并、
+覆盖层写 `[secrets]` 仍拒）。换代 `gen-1794324715834-15236217`（label
+`console-save-fix`），并在修好后给 `dsh-dev` 订阅 `qq:group/967578142` 成功
+（`config_version=3`）。
