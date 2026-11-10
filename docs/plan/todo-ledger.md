@@ -346,3 +346,15 @@ CI：push `2c372f3..2c12de8` 后 `verify` 工作流 **首次跑绿**；`docs` �
 5. 仍差：驱动侧 `ACBCTL_BIN` 指向的 acbl 包还是旧构建（没有 preload），删掉
    `session-tokens.env` 会让驱动拿不到 token。要等用新 acbl 做一次
    `nixos-rebuild switch`，之后归档该文件才算 P2.5 收口。
+
+### 2026-11-10 22:55 空投递（事件唤醒到点已无记录）
+
+现场：群 `769843907` 触发事件 #4372、报「这轮共 7 条未读」，投递正文却是
+「这一轮没有新记录」。水位当时已到 4385——触发记录在延迟窗口里被同一会话的
+另一轮用 `wait_message` 取走并 ack 了。
+
+修法：`Pending` 增加 `from_record`（只有「记录命中唤醒策略」这条入队路径置位）；
+`open_turn` 在 `from_record` 且 `pending_records` 为空时返回 `None` 并记日志；
+`poll_turn` / `poll_turn_for` 改循环，丢空轮后继续找下一个就绪会话。时钟、
+后台任务、票据结果、直接唤醒不受影响（它们本来就是「没消息也让模型看一眼」）。
+换代 `gen-1794322200728-b2320450`（label `nowake-empty`）。
