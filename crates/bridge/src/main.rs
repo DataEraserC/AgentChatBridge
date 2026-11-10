@@ -121,6 +121,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let options = Options::parse(std::env::args().skip(1))?;
 
     let config_dir = options.config_dir_path();
+    // 密钥入库（P2.5）：先把库里的密文解开装进快照，后面每条重载路径都能用上。
+    // 库还没建、没有密钥行时返回空表，加载回落到 [secrets] 声明，行为不变。
+    let preset = acb_kernel::secrets_db::preload(Path::new(&options.config), Some(&config_dir))
+        .map_err(|error| format!("preload secrets: {error}"))?;
+    if !preset.is_empty() {
+        eprintln!("secrets: {} name(s) loaded from store", preset.len());
+        acb_kernel::secrets_db::install(preset);
+    }
     let loaded = Config::load(Path::new(&options.config), Some(&config_dir))?;
     // 先开库：业务对象（连接/会话/人格/记忆/harness）以库为准，配置里那五段只在
     // 库为空时被导入一次。库打不开就别往下走——用内存悄悄跑起来比起不来更糟。

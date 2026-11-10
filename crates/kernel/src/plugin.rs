@@ -856,7 +856,10 @@ pub fn default_delivery_plan(request: &DeliveryRequest<'_>) -> DeliveryPlan {
     }
 
     DeliveryPlan {
-        keep: records[..keep_count].iter().map(|record| record.id).collect(),
+        keep: records[..keep_count]
+            .iter()
+            .map(|record| record.id)
+            .collect(),
         omitted: None,
     }
 }

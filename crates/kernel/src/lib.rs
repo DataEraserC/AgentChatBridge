@@ -28,6 +28,7 @@ pub mod relay;
 pub mod render;
 mod route_worker;
 pub mod sanitize;
+pub mod secrets_db;
 pub mod storage;
 mod task;
 pub mod tickets;

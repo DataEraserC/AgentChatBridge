@@ -1581,7 +1581,7 @@ impl Config {
     /// 完全一致。目录存在时只读取其中的 `*.toml`（按文件名字典序），子目录与其他后缀
     /// 忽略；`90-console.toml` 最后加载并覆盖它包含的顶层键。
     pub fn load(base_path: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
-        Self::load_mode(base_path, config_dir, SecretMode::Strict, None)
+        Self::load_mode(base_path, config_dir, SecretMode::Strict, None, None)
     }
 
     /// 加载时用库里的业务对象替换文件里的五类数组。
@@ -1594,7 +1594,21 @@ impl Config {
         config_dir: Option<&Path>,
         objects: Option<&crate::config_objects::ConfigObjects>,
     ) -> Result<LoadedConfig, ConfigError> {
-        Self::load_mode(base_path, config_dir, SecretMode::Strict, objects)
+        Self::load_mode(base_path, config_dir, SecretMode::Strict, objects, None)
+    }
+
+    /// 加载时把库里已解密的密钥当作来源值注入（P2.5 密钥入库）。
+    ///
+    /// `preset` 里的名字不再读文件/环境变量——文件被删掉也能启动，这正是
+    /// 「值以库为准」的验收条件。名字命中时才覆盖，未命中的来源照旧按
+    /// `[secrets]` 声明解析（fail-closed）。
+    pub fn load_with_secrets(
+        base_path: &Path,
+        config_dir: Option<&Path>,
+        objects: Option<&crate::config_objects::ConfigObjects>,
+        preset: Option<&SecretPreset>,
+    ) -> Result<LoadedConfig, ConfigError> {
+        Self::load_mode(base_path, config_dir, SecretMode::Strict, objects, preset)
     }
 
     /// 测试用加载入口，语义同 [`Config::parse_fixture`]；同样只在测试构建里存在。
@@ -1604,7 +1618,7 @@ impl Config {
         base_path: &Path,
         config_dir: Option<&Path>,
     ) -> Result<LoadedConfig, ConfigError> {
-        Self::load_mode(base_path, config_dir, SecretMode::Fixture, None)
+        Self::load_mode(base_path, config_dir, SecretMode::Fixture, None, None)
     }
 
     /// 测试用：带库对象注入的加载入口，语义同 [`Config::load_with_objects`]。
@@ -1615,7 +1629,7 @@ impl Config {
         config_dir: Option<&Path>,
         objects: Option<&crate::config_objects::ConfigObjects>,
     ) -> Result<LoadedConfig, ConfigError> {
-        Self::load_mode(base_path, config_dir, SecretMode::Fixture, objects)
+        Self::load_mode(base_path, config_dir, SecretMode::Fixture, objects, None)
     }
 
     fn load_mode(
@@ -1623,10 +1637,11 @@ impl Config {
         config_dir: Option<&Path>,
         mode: SecretMode,
         objects: Option<&crate::config_objects::ConfigObjects>,
+        preset: Option<&SecretPreset>,
     ) -> Result<LoadedConfig, ConfigError> {
         let base_text = read_config_file(base_path)?;
         let Some(config_dir) = config_dir.filter(|dir| dir.exists()) else {
-            return load_single_with_objects(base_path, &base_text, mode, objects);
+            return load_single_with_objects(base_path, &base_text, mode, objects, preset);
         };
         if !config_dir.is_dir() {
             return Err(ConfigError::DirReadFailed {
@@ -1646,7 +1661,7 @@ impl Config {
             .cloned();
         if normal.is_empty() && console.is_none() {
             // 目录存在但没有任何分片：保持旧路径，错误信息和解析行为都不变。
-            return load_single_with_objects(base_path, &base_text, mode, objects);
+            return load_single_with_objects(base_path, &base_text, mode, objects, preset);
         }
 
         let mut files = vec![parse_config_file(base_path, &base_text)?];
@@ -1693,7 +1708,7 @@ impl Config {
             objects.splice_into(&mut merged)?;
         }
 
-        finish_loaded(merged, sources, duplicate_rules, mode)
+        finish_loaded(merged, sources, duplicate_rules, mode, preset)
     }
 
     /// 用一段控制台文本作为 `90-console.toml` 的覆盖层，合并出最终配置。
@@ -1748,18 +1763,24 @@ impl Config {
             objects.splice_into(&mut merged)?;
         }
 
-        finish_loaded(merged, sources, duplicate_rules, SecretMode::Strict)
+        finish_loaded(merged, sources, duplicate_rules, SecretMode::Strict, None)
     }
 
     fn from_raw(raw: RawConfig, mode: SecretMode) -> Result<Self, ConfigError> {
-        Self::from_raw_with_secrets(raw, mode).map(|(config, _)| config)
+        Self::from_raw_with_secrets(raw, mode, None).map(|(config, _)| config)
     }
 
     fn from_raw_with_secrets(
         raw: RawConfig,
         mode: SecretMode,
+        preset: Option<&SecretPreset>,
     ) -> Result<(Self, SecretStore), ConfigError> {
-        let secrets = SecretStore::from_raw(raw.secrets, mode)?;
+        // 显式传入的优先；否则用启动期装好的库内快照（重载路径都会走到这里）。
+        let preset: Option<&SecretPreset> = match preset {
+            Some(preset) => Some(preset),
+            None => crate::secrets_db::current(),
+        };
+        let secrets = SecretStore::from_raw(raw.secrets, mode, preset)?;
         if raw.policy.is_some() {
             return Err(ConfigError::GlobalPolicyUnsupported);
         }
@@ -3177,8 +3198,15 @@ impl std::fmt::Debug for SecretStore {
     }
 }
 
+/// 库里已解密的密钥：来源名 → 明文。加载期用它顶替文件/环境来源。
+pub type SecretPreset = std::collections::BTreeMap<String, String>;
+
 impl SecretStore {
-    fn from_raw(raw: Option<RawSecrets>, mode: SecretMode) -> Result<Self, ConfigError> {
+    fn from_raw(
+        raw: Option<RawSecrets>,
+        mode: SecretMode,
+        preset: Option<&SecretPreset>,
+    ) -> Result<Self, ConfigError> {
         let raw = raw.unwrap_or_default();
         let default_kind = raw
             .default_kind
@@ -3207,6 +3235,18 @@ impl SecretStore {
 
         let mut sources = BTreeMap::new();
         for (name, plan) in plans {
+            // 库里有这个名字就以库为准：文件删了、env 没设都不影响启动。
+            if let Some(value) = preset.and_then(|preset| preset.get(&name)) {
+                sources.insert(
+                    name,
+                    ResolvedSecret {
+                        kind: "db".to_owned(),
+                        origin: "database".to_owned(),
+                        value: value.clone(),
+                    },
+                );
+                continue;
+            }
             let value = match mode {
                 SecretMode::Strict => load_plan(&name, &plan)?,
                 // fixture 里的来源只校验 schema；引用按名字自身解析，不读真实文件/环境。
@@ -3997,9 +4037,10 @@ fn load_single_with_objects(
     text: &str,
     mode: SecretMode,
     objects: Option<&crate::config_objects::ConfigObjects>,
+    preset: Option<&SecretPreset>,
 ) -> Result<LoadedConfig, ConfigError> {
     let Some(objects) = objects else {
-        return load_single(base_path, text, mode);
+        return load_single(base_path, text, mode, preset);
     };
     let mut merged: toml::Value =
         toml::from_str(text).map_err(|error| ConfigError::ParseFailed {
@@ -4012,18 +4053,19 @@ fn load_single_with_objects(
         sessions: array_count(&merged, "sessions"),
         rules: rules_count(&merged),
     };
-    finish_loaded(merged, vec![source], false, mode)
+    finish_loaded(merged, vec![source], false, mode, preset)
 }
 
 fn load_single(
     base_path: &Path,
     text: &str,
     mode: SecretMode,
+    preset: Option<&SecretPreset>,
 ) -> Result<LoadedConfig, ConfigError> {
     let raw: RawConfig = toml::from_str(text).map_err(|error| ConfigError::ParseFailed {
         detail: error.to_string(),
     })?;
-    let (config, secrets) = Config::from_raw_with_secrets(raw, mode)?;
+    let (config, secrets) = Config::from_raw_with_secrets(raw, mode, preset)?;
     Ok(LoadedConfig {
         sources: vec![ConfigSource {
             path: base_path.display().to_string(),
@@ -4070,6 +4112,7 @@ fn finish_loaded(
     sources: Vec<ConfigSource>,
     duplicate_rules: bool,
     mode: SecretMode,
+    preset: Option<&SecretPreset>,
 ) -> Result<LoadedConfig, ConfigError> {
     dedupe_admin_lists(&mut merged);
     let merged_toml = toml::to_string(&merged).map_err(|error| ConfigError::ParseFailed {
@@ -4079,7 +4122,7 @@ fn finish_loaded(
         toml::from_str(&merged_toml).map_err(|error| ConfigError::ParseFailed {
             detail: error.to_string(),
         })?;
-    let (config, secrets) = Config::from_raw_with_secrets(raw, mode)?;
+    let (config, secrets) = Config::from_raw_with_secrets(raw, mode, preset)?;
     Ok(LoadedConfig {
         config,
         secrets,

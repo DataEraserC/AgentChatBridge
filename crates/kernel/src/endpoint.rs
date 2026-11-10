@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use acb_proto::frame::{decode, encode};
 use acb_proto::{Delivery, ErrorCode, Frame, LogLevel, Ticket, ToolError};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::deps::DependencyRegistry;
@@ -656,8 +656,8 @@ pub fn run_connection<S: Store + Send + 'static>(
                                 let session = prepared.session().to_owned();
                                 let wait_ms = prepared.wait_ms();
                                 spawn_async_platform(Arc::clone(&bridge), prepared);
-                                let reply = async_reply(&bridge, task_id, &session, wait_ms)
-                                    .map(|value| {
+                                let reply =
+                                    async_reply(&bridge, task_id, &session, wait_ms).map(|value| {
                                         let guard = lock(&bridge);
                                         guard.fit_tool_result(&tool, value)
                                     });
@@ -668,8 +668,8 @@ pub fn run_connection<S: Store + Send + 'static>(
                                 let session = prepared.session().to_owned();
                                 let wait_ms = prepared.wait_ms();
                                 spawn_async_send(Arc::clone(&bridge), prepared);
-                                let reply = async_reply(&bridge, task_id, &session, wait_ms)
-                                    .map(|value| {
+                                let reply =
+                                    async_reply(&bridge, task_id, &session, wait_ms).map(|value| {
                                         let guard = lock(&bridge);
                                         guard.fit_tool_result(&tool, value)
                                     });

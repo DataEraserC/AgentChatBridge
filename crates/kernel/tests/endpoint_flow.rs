@@ -700,11 +700,7 @@ fn async_send_returns_a_task_id_and_tasks_get_wait_fetch_it() {
         },
     );
     let error = match read_frame(&mut reader).expect("能读到 tool_result") {
-        Frame::ToolResult {
-            id,
-            result,
-            error,
-        } => {
+        Frame::ToolResult { id, result, error } => {
             assert_eq!(id, "c-missing");
             assert!(result.is_none(), "不该有结果");
             error.expect("缺 async 要报错")

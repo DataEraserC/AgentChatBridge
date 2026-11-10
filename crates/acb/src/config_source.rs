@@ -24,6 +24,12 @@ pub fn load(config: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, St
     let dir_label = config_dir
         .map(|dir| dir.display().to_string())
         .unwrap_or_else(|| "-".to_owned());
+    // 密钥入库（P2.5）：先取库内快照，文件/环境来源被删掉也能加载。
+    let preset = acb_kernel::secrets_db::preload(config, config_dir)
+        .map_err(|error| format!("preload secrets: {error}"))?;
+    if !preset.is_empty() {
+        acb_kernel::secrets_db::install(preset);
+    }
     let loaded = Config::load(config, config_dir).map_err(|error| {
         format!(
             "load config {} (dir {dir_label}): {error}",

@@ -849,7 +849,10 @@ fn platform_call_send_is_recorded_and_acked() {
     let task = &list["tasks"][0];
     assert_eq!(task["handler"], "platform_call:msg.send_image");
     assert_eq!(task["status"], "succeeded");
-    assert_eq!(task["platform_id"], "9002", "发送类平台调用也要补平台消息号");
+    assert_eq!(
+        task["platform_id"], "9002",
+        "发送类平台调用也要补平台消息号"
+    );
 
     // 先确认轮次里收到的那条，水位才推得动；自己发的那条已经确认过，不能留下洞。
     let acked = bridge
@@ -954,10 +957,7 @@ fn platform_send_timeout_is_recorded_as_unknown() {
         "超时可能已经发出去了，不能记成失败"
     );
     assert!(task["platform_id"].is_null());
-    assert!(
-        task["idempotency_key"].as_str().is_some(),
-        "幂等键要落库"
-    );
+    assert!(task["idempotency_key"].as_str().is_some(), "幂等键要落库");
 }
 
 /// 方法名写错：给出同组的近似名，让模型一轮就改对，而不是反复猜。
