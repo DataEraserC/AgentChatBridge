@@ -18,6 +18,7 @@ pub mod notice;
 pub mod outbound;
 pub mod plugin;
 pub mod plugin_meta;
+pub mod plugin_registry;
 pub mod policy;
 pub mod query;
 pub mod relay;
@@ -83,6 +84,11 @@ pub use plugin::{
     WakeContext, WakeProvider, default_delivery_plan,
 };
 pub use plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetadata, PluginSource};
+pub use plugin_registry::{
+    CommandKind, CommandStatus, DataClass, Lifecycle, LocationKind, PluginCapabilityDecl,
+    PluginKind, PluginPolicyConfig, PluginStorageConfig, RegistryPlugin, ScopeKind, StorageKind,
+    check_command, command_fingerprint,
+};
 pub use policy::{CorePolicy, Policy, PolicyError};
 pub use relay::{FileRelay, RelayError};
 pub use route_worker::RouteWorker;

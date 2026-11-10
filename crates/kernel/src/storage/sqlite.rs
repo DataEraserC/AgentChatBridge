@@ -16,13 +16,18 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ConfigObjectsStore, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply,
-    Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind, Notes, Policies, PolicyEffect,
-    PrunePlan, RecordDraft, Recorded, SecretsStore, SessionMap, SessionMaps, SettingsStore,
-    StorageError, StoredSecret, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript, Watermarks,
+    Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind, Notes, PluginsStore, Policies,
+    PolicyEffect, PrunePlan, RecordDraft, Recorded, SecretsStore, SessionMap, SessionMaps,
+    SettingsStore, StorageError, StoredSecret, TaskRecord, TaskStatus, Tasks, TopicStatus,
+    Transcript, Watermarks,
 };
 use crate::config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 use crate::grants::{
     AccountGrant, BotAdminGrant, GrantRule, GrantsConfig, RoomGrant, SystemAdminGrant,
+};
+use crate::plugin_registry::{
+    CommandKind, DataClass, Lifecycle, LocationKind, PluginCapabilityDecl, PluginKind,
+    PluginPolicyConfig, PluginStorageConfig, RegistryPlugin, ScopeKind, StorageKind,
 };
 
 /// 这个程序认识的库结构版本。改表就加一。
@@ -52,7 +57,9 @@ use crate::grants::{
 ///          从配置文件搬进库。存的是每一条的 TOML 原文，读出来拼回合并文档再解析。
 ///          纯新增，不用搬数据；首次启动时桥把文件里那五段一次性导入
 ///          （见 `config_objects::import_once`）。
-pub const SCHEMA_VERSION: i64 = 16;
+/// 16 → 17：加插件平台七张表——注册、策略、存储、能力声明、配置、密钥引用、
+///          通用资源记录。纯新增；`[[tool_plugins]]` 首次启动时一次性 seed 进库。
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"
@@ -284,6 +291,90 @@ CREATE TABLE IF NOT EXISTS config_objects (
     position   INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (kind, id)
+);
+
+-- 插件平台（schema 17）。以前 `[[tool_plugins]]` 只是配置里的一段：改一条要
+-- 改文件 + 重启，控制台看不见，也无法判断命令还能不能执行。
+-- 现在注册、策略、存储、能力声明都在库里；命令另存指纹，用来发现漂移。
+CREATE TABLE IF NOT EXISTS plugin_registry (
+    id                  TEXT PRIMARY KEY,
+    kind                TEXT NOT NULL DEFAULT 'tool' CHECK (kind IN ('tool','policy')),
+    trust_tier          TEXT NOT NULL DEFAULT 'tool' CHECK (trust_tier IN ('tool','policy')),
+    command             TEXT NOT NULL,
+    args_json           TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(args_json)),
+    timeout_ms          INTEGER NOT NULL DEFAULT 5000 CHECK (timeout_ms BETWEEN 100 AND 60000),
+    command_kind        TEXT NOT NULL DEFAULT 'absolute'
+                        CHECK (command_kind IN ('absolute','profile','nix_store','relative')),
+    command_fingerprint TEXT,
+    manifest_json       TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(manifest_json)),
+    schema_version      INTEGER NOT NULL DEFAULT 0,
+    source_seed         TEXT,
+    enabled             INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    version             INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS plugin_capabilities (
+    plugin_id       TEXT NOT NULL REFERENCES plugin_registry(id) ON DELETE CASCADE,
+    capability_id   TEXT NOT NULL,
+    risk            TEXT NOT NULL DEFAULT 'high' CHECK (risk IN ('low','medium','high')),
+    requires_ticket INTEGER NOT NULL DEFAULT 1 CHECK (requires_ticket IN (0,1)),
+    scopes_json     TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(scopes_json)),
+    description     TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (plugin_id, capability_id)
+);
+
+CREATE TABLE IF NOT EXISTS plugin_policy (
+    plugin_id         TEXT PRIMARY KEY REFERENCES plugin_registry(id) ON DELETE CASCADE,
+    enabled           INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+    scope_kind        TEXT NOT NULL DEFAULT 'room' CHECK (scope_kind IN ('room','account','global')),
+    scope_id          TEXT,
+    capabilities_json TEXT NOT NULL DEFAULT '["tool_call"]' CHECK (json_valid(capabilities_json)),
+    rate_limit_json   TEXT CHECK (rate_limit_json IS NULL OR json_valid(rate_limit_json)),
+    lifecycle         TEXT NOT NULL DEFAULT 'resident' CHECK (lifecycle IN ('resident','on_demand')),
+    allow_unknown     INTEGER NOT NULL DEFAULT 0 CHECK (allow_unknown IN (0,1)),
+    updated_at        INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plugin_storage (
+    plugin_id     TEXT PRIMARY KEY REFERENCES plugin_registry(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL DEFAULT 'builtin' CHECK (kind IN ('builtin','external')),
+    location_kind TEXT NOT NULL DEFAULT 'none' CHECK (location_kind IN ('none','path','dsn')),
+    location      TEXT,
+    data_class    TEXT NOT NULL DEFAULT 'domain' CHECK (data_class IN ('domain','policy')),
+    backup        INTEGER NOT NULL DEFAULT 0 CHECK (backup IN (0,1)),
+    retention     TEXT,
+    updated_at    INTEGER NOT NULL,
+    CHECK (kind = 'builtin' OR location IS NOT NULL)
+);
+
+CREATE TABLE IF NOT EXISTS plugin_config (
+    plugin_id  TEXT NOT NULL REFERENCES plugin_registry(id) ON DELETE CASCADE,
+    key        TEXT NOT NULL,
+    value_json TEXT NOT NULL CHECK (json_valid(value_json)),
+    type       TEXT NOT NULL CHECK (type IN ('string','integer','number','boolean','array','object')),
+    encrypted  INTEGER NOT NULL DEFAULT 0 CHECK (encrypted IN (0,1)),
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (plugin_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS plugin_secret_refs (
+    plugin_id TEXT NOT NULL REFERENCES plugin_registry(id) ON DELETE CASCADE,
+    name      TEXT NOT NULL,
+    secret_id INTEGER NOT NULL REFERENCES secrets(id),
+    PRIMARY KEY (plugin_id, name)
+);
+
+-- builtin 通用 CRUD：一行一条资源记录，不动态建表。
+CREATE TABLE IF NOT EXISTS plugin_records (
+    plugin_id  TEXT NOT NULL REFERENCES plugin_registry(id) ON DELETE CASCADE,
+    resource   TEXT NOT NULL,
+    record_id  TEXT NOT NULL,
+    value_json TEXT NOT NULL CHECK (json_valid(value_json)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (plugin_id, resource, record_id)
 );
 "#;
 
@@ -2778,4 +2869,450 @@ impl SqliteStore {
             .map_err(io_error)?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// 插件注册表（schema 17）
+// ---------------------------------------------------------------------------
+
+impl PluginsStore for SqliteStore {
+    fn plugins_load(&self) -> Result<Option<Vec<RegistryPlugin>>, StorageError> {
+        // 标记缺失 = 还没导入过。和空列表分开，否则删光插件后重启会从文件抄回来。
+        let initialized: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'plugins_initialized'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io_error)?;
+        if initialized.is_none() {
+            return Ok(None);
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, kind, trust_tier, command, args_json, timeout_ms, command_kind,
+                        command_fingerprint, manifest_json, schema_version, source_seed,
+                        enabled, created_at, updated_at, version
+                 FROM plugin_registry ORDER BY id",
+            )
+            .map_err(io_error)?;
+        let mut rows = stmt.query([]).map_err(io_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(io_error)? {
+            let id: String = row.get(0).map_err(io_error)?;
+            let kind: String = row.get(1).map_err(io_error)?;
+            let trust_tier: String = row.get(2).map_err(io_error)?;
+            let command: String = row.get(3).map_err(io_error)?;
+            let args_json: String = row.get(4).map_err(io_error)?;
+            let timeout_ms: i64 = row.get(5).map_err(io_error)?;
+            let command_kind: String = row.get(6).map_err(io_error)?;
+            let command_fingerprint: Option<String> = row.get(7).map_err(io_error)?;
+            let manifest_json: String = row.get(8).map_err(io_error)?;
+            let schema_version: i64 = row.get(9).map_err(io_error)?;
+            let source_seed: Option<String> = row.get(10).map_err(io_error)?;
+            let enabled: i64 = row.get(11).map_err(io_error)?;
+            let created_at: i64 = row.get(12).map_err(io_error)?;
+            let updated_at: i64 = row.get(13).map_err(io_error)?;
+            let version: i64 = row.get(14).map_err(io_error)?;
+
+            let args: Vec<String> = serde_json::from_str(&args_json)
+                .map_err(|error| backend(format!("plugin_registry/{id} args: {error}")))?;
+            let kind = PluginKind::parse(&kind)
+                .ok_or_else(|| backend(format!("plugin_registry/{id} 的 kind 不认识：{kind}")))?;
+            let command_kind = CommandKind::parse(&command_kind).ok_or_else(|| {
+                backend(format!(
+                    "plugin_registry/{id} 的 command_kind 不认识：{command_kind}"
+                ))
+            })?;
+            out.push(RegistryPlugin {
+                policy: self.plugin_policy(&id)?,
+                storage: self.plugin_storage(&id)?,
+                capabilities: self.plugin_capabilities(&id)?,
+                id,
+                kind,
+                trust_tier,
+                command,
+                args,
+                timeout_ms: timeout_ms as u64,
+                command_kind,
+                command_fingerprint,
+                manifest_json,
+                schema_version: schema_version as u32,
+                source_seed,
+                enabled: enabled != 0,
+                created_at,
+                updated_at,
+                version,
+            });
+        }
+        Ok(Some(out))
+    }
+
+    fn plugins_replace(&mut self, plugins: &[RegistryPlugin], at: i64) -> Result<(), StorageError> {
+        let tx = self.conn.transaction().map_err(io_error)?;
+        tx.execute("DELETE FROM plugin_capabilities", [])
+            .map_err(io_error)?;
+        tx.execute("DELETE FROM plugin_policy", [])
+            .map_err(io_error)?;
+        tx.execute("DELETE FROM plugin_storage", [])
+            .map_err(io_error)?;
+        tx.execute("DELETE FROM plugin_registry", [])
+            .map_err(io_error)?;
+        for plugin in plugins {
+            put_plugin(
+                &tx,
+                plugin,
+                if plugin.created_at == 0 {
+                    at
+                } else {
+                    plugin.created_at
+                },
+                at,
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('plugins_initialized', ?1)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![at.to_string()],
+        )
+        .map_err(io_error)?;
+        tx.commit().map_err(io_error)?;
+        Ok(())
+    }
+
+    fn plugin_put(&mut self, plugin: &RegistryPlugin, at: i64) -> Result<(), StorageError> {
+        let tx = self.conn.transaction().map_err(io_error)?;
+        put_plugin(
+            &tx,
+            plugin,
+            if plugin.created_at == 0 {
+                at
+            } else {
+                plugin.created_at
+            },
+            at,
+        )?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('plugins_initialized', ?1)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![at.to_string()],
+        )
+        .map_err(io_error)?;
+        tx.commit().map_err(io_error)?;
+        Ok(())
+    }
+
+    fn plugin_delete(&mut self, id: &str) -> Result<bool, StorageError> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM plugin_registry WHERE id = ?1", params![id])
+            .map_err(io_error)?;
+        Ok(changed > 0)
+    }
+
+    fn plugin_set_enabled(
+        &mut self,
+        id: &str,
+        enabled: bool,
+        at: i64,
+    ) -> Result<bool, StorageError> {
+        let value = i64::from(enabled);
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE plugin_registry
+                 SET enabled = ?2, updated_at = ?3, version = version + 1
+                 WHERE id = ?1",
+                params![id, value, at],
+            )
+            .map_err(io_error)?;
+        if changed > 0 {
+            self.conn
+                .execute(
+                    "UPDATE plugin_policy SET enabled = ?2, updated_at = ?3 WHERE plugin_id = ?1",
+                    params![id, value, at],
+                )
+                .map_err(io_error)?;
+        }
+        Ok(changed > 0)
+    }
+}
+
+impl SqliteStore {
+    fn plugin_policy(&self, id: &str) -> Result<PluginPolicyConfig, StorageError> {
+        let found: Option<(
+            i64,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            String,
+            i64,
+        )> = self
+            .conn
+            .query_row(
+                "SELECT enabled, scope_kind, scope_id, capabilities_json, rate_limit_json,
+                        lifecycle, allow_unknown
+                 FROM plugin_policy WHERE plugin_id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(io_error)?;
+        let Some((
+            enabled,
+            scope_kind,
+            scope_id,
+            capabilities_json,
+            rate_limit_json,
+            lifecycle,
+            allow_unknown,
+        )) = found
+        else {
+            return Ok(PluginPolicyConfig::default());
+        };
+        let scope_kind = ScopeKind::parse(&scope_kind)
+            .ok_or_else(|| backend(format!("plugin_policy/{id} scope_kind: {scope_kind}")))?;
+        let lifecycle = Lifecycle::parse(&lifecycle)
+            .ok_or_else(|| backend(format!("plugin_policy/{id} lifecycle: {lifecycle}")))?;
+        let capabilities: Vec<String> = serde_json::from_str(&capabilities_json)
+            .map_err(|error| backend(format!("plugin_policy/{id} capabilities: {error}")))?;
+        let rate_limit = match rate_limit_json {
+            Some(raw) => Some(
+                serde_json::from_str(&raw)
+                    .map_err(|error| backend(format!("plugin_policy/{id} rate_limit: {error}")))?,
+            ),
+            None => None,
+        };
+        Ok(PluginPolicyConfig {
+            enabled: enabled != 0,
+            scope_kind,
+            scope_id,
+            capabilities,
+            rate_limit,
+            lifecycle,
+            allow_unknown: allow_unknown != 0,
+        })
+    }
+
+    fn plugin_storage(&self, id: &str) -> Result<PluginStorageConfig, StorageError> {
+        let found: Option<(String, String, Option<String>, String, i64, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT kind, location_kind, location, data_class, backup, retention
+                 FROM plugin_storage WHERE plugin_id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(io_error)?;
+        let Some((kind, location_kind, location, data_class, backup, retention)) = found else {
+            return Ok(PluginStorageConfig::default());
+        };
+        let kind = StorageKind::parse(&kind)
+            .ok_or_else(|| backend(format!("plugin_storage/{id} kind: {kind}")))?;
+        let location_kind = LocationKind::parse(&location_kind).ok_or_else(|| {
+            backend(format!(
+                "plugin_storage/{id} location_kind: {location_kind}"
+            ))
+        })?;
+        let data_class = DataClass::parse(&data_class)
+            .ok_or_else(|| backend(format!("plugin_storage/{id} data_class: {data_class}")))?;
+        Ok(PluginStorageConfig {
+            kind,
+            location_kind,
+            location,
+            data_class,
+            backup: backup != 0,
+            retention,
+        })
+    }
+
+    fn plugin_capabilities(&self, id: &str) -> Result<Vec<PluginCapabilityDecl>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT capability_id, risk, requires_ticket, scopes_json, description
+                 FROM plugin_capabilities WHERE plugin_id = ?1 ORDER BY capability_id",
+            )
+            .map_err(io_error)?;
+        let mut rows = stmt.query(params![id]).map_err(io_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(io_error)? {
+            let capability_id: String = row.get(0).map_err(io_error)?;
+            let risk: String = row.get(1).map_err(io_error)?;
+            let requires_ticket: i64 = row.get(2).map_err(io_error)?;
+            let scopes_json: String = row.get(3).map_err(io_error)?;
+            let description: String = row.get(4).map_err(io_error)?;
+            let scopes: Vec<String> = serde_json::from_str(&scopes_json)
+                .map_err(|error| backend(format!("plugin_capabilities/{id} scopes: {error}")))?;
+            out.push(PluginCapabilityDecl {
+                capability_id,
+                risk,
+                requires_ticket: requires_ticket != 0,
+                scopes,
+                description,
+            });
+        }
+        Ok(out)
+    }
+}
+
+fn put_plugin(
+    tx: &rusqlite::Transaction<'_>,
+    plugin: &RegistryPlugin,
+    created_at: i64,
+    at: i64,
+) -> Result<(), StorageError> {
+    let args_json = serde_json::to_string(&plugin.args)
+        .map_err(|error| backend(format!("plugin_registry/{} args: {error}", plugin.id)))?;
+    tx.execute(
+        "INSERT INTO plugin_registry (
+            id, kind, trust_tier, command, args_json, timeout_ms, command_kind,
+            command_fingerprint, manifest_json, schema_version, source_seed,
+            enabled, created_at, updated_at, version
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+         ON CONFLICT (id) DO UPDATE SET
+            kind = excluded.kind,
+            trust_tier = excluded.trust_tier,
+            command = excluded.command,
+            args_json = excluded.args_json,
+            timeout_ms = excluded.timeout_ms,
+            command_kind = excluded.command_kind,
+            command_fingerprint = excluded.command_fingerprint,
+            manifest_json = excluded.manifest_json,
+            schema_version = excluded.schema_version,
+            source_seed = excluded.source_seed,
+            enabled = excluded.enabled,
+            updated_at = excluded.updated_at,
+            version = plugin_registry.version + 1",
+        params![
+            plugin.id,
+            plugin.kind.as_str(),
+            plugin.trust_tier,
+            plugin.command,
+            args_json,
+            plugin.timeout_ms as i64,
+            plugin.command_kind.as_str(),
+            plugin.command_fingerprint,
+            plugin.manifest_json,
+            plugin.schema_version as i64,
+            plugin.source_seed,
+            i64::from(plugin.enabled),
+            created_at,
+            at,
+            plugin.version,
+        ],
+    )
+    .map_err(io_error)?;
+
+    let capabilities_json = serde_json::to_string(&plugin.policy.capabilities)
+        .map_err(|error| backend(format!("plugin_policy/{} capabilities: {error}", plugin.id)))?;
+    let rate_limit_json = match &plugin.policy.rate_limit {
+        Some(value) => Some(serde_json::to_string(value).map_err(|error| {
+            backend(format!("plugin_policy/{} rate_limit: {error}", plugin.id))
+        })?),
+        None => None,
+    };
+    tx.execute(
+        "INSERT INTO plugin_policy (
+            plugin_id, enabled, scope_kind, scope_id, capabilities_json, rate_limit_json,
+            lifecycle, allow_unknown, updated_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT (plugin_id) DO UPDATE SET
+            enabled = excluded.enabled,
+            scope_kind = excluded.scope_kind,
+            scope_id = excluded.scope_id,
+            capabilities_json = excluded.capabilities_json,
+            rate_limit_json = excluded.rate_limit_json,
+            lifecycle = excluded.lifecycle,
+            allow_unknown = excluded.allow_unknown,
+            updated_at = excluded.updated_at",
+        params![
+            plugin.id,
+            i64::from(plugin.policy.enabled),
+            plugin.policy.scope_kind.as_str(),
+            plugin.policy.scope_id,
+            capabilities_json,
+            rate_limit_json,
+            plugin.policy.lifecycle.as_str(),
+            i64::from(plugin.policy.allow_unknown),
+            at,
+        ],
+    )
+    .map_err(io_error)?;
+
+    tx.execute(
+        "INSERT INTO plugin_storage (
+            plugin_id, kind, location_kind, location, data_class, backup, retention, updated_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT (plugin_id) DO UPDATE SET
+            kind = excluded.kind,
+            location_kind = excluded.location_kind,
+            location = excluded.location,
+            data_class = excluded.data_class,
+            backup = excluded.backup,
+            retention = excluded.retention,
+            updated_at = excluded.updated_at",
+        params![
+            plugin.id,
+            plugin.storage.kind.as_str(),
+            plugin.storage.location_kind.as_str(),
+            plugin.storage.location,
+            plugin.storage.data_class.as_str(),
+            i64::from(plugin.storage.backup),
+            plugin.storage.retention,
+            at,
+        ],
+    )
+    .map_err(io_error)?;
+
+    tx.execute(
+        "DELETE FROM plugin_capabilities WHERE plugin_id = ?1",
+        params![plugin.id],
+    )
+    .map_err(io_error)?;
+    for decl in &plugin.capabilities {
+        let scopes_json = serde_json::to_string(&decl.scopes).map_err(|error| {
+            backend(format!("plugin_capabilities/{} scopes: {error}", plugin.id))
+        })?;
+        tx.execute(
+            "INSERT INTO plugin_capabilities (
+                plugin_id, capability_id, risk, requires_ticket, scopes_json, description
+             ) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                plugin.id,
+                decl.capability_id,
+                decl.risk,
+                i64::from(decl.requires_ticket),
+                scopes_json,
+                decl.description,
+            ],
+        )
+        .map_err(io_error)?;
+    }
+    Ok(())
 }

@@ -823,6 +823,41 @@ pub trait SettingsStore {
     fn settings_delete(&mut self, key: &str) -> Result<bool, StorageError>;
 }
 
+/// 插件注册表。schema 17 起 `[[tool_plugins]]` 也是业务对象：库是唯一源，
+/// 文件只在库为空时 seed 一次。
+///
+/// `None` 和空 `Vec` 必须分开：前者是「还没导入过」，后者是「用户把插件删光了」。
+/// 混在一起会让重启把删掉的插件从文件里抄回来。
+pub trait PluginsStore {
+    fn plugins_load(
+        &self,
+    ) -> Result<Option<Vec<crate::plugin_registry::RegistryPlugin>>, StorageError>;
+
+    /// 整份替换：首次 seed 与导入用。
+    fn plugins_replace(
+        &mut self,
+        plugins: &[crate::plugin_registry::RegistryPlugin],
+        at: i64,
+    ) -> Result<(), StorageError>;
+
+    /// 写一条。同 `id` 覆盖；策略/存储/能力随主体一起替换。
+    fn plugin_put(
+        &mut self,
+        plugin: &crate::plugin_registry::RegistryPlugin,
+        at: i64,
+    ) -> Result<(), StorageError>;
+
+    fn plugin_delete(&mut self, id: &str) -> Result<bool, StorageError>;
+
+    /// 只翻转 `enabled`，保留其余字段。返回之前是否存在。
+    fn plugin_set_enabled(
+        &mut self,
+        id: &str,
+        enabled: bool,
+        at: i64,
+    ) -> Result<bool, StorageError>;
+}
+
 /// 八样东西合起来。桥只依赖这一个约束，换后端只换实现。
 pub trait Store:
     Transcript
@@ -837,6 +872,7 @@ pub trait Store:
     + ConfigObjectsStore
     + SecretsStore
     + SettingsStore
+    + PluginsStore
 {
 }
 
@@ -853,6 +889,7 @@ impl<T> Store for T where
         + ConfigObjectsStore
         + SecretsStore
         + SettingsStore
+        + PluginsStore
 {
 }
 
@@ -889,6 +926,9 @@ pub struct MemoryStore {
     config_objects_initialized: bool,
     secrets: BTreeMap<String, StoredSecret>,
     settings: BTreeMap<String, serde_json::Value>,
+    /// 插件注册表。`plugins_initialized` 区分「导入过但是空的」与「从没导入」。
+    plugins: Vec<crate::plugin_registry::RegistryPlugin>,
+    plugins_initialized: bool,
 }
 
 impl MemoryStore {
@@ -1574,6 +1614,57 @@ impl SettingsStore for MemoryStore {
 
     fn settings_delete(&mut self, key: &str) -> Result<bool, StorageError> {
         Ok(self.settings.remove(key).is_some())
+    }
+}
+
+impl PluginsStore for MemoryStore {
+    fn plugins_load(
+        &self,
+    ) -> Result<Option<Vec<crate::plugin_registry::RegistryPlugin>>, StorageError> {
+        Ok(self.plugins_initialized.then(|| self.plugins.clone()))
+    }
+
+    fn plugins_replace(
+        &mut self,
+        plugins: &[crate::plugin_registry::RegistryPlugin],
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.plugins = plugins.to_vec();
+        self.plugins_initialized = true;
+        Ok(())
+    }
+
+    fn plugin_put(
+        &mut self,
+        plugin: &crate::plugin_registry::RegistryPlugin,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        match self.plugins.iter().position(|item| item.id == plugin.id) {
+            Some(index) => self.plugins[index] = plugin.clone(),
+            None => self.plugins.push(plugin.clone()),
+        }
+        self.plugins_initialized = true;
+        Ok(())
+    }
+
+    fn plugin_delete(&mut self, id: &str) -> Result<bool, StorageError> {
+        let before = self.plugins.len();
+        self.plugins.retain(|item| item.id != id);
+        Ok(self.plugins.len() != before)
+    }
+
+    fn plugin_set_enabled(
+        &mut self,
+        id: &str,
+        enabled: bool,
+        _at: i64,
+    ) -> Result<bool, StorageError> {
+        let Some(plugin) = self.plugins.iter_mut().find(|item| item.id == id) else {
+            return Ok(false);
+        };
+        plugin.enabled = enabled;
+        plugin.policy.enabled = enabled;
+        Ok(true)
     }
 }
 
