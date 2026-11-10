@@ -474,3 +474,42 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 验收：同一请求重放返回 200，`changes: ["session dsh-wumi: subscription qq:group/457830198 added"]`；
 `/api/config` 里 `dsh-wumi` 的 subscriptions 已经是 `qq:group/457830198`。
+
+### 2026-11-11 01:15 会话新增/删除后 preset 不更新 → 动态重放
+
+现象：新建 `dsh-wumi1` 并订阅 `group/415664847` 后发消息不回复，`turn_end` 报
+`session/create failed (agent-preset/not-found): Unknown agent preset: acb-dsh-wumi1`。
+
+原因有两层：
+1. `dsh` 组件在 01:01 那次失败链里耗尽 5 次重试，落成 `phase = failed`
+   （`state/components/dsh.json`）。管理内核跨 launcher 重启沿用这个状态，于是之后
+   每次重启都**不再启动 dsh**；`dsh-presets` 因为 `after = ["dsh"]` 永远 blocked，
+   新会话的 preset 也就永远不生成。删掉该状态文件后 dsh 正常起来。
+2. 即使 dsh 在跑，`dsh-presets` 只是启动时跑一次的 oneshot；会话增删后没有任何
+   东西重放它，dsh 里自然没有 `acb-<新会话>` 这个 preset。
+
+修法（代码）：`deploy/presets/drivers/drivers_acb.sh` 的对账循环里按
+`sid|preset` 算指纹，指纹变化就重跑 `dsh_presets_acb.sh`（同目录上一级），成功即
+记下指纹；失败 30s 后重试。`dsh` 的 HMR 只认 `dsh.profile.bundles` 列表变化，
+脚本本来就按内容摘要换包名，所以增删会话都能热生效，不用重启 dsh。
+
+部署：这段脚本属于 **acbl 包**（`share/acb/presets`），payload 换代覆盖不到，需要
+重建系统。过渡做法：把 acbl 的 presets 复制到
+`~/.local/share/acb/presets-local/`，换上新脚本，并用 drop-in
+`~/.config/systemd/user/acb-bridge.service.d/20-local-presets.conf` 设
+`ACB_PRESETS_FILE` 指向它。等系统 flake 更新到含本提交的 rev 后删掉这个镜像。
+
+验收：
+- 01:13:53 新建 `probe-dyn1` → `drivers: presets 已刷新（会话表变化）`，驱动起在 3107；
+- 01:14:23 新建 `probe-dyn2` → 同样刷新，驱动起在 3108，endpoint 报
+  `harness connected [probe-dyn2]`；
+- 01:14:54 删掉两个探针会话 → 驱动被停、presets 再次刷新，bundle 回到
+  `acb-presets-live-ec55c84d05f641ef`；
+- 01:15:25 重建 `dsh-wumi1` + `qq:group/415664847` 订阅 → 动态刷新，驱动连上 54630。
+
+遗留：
+- `dsh` 的 `failed` 状态会跨 launcher 重启保留，属于「失败即永久」的设计；这次靠
+  删状态文件解除。是否要改成「launcher 重启即重置」待定。
+- 01:08 有一次控制台保存把对象表整体写成 6 个会话（`dsh-wumi`/`dsh-wumi1` 消失）。
+  现在复现不出：新建 `probe-dyn1` 后库里正常落盘。先记着，再遇到要抓那次请求的
+  ops 与读到的对象快照。
