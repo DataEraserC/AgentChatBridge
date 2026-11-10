@@ -23,6 +23,7 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
         }
         "check" => check_command(&args[1..]),
         "resolve" => resolve_command(&args[1..]),
+        "migrate" => migrate_command(&args[1..]),
         other => Err(format!("unknown secrets subcommand: {other}")),
     };
     match result {
@@ -70,6 +71,76 @@ fn resolve_command(args: &[String]) -> Result<ExitCode, String> {
     };
     println!("{value}");
     Ok(ExitCode::SUCCESS)
+}
+
+fn migrate_command(args: &[String]) -> Result<ExitCode, String> {
+    let mut check = false;
+    let mut rest = Vec::new();
+    for arg in args {
+        if arg == "--check" {
+            check = true;
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    let options = Options::parse(&rest)?;
+    let loaded = load(&options)?;
+    let key = acb_kernel::crypto::AcbKey::load()?
+        .ok_or_else(|| "ACB_KEY_FILE / ACB_KEY is required to migrate secrets".to_string())?;
+    let store_path = loaded.config.storage.path.clone();
+    let mut store = acb_kernel::SqliteStore::open(&store_path)
+        .map_err(|error| format!("open store {store_path}: {error}"))?;
+    use acb_kernel::storage::SecretsStore;
+    let mut migrated = 0usize;
+    for entry in loaded.secrets.entries() {
+        if entry.kind == "db" {
+            continue;
+        }
+        let Some(value) = loaded.secrets.value(&entry.name) else {
+            continue;
+        };
+        if !check {
+            let encrypted = key
+                .encrypt(value)
+                .map_err(|error| format!("encrypt {}: {error}", entry.name))?;
+            store
+                .secret_put(
+                    &entry.name,
+                    &encrypted,
+                    true,
+                    Some(key.kid()),
+                    Some(&entry.origin),
+                    now_ms(),
+                )
+                .map_err(|error| format!("write secret {}: {error}", entry.name))?;
+        }
+        println!(
+            "{}\t{}\t{}",
+            entry.name,
+            entry.kind,
+            if check { "would migrate" } else { "migrated" }
+        );
+        migrated += 1;
+    }
+    let already = loaded
+        .secrets
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind == "db")
+        .count();
+    if check {
+        println!("dry run: {migrated} source(s) would be migrated; {already} already in database");
+    } else {
+        println!("migrated {migrated} source(s); {already} already in database");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn load(options: &Options) -> Result<acb_kernel::LoadedConfig, String> {
@@ -151,6 +222,7 @@ fn print_help() {
   acbctl secrets check [--config PATH] [--config-dir DIR]
   acbctl secrets resolve NAME [--config PATH] [--config-dir DIR]
   acbctl secrets resolve --session ID [--config PATH] [--config-dir DIR]
-  acbctl secrets resolve --console [--config PATH] [--config-dir DIR]"
+  acbctl secrets resolve --console [--config PATH] [--config-dir DIR]
+  acbctl secrets migrate [--check] [--config PATH] [--config-dir DIR]"
     );
 }

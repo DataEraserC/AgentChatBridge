@@ -16,7 +16,7 @@
 //!   也不要悄悄按一份过期的文件清单起一堆连不上的驱动。
 use std::path::{Path, PathBuf};
 
-use acb_kernel::storage::{ConfigObjectsStore, Policies};
+use acb_kernel::storage::{ConfigObjectsStore, Policies, SecretsStore, SettingsStore};
 use acb_kernel::{Config, LoadedConfig};
 
 /// 加载配置：先按文件解析，再（若库已初始化）用库对象与库策略覆盖。
@@ -60,7 +60,41 @@ pub fn load(config: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, St
     {
         loaded.config.grants = grants;
     }
+    overlay_db_secrets(&mut loaded, &store)?;
+    loaded.config.reset_runtime_defaults();
+    loaded.config.apply_settings(
+        &store
+            .settings_load()
+            .map_err(|error| format!("read settings: {error}"))?,
+    )?;
     Ok(loaded)
+}
+
+/// 库内密钥覆盖文件来源。密文缺密钥直接报错，不静默按明文读。
+pub fn overlay_db_secrets(
+    loaded: &mut LoadedConfig,
+    store: &impl SecretsStore,
+) -> Result<(), String> {
+    let rows = store
+        .secrets_load()
+        .map_err(|error| format!("read secrets: {error}"))?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let key = acb_kernel::crypto::AcbKey::load()?;
+    for row in rows {
+        let value = if row.encrypted {
+            let key = key.as_ref().ok_or_else(|| {
+                format!("secret {} is encrypted but ACB_KEY is not set", row.name)
+            })?;
+            key.decrypt(&row.value)
+                .map_err(|error| format!("decrypt secret {}: {error}", row.name))?
+        } else {
+            row.value
+        };
+        loaded.secrets.insert_runtime(row.name, value);
+    }
+    Ok(())
 }
 
 /// 与两个子命令原先各自实现的默认值保持一致：`<config 所在目录>/config.d`。

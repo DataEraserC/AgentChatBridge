@@ -8,6 +8,7 @@ mod run;
 mod secrets;
 mod service;
 mod sessions;
+mod settings;
 mod status;
 mod unit;
 mod upgrade;
@@ -98,6 +99,7 @@ fn run() -> Result<ExitCode, String> {
         },
         "grants" => grants::command(&args.collect::<Vec<_>>()),
         "secrets" => secrets::command(&args.collect::<Vec<_>>()),
+        "settings" => settings::command(&args.collect::<Vec<_>>()),
         "sessions" => sessions::command(&args.collect::<Vec<_>>()),
         "upgrade" => upgrade::command(&args.collect::<Vec<_>>()),
         other => Err(format!("unknown command: {other}")),
@@ -130,8 +132,10 @@ Usage:
   acbctl component list [--config PATH]
   acbctl component status [NAME] [--config PATH]
   acbctl grants explain|matrix|diff
-  acbctl secrets check|resolve
+  acbctl secrets check|resolve|migrate
+  acbctl settings list|set|delete
   acbctl sessions [--config PATH]
+  acbctl sessions set-port <id> <port> [--config PATH]
   acbctl sessions scan [--dsh-home DIR] [--known PRESET]... [--json]
   acbctl sessions migrate-preset --map OLD=NEW [--dsh-home DIR] [--apply]
   acbctl unit --help

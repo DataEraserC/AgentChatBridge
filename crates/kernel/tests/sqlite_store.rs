@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use acb_kernel::storage::{SecretsStore, SettingsStore};
 use acb_kernel::{
     Cursor, Deliveries, Element, Feedbacks, Note, NoteKey, NoteKind, Notes, PrunePlan, RecordDraft,
     RoomId, Sender, StorageError, Store, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript,
@@ -1098,14 +1099,15 @@ fn task_records_survive_a_restart_and_stay_in_their_session() {
     assert_eq!(back.params_summary, "printf ok");
 
     assert!(
-        store
-            .task_get("other", id)
-            .expect("可读")
-            .is_none(),
+        store.task_get("other", id).expect("可读").is_none(),
         "跨会话不该看到别人的任务"
     );
     assert_eq!(
-        store.task_find(id).expect("可读").expect("按 id 不限会话").session,
+        store
+            .task_find(id)
+            .expect("可读")
+            .expect("按 id 不限会话")
+            .session,
         "main"
     );
 
@@ -1162,5 +1164,39 @@ fn open_tasks_are_pending_and_prune_keeps_the_newest() {
         store.task_list("main", None, 0, 10).expect("可列").1,
         2,
         "裁掉的记录不能因为重启又冒出来"
+    );
+}
+
+#[test]
+fn secrets_and_settings_roundtrip() {
+    let db = TempDb::new("secrets-settings");
+    let mut store = acb_kernel::SqliteStore::open(db.path()).expect("能打开");
+    store
+        .secret_put(
+            "session-token",
+            "v1:kid:ciphertext",
+            true,
+            Some("kid"),
+            Some("test"),
+            AT,
+        )
+        .expect("能写密钥");
+    store
+        .settings_put("delivery_limit", &serde_json::json!(20), AT)
+        .expect("能写设置");
+    drop(store);
+
+    let store = acb_kernel::SqliteStore::open(db.path()).expect("能再打开");
+    let secrets = store.secrets_load().expect("能读密钥");
+    assert_eq!(secrets.len(), 1);
+    assert_eq!(secrets[0].name, "session-token");
+    assert!(secrets[0].encrypted);
+    assert_eq!(secrets[0].key_id.as_deref(), Some("kid"));
+    assert_eq!(
+        store
+            .settings_load()
+            .expect("能读设置")
+            .get("delivery_limit"),
+        Some(&serde_json::json!(20))
     );
 }

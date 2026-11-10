@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use acb_adapter_dynamic::DynamicLoader;
 use acb_adapter_onebot_snowluma::OneBotSnowLumaAdapterFactory;
 use acb_adapter_process::ProcessAdapterFactory;
+use acb_kernel::storage::SettingsStore;
 use acb_kernel::{
     AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ConfigSource, ControlRegistry,
     DependencyRegistry, Element, EventQueue, FileRelay, Outbounds, PluginManager, RecordDraft,
@@ -76,6 +77,31 @@ fn install_signal_handlers() {
     }
 }
 
+/// 把库内密钥叠加到文件来源之上。密文缺 `ACB_KEY` 时启动失败，不静默当明文。
+fn overlay_db_secrets(
+    loaded: &mut acb_kernel::LoadedConfig,
+    store: &impl acb_kernel::storage::SecretsStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rows = store.secrets_load()?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let key = acb_kernel::crypto::AcbKey::load()?;
+    for row in rows {
+        let value = if row.encrypted {
+            let key = key.as_ref().ok_or_else(|| {
+                format!("secret {} is encrypted but ACB_KEY is not set", row.name)
+            })?;
+            key.decrypt(&row.value)
+                .map_err(|error| format!("decrypt secret {}: {error}", row.name))?
+        } else {
+            row.value
+        };
+        loaded.secrets.insert_runtime(row.name, value);
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     acb_i18n::init();
     match run() {
@@ -98,13 +124,16 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // 先开库：业务对象（连接/会话/人格/记忆/harness）以库为准，配置里那五段只在
     // 库为空时被导入一次。库打不开就别往下走——用内存悄悄跑起来比起不来更糟。
     let mut store = SqliteStore::open(&loaded.config.storage.path)?;
-    let loaded = if options.check_only {
+    let mut loaded = if options.check_only {
         // --check 零副作用：只读对齐，不做首次导入（2026-11-09 实测曾把
         // 「空文件 + 未初始化的开发库」写成空导入）。
         config_objects::inspect(&store, Path::new(&options.config), &config_dir, loaded)?
     } else {
         config_objects::sync(&mut store, Path::new(&options.config), &config_dir, loaded)?
     };
+    overlay_db_secrets(&mut loaded, &store)?;
+    loaded.config.reset_runtime_defaults();
+    loaded.config.apply_settings(&store.settings_load()?)?;
     let config = loaded.config;
     let sources = loaded.sources;
     let duplicate_rules = loaded.duplicate_rules;

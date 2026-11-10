@@ -787,6 +787,42 @@ pub trait ConfigObjectsStore {
     ) -> Result<bool, StorageError>;
 }
 
+/// 库内密钥。值是密文（`encrypted=1`）或明文；解密由 config 层做。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSecret {
+    pub name: String,
+    pub value: String,
+    pub encrypted: bool,
+    pub key_id: Option<String>,
+    pub source: Option<String>,
+}
+
+pub trait SecretsStore {
+    fn secrets_load(&self) -> Result<Vec<StoredSecret>, StorageError>;
+    fn secret_put(
+        &mut self,
+        name: &str,
+        value: &str,
+        encrypted: bool,
+        key_id: Option<&str>,
+        source: Option<&str>,
+        at: i64,
+    ) -> Result<(), StorageError>;
+    fn secret_delete(&mut self, name: &str) -> Result<bool, StorageError>;
+}
+
+/// 运行时可变的全局设置。初始值在代码里，不从配置文件导入。
+pub trait SettingsStore {
+    fn settings_load(&self) -> Result<BTreeMap<String, serde_json::Value>, StorageError>;
+    fn settings_put(
+        &mut self,
+        key: &str,
+        value: &serde_json::Value,
+        at: i64,
+    ) -> Result<(), StorageError>;
+    fn settings_delete(&mut self, key: &str) -> Result<bool, StorageError>;
+}
+
 /// 八样东西合起来。桥只依赖这一个约束，换后端只换实现。
 pub trait Store:
     Transcript
@@ -799,6 +835,8 @@ pub trait Store:
     + Policies
     + ModelFallbacks
     + ConfigObjectsStore
+    + SecretsStore
+    + SettingsStore
 {
 }
 
@@ -813,6 +851,8 @@ impl<T> Store for T where
         + Policies
         + ModelFallbacks
         + ConfigObjectsStore
+        + SecretsStore
+        + SettingsStore
 {
 }
 
@@ -847,6 +887,8 @@ pub struct MemoryStore {
     config_objects: ConfigObjects,
     /// 和 `policy_initialized` 一样：区分「导入过但是空的」与「从没导入」。
     config_objects_initialized: bool,
+    secrets: BTreeMap<String, StoredSecret>,
+    settings: BTreeMap<String, serde_json::Value>,
 }
 
 impl MemoryStore {
@@ -1480,6 +1522,58 @@ impl ConfigObjectsStore for MemoryStore {
         items.retain(|item| item.id != id);
         self.config_objects_initialized = true;
         Ok(items.len() != before)
+    }
+}
+
+impl SecretsStore for MemoryStore {
+    fn secrets_load(&self) -> Result<Vec<StoredSecret>, StorageError> {
+        Ok(self.secrets.values().cloned().collect())
+    }
+
+    fn secret_put(
+        &mut self,
+        name: &str,
+        value: &str,
+        encrypted: bool,
+        key_id: Option<&str>,
+        source: Option<&str>,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.secrets.insert(
+            name.to_owned(),
+            StoredSecret {
+                name: name.to_owned(),
+                value: value.to_owned(),
+                encrypted,
+                key_id: key_id.map(str::to_owned),
+                source: source.map(str::to_owned),
+            },
+        );
+        Ok(())
+    }
+
+    fn secret_delete(&mut self, name: &str) -> Result<bool, StorageError> {
+        Ok(self.secrets.remove(name).is_some())
+    }
+}
+
+impl SettingsStore for MemoryStore {
+    fn settings_load(&self) -> Result<BTreeMap<String, serde_json::Value>, StorageError> {
+        Ok(self.settings.clone())
+    }
+
+    fn settings_put(
+        &mut self,
+        key: &str,
+        value: &serde_json::Value,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.settings.insert(key.to_owned(), value.clone());
+        Ok(())
+    }
+
+    fn settings_delete(&mut self, key: &str) -> Result<bool, StorageError> {
+        Ok(self.settings.remove(key).is_some())
     }
 }
 

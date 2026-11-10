@@ -6,6 +6,7 @@
 pub mod adapter;
 pub mod config;
 pub mod config_objects;
+pub mod crypto;
 pub mod deps;
 pub mod endpoint;
 pub mod engine;

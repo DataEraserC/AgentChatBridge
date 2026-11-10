@@ -273,6 +273,116 @@ impl Config {
         self.turn_timeout_secs.saturating_mul(1000)
     }
 
+    /// 把运行时可变的全局值重置为代码默认值。
+    /// 配置文件里的同名键自 schema 16 起不再生效，避免「文件 + 库」两个真源。
+    pub fn reset_runtime_defaults(&mut self) {
+        self.default_on_turn_error = Vec::new();
+        self.delivery_limit = DEFAULT_DELIVERY_LIMIT;
+        self.turn_timeout_secs = DEFAULT_TURN_TIMEOUT_SECS;
+        self.tickets = crate::tickets::TicketsPolicy::default();
+        if let Some(notifications) = &mut self.notifications {
+            notifications.min_interval_secs = DEFAULT_NOTIFICATION_MIN_INTERVAL_SECS;
+            notifications.in_band = InBandNoticeConfig::default();
+        }
+    }
+
+    /// 用库里的 `settings` 覆盖代码默认值。未知 key 只告警，不让旧库阻止启动。
+    pub fn apply_settings(
+        &mut self,
+        settings: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        for (key, value) in settings {
+            match key.as_str() {
+                "default_on_turn_error" => {
+                    let array = value
+                        .as_array()
+                        .ok_or_else(|| format!("setting {key} must be an array of strings"))?;
+                    let actions: Vec<String> = array
+                        .iter()
+                        .map(|item| {
+                            item.as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| format!("setting {key} must be an array of strings"))
+                        })
+                        .collect::<Result<_, _>>()?;
+                    self.default_on_turn_error = parse_turn_error_actions(&actions)
+                        .map_err(|error| format!("setting {key}: {error}"))?;
+                }
+                "delivery_limit" => {
+                    let limit = value
+                        .as_u64()
+                        .ok_or_else(|| format!("setting {key} must be a positive integer"))?;
+                    if limit == 0 {
+                        return Err(format!("setting {key} must be greater than zero"));
+                    }
+                    self.delivery_limit = limit as usize;
+                }
+                "turn_timeout_secs" => {
+                    self.turn_timeout_secs = value
+                        .as_u64()
+                        .ok_or_else(|| format!("setting {key} must be an integer"))?;
+                }
+                "tickets.request_cooldown_secs" => {
+                    self.tickets.request_cooldown_secs = value
+                        .as_u64()
+                        .ok_or_else(|| format!("setting {key} must be an integer"))?;
+                }
+                "tickets.admin_cooldown_secs" => {
+                    self.tickets.admin_cooldown_secs = value
+                        .as_u64()
+                        .ok_or_else(|| format!("setting {key} must be an integer"))?;
+                }
+                "tickets.auto_expire" => {
+                    self.tickets.auto_expire = value
+                        .as_bool()
+                        .ok_or_else(|| format!("setting {key} must be a boolean"))?;
+                }
+                "tickets.pending_ttl_secs" => {
+                    self.tickets.pending_ttl_secs = value
+                        .as_u64()
+                        .ok_or_else(|| format!("setting {key} must be an integer"))?;
+                }
+                "notifications.min_interval_secs" => {
+                    if let Some(notifications) = &mut self.notifications {
+                        notifications.min_interval_secs = value
+                            .as_u64()
+                            .ok_or_else(|| format!("setting {key} must be an integer"))?;
+                    }
+                }
+                "notifications.in_band.window_secs" => {
+                    if let Some(notifications) = &mut self.notifications {
+                        notifications.in_band.window_secs = value
+                            .as_u64()
+                            .ok_or_else(|| format!("setting {key} must be an integer"))?;
+                    }
+                }
+                "notifications.in_band.room_limit" => {
+                    if let Some(notifications) = &mut self.notifications {
+                        notifications.in_band.room_limit = value
+                            .as_u64()
+                            .ok_or_else(|| format!("setting {key} must be an integer"))?;
+                    }
+                }
+                "notifications.in_band.max_entries" => {
+                    if let Some(notifications) = &mut self.notifications {
+                        notifications.in_band.max_entries = value
+                            .as_u64()
+                            .ok_or_else(|| format!("setting {key} must be an integer"))?;
+                    }
+                }
+                "notifications.in_band.remind_secs" => {
+                    if let Some(notifications) = &mut self.notifications {
+                        notifications.in_band.remind_secs = value
+                            .as_u64()
+                            .ok_or_else(|| format!("setting {key} must be an integer"))?;
+                    }
+                }
+                other => eprintln!("setting {other} is unknown; ignored"),
+            }
+        }
+        Ok(())
+    }
+
     /// 当前配置引用的所有 provider。`queue_unload` / `queue_reload` 用它判断
     /// “被引用就不能热卸载”，避免散落在 engine 里的手写扫描与新增字段遗漏。
     pub fn provider_references(&self) -> Vec<ProviderReference> {
@@ -3163,6 +3273,18 @@ impl SecretStore {
     pub fn value(&self, name: &str) -> Option<&str> {
         self.sources.get(name).map(|source| source.value.as_str())
     }
+
+    /// 库内密钥覆盖/补充文件来源。只给启动期用：值已经从密文解出来，来源标记为 `db`。
+    pub fn insert_runtime(&mut self, name: String, value: String) {
+        self.sources.insert(
+            name.clone(),
+            ResolvedSecret {
+                kind: "db".to_owned(),
+                origin: "database".to_owned(),
+                value,
+            },
+        );
+    }
 }
 
 const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
@@ -4419,6 +4541,42 @@ mod tests {
             error.to_string().contains("below 1024"),
             "错误要指明端口范围：{error}"
         );
+    }
+
+    #[test]
+    fn runtime_settings_override_code_defaults() {
+        let mut config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        config.reset_runtime_defaults();
+        assert_eq!(config.delivery_limit, DEFAULT_DELIVERY_LIMIT);
+        assert_eq!(config.turn_timeout_secs, DEFAULT_TURN_TIMEOUT_SECS);
+
+        let settings = BTreeMap::from([
+            ("delivery_limit".to_owned(), serde_json::json!(20)),
+            ("turn_timeout_secs".to_owned(), serde_json::json!(45)),
+            (
+                "tickets.pending_ttl_secs".to_owned(),
+                serde_json::json!(1800),
+            ),
+            (
+                "default_on_turn_error".to_owned(),
+                serde_json::json!(["send:qq:group/123"]),
+            ),
+        ]);
+        config.apply_settings(&settings).expect("设置能应用");
+        assert_eq!(config.delivery_limit, 20);
+        assert_eq!(config.turn_timeout_secs, 45);
+        assert_eq!(config.tickets.pending_ttl_secs, 1800);
+        assert_eq!(config.default_on_turn_error.len(), 1);
+    }
+
+    #[test]
+    fn runtime_settings_reject_bad_values() {
+        let mut config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let settings = BTreeMap::from([("delivery_limit".to_owned(), serde_json::json!(0))]);
+        let error = config.apply_settings(&settings).expect_err("0 必须拒绝");
+        assert!(error.contains("greater than zero"), "{error}");
     }
 
     #[test]

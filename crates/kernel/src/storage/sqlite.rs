@@ -6,6 +6,7 @@
 //! 表结构见 `docs/07-storage.md`。改动表结构时把 `SCHEMA_VERSION` 加一，并且**先写迁移**
 //! 再写代码——现在遇到不认识的版本会直接拒绝打开，而不是往老库里写坏数据。
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -16,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     ConfigObjectsStore, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply,
     Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind, Notes, Policies, PolicyEffect,
-    PrunePlan, RecordDraft, Recorded, SessionMap, SessionMaps, StorageError, TaskRecord,
-    TaskStatus, Tasks, TopicStatus, Transcript, Watermarks,
+    PrunePlan, RecordDraft, Recorded, SecretsStore, SessionMap, SessionMaps, SettingsStore,
+    StorageError, StoredSecret, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript, Watermarks,
 };
 use crate::config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 use crate::grants::{
@@ -231,6 +232,17 @@ CREATE TABLE IF NOT EXISTS settings (
     key        TEXT PRIMARY KEY,
     value_json TEXT NOT NULL CHECK (json_valid(value_json)),
     updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS secrets (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL UNIQUE,
+    value_ciphertext TEXT NOT NULL,
+    encrypted        INTEGER NOT NULL DEFAULT 1 CHECK (encrypted IN (0,1)),
+    key_id           TEXT,
+    source           TEXT,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL
 );
 
 -- 授权判定/配置写入审计。先落盘再执行，事故能复盘。
@@ -2646,6 +2658,111 @@ impl ConfigObjectsStore for SqliteStore {
             .map_err(io_error)?;
         let at = now_ms();
         self.mark_config_objects_initialized(at)?;
+        Ok(changed > 0)
+    }
+}
+
+impl SecretsStore for SqliteStore {
+    fn secrets_load(&self) -> Result<Vec<StoredSecret>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT name, value_ciphertext, encrypted, key_id, source
+                 FROM secrets ORDER BY name",
+            )
+            .map_err(io_error)?;
+        let mut rows = stmt.query([]).map_err(io_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(io_error)? {
+            out.push(StoredSecret {
+                name: row.get(0).map_err(io_error)?,
+                value: row.get(1).map_err(io_error)?,
+                encrypted: row.get::<_, i64>(2).map_err(io_error)? != 0,
+                key_id: row.get(3).map_err(io_error)?,
+                source: row.get(4).map_err(io_error)?,
+            });
+        }
+        Ok(out)
+    }
+
+    fn secret_put(
+        &mut self,
+        name: &str,
+        value: &str,
+        encrypted: bool,
+        key_id: Option<&str>,
+        source: Option<&str>,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                "INSERT INTO secrets
+                    (name, value_ciphertext, encrypted, key_id, source, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                 ON CONFLICT (name) DO UPDATE SET
+                    value_ciphertext = excluded.value_ciphertext,
+                    encrypted = excluded.encrypted,
+                    key_id = excluded.key_id,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at",
+                params![name, value, encrypted as i64, key_id, source, at],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+
+    fn secret_delete(&mut self, name: &str) -> Result<bool, StorageError> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM secrets WHERE name = ?1", params![name])
+            .map_err(io_error)?;
+        Ok(changed > 0)
+    }
+}
+
+impl SettingsStore for SqliteStore {
+    fn settings_load(&self) -> Result<BTreeMap<String, serde_json::Value>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value_json FROM settings ORDER BY key")
+            .map_err(io_error)?;
+        let mut rows = stmt.query([]).map_err(io_error)?;
+        let mut out = BTreeMap::new();
+        while let Some(row) = rows.next().map_err(io_error)? {
+            let key: String = row.get(0).map_err(io_error)?;
+            let value: String = row.get(1).map_err(io_error)?;
+            let value: serde_json::Value = serde_json::from_str(&value)
+                .map_err(|error| backend(format!("settings/{key}: {error}")))?;
+            out.insert(key, value);
+        }
+        Ok(out)
+    }
+
+    fn settings_put(
+        &mut self,
+        key: &str,
+        value: &serde_json::Value,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        let value = serde_json::to_string(value)
+            .map_err(|error| backend(format!("settings/{key}: {error}")))?;
+        self.conn
+            .execute(
+                "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (key) DO UPDATE SET
+                    value_json = excluded.value_json,
+                    updated_at = excluded.updated_at",
+                params![key, value, at],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+
+    fn settings_delete(&mut self, key: &str) -> Result<bool, StorageError> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM settings WHERE key = ?1", params![key])
+            .map_err(io_error)?;
         Ok(changed > 0)
     }
 }
