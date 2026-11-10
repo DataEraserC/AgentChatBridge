@@ -1363,5 +1363,9 @@
   "console.config.errors.secretRequired": "Secret name is required",
   "console.config.errors.personaRequired": "Persona is required (persona is mandatory in the config)",
   "console.config.errors.personaIdRequired": "Persona id is required",
-  "console.config.errors.memoryRequired": "Repository id and location are both required"
+  "console.config.errors.memoryRequired": "Repository id and location are both required",
+  "console.ui.theme.label": "Theme",
+  "console.ui.theme.system": "System",
+  "console.ui.theme.light": "Light",
+  "console.ui.theme.dark": "Dark"
 }

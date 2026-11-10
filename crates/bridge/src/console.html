@@ -49,6 +49,27 @@
     --font-mono: ui-monospace, SFMono-Regular, Consolas, monospace;
   }
 
+
+  /* 浅色：只换颜色档位，间距/字号/圆角与深色同一套。 */
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-raised: #eef1f5;
+    --border: #dde2e9;
+    --border-strong: #c6cdd7;
+    --text: #2a3039;
+    --text-muted: #667085;
+    --text-strong: #0f141a;
+    --accent: #2563eb;
+    --accent-weak: #e4ecfd;
+    --ok: #1c7f48;
+    --ok-weak: #e1f3e7;
+    --warn: #8a5d05;
+    --warn-weak: #fbf0d8;
+    --err: #b3261e;
+    --err-weak: #fde8e6;
+  }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: var(--text-body)/var(--leading-body) var(--font-sans); }
   h1, h2, h3 { margin: 0; color: var(--text-strong); font-weight: 600; line-height: var(--leading-title); }
@@ -215,6 +236,16 @@
     .mini, .btn.sm { min-height: var(--touch); }
   }
 </style>
+<script>
+// 主题在首屏渲染前定下来，避免闪一下深色。
+(function () {
+  var saved = null;
+  try { saved = localStorage.getItem("acb-console-theme"); } catch (e) {}
+  var system = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  var theme = saved === "light" || saved === "dark" ? saved : system;
+  document.documentElement.dataset.theme = theme;
+})();
+</script>
 </head>
 <body>
 <header>
@@ -225,6 +256,11 @@
     </button>
   </div>
   <div class="spacer"></div>
+  <select id="theme" class="locale-switch" data-i18n-aria="console.ui.theme.label" aria-label="Theme">
+    <option value="system" data-i18n="console.ui.theme.system"></option>
+    <option value="light" data-i18n="console.ui.theme.light"></option>
+    <option value="dark" data-i18n="console.ui.theme.dark"></option>
+  </select>
   <select id="locale" class="locale-switch" data-i18n-aria="console.ui.locale.label" aria-label="Interface language">
     <option value="zh-CN" data-i18n="console.ui.locale.zh"></option>
     <option value="en" data-i18n="console.ui.locale.en"></option>
@@ -446,6 +482,28 @@ function applyStaticTexts() {
   document.querySelectorAll("[data-i18n-aria]").forEach((el) => { el.setAttribute("aria-label", t(el.dataset.i18nAria)); });
   const switcher = $("#locale");
   if (switcher) switcher.value = locale;
+  const themeSwitcher = $("#theme");
+  if (themeSwitcher) themeSwitcher.value = themePreference();
+}
+
+// ---------------------------------------------------------------------------
+// 主题：跟随系统 / 浅色 / 深色三态。存偏好，实际生效值写 data-theme。
+// ---------------------------------------------------------------------------
+const THEME_KEY = "acb-console-theme";
+const themePreference = () => {
+  const saved = store.get(THEME_KEY);
+  return saved === "light" || saved === "dark" ? saved : "system";
+};
+const systemTheme = () =>
+  (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+function applyTheme() {
+  document.documentElement.dataset.theme = themePreference() === "system" ? systemTheme() : themePreference();
+}
+function switchTheme(next) {
+  if (!["system", "light", "dark"].includes(next)) return;
+  if (next === "system") store.del(THEME_KEY);
+  else store.set(THEME_KEY, next);
+  applyTheme();
 }
 
 async function loadI18n() {
@@ -2233,6 +2291,14 @@ function addMemory() {
 async function boot() {
   const switcher = $("#locale");
   if (switcher) switcher.addEventListener("change", (e) => switchLocale(e.target.value).catch((err) => console.error(err)));
+  const themeSwitcher = $("#theme");
+  if (themeSwitcher) themeSwitcher.addEventListener("change", (e) => switchTheme(e.target.value));
+  if (window.matchMedia) {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const onChange = () => { if (themePreference() === "system") applyTheme(); };
+    if (media.addEventListener) media.addEventListener("change", onChange);
+    else if (media.addListener) media.addListener(onChange);
+  }
   await loadI18n();
   document.querySelectorAll("nav button").forEach((btn) => {
     btn.addEventListener("click", () => {

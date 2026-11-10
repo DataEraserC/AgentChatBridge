@@ -1363,5 +1363,9 @@
   "console.config.errors.secretRequired": "密钥来源名不能为空",
   "console.config.errors.personaRequired": "人格必填（配置里 persona 是必填项）",
   "console.config.errors.personaIdRequired": "人格 id 不能为空",
-  "console.config.errors.memoryRequired": "仓库 id 和位置都得填"
+  "console.config.errors.memoryRequired": "仓库 id 和位置都得填",
+  "console.ui.theme.label": "主题",
+  "console.ui.theme.system": "跟随系统",
+  "console.ui.theme.light": "浅色",
+  "console.ui.theme.dark": "深色"
 }
