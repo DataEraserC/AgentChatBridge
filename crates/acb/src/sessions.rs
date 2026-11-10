@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const EXIT_USAGE: u8 = 2;
 const EXIT_CONFIG: u8 = 78;
