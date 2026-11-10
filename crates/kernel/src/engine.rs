@@ -265,6 +265,9 @@ struct Pending {
     /// 最早什么时候允许开轮（Unix 毫秒）。等待期间的新消息照常入库，
     /// 到点 `open_turn` 会一起取走。
     not_before: i64,
+    /// 由「某条记录命中唤醒策略」触发。只有这种唤醒才保证触发记录还在未读里；
+    /// 到点若已被同会话的另一轮投走，就该丢空轮（其余唤醒是让模型「看一眼」）。
+    from_record: bool,
 }
 
 /// 正在跑的一轮。挂在会话上：一个会话同一时刻只有这一轮。
@@ -1867,6 +1870,7 @@ impl<S: Store> Bridge<S> {
                 None,
                 now_millis(),
                 0,
+                false,
             );
         }
     }
@@ -3218,6 +3222,7 @@ impl<S: Store> Bridge<S> {
                     Some(record.sender.id.clone()),
                     now,
                     verdict.delay_ms,
+                    true,
                 );
             }
         }
@@ -3937,6 +3942,7 @@ impl<S: Store> Bridge<S> {
                 None,
                 now,
                 0,
+                false,
             );
             self.record_wake_audit(
                 now,
@@ -4212,15 +4218,20 @@ impl<S: Store> Bridge<S> {
         self.apply_staged_config();
         self.maybe_promote_lkg();
         let now = now_millis();
-        let index = (0..self.pending.len()).find(|&index| {
-            let pending = &self.pending[index];
-            pending.not_before <= now && !self.active.contains_key(&pending.session)
-        });
-        let Some(index) = index else {
-            return Ok(None);
-        };
-        let pending = self.pending.remove(index).expect("just found");
-        self.open_turn(pending).map(Some)
+        loop {
+            let index = (0..self.pending.len()).find(|&index| {
+                let pending = &self.pending[index];
+                pending.not_before <= now && !self.active.contains_key(&pending.session)
+            });
+            let Some(index) = index else {
+                return Ok(None);
+            };
+            let pending = self.pending.remove(index).expect("just found");
+            if let Some(delivery) = self.open_turn(pending)? {
+                return Ok(Some(delivery));
+            }
+            // 空唤醒被丢掉：继续看还有没有别的会话在等。
+        }
     }
 
     /// 只给这一组会话取活。接入点用这个——一条连接只代表它自己那组会话。
@@ -4232,18 +4243,22 @@ impl<S: Store> Bridge<S> {
         self.apply_staged_config();
         self.maybe_promote_lkg();
         let now = now_millis();
-        let index = (0..self.pending.len()).find(|&index| {
-            let pending = &self.pending[index];
-            if !sessions.iter().any(|session| session == &pending.session) {
-                return false;
+        loop {
+            let index = (0..self.pending.len()).find(|&index| {
+                let pending = &self.pending[index];
+                if !sessions.iter().any(|session| session == &pending.session) {
+                    return false;
+                }
+                pending.not_before <= now && !self.active.contains_key(&pending.session)
+            });
+            let Some(index) = index else {
+                return Ok(None);
+            };
+            let pending = self.pending.remove(index).expect("just found");
+            if let Some(delivery) = self.open_turn(pending)? {
+                return Ok(Some(delivery));
             }
-            pending.not_before <= now && !self.active.contains_key(&pending.session)
-        });
-        let Some(index) = index else {
-            return Ok(None);
-        };
-        let pending = self.pending.remove(index).expect("just found");
-        self.open_turn(pending).map(Some)
+        }
     }
 
     /// 一轮收工。票作废，会话空出来。
@@ -7901,6 +7916,7 @@ impl<S: Store> Bridge<S> {
                 ticket.origin_sender.clone(),
                 now,
                 0,
+                false,
             );
         }
     }
@@ -7988,6 +8004,7 @@ impl<S: Store> Bridge<S> {
                     origin,
                     now,
                     0,
+                    false,
                 );
                 queued += 1;
             }
@@ -8826,6 +8843,7 @@ impl<S: Store> Bridge<S> {
                         None,
                         now,
                         0,
+                        false,
                     );
                     self.clock_last.insert(key, now);
                     queued += 1;
@@ -8862,6 +8880,7 @@ impl<S: Store> Bridge<S> {
         origin_sender: Option<String>,
         at: i64,
         delay_ms: u64,
+        from_record: bool,
     ) {
         self.wake_last.insert((session.clone(), room.clone()), at);
         let not_before = at.saturating_add(delay_ms.min(MAX_WAKE_DELAY_MS) as i64);
@@ -8885,15 +8904,31 @@ impl<S: Store> Bridge<S> {
             wake_reason,
             origin_sender,
             not_before,
+            from_record,
         });
     }
 
-    fn open_turn(&mut self, pending: Pending) -> Result<Delivery, BridgeError> {
+    fn open_turn(&mut self, pending: Pending) -> Result<Option<Delivery>, BridgeError> {
         // 开轮时冻结配置：这一轮后续的工具查询都用它，热重载只影响下一轮。
         let turn_config = Arc::new(self.config.clone());
         let account = turn_config.account_of_room(&pending.room);
         self.heal_own_holes(&pending.session, &pending.room, &account)?;
         let mut records = self.pending_records(&pending.session, &pending.room, &account)?;
+        // 延迟唤醒（「先等后续内容」/ 攒条数）到点时，这批记录可能已经被同会话的另一轮
+        // 投过、水位也推过去了。再开一轮就是空投递：harness 收到「有新消息」却一条记录
+        // 都没有，模型只能空转。事件驱动的空唤醒直接丢掉；时钟唤醒（例行检查）另算，
+        // 它本来就是「没有新消息也看一眼」。
+        if empty_record_wake_dropped(pending.from_record, &records) {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.engine.wake_empty_dropped",
+                    session = pending.session.as_str(),
+                    room = pending.room.to_string()
+                )
+            );
+            return Ok(None);
+        }
         // 引用里的平台编号翻成本房间编号，跟平台编号并排放（ADR-0024）。
         self.fill_quote_refs(&pending.room, &mut records);
 
@@ -9068,7 +9103,7 @@ impl<S: Store> Bridge<S> {
         );
 
         // 批次已经由 composer 选好（默认从旧到新连续投一段），这里直接用它。
-        Ok(Delivery {
+        Ok(Some(Delivery {
             ticket,
             session: pending.session,
             room: pending.room,
@@ -9083,7 +9118,7 @@ impl<S: Store> Bridge<S> {
             // 0 = 配置里关了超时，harness 收到就别自己掐。
             turn_timeout_ms: Some(turn_config.turn_timeout_ms()),
             prompts,
-        })
+        }))
     }
 
     /// 收集本轮插件贡献的上下文片段，并按预算裁剪/排序。
@@ -10782,6 +10817,7 @@ impl<S: Store> Bridge<S> {
                         None,
                         at,
                         0,
+                        false,
                     );
                     if !woke.iter().any(|session| session == &item.session) {
                         woke.push(item.session.clone());
@@ -13204,6 +13240,15 @@ fn with_file_hint(detail: String) -> String {
     )
 }
 
+/// 事件驱动的唤醒到点时若一条未投记录都没有，就别开轮。
+///
+/// 触发记录可能已经被同一会话的另一轮用 `wait_message` 取走并 ack 了（水位推过它），
+/// 这时再开一轮只会让 harness 收到「有新消息」却没有任何记录。时钟唤醒与后台任务
+/// 唤醒不走这条判断：它们本来就是「没有新消息也让模型看一眼」。
+fn empty_record_wake_dropped(from_record: bool, records: &[Record]) -> bool {
+    from_record && records.is_empty()
+}
+
 /// 把唤醒原因补上「是哪条记录触发的」：水位编号必有，平台消息号/回应目标有就带。
 ///
 /// 只拼编号、计数和人话，正文一律不进理由；房间和会话由外层渲染，不重复。
@@ -13235,6 +13280,51 @@ mod limit_tests {
         assert_eq!(memory_git_log_limit(None), 10, "默认 10 不变");
         assert_eq!(memory_git_log_limit(Some(0)), 1, "下限 1");
         assert_eq!(memory_git_log_limit(Some(999)), 100, "上限 100");
+    }
+}
+
+#[cfg(test)]
+mod empty_wake_tests {
+    use super::*;
+
+    #[test]
+    fn record_wake_with_no_records_is_dropped() {
+        assert!(empty_record_wake_dropped(true, &[]));
+    }
+
+    #[test]
+    fn record_wake_with_records_is_kept() {
+        let record = Record {
+            id: 1,
+            room: RoomId::new("qq", "group/1").expect("合法"),
+            kind: RecordKind::Message,
+            sender: Sender {
+                id: "10001".to_owned(),
+                name: "老王".to_owned(),
+                role: None,
+            },
+            at: 0,
+            elements: vec![Element::Quote {
+                message_id: "m-1".to_owned(),
+            }],
+            at_self: false,
+            reply_to_self: false,
+            platform_id: None,
+            quote_ref: None,
+            labels: Vec::new(),
+            suppressed: false,
+            redelivery: None,
+            note: None,
+        };
+        assert!(!empty_record_wake_dropped(
+            true,
+            std::slice::from_ref(&record)
+        ));
+    }
+
+    #[test]
+    fn clock_and_task_wakes_are_never_dropped() {
+        assert!(!empty_record_wake_dropped(false, &[]));
     }
 }
 

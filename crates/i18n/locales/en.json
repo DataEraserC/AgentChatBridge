@@ -1367,5 +1367,6 @@
   "console.ui.theme.label": "Theme",
   "console.ui.theme.system": "System",
   "console.ui.theme.light": "Light",
-  "console.ui.theme.dark": "Dark"
+  "console.ui.theme.dark": "Dark",
+  "kernel.engine.wake_empty_dropped": "wake had nothing left to deliver; skipped empty turn: session {session} room {room}"
 }
