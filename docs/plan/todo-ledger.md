@@ -413,3 +413,40 @@ detail 为 `90-console.toml must not declare [secrets]`。
 `secrets resolve --session` 仍报「cannot read …session-tokens.env」。需要用户把
 系统 flake 的 acb 输入更新到含 `e7c99b1` 的 rev，并重建**用户级** unit
 （`~/.config/systemd/user/acb-bridge.service` 里硬编码了 launcher 路径）。
+
+### 2026-11-11 00:55 驱动侧换到新 acbl，库内令牌闭环收口
+
+承接 00:22 那条「驱动侧 acbl 仍是旧构建」：
+
+1. 系统 00:33 重建后 `/run/current-system/sw/bin/acbctl` 已含 preload（acb rev
+   `6990ef0`）。但 `~/.config/systemd/user/acb-bridge.service` 是手写旧文件，遮蔽了
+   `/etc/systemd/user/acb-bridge.service`，ExecStart 仍指向 `lxbflj…` 旧 acbl。已备份
+   并移除该文件（保留 `acb-bridge.service.d/10-secrets-key.conf` 这个 ACB_KEY_FILE
+   drop-in），`daemon-reload` 后 FragmentPath 回到 `/etc`，入口改为
+   `/run/current-system/sw/bin/acb-launcher`。
+2. `state/supervisor/supervisor.toml` 里 dsh / dsh-presets / drivers 三个组件的 env
+   硬编码 `ACBCTL_BIN=/nix/store/lxbflj…`（旧、无 preload），且继承不到
+   ACB_KEY_FILE。去掉 ACBCTL_BIN（驱动脚本会回落到自身 PREFIX 里的 acbctl），并给
+   带 `ACB_CONFIG_FILE` 的两个组件显式补 `ACB_KEY_FILE`。
+3. `config.toml` 删掉 5 条指向 `secrets/session-tokens.env` 的 `[[secrets.sources]]`
+   （dsh-dev/qas/group2/snowluma-test、opencode-token），重启后启动日志
+   `secrets: 8 name(s) loaded from store`，全部 `(db, database)`；4 个 dsh 驱动 +
+   opencode 均从 `5dwa95…acbl` 启动并连上 endpoint。
+
+踩坑：第一次用「按 `[[secrets.sources]]` 切块」的脚本删条目时，把最后一个块之后
+的 `[endpoint]/[console]/[tickets]/[file_relay]/[notifications]` 一起吞了，桥报
+`notifications.topic contains a literal secret` 并崩溃循环。已从
+`config.toml.bak-20261111-0048` 恢复，改成「块边界到下一个 `[` 行」重删。
+
+备份：`config.toml.bak-20261111-0048`、`config.active.toml.bak-20261111-0048`、
+`state/supervisor/supervisor.toml.bak-20261111-0052`、
+`~/.config/systemd/user/acb-bridge.service.bak-20261111-0045`。
+
+验收：
+- `systemctl --user show acb-bridge -p FragmentPath` → `/etc/systemd/user/acb-bridge.service`
+- `grep "secret sources" -A9 bridge.log` 最新一段全部 `(db, database)`
+- `pgrep -af driver.mjs` → 4 个；drivers.log 不再出现 `acbctl sessions 失败`
+- `acbctl sessions --config …` （带 ACB_KEY_FILE）列出 6 个会话
+
+遗留：会话仍无显式 `driver_port`，按历史下标推导（3101–3106）；要稳定端口需在
+控制台给每个会话写入 `driver_port`。
