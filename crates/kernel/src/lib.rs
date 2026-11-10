@@ -17,6 +17,8 @@ pub mod memory;
 pub mod notice;
 pub mod outbound;
 pub mod plugin;
+pub mod plugin_admin;
+pub mod plugin_manifest;
 pub mod plugin_meta;
 pub mod plugin_registry;
 pub mod policy;
@@ -82,6 +84,10 @@ pub use plugin::{
     SubscribedAccessProvider, ToolAccessContext, ToolAccessProvider, ToolAccessVerdict,
     ToolCallContext, ToolLoader, ToolProvider, ToolSpec, TurnErrorProvider, TurnErrorRequest,
     WakeContext, WakeProvider, default_delivery_plan,
+};
+pub use plugin_manifest::{
+    ActionDecl, ConfigField, FieldType, PluginManifest, ResourceDecl, check_config_assignment,
+    looks_like_secret_key, looks_like_secret_value,
 };
 pub use plugin_meta::{PluginEffect, PluginInfo, PluginLifecycle, PluginMetadata, PluginSource};
 pub use plugin_registry::{

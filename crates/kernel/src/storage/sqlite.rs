@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ConfigObjectsStore, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply,
-    Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind, Notes, PluginsStore, Policies,
-    PolicyEffect, PrunePlan, RecordDraft, Recorded, SecretsStore, SessionMap, SessionMaps,
-    SettingsStore, StorageError, StoredSecret, TaskRecord, TaskStatus, Tasks, TopicStatus,
-    Transcript, Watermarks,
+    Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind, Notes, PluginDataStore,
+    PluginsStore, Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded, SecretsStore,
+    SessionMap, SessionMaps, SettingsStore, StorageError, StoredPluginConfig, StoredPluginRecord,
+    StoredSecret, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript, Watermarks,
 };
 use crate::config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 use crate::grants::{
@@ -3315,4 +3315,185 @@ fn put_plugin(
         .map_err(io_error)?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 插件数据：配置、资源记录、密钥引用（schema 17）
+// ---------------------------------------------------------------------------
+
+impl PluginDataStore for SqliteStore {
+    fn plugin_config_load(&self, plugin_id: &str) -> Result<Vec<StoredPluginConfig>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, value_json, type, encrypted FROM plugin_config
+                 WHERE plugin_id = ?1 ORDER BY key",
+            )
+            .map_err(io_error)?;
+        let mut rows = stmt.query(params![plugin_id]).map_err(io_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(io_error)? {
+            let key: String = row.get(0).map_err(io_error)?;
+            let value_json: String = row.get(1).map_err(io_error)?;
+            let ty: String = row.get(2).map_err(io_error)?;
+            let encrypted: i64 = row.get(3).map_err(io_error)?;
+            let value = serde_json::from_str(&value_json)
+                .map_err(|error| backend(format!("plugin_config/{plugin_id}/{key}: {error}")))?;
+            out.push(StoredPluginConfig {
+                key,
+                value,
+                ty,
+                encrypted: encrypted != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    fn plugin_config_put(
+        &mut self,
+        plugin_id: &str,
+        key: &str,
+        value: &serde_json::Value,
+        ty: &str,
+        encrypted: bool,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        let value_json = serde_json::to_string(value)
+            .map_err(|error| backend(format!("plugin_config/{plugin_id}/{key}: {error}")))?;
+        self.conn
+            .execute(
+                "INSERT INTO plugin_config (plugin_id, key, value_json, type, encrypted, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT (plugin_id, key) DO UPDATE SET
+                    value_json = excluded.value_json,
+                    type = excluded.type,
+                    encrypted = excluded.encrypted,
+                    updated_at = excluded.updated_at",
+                params![plugin_id, key, value_json, ty, i64::from(encrypted), at],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+
+    fn plugin_config_delete(&mut self, plugin_id: &str, key: &str) -> Result<bool, StorageError> {
+        let changed = self
+            .conn
+            .execute(
+                "DELETE FROM plugin_config WHERE plugin_id = ?1 AND key = ?2",
+                params![plugin_id, key],
+            )
+            .map_err(io_error)?;
+        Ok(changed > 0)
+    }
+
+    fn plugin_records_load(
+        &self,
+        plugin_id: &str,
+        resource: &str,
+    ) -> Result<Vec<StoredPluginRecord>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT record_id, value_json FROM plugin_records
+                 WHERE plugin_id = ?1 AND resource = ?2 ORDER BY record_id",
+            )
+            .map_err(io_error)?;
+        let mut rows = stmt.query(params![plugin_id, resource]).map_err(io_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(io_error)? {
+            let record_id: String = row.get(0).map_err(io_error)?;
+            let value_json: String = row.get(1).map_err(io_error)?;
+            let value = serde_json::from_str(&value_json).map_err(|error| {
+                backend(format!(
+                    "plugin_records/{plugin_id}/{resource}/{record_id}: {error}"
+                ))
+            })?;
+            out.push(StoredPluginRecord {
+                resource: resource.to_owned(),
+                record_id,
+                value,
+            });
+        }
+        Ok(out)
+    }
+
+    fn plugin_record_put(
+        &mut self,
+        plugin_id: &str,
+        resource: &str,
+        record_id: &str,
+        value: &serde_json::Value,
+        at: i64,
+    ) -> Result<(), StorageError> {
+        let value_json = serde_json::to_string(value).map_err(|error| {
+            backend(format!(
+                "plugin_records/{plugin_id}/{resource}/{record_id}: {error}"
+            ))
+        })?;
+        self.conn
+            .execute(
+                "INSERT INTO plugin_records
+                    (plugin_id, resource, record_id, value_json, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?5)
+                 ON CONFLICT (plugin_id, resource, record_id) DO UPDATE SET
+                    value_json = excluded.value_json,
+                    updated_at = excluded.updated_at",
+                params![plugin_id, resource, record_id, value_json, at],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+
+    fn plugin_record_delete(
+        &mut self,
+        plugin_id: &str,
+        resource: &str,
+        record_id: &str,
+    ) -> Result<bool, StorageError> {
+        let changed = self
+            .conn
+            .execute(
+                "DELETE FROM plugin_records
+                 WHERE plugin_id = ?1 AND resource = ?2 AND record_id = ?3",
+                params![plugin_id, resource, record_id],
+            )
+            .map_err(io_error)?;
+        Ok(changed > 0)
+    }
+
+    fn plugin_secret_ref_put(
+        &mut self,
+        plugin_id: &str,
+        name: &str,
+        secret_id: i64,
+    ) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                "INSERT INTO plugin_secret_refs (plugin_id, name, secret_id)
+                 VALUES (?1,?2,?3)
+                 ON CONFLICT (plugin_id, name) DO UPDATE SET secret_id = excluded.secret_id",
+                params![plugin_id, name, secret_id],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+
+    fn plugin_secret_refs_load(&self, plugin_id: &str) -> Result<Vec<(String, i64)>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT name, secret_id FROM plugin_secret_refs
+                 WHERE plugin_id = ?1 ORDER BY name",
+            )
+            .map_err(io_error)?;
+        let mut rows = stmt.query(params![plugin_id]).map_err(io_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(io_error)? {
+            out.push((
+                row.get::<_, String>(0).map_err(io_error)?,
+                row.get::<_, i64>(1).map_err(io_error)?,
+            ));
+        }
+        Ok(out)
+    }
 }

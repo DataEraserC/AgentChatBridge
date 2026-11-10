@@ -858,6 +858,73 @@ pub trait PluginsStore {
     ) -> Result<bool, StorageError>;
 }
 
+/// 插件数据：配置项、通用资源记录、密钥引用。
+///
+/// 这是 L1 的落点：插件把「自己的配置」交给桥存，桥按 manifest 校验；资源记录
+/// 一行一条，不动态建表（schema 变更只发生在 ACB 自己的迁移里）。
+#[derive(Debug, Clone)]
+pub struct StoredPluginConfig {
+    pub key: String,
+    pub value: serde_json::Value,
+    pub ty: String,
+    pub encrypted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredPluginRecord {
+    pub resource: String,
+    pub record_id: String,
+    pub value: serde_json::Value,
+}
+
+pub trait PluginDataStore {
+    fn plugin_config_load(&self, plugin_id: &str) -> Result<Vec<StoredPluginConfig>, StorageError>;
+
+    fn plugin_config_put(
+        &mut self,
+        plugin_id: &str,
+        key: &str,
+        value: &serde_json::Value,
+        ty: &str,
+        encrypted: bool,
+        at: i64,
+    ) -> Result<(), StorageError>;
+
+    fn plugin_config_delete(&mut self, plugin_id: &str, key: &str) -> Result<bool, StorageError>;
+
+    fn plugin_records_load(
+        &self,
+        plugin_id: &str,
+        resource: &str,
+    ) -> Result<Vec<StoredPluginRecord>, StorageError>;
+
+    fn plugin_record_put(
+        &mut self,
+        plugin_id: &str,
+        resource: &str,
+        record_id: &str,
+        value: &serde_json::Value,
+        at: i64,
+    ) -> Result<(), StorageError>;
+
+    fn plugin_record_delete(
+        &mut self,
+        plugin_id: &str,
+        resource: &str,
+        record_id: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// 把配置里的密钥字段绑定到一个具名密钥。值本身不进插件配置。
+    fn plugin_secret_ref_put(
+        &mut self,
+        plugin_id: &str,
+        name: &str,
+        secret_id: i64,
+    ) -> Result<(), StorageError>;
+
+    fn plugin_secret_refs_load(&self, plugin_id: &str) -> Result<Vec<(String, i64)>, StorageError>;
+}
+
 /// 八样东西合起来。桥只依赖这一个约束，换后端只换实现。
 pub trait Store:
     Transcript
@@ -873,6 +940,7 @@ pub trait Store:
     + SecretsStore
     + SettingsStore
     + PluginsStore
+    + PluginDataStore
 {
 }
 
@@ -890,6 +958,7 @@ impl<T> Store for T where
         + SecretsStore
         + SettingsStore
         + PluginsStore
+        + PluginDataStore
 {
 }
 
@@ -929,6 +998,12 @@ pub struct MemoryStore {
     /// 插件注册表。`plugins_initialized` 区分「导入过但是空的」与「从没导入」。
     plugins: Vec<crate::plugin_registry::RegistryPlugin>,
     plugins_initialized: bool,
+    /// 插件配置：(plugin_id, key) → 值。
+    plugin_config: BTreeMap<(String, String), StoredPluginConfig>,
+    /// 插件资源记录：(plugin_id, resource, record_id) → 值。
+    plugin_records: BTreeMap<(String, String, String), serde_json::Value>,
+    /// 插件密钥引用：(plugin_id, name) → secret id。
+    plugin_secret_refs: BTreeMap<(String, String), i64>,
 }
 
 impl MemoryStore {
@@ -1614,6 +1689,122 @@ impl SettingsStore for MemoryStore {
 
     fn settings_delete(&mut self, key: &str) -> Result<bool, StorageError> {
         Ok(self.settings.remove(key).is_some())
+    }
+}
+
+impl PluginDataStore for MemoryStore {
+    fn plugin_config_load(&self, plugin_id: &str) -> Result<Vec<StoredPluginConfig>, StorageError> {
+        Ok(self
+            .plugin_config
+            .iter()
+            .filter(|((id, _), _)| id == plugin_id)
+            .map(|(_, config)| StoredPluginConfig {
+                key: config.key.clone(),
+                value: config.value.clone(),
+                ty: config.ty.clone(),
+                encrypted: config.encrypted,
+            })
+            .collect())
+    }
+
+    fn plugin_config_put(
+        &mut self,
+        plugin_id: &str,
+        key: &str,
+        value: &serde_json::Value,
+        ty: &str,
+        encrypted: bool,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.plugin_config.insert(
+            (plugin_id.to_owned(), key.to_owned()),
+            StoredPluginConfig {
+                key: key.to_owned(),
+                value: value.clone(),
+                ty: ty.to_owned(),
+                encrypted,
+            },
+        );
+        Ok(())
+    }
+
+    fn plugin_config_delete(&mut self, plugin_id: &str, key: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .plugin_config
+            .remove(&(plugin_id.to_owned(), key.to_owned()))
+            .is_some())
+    }
+
+    fn plugin_records_load(
+        &self,
+        plugin_id: &str,
+        resource: &str,
+    ) -> Result<Vec<StoredPluginRecord>, StorageError> {
+        Ok(self
+            .plugin_records
+            .iter()
+            .filter(|((id, res, _), _)| id == plugin_id && res == resource)
+            .map(|((_, _, record_id), value)| StoredPluginRecord {
+                resource: resource.to_owned(),
+                record_id: record_id.clone(),
+                value: value.clone(),
+            })
+            .collect())
+    }
+
+    fn plugin_record_put(
+        &mut self,
+        plugin_id: &str,
+        resource: &str,
+        record_id: &str,
+        value: &serde_json::Value,
+        _at: i64,
+    ) -> Result<(), StorageError> {
+        self.plugin_records.insert(
+            (
+                plugin_id.to_owned(),
+                resource.to_owned(),
+                record_id.to_owned(),
+            ),
+            value.clone(),
+        );
+        Ok(())
+    }
+
+    fn plugin_record_delete(
+        &mut self,
+        plugin_id: &str,
+        resource: &str,
+        record_id: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .plugin_records
+            .remove(&(
+                plugin_id.to_owned(),
+                resource.to_owned(),
+                record_id.to_owned(),
+            ))
+            .is_some())
+    }
+
+    fn plugin_secret_ref_put(
+        &mut self,
+        plugin_id: &str,
+        name: &str,
+        secret_id: i64,
+    ) -> Result<(), StorageError> {
+        self.plugin_secret_refs
+            .insert((plugin_id.to_owned(), name.to_owned()), secret_id);
+        Ok(())
+    }
+
+    fn plugin_secret_refs_load(&self, plugin_id: &str) -> Result<Vec<(String, i64)>, StorageError> {
+        Ok(self
+            .plugin_secret_refs
+            .iter()
+            .filter(|((id, _), _)| id == plugin_id)
+            .map(|((_, name), secret_id)| (name.clone(), *secret_id))
+            .collect())
     }
 }
 
