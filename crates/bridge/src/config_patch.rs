@@ -797,6 +797,8 @@ fn set_or_remove_int(
 
 #[cfg(test)]
 mod tests {
+    use super::apply_patch;
+
     fn changes_en(changes: &[acb_i18n::Message]) -> Vec<String> {
         changes.iter().map(|change| change.render("en")).collect()
     }
@@ -1066,5 +1068,44 @@ keywords = ["喂"]
         let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
         assert_eq!(config.harnesses[1].name, "改名");
         assert_eq!(config.harnesses.len(), 2, "不重复建");
+    }
+
+    #[test]
+    fn create_then_delete_keeps_other_sessions_with_subscription_tables() {
+        let doc = "[[harnesses]]\nid = \"dsh\"\nkind = \"dsh\"\n\n[[sessions]]\nid = \"a\"\nharness = \"dsh\"\npersona = \"p\"\ntoken = { secret = \"a-token\" }\n\n[sessions.subscriptions]\nroom = \"group/1\"\n\n[[sessions]]\nid = \"b\"\nharness = \"dsh\"\npersona = \"p\"\ntoken = { secret = \"b-token\" }\n";
+        let create = serde_json::json!([{"op":"session","id":"c","create":{"harness":"dsh","secret":"c-token","persona":"p"}}]);
+        let (patched, _) = apply_patch(doc, create.as_array().expect("array")).expect("create");
+        println!("--- after create ---\n{patched}");
+        let session_ids = |text: &str| -> Vec<String> {
+            let value: toml::Value = text.parse().expect("parse");
+            value
+                .get("sessions")
+                .and_then(toml::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("id")
+                                .and_then(toml::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            session_ids(&patched),
+            vec!["a", "b", "c"],
+            "create 后会话不该乱"
+        );
+        let delete = serde_json::json!([{"op":"delete","section":"session","id":"c"}]);
+        let (final_text, _) =
+            apply_patch(&patched, delete.as_array().expect("array")).expect("delete");
+        println!("--- after delete ---\n{final_text}");
+        assert_eq!(
+            session_ids(&final_text),
+            vec!["a", "b"],
+            "delete 后不该丢掉别的会话"
+        );
     }
 }

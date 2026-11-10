@@ -1370,5 +1370,7 @@
   "console.ui.theme.dark": "Dark",
   "kernel.engine.wake_empty_dropped": "wake had nothing left to deliver; skipped empty turn: session {session} room {room}",
   "bridge.console.secret_name_invalid": "secret source names allow letters, digits, underscore, dot and dash only: {name}",
-  "bridge.console.secret_mint_failed": "could not generate a session token"
+  "bridge.console.secret_mint_failed": "could not generate a session token",
+  "bridge.console.patch_lost_object": "the patch would drop {kind} \"{id}\"; rejected without writing",
+  "bridge.console.patch_lost_object_detail": "Nothing in your change deleted it: the patch lost the entry while rewriting the document. Report this change to the maintainer or edit the raw TOML instead."
 }

@@ -173,6 +173,54 @@ impl Drop for SessionSecretMint {
     }
 }
 
+/// 补丁后凭空消失的对象：没被显式 `delete`，却不在新集合里。
+///
+/// 返回第一条，够用——发现问题就整单拒绝，不需要列全。
+fn lost_object(
+    before: &acb_kernel::ConfigObjects,
+    after: &acb_kernel::ConfigObjects,
+    ops: &[serde_json::Value],
+) -> Option<(&'static str, String)> {
+    let deleted: Vec<(String, String)> = ops
+        .iter()
+        .filter(|op| op.get("op").and_then(serde_json::Value::as_str) == Some("delete"))
+        .map(|op| {
+            (
+                op.get("section")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                op.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+            )
+        })
+        .collect();
+    for kind in acb_kernel::ConfigObjectKind::ALL {
+        let section = match kind {
+            acb_kernel::ConfigObjectKind::Connection => "connection",
+            acb_kernel::ConfigObjectKind::Harness => "harness",
+            acb_kernel::ConfigObjectKind::Persona => "persona",
+            acb_kernel::ConfigObjectKind::Memory => "memory",
+            acb_kernel::ConfigObjectKind::Session => "session",
+        };
+        for object in before.get(kind) {
+            if after.get(kind).iter().any(|next| next.id == object.id) {
+                continue;
+            }
+            if deleted
+                .iter()
+                .any(|(dot, id)| dot == section && *id == object.id)
+            {
+                continue;
+            }
+            return Some((section, object.id.clone()));
+        }
+    }
+    None
+}
+
 fn valid_secret_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -1128,6 +1176,23 @@ impl<S: Store + Send + 'static> Console<S> {
                 }
             }
         };
+
+        // 兜底：对象补丁只该「改」或「显式删」。任何一条没被显式 delete 却消失了，
+        // 都说明补丁在文本层把数据吃掉了——宁可整单拒绝，也不能静默丢会话
+        // （2026-11-10 现场：新建会话后 `dsh-dev` 消失，只能从备份库补回）。
+        if let Some(next) = &next_objects {
+            if let Some((kind, id)) = lost_object(&objects, next, &object_ops) {
+                return config_error(
+                    500,
+                    acb_i18n::msg!(
+                        "bridge.console.patch_lost_object",
+                        kind = kind,
+                        id = id.clone()
+                    ),
+                    Some(acb_i18n::t!("bridge.console.patch_lost_object_detail").to_owned()),
+                );
+            }
+        }
 
         let effective = next_objects.as_ref().unwrap_or(&objects);
         let new_config = match acb_kernel::Config::load_with_console_overlay(

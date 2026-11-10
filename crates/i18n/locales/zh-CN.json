@@ -1370,5 +1370,7 @@
   "console.ui.theme.dark": "深色",
   "kernel.engine.wake_empty_dropped": "唤醒到点时已无未投记录，跳过空投递：会话 {session} 房间 {room}",
   "bridge.console.secret_name_invalid": "密钥来源名只能用字母、数字、下划线、点、横线：{name}",
-  "bridge.console.secret_mint_failed": "自动生成会话令牌失败"
+  "bridge.console.secret_mint_failed": "自动生成会话令牌失败",
+  "bridge.console.patch_lost_object": "补丁会丢掉 {kind}「{id}」——整单拒绝，没有写入",
+  "bridge.console.patch_lost_object_detail": "这不是你删的：补丁在文本层把这条吃掉了。请把这次改动报给维护者，或改用 TOML 原文修改。"
 }
