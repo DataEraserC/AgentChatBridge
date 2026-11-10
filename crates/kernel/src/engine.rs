@@ -2401,6 +2401,16 @@ impl<S: Store> Bridge<S> {
         Ok(self.store.config_objects_load()?.unwrap_or_default())
     }
 
+    /// 库里的插件注册表（控制台/诊断用）。还没导入过时返回空表，不报 500。
+    ///
+    /// 只做搬运：策略、存储、能力声明原样给出；命令能不能跑由调用方用
+    /// [`crate::plugin_registry::check_command`] 判，避免把运行环境差异塞进 kernel。
+    pub fn registry_plugins(
+        &self,
+    ) -> Result<Vec<crate::plugin_registry::RegistryPlugin>, crate::storage::StorageError> {
+        Ok(self.store.plugins_load()?.unwrap_or_default())
+    }
+
     /// 整组覆盖业务对象。写完只置标记，轮次边界生效。
     ///
     /// 和策略、后备链同一个时机：一轮里换会话列表会让同一轮前后看到两套订阅。

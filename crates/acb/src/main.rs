@@ -4,6 +4,7 @@ mod component;
 mod config_source;
 mod grants;
 mod logs;
+mod plugin;
 mod run;
 mod secrets;
 mod service;
@@ -100,6 +101,7 @@ fn run() -> Result<ExitCode, String> {
         "grants" => grants::command(&args.collect::<Vec<_>>()),
         "secrets" => secrets::command(&args.collect::<Vec<_>>()),
         "settings" => settings::command(&args.collect::<Vec<_>>()),
+        "plugin" => plugin::command(&args.collect::<Vec<_>>()),
         "sessions" => sessions::command(&args.collect::<Vec<_>>()),
         "upgrade" => upgrade::command(&args.collect::<Vec<_>>()),
         other => Err(format!("unknown command: {other}")),

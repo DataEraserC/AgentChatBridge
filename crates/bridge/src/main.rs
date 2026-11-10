@@ -36,6 +36,7 @@ use acb_plugin_trusted::TrustedLoader;
 mod config_objects;
 mod config_patch;
 mod console;
+mod plugins;
 use console::Console;
 
 /// 清理线程隔多久扫一次。来源：实现默认——桥不是数据库，5 分钟一次足够，
@@ -134,6 +135,25 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     overlay_db_secrets(&mut loaded, &store)?;
     loaded.config.reset_runtime_defaults();
     loaded.config.apply_settings(&store.settings_load()?)?;
+    // 插件清单同样以库为准：首次启动把 `[[tool_plugins]]` seed 进库，之后只读库。
+    // 命令不可执行只标记 degraded，不阻塞启动——插件坏了不该让桥起不来。
+    let plugin_runtimes = plugins::sync(
+        &mut store,
+        &loaded.config.tool_plugins,
+        Path::new(&options.config),
+        &config_dir,
+        !options.check_only,
+    )?;
+    for runtime in &plugin_runtimes {
+        if let Some(reason) = runtime.reason() {
+            eprintln!("plugin {}: degraded ({reason})", runtime.plugin.id);
+        }
+    }
+    let tool_plugins: Vec<_> = plugin_runtimes
+        .iter()
+        .filter(|runtime| runtime.callable())
+        .map(|runtime| runtime.plugin.tool_config())
+        .collect();
     let config = loaded.config;
     let sources = loaded.sources;
     let duplicate_rules = loaded.duplicate_rules;
@@ -246,9 +266,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if !config.plugins.is_empty() {
         plugins.install_loader_owned(Arc::new(DynamicLoader::new(&config.plugins)))?;
     }
-    // 外置进程工具：只承载第三方工具，第一方工具仍走进程内 ToolLoader。
-    if !config.tool_plugins.is_empty() {
-        plugins.install_loader_owned(Arc::new(ProcessToolLoader::new(&config.tool_plugins)))?;
+    // 外置进程工具：清单来自库，只有启用且命令可执行的才装；第一方工具仍走进程内 ToolLoader。
+    if !tool_plugins.is_empty() {
+        plugins.install_loader_owned(Arc::new(ProcessToolLoader::new(&tool_plugins)))?;
     }
     // 外置进程策略 provider：核心不认识 wasm，只按命令启动宿主并转发 decide。
     // 列表为空 = 不装宿主；配置里有但宿主起不来 = 启动期硬失败。

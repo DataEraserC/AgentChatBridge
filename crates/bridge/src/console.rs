@@ -388,11 +388,68 @@ impl<S: Store + Send + 'static> Console<S> {
                 let bridge = lock(&self.bridge);
                 let plugins = bridge.plugin_catalog();
                 let wake_audit = bridge.wake_audit();
+                let registry = match bridge.registry_plugins() {
+                    Ok(list) => list,
+                    Err(error) => {
+                        eprintln!("console: failed to read plugin registry: {error}");
+                        Vec::new()
+                    }
+                };
+                let registry_view: Vec<serde_json::Value> = registry
+                    .iter()
+                    .map(|plugin| {
+                        let status =
+                            acb_kernel::plugin_registry::check_command(&plugin.command, plugin.command_kind, None);
+                        json!({
+                            "id": plugin.id,
+                            "kind": plugin.kind.as_str(),
+                            "trustTier": plugin.trust_tier,
+                            "command": plugin.command,
+                            "args": plugin.args,
+                            "timeoutMs": plugin.timeout_ms,
+                            "commandKind": plugin.command_kind.as_str(),
+                            "fingerprint": plugin.command_fingerprint,
+                            "fingerprintOk": plugin.fingerprint_matches(),
+                            "manifest": serde_json::from_str::<serde_json::Value>(&plugin.manifest_json)
+                                .unwrap_or(serde_json::Value::Null),
+                            "enabled": plugin.enabled,
+                            "degraded": if plugin.enabled {
+                                Some(status.describe()).filter(|_| !status.is_ok())
+                            } else {
+                                None
+                            },
+                            "policy": {
+                                "enabled": plugin.policy.enabled,
+                                "scopeKind": plugin.policy.scope_kind.as_str(),
+                                "scopeId": plugin.policy.scope_id,
+                                "capabilities": plugin.policy.capabilities,
+                                "lifecycle": plugin.policy.lifecycle.as_str(),
+                                "allowUnknown": plugin.policy.allow_unknown,
+                            },
+                            "storage": {
+                                "kind": plugin.storage.kind.as_str(),
+                                "locationKind": plugin.storage.location_kind.as_str(),
+                                "location": plugin.storage.location,
+                                "dataClass": plugin.storage.data_class.as_str(),
+                                "backup": plugin.storage.backup,
+                                "retention": plugin.storage.retention,
+                            },
+                            "capabilities": plugin.capabilities.iter().map(|decl| json!({
+                                "id": decl.capability_id,
+                                "risk": decl.risk,
+                                "requiresTicket": decl.requires_ticket,
+                                "scopes": decl.scopes,
+                                "description": decl.description,
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
                 (
                     200,
                     json!({
                         "count": plugins.len(),
                         "plugins": plugins,
+                        "registry": registry_view,
                         "connections": self.deps.platform_items(),
                         "wakeAudit": wake_audit,
                     })
