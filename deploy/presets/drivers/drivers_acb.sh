@@ -7,6 +7,7 @@
 #   - 删除/禁用：SIGTERM 对应 driver；
 #   - token / preset / port / model 变化：只重启那一个；
 #   - 单个 driver 崩溃：指数退避重启，不再整组退出。
+#   - 会话增删：重跑 dsh-presets，让 dsh 通过 HMR 重新组合，不用重启 dsh。
 #
 # 端口来自会话的显式 `driver_port`；旧配置没有时 acbctl 会按历史下标推导并告警。
 # 状态只在内存里；进程重启后从当前会话清单重建。
@@ -36,6 +37,30 @@ ACB_DATA=${ACB_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/acb}
 CONFIG=${ACB_CONFIG_FILE:-$ACB_DATA/config/config.toml}
 STATE_DIR=${ACB_DRIVERS_STATE_DIR:-$ACB_DATA/state/drivers}
 READ_INTERVAL=${ACB_DRIVERS_INTERVAL_SECS:-5}
+
+# 会话表变化后重放 dsh-presets（同名脚本，oneshot 用的那份）。dsh HMR 只认
+# `dsh.profile.bundles` 列表变化，所以新增/删除会话必须重新生成 bundle 名。
+# 失败不致命：驱动继续跑，下一轮或下一次变化再试。
+PRESETS_INSTALLER=${ACB_PRESETS_INSTALLER:-$HERE/../dsh-presets/dsh_presets_acb.sh}
+PRESET_RETRY_SECS=${ACB_PRESETS_RETRY_SECS:-30}
+preset_fp=""
+preset_fp_done=""
+preset_last_try=0
+
+refresh_presets() {
+  local fp=$1 now
+  now=$(date +%s)
+  [[ -x $PRESETS_INSTALLER ]] || return 0
+  [[ $fp == "$preset_fp_done" ]] && return 0
+  (( now - preset_last_try >= PRESET_RETRY_SECS )) || return 0
+  preset_last_try=$now
+  if "$PRESETS_INSTALLER" >>"$STATE_DIR/presets.log" 2>&1; then
+    preset_fp_done=$fp
+    log "presets 已刷新（会话表变化）"
+  else
+    log "presets 刷新失败（见 $STATE_DIR/presets.log），稍后重试"
+  fi
+}
 
 NODE=${ACB_NODE_BIN:-}
 [[ -n $NODE ]] || NODE=$(command -v node || true)
@@ -148,10 +173,12 @@ reconcile() {
   local -A want_port=()
   local -A want_token=()
   local sid harness preset port token fp
+  local preset_fp_parts=""
 
   while IFS=$'\t' read -r sid harness preset port; do
     [[ -n $sid && $harness == dsh ]] || continue
     [[ -n $preset && -n $port ]] || { log "会话 $sid 缺少 preset/port，跳过"; continue; }
+    preset_fp_parts+="$sid|$preset"$'\n'
     if ! token=$(session_token "$sid"); then
       log "会话 $sid 的 token 解析失败，保留现有驱动"
       continue
@@ -166,6 +193,9 @@ reconcile() {
     want_port[$sid]=$port
     want_token[$sid]=$token
   done <<<"$output"
+
+  # 先把 agent preset 对齐，再起/重启驱动：顺序反了 dsh 会报 Unknown agent preset。
+  refresh_presets "$preset_fp_parts"
 
   # 先停：被删除、或配置变了的会话。
   for sid in "${!pids[@]}"; do
