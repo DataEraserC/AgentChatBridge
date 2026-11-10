@@ -2418,6 +2418,24 @@ impl<S: Store> Bridge<S> {
     ///
     /// 控制台的结构化表单要拿它当底稿：表单改的是库里那一份，不是文件。
     /// 还没导入过时返回空集——控制台读配置不能因为「首次导入没跑」而 500。
+    /// 写一条库内密钥（控制台新建会话用）。值由调用方加密，这里是纯落库。
+    pub fn put_secret(
+        &mut self,
+        name: &str,
+        value: &str,
+        encrypted: bool,
+        key_id: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.store
+            .secret_put(name, value, encrypted, key_id, source, now_millis())
+    }
+
+    /// 删一条库内密钥（写入失败时回滚）。
+    pub fn delete_secret(&mut self, name: &str) -> Result<bool, crate::storage::StorageError> {
+        self.store.secret_delete(name)
+    }
+
     pub fn config_objects(&self) -> Result<ConfigObjects, crate::storage::StorageError> {
         Ok(self.store.config_objects_load()?.unwrap_or_default())
     }

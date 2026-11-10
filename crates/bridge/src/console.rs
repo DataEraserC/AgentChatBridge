@@ -138,6 +138,8 @@ struct SessionSecretMint {
     fragment_previous: Option<Option<String>>,
     token_paths: Vec<PathBuf>,
     names: Vec<String>,
+    /// 明文令牌只在本进程内存里待一会儿：落库要加密，落文件要 0600。
+    tokens: Vec<(String, String)>,
     committed: bool,
 }
 
@@ -1212,10 +1214,20 @@ impl<S: Store + Send + 'static> Console<S> {
         };
         // 只有真的动了文件侧才回写覆盖层；纯对象改动不碰任何文件。
         let write_text = (!file_ops.is_empty()).then_some(overlay_text.as_str());
+        // 校验过了再落库：新令牌进 `secrets` 表（密文），文件那份留给还没换新的 acbctl。
+        let mut db_written: Vec<String> = Vec::new();
+        if let Err(response) = self.persist_minted_secrets(&_mint.tokens, &mut db_written) {
+            return response;
+        }
         let result =
             self.finish_config_save(new_config, write_text, next_objects.as_ref(), changes);
         if result.is_ok() {
             _mint.commit();
+        } else {
+            let mut bridge = lock(&self.bridge);
+            for name in &db_written {
+                let _ = bridge.delete_secret(name);
+            }
         }
         match result {
             Ok(value) => (200, value.to_string()),
@@ -1291,6 +1303,7 @@ impl<S: Store + Send + 'static> Console<S> {
             return Err(self.mint_error(format!("write {}: {error}", token_path.display())));
         }
         mint.token_paths.push(token_path.clone());
+        mint.tokens.push((name.to_owned(), token.clone()));
 
         let fragment = dir.join("50-session-secrets.toml");
         let previous = std::fs::read_to_string(&fragment).ok();
@@ -1310,6 +1323,31 @@ impl<S: Store + Send + 'static> Console<S> {
             return Err(self.mint_error(format!("write {}: {error}", fragment.display())));
         }
         mint.names.push(name.to_owned());
+        Ok(())
+    }
+
+    fn persist_minted_secrets(
+        &self,
+        tokens: &[(String, String)],
+        written: &mut Vec<String>,
+    ) -> Result<(), (u16, String)> {
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        // 没有 ACB_KEY 就只留文件：旧 acbctl 靠文件，桥靠 preload，都还能跑。
+        let key = match acb_kernel::crypto::AcbKey::load() {
+            Ok(Some(key)) => key,
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(self.mint_error(error)),
+        };
+        for (name, token) in tokens {
+            let cipher = key.encrypt(token).map_err(|error| self.mint_error(error))?;
+            let mut bridge = lock(&self.bridge);
+            match bridge.put_secret(name, &cipher, true, Some(key.kid()), Some("console")) {
+                Ok(()) => written.push(name.clone()),
+                Err(error) => return Err(self.mint_error(error.to_string())),
+            }
+        }
         Ok(())
     }
 

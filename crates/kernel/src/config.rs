@@ -3262,6 +3262,23 @@ impl SecretStore {
                 },
             );
         }
+        // 库里有的名字不要求在 `[secrets]` 里再声明一次：控制台新建会话
+        // 直接把令牌写进 `secrets` 表，配置文件里不该出现第二份声明。
+        if let Some(preset) = preset {
+            for (name, value) in preset {
+                if sources.contains_key(name) {
+                    continue;
+                }
+                sources.insert(
+                    name.clone(),
+                    ResolvedSecret {
+                        kind: "db".to_owned(),
+                        origin: "database".to_owned(),
+                        value: value.clone(),
+                    },
+                );
+            }
+        }
         Ok(Self {
             #[cfg(any(test, feature = "test-fixtures"))]
             mode,
