@@ -8,7 +8,7 @@
 //! 备份由 console 的保存流程统一管，这里只负责「改文本」）。
 
 use acb_i18n::{Message, msg};
-use toml_edit::{DocumentMut, InlineTable, Item, Table, Value, value};
+use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value, value};
 
 /// 补丁错误：主文案是 key + 参数，渲染由调用方按请求 locale 完成；
 /// `detail` 只放无法 key 化的底层原文（TOML 解析器、provider 校验等）。
@@ -267,6 +267,13 @@ fn subscription_op(
     }
 
     let (connection, path) = split_room(&string_field(op, "room")?, op)?;
+    // 新建会话默认没有 subscriptions 段：第一次订阅就当场建表，别让用户回去改 TOML。
+    if session.get("subscriptions").is_none() {
+        session.insert(
+            "subscriptions",
+            Item::ArrayOfTables(ArrayOfTables::new()),
+        );
+    }
     let subs = session
         .get_mut("subscriptions")
         .and_then(Item::as_array_of_tables_mut)
@@ -911,6 +918,27 @@ keywords = ["喂"]
         let subs = &config.session("main").expect("在").subscriptions;
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].room.to_string(), "qq:group/456");
+    }
+
+    #[test]
+    fn first_subscription_creates_the_section() {
+        // 新建会话没有 [[sessions.subscriptions]]，第一次加订阅应自动建段。
+        let text = format!(
+            "{}\n[[sessions]]\nid = \"bare\"\nharness = \"dsh\"\npersona = \"p\"\ntoken = {{ secret = \"t-bare\" }}\n",
+            base()
+        );
+        let ops = parse_ops(serde_json::json!([
+            {"op": "subscription", "session": "bare", "connection": "qq", "room": "group/457830198"}
+        ]));
+        let (new_text, changes) = super::apply_patch(&text, &ops).expect("能加");
+        assert!(changes_en(&changes)[0].contains("added"));
+        assert!(new_text.contains("[[sessions.subscriptions]]"));
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("合法");
+        let subs = &config.session("bare").expect("在").subscriptions;
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].room.to_string(), "qq:group/457830198");
+        // 原来那条订阅没被动。
+        assert_eq!(config.session("main").expect("在").subscriptions.len(), 1);
     }
 
     #[test]

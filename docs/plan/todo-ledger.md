@@ -450,3 +450,27 @@ detail 为 `90-console.toml must not declare [secrets]`。
 
 遗留：会话仍无显式 `driver_port`，按历史下标推导（3101–3106）；要稳定端口需在
 控制台给每个会话写入 `driver_port`。
+
+### 2026-11-11 01:02 控制台「加订阅没反应」：新建会话没有 subscriptions 段
+
+现象：新建 `dsh-wumi` 后在页面上加 `group/457830198` 订阅，弹窗保存后列表里没有，
+看起来像没反应。
+
+复现（直接打 `/api/config/patch`，返回 400）：
+`op 1 (subscription): session dsh-wumi has no [[sessions.subscriptions]] section; add one in a TOML editor first`
+
+原因：`subscription_op` 只在已有的 `[[sessions.subscriptions]]` 数组上追加；新建会话
+的表里没有这个键，于是整单被拒——而且提示让用户回去改 TOML，正是 ADR-0009 要消灭的
+那种交互。
+
+修法：`crates/bridge/src/config_patch.rs` 里新增订阅时若 `subscriptions` 键不存在，
+就地插入空的 `Item::ArrayOfTables`；键存在但类型不对仍报原错误。新增回归测试
+`first_subscription_creates_the_section`（裸会话加第一条订阅、原有会话订阅不受影响）。
+`cargo test -p acb-bridge` 33 条全过。
+
+换代 `gen-1794330073230-b2f4508c`（payload `fi1nyd…`），`acbctl upgrade` 提交后
+launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，手动
+`systemctl --user restart acb-bridge` 恢复。
+
+验收：同一请求重放返回 200，`changes: ["session dsh-wumi: subscription qq:group/457830198 added"]`；
+`/api/config` 里 `dsh-wumi` 的 subscriptions 已经是 `qq:group/457830198`。
