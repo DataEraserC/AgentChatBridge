@@ -377,3 +377,17 @@ detail 为 `90-console.toml must not declare [secrets]`。
 覆盖层写 `[secrets]` 仍拒）。换代 `gen-1794324715834-15236217`（label
 `console-save-fix`），并在修好后给 `dsh-dev` 订阅 `qq:group/967578142` 成功
 （`config_version=3`）。
+
+### 2026-11-10 23:55 控制台新建会话 + 对象补丁丢条目
+
+1. 新建会话必然失败：表单要求来源名已在 `[secrets]` 声明，页面无法声明。改为自动
+   生成令牌（`config.d/secrets/<名>.token` 0600 + `config.d/50-session-secrets.toml`
+   追加来源，分片 sources 是追加语义），守卫失败时整体回滚；表单允许留空。
+2. 事故：23:44 我实测建会话后，`dsh-dev` 从库对象里消失（驱动随之停）。已从
+   `state/backup-pre-p25-20261110-222023` 补回 payload 并重启，四路驱动全部回来；
+   `group/967578142` 订阅随后重加。
+3. 根因未定位到唯一一行（文本往返在构造用例与真实对象文档上均未复现）。已加兜底：
+   补丁后逐类比对对象集合，任何没被显式 `delete` 却消失的条目让整单 500 拒绝
+   （`bridge.console.patch_lost_object`），不再可能静默丢数据。
+4. 换代 `gen-1794325936774-c33445dd`（label `patch-guard`）；实测新建 `probe-mint2`
+   → 7 个会话，删除 → 6 个会话，其余会话无损失；临时令牌文件与分片已清理。
