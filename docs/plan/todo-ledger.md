@@ -134,14 +134,15 @@
 | id | 目标 | 现状 | 判定 | 状态 |
 |---|---|---|---|---|
 | F1 | 控制台不再写 `90-console.toml` 覆盖层 | **走 B（用户 2026-11-09 裁定）：控制台直接写库。** 审计见 [config-source-audit.md](config-source-audit.md)；实现与**真机迁移记录**见其 §8（2026-11-09 已执行：schema 15 上线、覆盖层归档、`config.toml` 清成纯引导；`config.active.toml` 实为 acb-config-merge 派生物，改配置要改 `config.toml`） | **done**（F1a 的 9 条规则已于 2026-11-09 20:30 入库，见审计 §8.4） | done |
-| F1b | 会话增删后驱动跟着重起 | 前半段已修（2026-11-09）：`acbctl sessions` / `secrets resolve` 改走「文件+库对象」加载（`crates/acb/src/config_source.rs`），驱动清单从库来；后半段未做：`drivers` 组件只在 launcher 启动时读一次清单，运行期加减会话不会自动起/停驱动 | 做后半段：轮次边界对账（F2 的原生前置） | next |
+| F1b | 会话增删后驱动跟着重起 | **已完成（2026-11-10，commit `9c8faa7`）**：`deploy/presets/drivers/drivers_acb.sh` 改成常驻对账（5s 一轮）：新增会话 spawn、删除 SIGTERM、指纹（id/preset/port/token 哈希/model）变化重启、崩溃指数退避（上限 60s）、`--once` 供测试；`Session.driver_port` 显式化并校验唯一。**仍缺**计划里的 `deploy/verify-drivers-reconcile.sh` 独立脚本测试（逻辑有单测覆盖，端到端没有） | 补对账脚本测试 | done（缺测试） |
 | F1a | 止血：把 plugin 授权补回库（**用户裁定不止血**） | 覆盖层吃掉 `70-grants-issue.toml` 的 9 条 `plugin` 规则 → F3 首次导入只拿到 1 条规则（`allow=1 deny=0 rooms=7`）；此后 `bridge.log` 实测 **12 次** `admin:no_plugin_grant`（含管理员私信），system_admin 调不动任何插件工具 | **已完成（2026-11-09 20:30）**：用户澄清「不止血」= 不再往配置文件塞新东西、不是不入库；`/api/policy` 整份写回（9 条原样 + 原有 1 条 = 10 条，房 7），70 片与三个 `pre-*` 归档进 `config.d/history/`；`acbctl grants` 一并接库（审计 §8.4） | done |
-| F2 | sessions 进库 + 能动态新增 | **会话已在库**（F1 的 `config_objects`，schema 15），控制台可增删改、下一轮生效；`acbctl sessions`/`secrets resolve` 也已接库（2026-11-09）。仍差：加完会话驱动不会自己起（F1b 后半段）、端口仍是驱动侧算的 | 只剩 F1b 后半段 | doing |
+| F2 | sessions 进库 + 能动态新增 | **已完成（2026-11-10）**：会话在库（schema 15）、控制台可增删改、下一轮生效；`driver_port` 进 `Session` 并做全局唯一校验；驱动侧 5s 对账据此起停，加完会话约 5 秒内起驱动 | 无 | done |
 | F3 | grants/rooms 进库 | **已完成**（schema 13）：`policy_rules`/`policy_rooms`/`policy_accounts`/`policy_admins` 四表；启动时一次性导入 TOML 并打 `policy_initialized`，之后库为唯一来源；控制台「权限」页 + `GET/POST /api/policy`，保存后轮次边界生效 | 做完了。顺带解决了 C11：审批路由改完下一张票就走新路由，不再有「建票时快照」 | done |
 | F4 | 插件注册进库 | **代码已完成（2026-11-10，schema 17）**：七张插件表 + `PluginsStore`；`[[tool_plugins]]` 只在库为空时 seed，之后库为唯一源；`command_kind` + sha256 指纹 + 可执行检查，失败只标 degraded；`acbctl plugin list/show/add/remove/enable/disable/check/export/import`；`/api/plugins` 带 registry 视图。**真机已把 schema 15→17、`issue.tools` 入库并 check 通过**；2026-11-10 20:43 已换代到 `gen-1794314416628-bf0fc0b5` 并归档 `80-issue-tools.toml`，新桥读库、启动日志确认文件条目被忽略 | 已归档；回滚需同时恢复备份库 | done |
 | F5 | 插件配置 `plugin_config` + `StorageHandle` | **L1 已完成（2026-11-10，schema 17）**：`plugin_config` / `plugin_records` / `plugin_secret_refs` 三表；manifest 声明 config/resources/actions；写入校验类型/枚举/范围/密钥形态；控制台按 schema 渲染表单、资源记录增删查、动作按钮；`acbctl plugin config/records`；示例插件 `examples/plugin-demo` 全流程可跑。L2（插件自带库、ACB 只存 location）只有表字段，没有实现 | 下一批做 L2 | doing |
 | F6 | agent 能改配置（工具 + 能力 + 审批） | **已完成（2026-11-10）**：能力枚举加 config_read/config_write/policy_write/plugin_admin/access_approve；新增 `config`/`policy`/`plugin_config`/`plugin_action` 四个工具。不写身份分支：一律 能力映射 → Policy → 审计落盘 → 执行；`AuditStore` 双实现；票据审批人也要逐个能力过 Policy（account_secret 仅 system_admin break-glass）。默认策略数据不带任何授予 = 默认全拒。配置写入可走票据：连接级 op（config:get/list/set/delete、policy:get/set、plugin_config:get/set、plugin_action:run）走 `TICKET_CONNECTION_OPS`，批准后放行一次 | 按需在控制台加角色/规则即可放开 | done |
 | F7 | 模型后备链入库 | **已完成**（schema 14）：`model_fallbacks` 表 + `GET/POST /api/model-fallbacks` + 控制台「模型」页；桥每轮随 `SessionInfo.model_fallbacks` 下发，驱动在主模型被拒（content-blocked / 限流 / 下线 / 超时）且**本轮没调过桥工具**时换模型重放 | 做完了。遗留：per-session 覆盖要等 F2 会话入库（现在链是全局的） | done |
+| F8 | 密钥入库（P2.5） | **桥侧已完成（2026-11-10）**：`secrets` 表 + `v1:<kid>` AEAD；`Config::load_with_secrets` 吃 `SecretPreset`，启动先 `secrets_db::preload` 再加载，命中即 `kind=db`、不读文件；`acbctl secrets migrate/check` 迁移 8 个来源（kid `bd316e15df6cedc8`）；unit drop-in 注入 `ACB_KEY_FILE`；换代 `gen-1794321068510-e92068ce`（label `p25-secrets2`）后日志 `secrets: 8 name(s) loaded from store`；移走 `session-tokens.env` 后 `acb-bridge --check` 仍通过 | **仍差**：驱动侧 `ACBCTL_BIN` 是旧 acbl 构建（无 preload），删文件要等系统代重建 | doing |
 | F7 | 权限判定插件化（`policy_binding`） | `Policy` trait 已就位，`CorePolicy` 在 core；无外部实现、无白名单 | hold（没有外部实现需求） | hold |
 
 **F1/F2/F3 顺序理由**：先断掉「第二写入口」（F1），再迁数据（F2/F3）。反过来的话，
@@ -180,6 +181,9 @@ node 依赖链，且产物要 `include_str!` 或额外打包；② 这个页面�
 见 §5「D3/D5」。要点：L1 的验收是「`issue.tools` 的三个配置项从 toml 搬进库，改一次
 不重启桥生效」；L2 的验收是「写一个只依赖插件接口的示例插件，全程零改动
 `crates/kernel` 业务代码」。J3 的插件配置表单直接吃 L1 的 schema。
+
+**L2 现状（2026-11-10 核对）**：`plugin_storage` 只有 schema 表，`plugin-api` 里没有
+`StorageHandle`，`examples/plugin-demo` 也没用存储——L2 未开工。
 
 
 
@@ -221,6 +225,7 @@ hold：B6 F7 E2 G6（等条件，见 §5）
 ## 10. 分支与推送状态
 
 - 已推送：`2c372f3..2c12de8`（17 个提交）到 `origin/dev_20261025`，2026-11-09 11:16。
+- **未推送：2026-11-10 这一批 41 个提交**（控制台 J1/J2/J4、P2.5 密钥、空投递、状态脚本修复、换代记录）。
 - CI（`.github/workflows/verify.yml`）：推送后需看 Actions 结果，**尚未确认**。
   若 Actions 红而本地绿，优先查两者差异（node 版本、缺少 nix 依赖）。
 
