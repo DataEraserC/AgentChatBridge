@@ -70,6 +70,25 @@ deploy/acb-status.sh --quiet  # 只要错（给定时任务/脚本用），有�
 这不是丢日志，是去向不同。
 :::
 
+## 会话与驱动
+
+drivers 组件现在是常驻对账，不是启动一次就退出：
+
+1. 每 5 秒跑一次 `acbctl sessions --config <运行配置>`；新会话起驱动，删除/禁用停驱动。
+2. token / preset / port / model 变化只重启那一个驱动；单个驱动崩溃指数退避重启。
+3. dsh 会话的端口来自会话字段 `driver_port`；旧配置没有时 acbctl 按历史下标推导并告警。
+   新会话请显式写端口，或用 `acbctl sessions set-port <id> <port>` 写回库。
+4. 驱动日志在 `~/.local/share/acb/state/drivers/<session-id>.log`，脚本自己的日志在
+   `~/.local/share/acb/state/logs/drivers.log`。
+
+手工验证对账（`--once` 只跑一轮，不回收已起的驱动）：
+
+```sh
+ACB_CONFIG_FILE=~/.local/share/acb/config/config.toml \
+ACB_DRIVERS_STATE_DIR=/tmp/acb-drivers-check \
+  /path/to/profile/current/share/acb/presets/drivers/drivers_acb.sh --once
+```
+
 ## 换代（不重装）
 
 ```sh

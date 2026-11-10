@@ -1,8 +1,8 @@
 //! `acbctl sessions`：从 kernel 配置推导每个会话的 agent preset 名与 MCP 端口。
 //!
-//! 推导规则是单一的，`[[sessions]]` 里不再新增 `mcp_port` / `agent_preset`：
+//! 推导规则是单一的：
 //!   - preset 名 = `acb-<session id>`
-//!   - MCP 端口 = `3101 + 会话在 [[sessions]] 里的下标`
+//!   - MCP 端口 = 会话显式 `driver_port`；旧配置缺省时回落到 `3101 + 下标` 并告警
 //!
 //! `dsh-presets` 与 `drivers` 两个组件脚本都消费这份输出，避免两处各拼一套名字。
 //! 输出按行制表符分隔：`id\tharness\tpreset\tport`，不带表头，便于脚本过滤。
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const EXIT_USAGE: u8 = 2;
 const EXIT_CONFIG: u8 = 78;
@@ -43,8 +43,195 @@ pub fn command(args: &[String]) -> Result<ExitCode, String> {
     match args.first().map(String::as_str) {
         Some("scan") => scan_command(&args[1..]),
         Some("migrate-preset") => migrate_command(&args[1..]),
+        Some("set-port") => set_port_command(&args[1..]),
         _ => derive_command(args),
     }
+}
+
+/// `sessions set-port <id> <port>`：把显式端口写回库里的会话对象。
+///
+/// 只改 `config_objects` 的 session payload（TOML 原文），不碰文件；写前校验端口
+/// 范围和唯一性，写后重新加载一次配置确认可解析，失败就回滚旧文本。
+fn set_port_command(args: &[String]) -> Result<ExitCode, String> {
+    let mut config = None;
+    let mut config_dir = None;
+    let mut id = None;
+    let mut port = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                config = Some(PathBuf::from(next(args, &mut index, "--config")?));
+            }
+            "--config-dir" => {
+                config_dir = Some(PathBuf::from(next(args, &mut index, "--config-dir")?));
+            }
+            "-h" | "--help" | "help" => {
+                println!(
+                    "Usage:\n  acbctl sessions set-port <session-id> <port> [--config PATH] [--config-dir DIR]"
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            other if other.starts_with('-') => {
+                eprintln!("acbctl sessions set-port: unknown option: {other}");
+                return Ok(ExitCode::from(EXIT_USAGE));
+            }
+            other => {
+                if id.is_none() {
+                    id = Some(other.to_string());
+                } else if port.is_none() {
+                    port = Some(other.to_string());
+                } else {
+                    eprintln!("acbctl sessions set-port: unexpected argument: {other}");
+                    return Ok(ExitCode::from(EXIT_USAGE));
+                }
+            }
+        }
+        index += 1;
+    }
+    let (Some(id), Some(port)) = (id, port) else {
+        eprintln!("acbctl sessions set-port: need <session-id> and <port>");
+        return Ok(ExitCode::from(EXIT_USAGE));
+    };
+    let port: u16 = match port.parse() {
+        Ok(port) if port >= 1024 => port,
+        Ok(port) => {
+            eprintln!("acbctl sessions set-port: port {port} is below 1024");
+            return Ok(ExitCode::from(EXIT_USAGE));
+        }
+        Err(_) => {
+            eprintln!("acbctl sessions set-port: invalid port {port:?}");
+            return Ok(ExitCode::from(EXIT_USAGE));
+        }
+    };
+
+    let options = Options {
+        config,
+        config_dir,
+        help: false,
+    };
+    let desired = options.desired_config();
+    let dir = options
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| crate::config_source::default_config_dir(&desired));
+    let loaded = crate::config_source::load(&desired, Some(&dir))?;
+    let Some(session) = loaded
+        .config
+        .sessions
+        .iter()
+        .find(|session| session.id == id)
+    else {
+        eprintln!("acbctl sessions set-port: no such session: {id}");
+        return Ok(ExitCode::from(EXIT_CONFIG));
+    };
+    if !matches!(session.harness.as_str(), "dsh") {
+        eprintln!(
+            "acbctl sessions set-port: session {id} uses harness {}; driver_port only applies to dsh",
+            session.harness
+        );
+        return Ok(ExitCode::from(EXIT_USAGE));
+    }
+    if let Some(other) = loaded
+        .config
+        .sessions
+        .iter()
+        .find(|other| other.id != id && other.driver_port == Some(port))
+    {
+        eprintln!(
+            "acbctl sessions set-port: port {port} is already used by session {}",
+            other.id
+        );
+        return Ok(ExitCode::from(EXIT_USAGE));
+    }
+
+    let store_path = loaded.config.storage.path.clone();
+    let mut store = acb_kernel::SqliteStore::open(&store_path)
+        .map_err(|error| format!("open store {store_path}: {error}"))?;
+    use acb_kernel::storage::ConfigObjectsStore;
+    let Some(objects) = store
+        .config_objects_load()
+        .map_err(|error| format!("read config objects: {error}"))?
+    else {
+        eprintln!(
+            "acbctl sessions set-port: config objects are not initialized in {store_path}; start the bridge once first"
+        );
+        return Ok(ExitCode::from(EXIT_CONFIG));
+    };
+    let Some((position, object)) = objects
+        .sessions
+        .iter()
+        .enumerate()
+        .find(|(_, object)| object.id == id)
+    else {
+        eprintln!(
+            "acbctl sessions set-port: session {id} exists in the merged config but not in config_objects"
+        );
+        return Ok(ExitCode::from(EXIT_CONFIG));
+    };
+    let old_toml = object.toml.clone();
+    let new_toml = match with_driver_port(&old_toml, port) {
+        Ok(text) => text,
+        Err(message) => {
+            eprintln!("acbctl sessions set-port: {message}");
+            return Ok(ExitCode::from(EXIT_CONFIG));
+        }
+    };
+    let at = now_ms() as i64;
+    if let Err(error) = store.config_object_put(
+        acb_kernel::ConfigObjectKind::Session,
+        &id,
+        &new_toml,
+        position as i64,
+        at,
+    ) {
+        eprintln!("acbctl sessions set-port: write config object: {error}");
+        return Ok(ExitCode::from(EXIT_CONFIG));
+    }
+    // 写后重载一次，确认整份配置仍能解析；坏文本不能留在库里。
+    if let Err(error) = crate::config_source::load(&desired, Some(&dir)) {
+        let _ = store.config_object_put(
+            acb_kernel::ConfigObjectKind::Session,
+            &id,
+            &old_toml,
+            position as i64,
+            at,
+        );
+        eprintln!("acbctl sessions set-port: reload failed, rolled back: {error}");
+        return Ok(ExitCode::from(EXIT_CONFIG));
+    }
+    println!(
+        "session {id}: driver_port = {port} (written to {store_path}; next turn/driver reconcile picks it up)"
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 在 `[[sessions]]` 原文里设置 `driver_port`。
+///
+/// TOML 顶层键必须放在任何子表之前；这里固定插在表头后的第一行，先删掉已有的
+/// `driver_port` 行，避免重复键。
+fn with_driver_port(text: &str, port: u16) -> Result<String, String> {
+    let mut lines = text.lines();
+    let header = lines
+        .next()
+        .ok_or_else(|| "session payload is empty".to_string())?;
+    if !header.trim_start().starts_with("[[sessions]]") {
+        return Err(format!(
+            "session payload does not start with [[sessions]]: {header:?}"
+        ));
+    }
+    let mut out = String::new();
+    out.push_str(header);
+    out.push('\n');
+    out.push_str(&format!("driver_port = {port}\n"));
+    for line in lines {
+        if line.trim_start().starts_with("driver_port") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 fn derive_command(args: &[String]) -> Result<ExitCode, String> {
@@ -69,12 +256,24 @@ fn derive_command(args: &[String]) -> Result<ExitCode, String> {
     };
 
     for (index, session) in loaded.config.sessions.iter().enumerate() {
-        let Some(port) = PORT_BASE.checked_add(index as u16) else {
-            eprintln!(
-                "acbctl sessions: too many sessions; port {} overflows u16",
-                PORT_BASE as u32 + index as u32
-            );
-            return Ok(ExitCode::from(EXIT_CONFIG));
+        let port = match session.driver_port {
+            Some(port) => port,
+            None => {
+                let Some(port) = PORT_BASE.checked_add(index as u16) else {
+                    eprintln!(
+                        "acbctl sessions: too many sessions; port {} overflows u16",
+                        PORT_BASE as u32 + index as u32
+                    );
+                    return Ok(ExitCode::from(EXIT_CONFIG));
+                };
+                if session.harness == "dsh" {
+                    eprintln!(
+                        "acbctl sessions: session {} has no driver_port; using legacy index port {} (add driver_port to the session to make it stable)",
+                        session.id, port
+                    );
+                }
+                port
+            }
         };
         println!(
             "{}\t{}\t{}\t{}",
@@ -168,11 +367,12 @@ fn print_help() {
     println!(
         "Usage:
   acbctl sessions [--config PATH] [--config-dir DIR]
+  acbctl sessions set-port <session-id> <port> [--config PATH] [--config-dir DIR]
   acbctl sessions scan [--dsh-home DIR] [--known PRESET]... [--json]
   acbctl sessions migrate-preset --map OLD=NEW [--map OLD=NEW]... [--dsh-home DIR] [--apply]
 
 Derives one row per [[sessions]] entry: id<TAB>harness<TAB>preset<TAB>port
-  preset = acb-<id>, port = 3101 + index
+  preset = acb-<id>, port = session.driver_port (legacy fallback: 3101 + index)
 
 scan enumerates stored dsh sessions by their effective agentPreset projection.
   --known marks presets that no longer exist in the current preset table.
@@ -1374,6 +1574,20 @@ mod tests {
     fn preset_name_is_prefixed_session_id() {
         assert_eq!(preset_name("main"), "acb-main");
         assert_eq!(preset_name("dsh-qas"), "acb-dsh-qas");
+    }
+
+    #[test]
+    fn set_port_inserts_and_replaces_driver_port() {
+        let text = "[[sessions]]\nid = \"main\"\nharness = \"dsh\"\n\n[[sessions.subscriptions]]\nconnection = \"qq\"\nroom = \"group/1\"\n";
+        let once = with_driver_port(text, 3101).unwrap();
+        assert!(once.contains("driver_port = 3101"), "{once}");
+        assert!(
+            once.find("driver_port").unwrap() < once.find("[[sessions.subscriptions]]").unwrap(),
+            "必须是顶层键，不能落到订阅表里：{once}"
+        );
+        let twice = with_driver_port(&once, 3102).unwrap();
+        assert_eq!(twice.matches("driver_port").count(), 1, "{twice}");
+        assert!(twice.contains("driver_port = 3102"), "{twice}");
     }
 
     #[test]

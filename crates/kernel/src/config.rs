@@ -774,6 +774,9 @@ pub struct Session {
     pub name: String,
     /// 这个会话用哪个模型。可空 = 由 harness 侧自己决定。
     pub model: Option<String>,
+    /// dsh 驱动的 MCP 端口。可空 = 旧配置，由 acbctl 按历史下标推导并告警。
+    /// 新配置必须显式写，避免「插一个会话把所有人端口平移」。
+    pub driver_port: Option<u16>,
     /// 人格卡 id。
     pub persona: String,
     /// 引用的记忆 id 列表。可空（空 = 不存长期记忆）。
@@ -2059,6 +2062,7 @@ impl Config {
 
         let mut sessions = Vec::with_capacity(raw.sessions.len());
         let mut seen_sessions: Vec<String> = Vec::new();
+        let mut seen_driver_ports: Vec<(u16, String)> = Vec::new();
 
         for raw_session in raw.sessions {
             let id = raw_session.id;
@@ -2066,6 +2070,25 @@ impl Config {
                 return Err(ConfigError::DuplicateSession { session: id });
             }
             seen_sessions.push(id.clone());
+
+            let driver_port = raw_session.driver_port;
+            if let Some(port) = driver_port {
+                if port < 1024 {
+                    return Err(ConfigError::ParseFailed {
+                        detail: format!(
+                            "session {id}: driver_port {port} is below 1024; use an unprivileged port"
+                        ),
+                    });
+                }
+                if let Some((_, first)) = seen_driver_ports.iter().find(|(seen, _)| *seen == port) {
+                    return Err(ConfigError::ParseFailed {
+                        detail: format!(
+                            "session {id}: driver_port {port} is already used by session {first}"
+                        ),
+                    });
+                }
+                seen_driver_ports.push((port, id.clone()));
+            }
 
             check_not_blank(&id, "id").map_err(|field| ConfigError::EmptyField {
                 session: id.clone(),
@@ -2181,6 +2204,7 @@ impl Config {
                 harness,
                 name,
                 model,
+                driver_port,
                 persona: raw_session.persona,
                 memories: raw_session.memories,
                 token,
@@ -3496,6 +3520,9 @@ struct RawSession {
     name: String,
     #[serde(default)]
     model: Option<String>,
+    /// dsh 驱动的 MCP 端口；缺省时 acbctl 仍按历史下标推导，只用于旧配置迁移。
+    #[serde(default)]
+    driver_port: Option<u16>,
     persona: String,
     #[serde(default)]
     memories: Vec<String>,
@@ -4363,6 +4390,35 @@ mod tests {
         // 超时默认关闭，协议帧里带 0 表示 harness 不许自己掐。
         assert_eq!(config.turn_timeout_secs, DEFAULT_TURN_TIMEOUT_SECS);
         assert_eq!(config.turn_timeout_ms(), 0);
+    }
+
+    #[test]
+    fn driver_port_is_optional_and_parsed() {
+        let without = Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION))
+            .expect("旧配置没有 driver_port");
+        assert_eq!(without.sessions[0].driver_port, None);
+
+        let with = ONE_SESSION.replace(
+            "harness = \"dsh\"",
+            "harness = \"dsh\"\n        driver_port = 3101",
+        );
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, &with)).expect("显式端口能解析");
+        assert_eq!(config.sessions[0].driver_port, Some(3101));
+    }
+
+    #[test]
+    fn driver_port_rejects_privileged_ports() {
+        let text = ONE_SESSION.replace(
+            "harness = \"dsh\"",
+            "harness = \"dsh\"\n        driver_port = 80",
+        );
+        let error = Config::parse_fixture(&config_with(ONE_CONNECTION, &text))
+            .expect_err("80 是特权端口，应当拒绝");
+        assert!(
+            error.to_string().contains("below 1024"),
+            "错误要指明端口范围：{error}"
+        );
     }
 
     #[test]
