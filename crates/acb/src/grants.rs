@@ -118,6 +118,7 @@ trait PolicySource {
             subject,
             place,
             capability,
+            actor: None,
             target,
             // CLI 只回答「这个目标对这套主体/场所是否成立」，没有 turn 概念；
             // access_request 的发起房间只能由运行时提供，这里按缺省处理（deny）。

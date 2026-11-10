@@ -341,6 +341,16 @@ pub enum GrantCapability {
     /// 能不能发起 `access_request`。与房间读写能力正交。
     AccessRequest,
     Plugin,
+    /// 能不能批准票据。批准还要另行校验「审批人有票据申请的能力 + 范围覆盖」。
+    AccessApprove,
+    /// 读配置对象（会话/人格/插件配置等）。给 agent 配置工具用。
+    ConfigRead,
+    /// 写配置对象。高危，默认走票据。
+    ConfigWrite,
+    /// 改权限规则/角色/指派。最高危，默认走票据。
+    PolicyWrite,
+    /// 注册/卸载插件、改插件 command 或存储类型。
+    PluginAdmin,
 }
 
 impl GrantCapability {
@@ -356,8 +366,84 @@ impl GrantCapability {
             Self::AccountSecret => "account_secret",
             Self::AccessRequest => "access_request",
             Self::Plugin => "plugin",
+            Self::AccessApprove => "access_approve",
+            Self::ConfigRead => "config_read",
+            Self::ConfigWrite => "config_write",
+            Self::PolicyWrite => "policy_write",
+            Self::PluginAdmin => "plugin_admin",
         }
     }
+}
+
+/// 角色：一组能力的命名集合。内置角色只用于展示/迁移，求值仍走 floor。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyRole {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub builtin: bool,
+    #[serde(default)]
+    pub capabilities: Vec<GrantCapability>,
+}
+
+/// 指派的主体种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentSubjectKind {
+    /// 固定主体名：`system_admin` / `bot_admin` / `user` / `system`。
+    Subject,
+    /// `连接:账号`，如 `qq:323622442`。
+    Account,
+    /// `连接:房间#成员`，如 `qq:group/123#456`。
+    Member,
+}
+
+/// 指派的范围。`global` 对所有资源生效；`connection` / `room` 只覆盖对应范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentScopeKind {
+    Global,
+    Connection,
+    Room,
+}
+
+/// 指派时的角色快照。角色日后扩容不追认旧指派，审计能看到当时的能力集合。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleSnapshot {
+    pub id: String,
+    pub name: String,
+    pub capabilities: Vec<GrantCapability>,
+}
+
+/// 一条角色指派。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyAssignment {
+    pub id: String,
+    pub subject_kind: AssignmentSubjectKind,
+    pub subject_id: String,
+    pub role_id: String,
+    pub scope_kind: AssignmentScopeKind,
+    #[serde(default)]
+    pub scope_id: Option<String>,
+    /// 判定实际使用的能力快照；角色日后扩容不影响已发出的指派。
+    pub capability_snapshot: Vec<GrantCapability>,
+    pub role_snapshot: RoleSnapshot,
+    #[serde(default)]
+    pub needs_review: bool,
+}
+
+/// 一次判定里的主体上下文。用于把 `account` / `member` 指派匹配到具体的人。
+#[derive(Debug, Clone, Copy)]
+pub struct Actor<'a> {
+    pub connection: &'a str,
+    pub account: Option<&'a str>,
+    pub room: Option<&'a RoomId>,
+    pub member: Option<&'a str>,
 }
 
 /// 一个常态授予规则。
@@ -439,6 +525,12 @@ pub struct GrantsConfig {
     /// 账号级审批路由：`[grants.accounts."qq:10001"]`。
     #[serde(default)]
     pub accounts: std::collections::BTreeMap<String, AccountGrant>,
+    /// 自定义角色。内置角色由迁移写入，求值仍走 floor。
+    #[serde(default)]
+    pub roles: Vec<PolicyRole>,
+    /// 角色指派。按 `subject_kind/subject_id` + scope 匹配。
+    #[serde(default)]
+    pub assignments: Vec<PolicyAssignment>,
 }
 
 impl GrantsConfig {
@@ -599,6 +691,109 @@ impl GrantsConfig {
                 })?;
             }
         }
+        let mut role_ids = std::collections::BTreeSet::new();
+        for (index, role) in self.roles.iter().enumerate() {
+            let id = role.id.trim();
+            if id.is_empty() {
+                return Err(format!("grants.roles[{index}] id must not be empty"));
+            }
+            if !role_ids.insert(id.to_owned()) {
+                return Err(format!("duplicate role id {id}"));
+            }
+            if role.name.trim().is_empty() {
+                return Err(format!("grants.roles[{index}] name must not be empty"));
+            }
+            if role.capabilities.is_empty() {
+                return Err(format!(
+                    "grants.roles[{index}] capabilities must not be empty"
+                ));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for capability in &role.capabilities {
+                if !seen.insert(*capability) {
+                    return Err(format!(
+                        "grants.roles[{index}] capability declared twice: {}",
+                        capability.as_str()
+                    ));
+                }
+            }
+        }
+        let mut assignment_ids = std::collections::BTreeSet::new();
+        for (index, assignment) in self.assignments.iter().enumerate() {
+            let id = assignment.id.trim();
+            if id.is_empty() {
+                return Err(format!("grants.assignments[{index}] id must not be empty"));
+            }
+            if !assignment_ids.insert(id.to_owned()) {
+                return Err(format!("duplicate assignment id {id}"));
+            }
+            if assignment.subject_id.trim().is_empty() {
+                return Err(format!(
+                    "grants.assignments[{index}] subject_id must not be empty"
+                ));
+            }
+            match assignment.subject_kind {
+                AssignmentSubjectKind::Account if !assignment.subject_id.contains(':') => {
+                    return Err(format!(
+                        "grants.assignments[{index}] account subject_id must be connection:account"
+                    ));
+                }
+                AssignmentSubjectKind::Member if !assignment.subject_id.contains('#') => {
+                    return Err(format!(
+                        "grants.assignments[{index}] member subject_id must be connection:room#member"
+                    ));
+                }
+                _ => {}
+            }
+            if !role_ids.contains(assignment.role_id.trim()) {
+                return Err(format!(
+                    "grants.assignments[{index}] references unknown role {}",
+                    assignment.role_id
+                ));
+            }
+            if assignment.role_snapshot.id != assignment.role_id {
+                return Err(format!(
+                    "grants.assignments[{index}] role_snapshot.id must equal role_id"
+                ));
+            }
+            if assignment.capability_snapshot.is_empty() {
+                return Err(format!(
+                    "grants.assignments[{index}] capability_snapshot must not be empty"
+                ));
+            }
+            match assignment.scope_kind {
+                AssignmentScopeKind::Global => {
+                    if assignment.scope_id.is_some() {
+                        return Err(format!(
+                            "grants.assignments[{index}] global scope must not have scope_id"
+                        ));
+                    }
+                }
+                AssignmentScopeKind::Connection => {
+                    if assignment
+                        .scope_id
+                        .as_deref()
+                        .is_none_or(|id| id.trim().is_empty())
+                    {
+                        return Err(format!(
+                            "grants.assignments[{index}] connection scope requires scope_id"
+                        ));
+                    }
+                }
+                AssignmentScopeKind::Room => {
+                    let Some(room) = assignment.scope_id.as_deref() else {
+                        return Err(format!(
+                            "grants.assignments[{index}] room scope requires scope_id"
+                        ));
+                    };
+                    RoomId::parse(room).map_err(|error| {
+                        format!(
+                            "grants.assignments[{index}] scope_id {room:?} is not a room: {error}"
+                        )
+                    })?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -659,6 +854,8 @@ pub struct GrantQuery<'a> {
     pub subject: GrantSubject,
     pub place: Place,
     pub capability: GrantCapability,
+    /// 具体的人：账号/成员上下文。没有 actor 时只有 `subject` 类指派能命中。
+    pub actor: Option<&'a Actor<'a>>,
     /// 被评估的目标。除 `access_request` 外，目标可达性靠它判。
     pub target: &'a AccessTarget,
     /// 发起这次判定的房间（turn 所在房间）。控制台等无房间场景为 `None`。
@@ -924,6 +1121,7 @@ mod tests {
                 subject,
                 place,
                 capability,
+                actor: None,
                 target,
                 origin,
                 subscriptions,
@@ -1105,6 +1303,7 @@ mod tests {
             system_admin: None,
             rooms: Default::default(),
             accounts: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -1257,6 +1456,7 @@ mod tests {
             system_admin: None,
             rooms: Default::default(),
             accounts: Default::default(),
+            ..Default::default()
         };
         assert_eq!(
             grants.subject_for("qq", Some("10001")),
@@ -1437,5 +1637,179 @@ mod tests {
         let grants: GrantsConfig = toml::from_str(duplicate).expect("应能解析");
         let error = grants.validate().expect_err("重复 id 必须拒绝");
         assert!(error.contains("duplicate grant rule id"), "{error}");
+    }
+
+    fn role(id: &str, capabilities: Vec<GrantCapability>) -> PolicyRole {
+        PolicyRole {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            description: String::new(),
+            builtin: false,
+            capabilities,
+        }
+    }
+
+    fn query<'a>(
+        grants: &'a GrantsConfig,
+        subject: GrantSubject,
+        capability: GrantCapability,
+        target: &'a AccessTarget,
+        actor: Option<&'a Actor<'a>>,
+    ) -> GrantQuery<'a> {
+        GrantQuery {
+            subject,
+            place: Place::Room(RoomScope::MultiParty),
+            capability,
+            actor,
+            target,
+            origin: None,
+            subscriptions: &[],
+            platform_op: None,
+            policy_version: 1,
+            grants,
+        }
+    }
+
+    #[test]
+    fn role_assignment_grants_capability_by_subject() {
+        let mut grants = GrantsConfig::default();
+        grants
+            .roles
+            .push(role("moderator", vec![GrantCapability::RoomWrite]));
+        grants.assignments.push(PolicyAssignment {
+            id: "a1".to_owned(),
+            subject_kind: AssignmentSubjectKind::Subject,
+            subject_id: "user".to_owned(),
+            role_id: "moderator".to_owned(),
+            scope_kind: AssignmentScopeKind::Global,
+            scope_id: None,
+            capability_snapshot: vec![GrantCapability::RoomWrite],
+            role_snapshot: RoleSnapshot {
+                id: "moderator".to_owned(),
+                name: "moderator".to_owned(),
+                capabilities: vec![GrantCapability::RoomWrite],
+            },
+            needs_review: false,
+        });
+        let room = RoomId::parse("qq:group/1").unwrap();
+        let target = AccessTarget::room(&room);
+        let decision = CorePolicy::new()
+            .decide(&query(
+                &grants,
+                GrantSubject::User,
+                GrantCapability::RoomWrite,
+                &target,
+                None,
+            ))
+            .unwrap();
+        assert!(decision.allow, "{decision:?}");
+        assert!(decision.basis.contains("role:moderator#a1"), "{decision:?}");
+    }
+
+    #[test]
+    fn account_assignment_is_scoped_to_connection_and_room() {
+        let mut grants = GrantsConfig::default();
+        grants
+            .roles
+            .push(role("reader", vec![GrantCapability::RoomRead]));
+        grants.assignments.push(PolicyAssignment {
+            id: "a2".to_owned(),
+            subject_kind: AssignmentSubjectKind::Account,
+            subject_id: "qq:42".to_owned(),
+            role_id: "reader".to_owned(),
+            scope_kind: AssignmentScopeKind::Room,
+            scope_id: Some("qq:group/1".to_owned()),
+            capability_snapshot: vec![GrantCapability::RoomRead],
+            role_snapshot: RoleSnapshot {
+                id: "reader".to_owned(),
+                name: "reader".to_owned(),
+                capabilities: vec![GrantCapability::RoomRead],
+            },
+            needs_review: false,
+        });
+        let room = RoomId::parse("qq:group/1").unwrap();
+        let target = AccessTarget::room(&room);
+        let actor = Actor {
+            connection: "qq",
+            account: Some("42"),
+            room: Some(&room),
+            member: Some("42"),
+        };
+        assert!(
+            CorePolicy::new()
+                .decide(&query(
+                    &grants,
+                    GrantSubject::User,
+                    GrantCapability::RoomRead,
+                    &target,
+                    Some(&actor)
+                ))
+                .unwrap()
+                .allow
+        );
+
+        let other = RoomId::parse("qq:group/2").unwrap();
+        let other_target = AccessTarget::room(&other);
+        let other_actor = Actor {
+            connection: "qq",
+            account: Some("42"),
+            room: Some(&other),
+            member: Some("42"),
+        };
+        assert!(
+            !CorePolicy::new()
+                .decide(&query(
+                    &grants,
+                    GrantSubject::User,
+                    GrantCapability::RoomRead,
+                    &other_target,
+                    Some(&other_actor)
+                ))
+                .unwrap()
+                .allow,
+            "同一个账号在别的房间不应命中"
+        );
+    }
+
+    #[test]
+    fn assignment_uses_snapshot_not_live_role_capabilities() {
+        let mut grants = GrantsConfig::default();
+        grants
+            .roles
+            .push(role("reader", vec![GrantCapability::RoomRead]));
+        grants.assignments.push(PolicyAssignment {
+            id: "a3".to_owned(),
+            subject_kind: AssignmentSubjectKind::Subject,
+            subject_id: "user".to_owned(),
+            role_id: "reader".to_owned(),
+            scope_kind: AssignmentScopeKind::Global,
+            scope_id: None,
+            capability_snapshot: vec![GrantCapability::RoomRead],
+            role_snapshot: RoleSnapshot {
+                id: "reader".to_owned(),
+                name: "reader".to_owned(),
+                capabilities: vec![GrantCapability::RoomRead],
+            },
+            needs_review: false,
+        });
+        // 角色后来扩容，但旧指派仍按快照。
+        grants.roles[0]
+            .capabilities
+            .push(GrantCapability::RoomWrite);
+        let room = RoomId::parse("qq:group/1").unwrap();
+        let target = AccessTarget::room(&room);
+        assert!(
+            !CorePolicy::new()
+                .decide(&query(
+                    &grants,
+                    GrantSubject::User,
+                    GrantCapability::RoomWrite,
+                    &target,
+                    None
+                ))
+                .unwrap()
+                .allow,
+            "角色扩容不能追认旧指派"
+        );
     }
 }

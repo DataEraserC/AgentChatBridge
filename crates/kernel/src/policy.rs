@@ -11,8 +11,8 @@
 //! - 减法只来自独立的 `[grants].deny` 列表。
 
 use crate::grants::{
-    GrantCapability, GrantDecision, GrantQuery, GrantSubject, Place, RoomScope, base_access,
-    origin_access, scope_matches,
+    AssignmentScopeKind, AssignmentSubjectKind, GrantCapability, GrantDecision, GrantQuery,
+    GrantSubject, Place, PolicyAssignment, RoomScope, base_access, origin_access, scope_matches,
 };
 
 /// 判定实现失败。core 收到任何错误都必须 deny（fail-closed）。
@@ -68,7 +68,16 @@ impl CorePolicy {
             // 凭证、破坏性、最高危能力不能从 floor 来；只能显式规则或票据。
             GrantCapability::AccountSecret
             | GrantCapability::Destructive
-            | GrantCapability::Critical => None,
+            | GrantCapability::Critical
+            | GrantCapability::ConfigRead
+            | GrantCapability::ConfigWrite
+            | GrantCapability::PolicyWrite
+            | GrantCapability::PluginAdmin => None,
+            // 管理员本身就有审批权；普通主体必须显式拿 access_approve。
+            GrantCapability::AccessApprove if is_admin(request.subject) => {
+                Some("base:admin_approve")
+            }
+            GrantCapability::AccessApprove => None,
             _ => base_access(request).allow.then_some("base:subscription"),
         }
     }
@@ -94,6 +103,14 @@ impl CorePolicy {
                 "base:no_high_risk_grant",
                 "high-risk capability requires an explicit grant or an access_request ticket",
             ),
+            GrantCapability::AccessApprove
+            | GrantCapability::ConfigRead
+            | GrantCapability::ConfigWrite
+            | GrantCapability::PolicyWrite
+            | GrantCapability::PluginAdmin => GrantDecision::deny(
+                "base:no_management_grant",
+                "management capability requires an explicit role/rule grant",
+            ),
             _ => base_access(request),
         }
     }
@@ -118,6 +135,16 @@ impl Policy for CorePolicy {
                 sources.push(format!("rule:{}", rule.id));
             }
             // 匹配但没列出该能力：不构成 deny，继续看其它规则。
+        }
+
+        for assignment in &request.grants.assignments {
+            if !assignment_matches(assignment, request) {
+                continue;
+            }
+            if assignment.capability_snapshot.contains(&request.capability) {
+                allowed = true;
+                sources.push(format!("role:{}#{}", assignment.role_id, assignment.id));
+            }
         }
 
         let mut denied: Vec<String> = Vec::new();
@@ -160,6 +187,37 @@ impl Policy for CorePolicy {
         }
 
         Ok(self.no_grant(request).at_version(request.policy_version))
+    }
+}
+
+fn assignment_matches(assignment: &PolicyAssignment, request: &GrantQuery<'_>) -> bool {
+    let subject_matches = match assignment.subject_kind {
+        AssignmentSubjectKind::Subject => assignment.subject_id == request.subject.as_str(),
+        AssignmentSubjectKind::Account => request.actor.is_some_and(|actor| {
+            actor.account.is_some_and(|account| {
+                format!("{}:{account}", actor.connection) == assignment.subject_id
+            })
+        }),
+        AssignmentSubjectKind::Member => request.actor.is_some_and(|actor| {
+            actor.room.is_some_and(|room| {
+                actor
+                    .member
+                    .is_some_and(|member| format!("{room}#{member}") == assignment.subject_id)
+            })
+        }),
+    };
+    if !subject_matches {
+        return false;
+    }
+    match assignment.scope_kind {
+        AssignmentScopeKind::Global => true,
+        AssignmentScopeKind::Connection => request
+            .actor
+            .is_some_and(|actor| assignment.scope_id.as_deref() == Some(actor.connection)),
+        AssignmentScopeKind::Room => request.actor.is_some_and(|actor| match actor.room {
+            Some(room) => assignment.scope_id.as_deref() == Some(room.to_string().as_str()),
+            None => false,
+        }),
     }
 }
 

@@ -51,7 +51,7 @@ use crate::grants::{
 ///          从配置文件搬进库。存的是每一条的 TOML 原文，读出来拼回合并文档再解析。
 ///          纯新增，不用搬数据；首次启动时桥把文件里那五段一次性导入
 ///          （见 `config_objects::import_once`）。
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"
@@ -213,6 +213,43 @@ CREATE TABLE IF NOT EXISTS policy_admins (
     payload    TEXT NOT NULL,        -- BotAdminGrant / SystemAdminGrant
     updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS policy_roles (
+    id         TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,        -- PolicyRole JSON
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS policy_assignments (
+    id         TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,        -- PolicyAssignment JSON（含能力/角色快照）
+    updated_at INTEGER NOT NULL
+);
+
+-- 运行时可变的全局设置。初始值在代码里；不从配置文件导入，避免两个真源。
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL CHECK (json_valid(value_json)),
+    updated_at INTEGER NOT NULL
+);
+
+-- 授权判定/配置写入审计。先落盘再执行，事故能复盘。
+CREATE TABLE IF NOT EXISTS policy_audit (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    at             INTEGER NOT NULL,
+    session        TEXT,
+    subject        TEXT NOT NULL,
+    place          TEXT NOT NULL,
+    capability     TEXT NOT NULL,
+    target_kind    TEXT NOT NULL,
+    target_id      TEXT NOT NULL,
+    decision       TEXT NOT NULL CHECK (decision IN ('allow','deny')),
+    basis          TEXT NOT NULL,
+    policy_version INTEGER NOT NULL,
+    approver       TEXT,
+    request_id     TEXT
+);
+CREATE INDEX IF NOT EXISTS policy_audit_at ON policy_audit(at);
 
 -- 后备模型链：主模型被拒时按 position 从小到大换。顺序本身就是语义，
 -- 所以不用自增主键排序（删一条再插会打乱顺序）。
@@ -2157,6 +2194,41 @@ impl Policies for SqliteStore {
             any = true;
         }
 
+        drop(rows);
+        drop(stmt);
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, payload FROM policy_roles ORDER BY id")
+            .map_err(io_error)?;
+        let mut rows = stmt.query([]).map_err(io_error)?;
+        while let Some(row) = rows.next().map_err(io_error)? {
+            let id: String = row.get(0).map_err(io_error)?;
+            let payload: String = row.get(1).map_err(io_error)?;
+            grants.roles.push(
+                serde_json::from_str(&payload)
+                    .map_err(|error| policy_json(error, &format!("policy_roles/{id}")))?,
+            );
+            any = true;
+        }
+        drop(rows);
+        drop(stmt);
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, payload FROM policy_assignments ORDER BY id")
+            .map_err(io_error)?;
+        let mut rows = stmt.query([]).map_err(io_error)?;
+        while let Some(row) = rows.next().map_err(io_error)? {
+            let id: String = row.get(0).map_err(io_error)?;
+            let payload: String = row.get(1).map_err(io_error)?;
+            grants.assignments.push(
+                serde_json::from_str(&payload)
+                    .map_err(|error| policy_json(error, &format!("policy_assignments/{id}")))?,
+            );
+            any = true;
+        }
+
         Ok((any || self.policy_initialized()?).then_some(grants))
     }
 
@@ -2168,6 +2240,8 @@ impl Policies for SqliteStore {
             "policy_rooms",
             "policy_accounts",
             "policy_admins",
+            "policy_roles",
+            "policy_assignments",
         ] {
             transaction
                 .execute(&format!("DELETE FROM {table}"), [])
@@ -2227,6 +2301,27 @@ impl Policies for SqliteStore {
                 .execute(
                     "INSERT INTO policy_admins (role, payload, updated_at) VALUES ('system_admin', ?1, ?2)",
                     params![payload, at],
+                )
+                .map_err(io_error)?;
+        }
+        for role in &grants.roles {
+            let payload = serde_json::to_string(role)
+                .map_err(|error| policy_json(error, &format!("role/{}", role.id)))?;
+            transaction
+                .execute(
+                    "INSERT INTO policy_roles (id, payload, updated_at) VALUES (?1, ?2, ?3)",
+                    params![role.id, payload, at],
+                )
+                .map_err(io_error)?;
+        }
+        for assignment in &grants.assignments {
+            let payload = serde_json::to_string(assignment)
+                .map_err(|error| policy_json(error, &format!("assignment/{}", assignment.id)))?;
+            transaction
+                .execute(
+                    "INSERT INTO policy_assignments (id, payload, updated_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![assignment.id, payload, at],
                 )
                 .map_err(io_error)?;
         }

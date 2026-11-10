@@ -3289,6 +3289,30 @@ impl<S: Store> Bridge<S> {
                 );
             }
         };
+        if verb == "/approve" {
+            let tickets: Vec<AccessTicket> = match first {
+                Some(id) if id.starts_with("bt-") => self
+                    .access_tickets
+                    .for_batch(id)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                Some(id) => self.access_tickets.get(id).cloned().into_iter().collect(),
+                None => Vec::new(),
+            };
+            for ticket in tickets {
+                if let Err(reason) =
+                    self.approver_allows_ticket(&self.config, room, &draft.sender.id, &ticket)
+                {
+                    access_approval_log("deny", &reason);
+                    return self.reply_access_command(
+                        &draft,
+                        room,
+                        &format!("不能批准 {}：{reason}", ticket.id),
+                    );
+                }
+            }
+        }
         let now = now_millis();
         let mut approved = Vec::new();
         let mut superseded = Vec::new();
@@ -3472,6 +3496,87 @@ impl<S: Store> Bridge<S> {
             }
             Place::None => (false, false, "no_human"),
         }
+    }
+
+    /// 审批人是否真的有资格批这张票：`access_approve` + 票据申请的每个能力 +
+    /// 范围覆盖票据目标。system_admin 视为拥有全部能力，但仍要过场所/信任检查。
+    fn approver_allows_ticket(
+        &self,
+        config: &Config,
+        room: &RoomId,
+        sender: &str,
+        ticket: &AccessTicket,
+    ) -> Result<(), String> {
+        let subject = config.grants.subject_for(&room.connection, Some(sender));
+        let place = self.room_place(room, true);
+        let actor = crate::grants::Actor {
+            connection: &room.connection,
+            account: Some(sender),
+            room: Some(room),
+            member: Some(sender),
+        };
+        let subscriptions: Vec<RoomId> = Vec::new();
+        let run = |capability| {
+            let query = crate::grants::GrantQuery {
+                subject,
+                place,
+                capability,
+                actor: Some(&actor),
+                target: &ticket.target,
+                subscriptions: &subscriptions,
+                origin: Some(room),
+                platform_op: None,
+                policy_version: self.config_version as i64,
+                grants: &config.grants,
+            };
+            policy_decision(self.policy.as_ref(), &query)
+        };
+
+        if !run(GrantCapability::AccessApprove).allow {
+            return Err("审批人没有 access_approve 权限".to_owned());
+        }
+        if matches!(subject, GrantSubject::SystemAdmin | GrantSubject::BotAdmin) {
+            for capability in &ticket.capabilities {
+                if matches!(
+                    capability,
+                    GrantCapability::AccountSecret
+                        | GrantCapability::Destructive
+                        | GrantCapability::Critical
+                        | GrantCapability::PolicyWrite
+                        | GrantCapability::PluginAdmin
+                ) && subject != GrantSubject::SystemAdmin
+                {
+                    return Err(format!(
+                        "高危能力 {} 只能由 system_admin 批准",
+                        capability.as_str()
+                    ));
+                }
+            }
+            return Ok(());
+        }
+        for capability in &ticket.capabilities {
+            if matches!(
+                capability,
+                GrantCapability::AccountSecret
+                    | GrantCapability::Destructive
+                    | GrantCapability::Critical
+                    | GrantCapability::PolicyWrite
+                    | GrantCapability::PluginAdmin
+            ) {
+                return Err(format!(
+                    "高危能力 {} 只能由 system_admin 批准",
+                    capability.as_str()
+                ));
+            }
+            if !run(*capability).allow {
+                return Err(format!(
+                    "审批人缺少 {} 权限，或范围不覆盖目标 {}",
+                    capability.as_str(),
+                    ticket.target.display()
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// 批准/拒绝后通知其余路由目标，避免第二个目标再做一次动作。
@@ -5361,10 +5466,17 @@ impl<S: Store> Bridge<S> {
                     .map(|subscription| subscription.room.clone())
                     .collect();
                 let target = access_target_for_spec(&ctx.config, &room, spec);
+                let actor = grants::Actor {
+                    connection: &ctx.room.connection,
+                    account: ctx.origin_sender.as_deref(),
+                    room: Some(&ctx.room),
+                    member: ctx.origin_sender.as_deref(),
+                };
                 let query = grants::GrantQuery {
                     subject,
                     place,
                     capability,
+                    actor: Some(&actor),
                     target: &target,
                     subscriptions: &subscriptions,
                     origin: Some(&ctx.room),
@@ -5843,10 +5955,17 @@ impl<S: Store> Bridge<S> {
             .map(|subscription| subscription.room.clone())
             .collect();
         let plugin_target = AccessTarget::room(&ctx.room);
+        let actor = grants::Actor {
+            connection: &ctx.room.connection,
+            account: ctx.origin_sender.as_deref(),
+            room: Some(&ctx.room),
+            member: ctx.origin_sender.as_deref(),
+        };
         let query = grants::GrantQuery {
             subject,
             place,
             capability: GrantCapability::Plugin,
+            actor: Some(&actor),
             target: &plugin_target,
             subscriptions: &subscriptions,
             origin: Some(&ctx.room),
@@ -6095,10 +6214,17 @@ impl<S: Store> Bridge<S> {
             let target = self
                 .ticket_access_target(&ctx.config, &room, &ops)
                 .map_err(|error| batch_item_error(index, &error.message))?;
+            let actor = crate::grants::Actor {
+                connection: &ctx.room.connection,
+                account: ctx.origin_sender.as_deref(),
+                room: Some(&ctx.room),
+                member: ctx.origin_sender.as_deref(),
+            };
             let query = crate::grants::GrantQuery {
                 subject: principal,
                 place,
                 capability: GrantCapability::AccessRequest,
+                actor: Some(&actor),
                 target: &target,
                 subscriptions: &subscriptions,
                 origin: Some(&ctx.room),
@@ -7738,12 +7864,20 @@ impl<S: Store> Bridge<S> {
                 Some(room) => AccessTarget::room(room),
                 None => AccessTarget::connection(connection),
             };
+            let actor_sender = origin_room.and_then(|room| self.origin_sender_for(id, room));
+            let actor = origin_room.map(|room| grants::Actor {
+                connection: &room.connection,
+                account: actor_sender.as_deref(),
+                room: Some(room),
+                member: actor_sender.as_deref(),
+            });
 
             let (mut allowed, mut basis, decision) = if built_in {
                 let query = grants::GrantQuery {
                     subject,
                     place,
                     capability,
+                    actor: actor.as_ref(),
                     target: &target,
                     subscriptions: &subscriptions,
                     origin: origin_room,
@@ -11570,6 +11704,7 @@ impl<S: Store> Bridge<S> {
             subject,
             place,
             capability,
+            actor: None,
             target: &target,
             subscriptions: &subscriptions,
             origin: Some(room),

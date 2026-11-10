@@ -207,6 +207,21 @@ fn config() -> String {
         scope = "connection"
         target = { kind = "connection", id = "qq" }
         capability = ["access_request"]
+
+        [[grants.roles]]
+        id = "fixture-approver"
+        name = "fixture-approver"
+        capabilities = ["access_approve", "room_write"]
+
+        [[grants.assignments]]
+        id = "fixture-alice-approver"
+        subject_kind = "account"
+        subject_id = "qq:alice"
+        role_id = "fixture-approver"
+        scope_kind = "connection"
+        scope_id = "qq"
+        capability_snapshot = ["access_approve", "room_write"]
+        role_snapshot = { id = "fixture-approver", name = "fixture-approver", capabilities = ["access_approve", "room_write"] }
     "#
     .to_owned()
 }
@@ -410,6 +425,26 @@ fn trusted_group_member_can_approve_non_member_cannot() {
             .as_array()
             .is_some_and(|route| route.iter().any(|item| item == "qq:group/456")),
         "票据结果要落 approval_route: {ticket}"
+    );
+}
+
+#[test]
+fn trusted_group_member_without_approval_role_is_denied() {
+    let (mut bridge, sends) = bridge();
+    let request = start_request(&mut bridge, "qq:group/123", "u1", "qq:group/999").expect("能申请");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let nonce = nonce_of(&approval_text(&sends, "qq:group/789"));
+
+    // bob 在可信群里，但没有 access_approve / room_write 的指派；不能靠「群可信」直接批。
+    let denied = approve(&mut bridge, "qq:group/789", "bob", &id, &nonce);
+    assert!(matches!(denied, Ingest::Handled { .. }));
+    let refusal = sent_to(&sends, "qq:group/789").pop().unwrap_or_default();
+    assert!(
+        refusal.contains("access_approve"),
+        "要说清缺什么权限: {refusal}"
     );
 }
 
