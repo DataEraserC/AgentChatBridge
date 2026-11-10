@@ -139,7 +139,7 @@
 | F2 | sessions 进库 + 能动态新增 | **会话已在库**（F1 的 `config_objects`，schema 15），控制台可增删改、下一轮生效；`acbctl sessions`/`secrets resolve` 也已接库（2026-11-09）。仍差：加完会话驱动不会自己起（F1b 后半段）、端口仍是驱动侧算的 | 只剩 F1b 后半段 | doing |
 | F3 | grants/rooms 进库 | **已完成**（schema 13）：`policy_rules`/`policy_rooms`/`policy_accounts`/`policy_admins` 四表；启动时一次性导入 TOML 并打 `policy_initialized`，之后库为唯一来源；控制台「权限」页 + `GET/POST /api/policy`，保存后轮次边界生效 | 做完了。顺带解决了 C11：审批路由改完下一张票就走新路由，不再有「建票时快照」 | done |
 | F4 | 插件注册进库 | **代码已完成（2026-11-10，schema 17）**：七张插件表 + `PluginsStore`；`[[tool_plugins]]` 只在库为空时 seed，之后库为唯一源；`command_kind` + sha256 指纹 + 可执行检查，失败只标 degraded；`acbctl plugin list/show/add/remove/enable/disable/check/export/import`；`/api/plugins` 带 registry 视图。**真机已把 schema 15→17、`issue.tools` 入库并 check 通过**；`config.d/80-issue-tools.toml` 暂未归档——新桥二进制还没部署，归档会让旧二进制重启后丢插件 | 部署新桥后归档文件 | doing |
-| F5 | 插件配置 `plugin_config` + `StorageHandle` | 0 实现 | 做：拆 L1（配置闭环）/ L2（自带存储），见 §5 D3/D5 | next |
+| F5 | 插件配置 `plugin_config` + `StorageHandle` | **L1 已完成（2026-11-10，schema 17）**：`plugin_config` / `plugin_records` / `plugin_secret_refs` 三表；manifest 声明 config/resources/actions；写入校验类型/枚举/范围/密钥形态；控制台按 schema 渲染表单、资源记录增删查、动作按钮；`acbctl plugin config/records`；示例插件 `examples/plugin-demo` 全流程可跑。L2（插件自带库、ACB 只存 location）只有表字段，没有实现 | 下一批做 L2 | doing |
 | F6 | agent 能改配置（工具 + 能力 + 审批） | 29 个工具里 0 个能写配置；能力枚举 10 项无配置类 | 依赖 F1/F2；先把能力加上，工具后跟 | next |
 | F7 | 模型后备链入库 | **已完成**（schema 14）：`model_fallbacks` 表 + `GET/POST /api/model-fallbacks` + 控制台「模型」页；桥每轮随 `SessionInfo.model_fallbacks` 下发，驱动在主模型被拒（content-blocked / 限流 / 下线 / 超时）且**本轮没调过桥工具**时换模型重放 | 做完了。遗留：per-session 覆盖要等 F2 会话入库（现在链是全局的） | done |
 | F7 | 权限判定插件化（`policy_binding`） | `Policy` trait 已就位，`CorePolicy` 在 core；无外部实现、无白名单 | hold（没有外部实现需求） | hold |
@@ -163,7 +163,7 @@ localized yet.」，内容是裸渲染。插件 tab 只有 reload/unload，没�
 |---|---|---|---|
 | J1 | 四个 tab 与概览同等质量（卡片头、空态、错误态、刷新、可读的键值/表格） | 做：沿用现有令牌与 `.card` 结构，**不引入前端构建链** | next |
 | J2 | 多端可用：窄屏表格转「标签-值」卡片、导航可横滑、按钮达 44px | 做：与 J1 同一批改（同一套 CSS 与结构） | next |
-| J3 | 插件配置在前端可见可改（按插件声明的 schema 渲染表单） | **被 F5-L1 阻塞**：后端没有 `plugin_config` 表与 schema 接口，前端无东西可渲染。先做 F5-L1 | blocked |
+| J3 | 插件配置在前端可见可改（按插件声明的 schema 渲染表单） | **已解除阻塞（2026-11-10）**：插件 tab 有注册表卡片，按 manifest 渲染配置表单、资源记录与动作按钮；密钥字段只显示绑定状态 | done |
 | J4 | 浅色/深色跟随系统 + 手动切换 | 做：现在写死 `color-scheme: dark`；三态（跟随/浅/深）存 localStorage | next |
 
 **为什么不引入 React/Vue + 构建链**：① `nix build` 现在是纯 Rust，加了前端构建就多一条
