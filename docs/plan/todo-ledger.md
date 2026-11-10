@@ -391,3 +391,25 @@ detail 为 `90-console.toml must not declare [secrets]`。
    （`bridge.console.patch_lost_object`），不再可能静默丢数据。
 4. 换代 `gen-1794325936774-c33445dd`（label `patch-guard`）；实测新建 `probe-mint2`
    → 7 个会话，删除 → 6 个会话，其余会话无损失；临时令牌文件与分片已清理。
+
+### 2026-11-11 00:22 库内令牌打通（桥侧），但驱动侧 acbl 仍是旧构建
+
+代码：
+1. `SecretStore::from_raw` 允许「快照里有、`[secrets]` 没声明」的名字（`kind=db`）。
+2. 控制台新建会话时令牌双写：`secrets` 表（`ACB_KEY` 加密，`source=console`）+ 0600
+   文件与 `config.d` 分片（兼容旧 acbctl）。校验通过才落库，失败回滚。
+3. `Bridge::put_secret/delete_secret`。
+
+实测：
+- 建 `probe-db` → DB 出现 `probe-db-token|1|bd316e15…|console`，驱动起在 3107 并连上桥。
+- 移除分片与令牌文件后重启：桥加载 7 个会话，`probe-db-token (db, database)` 生效。
+- 但 `acbctl sessions` 立刻失败（旧 acbctl 没有 preload，遇到未声明名字直接
+  UnknownSecret），drivers 进入「保留现有驱动」；已回滚到「文件 + 声明」形态，
+  驱动全部恢复。
+
+结论：**驱动侧 acbl 还没换到带 preload 的版本**。现场证据：单元仍 ExecStart
+`/nix/store/lxbflj…-acbl-0.1.0`，`/run/current-system/sw/bin/acbctl` 是
+`l0crh4…`，两者 `strings | grep 'preload secrets'` 都是 0，且拿掉 env 文件后
+`secrets resolve --session` 仍报「cannot read …session-tokens.env」。需要用户把
+系统 flake 的 acb 输入更新到含 `e7c99b1` 的 rev，并重建**用户级** unit
+（`~/.config/systemd/user/acb-bridge.service` 里硬编码了 launcher 路径）。
