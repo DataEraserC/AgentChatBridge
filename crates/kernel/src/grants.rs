@@ -354,6 +354,14 @@ pub enum GrantCapability {
 }
 
 impl GrantCapability {
+    /// 只能由票据本身持有、不能通过规则/角色授予的能力。
+    ///
+    /// `account_secret` 是取账号凭据：一旦某主体长期持有，票据审批就形同虚设。
+    /// 所以它只能随一张已批准的票短暂生效；批准人固定是 system_admin（break-glass）。
+    pub fn is_ticket_only(self) -> bool {
+        matches!(self, Self::AccountSecret)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RoomRead => "room_read",

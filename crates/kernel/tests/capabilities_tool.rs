@@ -292,6 +292,15 @@ fn deny_read_config() -> &'static str {
         scope = "connection"
         target = { kind = "connection", id = "qq" }
         capability = ["access_request"]
+
+        # 审批人必须真的持有票据里的能力（2026-11-10 起的规则）。
+        [[grants.rules]]
+                id = "fixture-admin-approval-19"
+                subject = "system_admin"
+        place = "private"
+        scope = "connection"
+        target = { kind = "connection", id = "qq" }
+        capability = ["room_read"]
     "#
 }
 

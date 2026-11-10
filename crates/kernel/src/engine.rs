@@ -3619,7 +3619,11 @@ impl<S: Store> Bridge<S> {
     }
 
     /// 审批人是否真的有资格批这张票：`access_approve` + 票据申请的每个能力 +
-    /// 范围覆盖票据目标。system_admin 视为拥有全部能力，但仍要过场所/信任检查。
+    /// 范围覆盖票据目标。
+    ///
+    /// 管理员也**不**默认拥有票据里的能力（2026-11-10 用户裁定）：`config_write`、
+    /// `policy_write`、`account_secret` 这些在 core 里没有 floor，只能显式授予。
+    /// 所以这里对所有人走同一条检查；差别只在「高危能力只能 system_admin 批」。
     fn approver_allows_ticket(
         &self,
         config: &Config,
@@ -3655,34 +3659,23 @@ impl<S: Store> Bridge<S> {
         if !run(GrantCapability::AccessApprove).allow {
             return Err("审批人没有 access_approve 权限".to_owned());
         }
-        if matches!(subject, GrantSubject::SystemAdmin | GrantSubject::BotAdmin) {
-            for capability in &ticket.capabilities {
-                if matches!(
-                    capability,
-                    GrantCapability::AccountSecret
-                        | GrantCapability::Destructive
-                        | GrantCapability::Critical
-                        | GrantCapability::PolicyWrite
-                        | GrantCapability::PluginAdmin
-                ) && subject != GrantSubject::SystemAdmin
-                {
-                    return Err(format!(
-                        "高危能力 {} 只能由 system_admin 批准",
-                        capability.as_str()
-                    ));
-                }
-            }
-            return Ok(());
-        }
         for capability in &ticket.capabilities {
+            // 票据专属能力（account_secret）无法被任何人长期持有：只允许 system_admin
+            // 以 break-glass 方式批准，不再要求「持有该能力」。
+            if capability.is_ticket_only() {
+                if subject != GrantSubject::SystemAdmin {
+                    return Err(format!("{} 只能由 system_admin 批准", capability.as_str()));
+                }
+                continue;
+            }
             if matches!(
                 capability,
-                GrantCapability::AccountSecret
-                    | GrantCapability::Destructive
+                GrantCapability::Destructive
                     | GrantCapability::Critical
                     | GrantCapability::PolicyWrite
                     | GrantCapability::PluginAdmin
-            ) {
+            ) && subject != GrantSubject::SystemAdmin
+            {
                 return Err(format!(
                     "高危能力 {} 只能由 system_admin 批准",
                     capability.as_str()

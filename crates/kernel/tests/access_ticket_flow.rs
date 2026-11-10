@@ -183,6 +183,16 @@ fn config() -> &'static str {
         scope = "connection"
         target = { kind = "connection", id = "qq" }
         capability = ["access_request"]
+
+        # 审批人必须真的持有票据里的能力（2026-11-10 起的规则）。
+        # 只在私信审批场所授予，不影响群里的直接判定。
+        [[grants.rules]]
+                id = "fixture-admin-approval"
+                subject = "system_admin"
+        place = "private"
+        scope = "connection"
+        target = { kind = "connection", id = "qq" }
+        capability = ["room_read", "room_write", "account_read", "platform", "destructive", "critical"]
     "#
 }
 
@@ -729,6 +739,10 @@ fn bot_admin_can_approve_but_ordinary_user_cannot() {
         .replace(
             "approval_route = [\"qq:private/admin\"]",
             "approval_route = [\"qq:private/admin\", \"qq:private/botadmin\"]",
+        )
+        .replace(
+            "# 审批人必须真的持有票据里的能力（2026-11-10 起的规则）。",
+            "[[grants.rules]]\n        id = \"fixture-botadmin-approval\"\n        subject = \"bot_admin\"\n        place = \"private\"\n        scope = \"connection\"\n        target = { kind = \"connection\", id = \"qq\" }\n        capability = [\"room_read\", \"room_write\"]\n\n        # 审批人必须真的持有票据里的能力（2026-11-10 起的规则）。",
         );
     let (mut bridge, sends) = bridge_with(&text);
     bridge
