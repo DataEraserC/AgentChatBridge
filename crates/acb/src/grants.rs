@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use acb_kernel::grants::{GrantDecision, GrantQuery, GrantRule};
+use acb_kernel::grants::{Actor, GrantDecision, GrantQuery, GrantRule};
 use acb_kernel::{
     AccessTarget, AccessTargetKind, Config, CorePolicy, GrantCapability, GrantSubject,
     GrantsConfig, Place, Policy, RoomId, RoomScope,
@@ -30,7 +30,7 @@ const SUBJECTS: [GrantSubject; 4] = [
     GrantSubject::User,
 ];
 
-const CAPABILITIES: [GrantCapability; 10] = [
+const CAPABILITIES: [GrantCapability; 15] = [
     GrantCapability::RoomRead,
     GrantCapability::RoomWrite,
     GrantCapability::ConnectionRead,
@@ -41,6 +41,11 @@ const CAPABILITIES: [GrantCapability; 10] = [
     GrantCapability::AccountSecret,
     GrantCapability::AccessRequest,
     GrantCapability::Plugin,
+    GrantCapability::AccessApprove,
+    GrantCapability::ConfigRead,
+    GrantCapability::ConfigWrite,
+    GrantCapability::PolicyWrite,
+    GrantCapability::PluginAdmin,
 ];
 
 const MATRIX_JSON_KIND: &str = "acb-grants-matrix";
@@ -141,6 +146,33 @@ struct ConfigSource {
 }
 
 impl ConfigSource {
+    /// 带 actor 的判定：账号/成员类指派要有具体的人才能命中。
+    fn decide_with_actor(
+        &self,
+        subject: GrantSubject,
+        place: Place,
+        capability: GrantCapability,
+        target: &AccessTarget,
+        policy_version: i64,
+        actor: Option<&Actor<'_>>,
+    ) -> Result<GrantDecision, CliError> {
+        let query = GrantQuery {
+            subject,
+            place,
+            capability,
+            actor,
+            target,
+            origin: None,
+            subscriptions: self.subscriptions(),
+            platform_op: None,
+            policy_version,
+            grants: self.grants(),
+        };
+        CorePolicy::new()
+            .decide(&query)
+            .map_err(|error| CliError::config(format!("policy evaluation failed: {error:?}")))
+    }
+
     fn new(label: String, config: Config) -> Self {
         let subscriptions = subscriptions_of(&config);
         Self {
@@ -300,11 +332,17 @@ fn parse_capability(value: &str) -> Result<GrantCapability, CliError> {
         "account_secret" => Ok(GrantCapability::AccountSecret),
         "access_request" => Ok(GrantCapability::AccessRequest),
         "plugin" => Ok(GrantCapability::Plugin),
+        "access_approve" => Ok(GrantCapability::AccessApprove),
+        "config_read" => Ok(GrantCapability::ConfigRead),
+        "config_write" => Ok(GrantCapability::ConfigWrite),
+        "policy_write" => Ok(GrantCapability::PolicyWrite),
+        "plugin_admin" => Ok(GrantCapability::PluginAdmin),
         other => Err(CliError::new(
             EXIT_UNKNOWN_CAPABILITY,
             format!(
                 "unknown capability {other:?}; expected room_read/room_write/connection_read/\
-                 platform/destructive/critical/account_read/account_secret/access_request/plugin"
+                 platform/destructive/critical/account_read/account_secret/access_request/plugin/\
+                 access_approve/config_read/config_write/policy_write/plugin_admin"
             ),
         )),
     }
@@ -533,6 +571,7 @@ fn explain_command(args: &[String]) -> Result<ExitCode, CliError> {
     let mut capability = None;
     let mut target = None;
     let mut rule = None;
+    let mut account = None;
     let mut positional = Vec::new();
 
     let mut index = 0;
@@ -550,6 +589,13 @@ fn explain_command(args: &[String]) -> Result<ExitCode, CliError> {
                     policy_version = flag_value(args, &mut index, inline, name)?
                         .parse()
                         .map_err(|_| CliError::usage("--policy-version must be an integer"))?;
+                }
+                "account" => {
+                    let raw = flag_value(args, &mut index, inline, name)?;
+                    let (connection, account_id) = raw.split_once(':').ok_or_else(|| {
+                        CliError::usage("--account must be connection:account, e.g. qq:323622442")
+                    })?;
+                    account = Some((connection.to_owned(), account_id.to_owned()));
                 }
                 "place" => {
                     place = Some(PlaceArg::parse(&flag_value(
@@ -623,7 +669,21 @@ fn explain_command(args: &[String]) -> Result<ExitCode, CliError> {
         }
     }
 
-    let decision = source.decide(subject, place.place(), capability, &target, policy_version)?;
+    let room_for_actor = place.room().cloned();
+    let actor = account.as_ref().map(|(connection, account_id)| Actor {
+        connection,
+        account: Some(account_id.as_str()),
+        room: room_for_actor.as_ref(),
+        member: Some(account_id.as_str()),
+    });
+    let decision = source.decide_with_actor(
+        subject,
+        place.place(),
+        capability,
+        &target,
+        policy_version,
+        actor.as_ref(),
+    )?;
     let rule_matched = rule.as_ref().map(|id| {
         decision
             .basis
@@ -1401,7 +1461,7 @@ fn print_help() {
         "Usage:
   acbctl grants explain <subject> --place <private|group|console|none|room:ID> \\
       --capability <cap> [--target SPEC] [--rule ID] \\
-      [--config PATH] [--config-dir DIR] [--policy-version N] [--json]
+      [--account CONN:ACCOUNT] [--config PATH] [--config-dir DIR] [--policy-version N] [--json]
   acbctl grants matrix [--config PATH] [--config-dir DIR] \\
       [--subject a,b,...] [--room ROOM]... [--capability a,b,...] \\
       [--place group|private|all] [--policy-version N] [--format tsv|json]
