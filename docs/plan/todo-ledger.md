@@ -304,3 +304,11 @@ CI：push `2c372f3..2c12de8` 后 `verify` 工作流 **首次跑绿**；`docs` �
 
 **注意**：`cargo fmt --all` 会格式化全仓库（本仓库历史文件并不都合 rustfmt），
 不要用它；只对改动的文件跑 `rustfmt`，或者依赖门禁的 `skip_children` 逐文件检查。
+
+## 2026-11-10 21:15 真机换代（console-ui）
+
+1. 备份 `state/acb.db` + `-wal` + `-shm` 到 `state/backup-pre-console-ui-20261110-211408/`（先停桥）。
+2. `nix build .#payload` → `/nix/store/ypq5v4bfwjh2c6myx5pzy8i233j4ph7k-acb-payload-0.1.0`。
+3. `acbctl profile add … --strategy store --label console-ui` → `gen-1794316491779-df056b0f`；`profile switch` 后重启单元。
+4. 验收：`acbctl status` unit active / endpoint open / console 200；`acb-status.sh` 全绿（5 条 ESTAB、驱动→dsh 通、/healthz 带令牌通、三段日志无错误）；线上 `/` 返回的 HTML 含新界面标记（`fb-replies`、`data-theme`、`console.config.sessions.title`），`/proc/<pid>/exe` 指向新 store 路径。
+5. 顺手修 `deploy/acb-status.sh`：令牌解析补 `--config` 与 cwd；drivers.log 启动锚点认时间戳前缀（此前把上一轮启动的陈错报成本轮）。
