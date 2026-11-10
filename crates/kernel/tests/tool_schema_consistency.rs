@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use acb_kernel::TOOL_NAMES;
-use acb_kernel::engine::TICKET_OPS;
+use acb_kernel::engine::{TICKET_CONNECTION_OPS, TICKET_OPS};
 use acb_kernel::{ON_DEMAND_TOOLS, RESIDENT_TOOLS};
 
 fn tools_mjs() -> String {
@@ -179,6 +179,7 @@ fn access_request_description_lists_exactly_the_kernel_ticket_ops() {
     let described = access_request_ops(&tools_mjs());
     let kernel: BTreeSet<String> = TICKET_OPS
         .iter()
+        .chain(TICKET_CONNECTION_OPS.iter())
         .map(|(name, _)| (*name).to_owned())
         .collect();
 

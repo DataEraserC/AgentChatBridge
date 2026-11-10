@@ -120,6 +120,19 @@ pub const TICKET_OPS: &[(&str, GrantCapability)] = &[
     ("wait_message", GrantCapability::RoomRead),
 ];
 
+/// 连接级票据词表：改的是库里的配置（连接/会话/策略/插件），不是某个房间。
+pub const TICKET_CONNECTION_OPS: &[(&str, GrantCapability)] = &[
+    ("config:get", GrantCapability::ConfigRead),
+    ("config:list", GrantCapability::ConfigRead),
+    ("config:set", GrantCapability::ConfigWrite),
+    ("config:delete", GrantCapability::ConfigWrite),
+    ("policy:get", GrantCapability::ConfigRead),
+    ("policy:set", GrantCapability::PolicyWrite),
+    ("plugin_config:get", GrantCapability::ConfigRead),
+    ("plugin_config:set", GrantCapability::ConfigWrite),
+    ("plugin_action:run", GrantCapability::PluginAdmin),
+];
+
 /// 高信任模块直接唤醒的频率上限：每个来源在窗口内最多请求几次。
 const WAKE_REQUEST_LIMIT: usize = 6;
 /// 直接唤醒的限流窗口（Unix 毫秒）。
@@ -7262,6 +7275,22 @@ impl<S: Store> Bridge<S> {
                 capabilities.insert(*capability);
                 continue;
             }
+            if let Some((_, capability)) = TICKET_CONNECTION_OPS
+                .iter()
+                .find(|(name, _)| *name == op.as_str())
+            {
+                if target.kind != AccessTargetKind::Connection {
+                    return Err(ToolError::new(
+                        ErrorCode::BadRequest,
+                        format!(
+                            "[target_kind_mismatch] {op} requires a connection target, got {}",
+                            target.kind.as_str()
+                        ),
+                    ));
+                }
+                capabilities.insert(*capability);
+                continue;
+            }
             match op.as_str() {
                 other if other.starts_with("platform_call:") => {
                     let op_name = &other["platform_call:".len()..];
@@ -7360,6 +7389,13 @@ impl<S: Store> Bridge<S> {
         for op in ops {
             if TICKET_OPS.iter().any(|(name, _)| *name == op.as_str()) {
                 remember(AccessTargetKind::Room)?;
+                continue;
+            }
+            if TICKET_CONNECTION_OPS
+                .iter()
+                .any(|(name, _)| *name == op.as_str())
+            {
+                remember(AccessTargetKind::Connection)?;
                 continue;
             }
             let Some(name) = op.strip_prefix("platform_call:") else {
@@ -8265,6 +8301,7 @@ impl<S: Store> Bridge<S> {
         ctx: &TurnCtx,
         capability: GrantCapability,
         target: &AccessTarget,
+        op: &str,
     ) -> Result<(), ToolError> {
         let subject = ctx
             .config
@@ -8293,18 +8330,33 @@ impl<S: Store> Bridge<S> {
         let decision = policy_decision(self.policy.as_ref(), &query);
         self.write_management_audit(ctx, subject, place, capability, target, &decision)?;
         if decision.allow {
-            Ok(())
-        } else {
-            Err(ToolError::new(
-                ErrorCode::ToolNotAllowed,
-                format!(
-                    "{} denied ({}): {}；需要显式授予该能力",
-                    capability.as_str(),
-                    decision.basis,
-                    decision.reason
-                ),
-            ))
+            return Ok(());
         }
+        // 票据兜底：一张已批准、目标与能力都匹配的票可以放行这一次；用后即废。
+        if let Some(ticket_id) =
+            self.access_tickets
+                .authorize(&ctx.session, target, capability, op, now_millis())
+        {
+            let ticket = GrantDecision {
+                allow: true,
+                basis: format!("ticket:{ticket_id}"),
+                reason: "approved access ticket".to_owned(),
+                rule_id: format!("ticket:{ticket_id}"),
+                policy_version: self.config_version as i64,
+            };
+            self.write_management_audit(ctx, subject, place, capability, target, &ticket)?;
+            return Ok(());
+        }
+        Err(ToolError::new(
+            ErrorCode::ToolNotAllowed,
+            format!(
+                "{} denied ({}): {}；需要显式授予该能力，或按 {} 申请票据",
+                capability.as_str(),
+                decision.basis,
+                decision.reason,
+                op
+            ),
+        ))
     }
 
     fn write_management_audit(
@@ -8354,7 +8406,7 @@ impl<S: Store> Bridge<S> {
         let target = AccessTarget::connection(&ctx.room.connection);
         match args.action.as_str() {
             "list" => {
-                self.management_gate(ctx, GrantCapability::ConfigRead, &target)?;
+                self.management_gate(ctx, GrantCapability::ConfigRead, &target, "config:list")?;
                 let objects = self
                     .store
                     .config_objects_load()
@@ -8369,7 +8421,7 @@ impl<S: Store> Bridge<S> {
                 }))
             }
             "get" => {
-                self.management_gate(ctx, GrantCapability::ConfigRead, &target)?;
+                self.management_gate(ctx, GrantCapability::ConfigRead, &target, "config:get")?;
                 let id = args
                     .id
                     .as_deref()
@@ -8387,7 +8439,7 @@ impl<S: Store> Bridge<S> {
                 Ok(json!({"id": object.id, "toml": object.toml}))
             }
             "set" => {
-                self.management_gate(ctx, GrantCapability::ConfigWrite, &target)?;
+                self.management_gate(ctx, GrantCapability::ConfigWrite, &target, "config:set")?;
                 let id = args
                     .id
                     .as_deref()
@@ -8435,7 +8487,7 @@ impl<S: Store> Bridge<S> {
                 Ok(json!({"ok": true, "id": id, "section": kind.as_str()}))
             }
             "delete" => {
-                self.management_gate(ctx, GrantCapability::ConfigWrite, &target)?;
+                self.management_gate(ctx, GrantCapability::ConfigWrite, &target, "config:delete")?;
                 let id = args
                     .id
                     .as_deref()
@@ -8459,11 +8511,11 @@ impl<S: Store> Bridge<S> {
         let target = AccessTarget::connection(&ctx.room.connection);
         match args.action.as_str() {
             "get" => {
-                self.management_gate(ctx, GrantCapability::ConfigRead, &target)?;
+                self.management_gate(ctx, GrantCapability::ConfigRead, &target, "policy:get")?;
                 Ok(serde_json::to_value(&ctx.config.grants).unwrap_or(Value::Null))
             }
             "set" => {
-                self.management_gate(ctx, GrantCapability::PolicyWrite, &target)?;
+                self.management_gate(ctx, GrantCapability::PolicyWrite, &target, "policy:set")?;
                 let raw = args
                     .grants
                     .ok_or_else(|| bad_request("grants is required".to_owned()))?;
@@ -8485,12 +8537,22 @@ impl<S: Store> Bridge<S> {
         let target = AccessTarget::connection(&ctx.room.connection);
         match args.action.as_str() {
             "get" => {
-                self.management_gate(ctx, GrantCapability::ConfigRead, &target)?;
+                self.management_gate(
+                    ctx,
+                    GrantCapability::ConfigRead,
+                    &target,
+                    "plugin_config:get",
+                )?;
                 self.plugin_admin_view(&args.plugin)
                     .map_err(|error| bad_request(error))
             }
             "set" => {
-                self.management_gate(ctx, GrantCapability::ConfigWrite, &target)?;
+                self.management_gate(
+                    ctx,
+                    GrantCapability::ConfigWrite,
+                    &target,
+                    "plugin_config:set",
+                )?;
                 let config = args
                     .config
                     .ok_or_else(|| bad_request("config is required".to_owned()))?;
@@ -8511,7 +8573,12 @@ impl<S: Store> Bridge<S> {
         args: crate::tools::PluginActionToolArgs,
     ) -> Result<Value, ToolError> {
         let target = AccessTarget::connection(&ctx.room.connection);
-        self.management_gate(ctx, GrantCapability::PluginAdmin, &target)?;
+        self.management_gate(
+            ctx,
+            GrantCapability::PluginAdmin,
+            &target,
+            "plugin_action:run",
+        )?;
         let runner = self
             .action_runners
             .iter()

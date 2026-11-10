@@ -346,3 +346,139 @@ fn unused_sender() -> Sender {
         role: None,
     }
 }
+
+/// 配置写入可以走票据：申请 → 管理员私信批准 → 下一次 config:set 放行一次。
+#[test]
+fn config_write_can_go_through_a_ticket() {
+    let sends: Arc<Mutex<Vec<(RoomId, String)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    struct Capturing {
+        sends: Arc<Mutex<Vec<(RoomId, String)>>>,
+    }
+
+    impl Outbound for Capturing {
+        fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
+            let text: String = elements.iter().filter_map(Element::as_text).collect();
+            self.sends
+                .lock()
+                .expect("没被毒死")
+                .push((room.clone(), text));
+            Ok(Sent {
+                platform_id: "p-1".to_owned(),
+                at: AT,
+            })
+        }
+
+        fn catalog(&self, _connection: &str) -> Arc<[MethodSpec]> {
+            Arc::from(Vec::<MethodSpec>::new())
+        }
+
+        fn call(
+            &mut self,
+            _room: &RoomId,
+            _method: &str,
+            _params: &serde_json::Value,
+        ) -> Result<CallOutcome, CallError> {
+            Ok(CallOutcome::value(json!({})))
+        }
+    }
+
+    let extra = r#"
+        [grants.rooms."qq:group/123"]
+        approval_route = ["qq:private/admin"]
+
+        [[grants.rules]]
+        id = "user-request"
+        subject = "user"
+        place = "group"
+        scope = "connection"
+        target = { kind = "connection", id = "qq" }
+        capability = ["access_request"]
+
+        [[grants.rules]]
+        id = "adm-write"
+        subject = "system_admin"
+        place = "private"
+        scope = "connection"
+        target = { kind = "connection", id = "qq" }
+        capability = ["config_read", "config_write"]
+    "#;
+    let mut bridge = Bridge::new(
+        Config::parse_fixture(&config(extra)).expect("配置合法"),
+        MemoryStore::new(),
+        Box::new(Capturing {
+            sends: sends.clone(),
+        }),
+    );
+
+    let ticket = open_turn(&mut bridge, "qq:group/123", "user1");
+    let request = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "access_request",
+            json!({"items": [{"target": "qq:group/123", "ops": ["config:set"], "reason": "改人格"}]}),
+        )
+        .expect("能申请连接级票据");
+    let id = request["tickets"][0]["ticket"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    bridge.end_turn(&ticket, None).expect("收工");
+
+    let approval = sends
+        .lock()
+        .expect("没被毒死")
+        .iter()
+        .find(|(room, text)| room.path == ["private", "admin"] && text.contains("[ACB 授权申请]"))
+        .map(|(_, text)| text.clone())
+        .expect("审批私信已发到管理员");
+    let nonce = approval
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix("nonce="))
+        .expect("审批消息带 nonce")
+        .to_owned();
+
+    let handled = bridge
+        .ingest(message(
+            "qq:private/admin",
+            "admin",
+            &format!("/approve {id} {nonce}"),
+        ))
+        .expect("审批能入库");
+    assert!(
+        matches!(handled, Ingest::Handled { .. }),
+        "审批由 core 接管"
+    );
+
+    // 批准后：下一次 config:set 用票放行；票用后即废。
+    let after_ticket = open_turn(&mut bridge, "qq:group/123", "user1");
+    let toml = "[[personas]]\nid = \"p\"\nname = \"人格\"\ntext = \"你是桥。\"\n";
+    let written = bridge
+        .tool_call(
+            &after_ticket,
+            &sessions(),
+            "config",
+            json!({"action": "set", "section": "persona", "id": "p", "value": toml}),
+        )
+        .expect("票据放行一次 config:set");
+    assert_eq!(written["ok"], true);
+
+    let second = bridge
+        .tool_call(
+            &after_ticket,
+            &sessions(),
+            "config",
+            json!({"action": "set", "section": "persona", "id": "p", "value": toml}),
+        )
+        .expect_err("票用后即废");
+    assert_eq!(second.code, ErrorCode::ToolNotAllowed);
+
+    let audit = bridge.store().audit_recent(10).expect("能读审计");
+    assert!(
+        audit
+            .iter()
+            .any(|row| row.decision == "allow" && row.basis.contains("ticket:")),
+        "票据放行要留审计: {audit:?}"
+    );
+}

@@ -138,7 +138,9 @@ unverified 是硬不变量：不论规则怎么授予，直调一律拒绝，只
 结果默认只进 access_ticket_get，不进房间流水或投递正文。
 同一个会话的审批消息会聚合成一条，在本轮结束时发出；冷却期内的申请会被明确拒绝并给出剩余秒数。
 op 列表要具体：send_message，send_message_to，get_history，fetch_records，notes:list，notes:set，notes:del，
-get_platform_events，wait_message，或 platform_call:<op>（如 platform_call:member.kick）。
+get_platform_events，wait_message，config:get，config:list，config:set，config:delete，policy:get，policy:set，
+plugin_config:get，plugin_config:set，plugin_action:run，或 platform_call:<op>（如 platform_call:member.kick）。
+config:* / policy:* / plugin_*:* 是连接级票据：target 写连接名（如 qq），改的是数据库里的配置，不是文件。
 批量最多 8 条；任一条校验失败整批拒绝。`,
     schema: {
       type: "object",
