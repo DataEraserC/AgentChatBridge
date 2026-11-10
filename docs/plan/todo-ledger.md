@@ -138,7 +138,7 @@
 | F1a | 止血：把 plugin 授权补回库（**用户裁定不止血**） | 覆盖层吃掉 `70-grants-issue.toml` 的 9 条 `plugin` 规则 → F3 首次导入只拿到 1 条规则（`allow=1 deny=0 rooms=7`）；此后 `bridge.log` 实测 **12 次** `admin:no_plugin_grant`（含管理员私信），system_admin 调不动任何插件工具 | **已完成（2026-11-09 20:30）**：用户澄清「不止血」= 不再往配置文件塞新东西、不是不入库；`/api/policy` 整份写回（9 条原样 + 原有 1 条 = 10 条，房 7），70 片与三个 `pre-*` 归档进 `config.d/history/`；`acbctl grants` 一并接库（审计 §8.4） | done |
 | F2 | sessions 进库 + 能动态新增 | **会话已在库**（F1 的 `config_objects`，schema 15），控制台可增删改、下一轮生效；`acbctl sessions`/`secrets resolve` 也已接库（2026-11-09）。仍差：加完会话驱动不会自己起（F1b 后半段）、端口仍是驱动侧算的 | 只剩 F1b 后半段 | doing |
 | F3 | grants/rooms 进库 | **已完成**（schema 13）：`policy_rules`/`policy_rooms`/`policy_accounts`/`policy_admins` 四表；启动时一次性导入 TOML 并打 `policy_initialized`，之后库为唯一来源；控制台「权限」页 + `GET/POST /api/policy`，保存后轮次边界生效 | 做完了。顺带解决了 C11：审批路由改完下一张票就走新路由，不再有「建票时快照」 | done |
-| F4 | 插件注册进库 | **代码已完成（2026-11-10，schema 17）**：七张插件表 + `PluginsStore`；`[[tool_plugins]]` 只在库为空时 seed，之后库为唯一源；`command_kind` + sha256 指纹 + 可执行检查，失败只标 degraded；`acbctl plugin list/show/add/remove/enable/disable/check/export/import`；`/api/plugins` 带 registry 视图。**真机已把 schema 15→17、`issue.tools` 入库并 check 通过**；`config.d/80-issue-tools.toml` 暂未归档——新桥二进制还没部署，归档会让旧二进制重启后丢插件 | 部署新桥后归档文件 | doing |
+| F4 | 插件注册进库 | **代码已完成（2026-11-10，schema 17）**：七张插件表 + `PluginsStore`；`[[tool_plugins]]` 只在库为空时 seed，之后库为唯一源；`command_kind` + sha256 指纹 + 可执行检查，失败只标 degraded；`acbctl plugin list/show/add/remove/enable/disable/check/export/import`；`/api/plugins` 带 registry 视图。**真机已把 schema 15→17、`issue.tools` 入库并 check 通过**；2026-11-10 20:43 已换代到 `gen-1794314416628-bf0fc0b5` 并归档 `80-issue-tools.toml`，新桥读库、启动日志确认文件条目被忽略 | 已归档；回滚需同时恢复备份库 | done |
 | F5 | 插件配置 `plugin_config` + `StorageHandle` | **L1 已完成（2026-11-10，schema 17）**：`plugin_config` / `plugin_records` / `plugin_secret_refs` 三表；manifest 声明 config/resources/actions；写入校验类型/枚举/范围/密钥形态；控制台按 schema 渲染表单、资源记录增删查、动作按钮；`acbctl plugin config/records`；示例插件 `examples/plugin-demo` 全流程可跑。L2（插件自带库、ACB 只存 location）只有表字段，没有实现 | 下一批做 L2 | doing |
 | F6 | agent 能改配置（工具 + 能力 + 审批） | **已完成（2026-11-10）**：能力枚举加 config_read/config_write/policy_write/plugin_admin/access_approve；新增 `config`/`policy`/`plugin_config`/`plugin_action` 四个工具。不写身份分支：一律 能力映射 → Policy → 审计落盘 → 执行；`AuditStore` 双实现；票据审批人也要逐个能力过 Policy（account_secret 仅 system_admin break-glass）。默认策略数据不带任何授予 = 默认全拒。配置写入可走票据：连接级 op（config:get/list/set/delete、policy:get/set、plugin_config:get/set、plugin_action:run）走 `TICKET_CONNECTION_OPS`，批准后放行一次 | 按需在控制台加角色/规则即可放开 | done |
 | F7 | 模型后备链入库 | **已完成**（schema 14）：`model_fallbacks` 表 + `GET/POST /api/model-fallbacks` + 控制台「模型」页；桥每轮随 `SessionInfo.model_fallbacks` 下发，驱动在主模型被拒（content-blocked / 限流 / 下线 / 超时）且**本轮没调过桥工具**时换模型重放 | 做完了。遗留：per-session 覆盖要等 F2 会话入库（现在链是全局的） | done |
@@ -266,6 +266,15 @@ hold：B6 F7 E2 G6（等条件，见 §5）
   被吃、12 次实测拒绝」，并给出三步切割与 3 个待裁定项。
 - 探针方式（可复用）：复制配置目录到 `/tmp`，加一个只含新会话的分片，跑
   `acb-bridge --check --config <副本>`，对比 `config source` 声明数与 `sessions:` 实际数。
+
+## 11b. 本轮执行记录（2026-11-10 换代）
+
+1. 库：schema 15 → 17；备份 `backups/pre-schema17-20261110-180521`、`backups/pre-gen-20261110-203419`。
+2. 插件：`issue.tools` 入库（nix_store + 指纹），`config.d/80-issue-tools.toml` 归档到 `history/…archived-20261110-204346`。
+3. 角色：`role-config-admin` / `role-policy-owner` / `role-plugin-admin` 指派给 `qq:323622442`（connection/qq），人工操作已写 `policy_audit`。
+4. 换代：payload `f15nzrvk…` → `gen-1794314416628-bf0fc0b5`；LKG 已 promote。
+5. 一个真机 bug：drivers/dsh-presets 组件从 `supervisor.toml` 的 `ACBCTL_BIN` 读到旧代 acbctl（只认 schema 15），换代后反复退出。已改预设优先用自身 PREFIX 的 acbctl（提交 `1c1c…`），并把 supervisor.toml 的 `ACBCTL_BIN` 指到新 acbl。
+6. acbl 本身没随 payload 换代：用新构建的 `acbctl unit install-user` 之外的路径安装会遮蔽 nix unit；本次用“用户单元指向新 acbl launcher + 新预设”完成，system 级 unit 仍是旧 acbl。
 
 ## 12. 验证证据
 
