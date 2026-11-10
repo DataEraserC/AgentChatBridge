@@ -447,6 +447,7 @@ impl RegistryPlugin {
             command: self.command.clone(),
             args: self.args.clone(),
             timeout_ms: Some(self.timeout_ms),
+            env: Vec::new(),
         }
     }
 

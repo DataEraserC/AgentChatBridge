@@ -152,7 +152,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let tool_plugins: Vec<_> = plugin_runtimes
         .iter()
         .filter(|runtime| runtime.callable())
-        .map(|runtime| runtime.plugin.tool_config())
+        .map(|runtime| {
+            let mut config = runtime.plugin.tool_config();
+            // 配置从库来，以 ACB_PLUGIN_* 注入子进程；读失败不拦启动，只记一笔。
+            match acb_kernel::plugin_admin::config_env(&store, &runtime.plugin) {
+                Ok(env) => config.env = env.into_iter().collect(),
+                Err(error) => eprintln!(
+                    "plugin {}: config not injected ({error})",
+                    runtime.plugin.id
+                ),
+            }
+            config
+        })
         .collect();
     let config = loaded.config;
     let sources = loaded.sources;

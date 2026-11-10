@@ -1,0 +1,58 @@
+{
+  "id": "demo.tools",
+  "title": "Demo Tools",
+  "summary": "示例插件：一个配置项、一条资源、一个动作",
+  "description": "用来验证插件平台最小闭环：manifest 声明 → 控制台表单 → 库内配置 → 子进程工具。",
+  "config": [
+    {
+      "key": "endpoint",
+      "label": "上游地址",
+      "description": "示例服务地址；这里只做展示，示例脚本不会真的去连",
+      "type": "string",
+      "required": true,
+      "default": "http://127.0.0.1:9999"
+    },
+    {
+      "key": "limit",
+      "label": "每次返回条数",
+      "type": "integer",
+      "min": 1,
+      "max": 100,
+      "default": 10
+    },
+    {
+      "key": "verbose",
+      "label": "详细日志",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "key": "apiToken",
+      "label": "访问令牌",
+      "description": "声明为密钥：值只进密钥库，不出现在普通配置里",
+      "type": "string",
+      "secret": true
+    }
+  ],
+  "resources": [
+    {
+      "name": "notes",
+      "label": "示例笔记",
+      "id_field": "id",
+      "fields": [
+        { "key": "id", "type": "string" },
+        { "key": "title", "type": "string" },
+        { "key": "done", "type": "boolean", "default": false }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "name": "ping",
+      "label": "探活",
+      "description": "回一条 pong 和当前配置摘要",
+      "risk": "low",
+      "requires_ticket": false
+    }
+  ]
+}

@@ -149,6 +149,7 @@ mod tests {
             command: "/bin/sh".to_owned(),
             args: vec![],
             timeout_ms: Some(1000),
+            env: Vec::new(),
         }
     }
 
@@ -180,6 +181,7 @@ mod tests {
                 command: "/bin/sh".to_owned(),
                 args: vec![],
                 timeout_ms: None,
+                env: Vec::new(),
             }],
             &config_path(),
             Path::new("/etc/acb"),

@@ -18,6 +18,7 @@ fn config(id: &str, args: &[&str], timeout_ms: u64) -> ToolPluginConfig {
         command: fixture(),
         args: args.iter().map(|arg| (*arg).to_owned()).collect(),
         timeout_ms: Some(timeout_ms),
+        env: Vec::new(),
     }
 }
 
@@ -169,4 +170,29 @@ fn loader_registers_provider_and_shutdown_works() {
     assert!(provider.is_alive());
     provider.shutdown();
     assert!(!provider.is_alive());
+}
+
+#[test]
+fn plugin_config_reaches_child_as_env() {
+    let mut cfg = config("process.env", &["env"], 500);
+    cfg.env = vec![
+        ("ACB_PLUGIN_LIMIT".to_owned(), "20".to_owned()),
+        ("ACB_PLUGIN_VERBOSE".to_owned(), "true".to_owned()),
+    ];
+    let provider = ProcessToolProvider::spawn(cfg).expect("夹具应能启动");
+    let (room, session) = context();
+    let context = ToolCallContext {
+        session: &session,
+        room: &room,
+        origin_sender: None,
+        live: true,
+    };
+    let value = provider
+        .call(&context, "echo", serde_json::json!({}))
+        .expect("调用应成功");
+    assert_eq!(value["env"]["ACB_PLUGIN_LIMIT"], serde_json::json!("20"));
+    assert_eq!(
+        value["env"]["ACB_PLUGIN_VERBOSE"],
+        serde_json::json!("true")
+    );
 }

@@ -115,6 +115,10 @@ impl ChildProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        // 插件配置以 ACB_PLUGIN_* 注入；密钥不在其中（走密钥引用）。
+        for (key, value) in &config.env {
+            command.env(key, value);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| format!("cannot spawn {}: {error}", config.command))?;

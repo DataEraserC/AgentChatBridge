@@ -825,6 +825,151 @@ function pluginActions(p) {
   return `<span class="muted">${esc(t("console.plugins.residentHint"))}</span>`;
 }
 
+function pluginFieldInput(field, value) {
+  const id = "pc-" + field.key;
+  const current = value === undefined || value === null ? "" : value;
+  if (Array.isArray(field.enum) && field.enum.length) {
+    const options = field.enum.map((item) => {
+      const text = typeof item === "string" ? item : JSON.stringify(item);
+      const raw = JSON.stringify(item);
+      const selected = JSON.stringify(current) === raw ? " selected" : "";
+      return `<option value='${esc(raw)}'${selected}>${esc(text)}</option>`;
+    }).join("");
+    return `<select id="${esc(id)}">${options}</select>`;
+  }
+  if (field.type === "boolean") {
+    return `<input type="checkbox" id="${esc(id)}"${current ? " checked" : ""}>`;
+  }
+  if (field.type === "integer" || field.type === "number") {
+    const min = field.min === undefined || field.min === null ? "" : ` min="${esc(field.min)}"`;
+    const max = field.max === undefined || field.max === null ? "" : ` max="${esc(field.max)}"`;
+    return `<input type="number" id="${esc(id)}" value="${esc(current)}"${min}${max} style="max-width:160px">`;
+  }
+  if (field.type === "array" || field.type === "object") {
+    const text = typeof current === "string" ? current : JSON.stringify(current);
+    return `<textarea id="${esc(id)}" rows="3" placeholder="JSON">${esc(text)}</textarea>`;
+  }
+  return `<input type="text" id="${esc(id)}" value="${esc(current)}" style="max-width:420px">`;
+}
+
+function pluginFieldValue(field) {
+  const el = document.getElementById("pc-" + field.key);
+  if (!el) return undefined;
+  if (field.type === "boolean") return el.checked;
+  if (field.type === "integer") return el.value === "" ? null : parseInt(el.value, 10);
+  if (field.type === "number") return el.value === "" ? null : Number(el.value);
+  if (field.type === "array" || field.type === "object") {
+    if (el.value.trim() === "") return null;
+    return JSON.parse(el.value);
+  }
+  if (Array.isArray(field.enum) && field.enum.length) {
+    return JSON.parse(el.value);
+  }
+  return el.value;
+}
+
+async function openPluginConfig(id) {
+  let view;
+  try {
+    view = await api("/api/plugins/" + encodeURIComponent(id) + "/admin");
+  } catch (e) {
+    alert(e.message);
+    return;
+  }
+  const manifest = view.manifest || {};
+  const fields = (manifest.config || []).filter((field) => !field.secret);
+  const secrets = (manifest.config || []).filter((field) => field.secret);
+  const bound = new Set((view.secretRefs || []).map((ref) => ref.name));
+  const configRows = fields.map((field) => `
+    <div class="form-row"><label>${esc(field.label || field.key)}</label>${pluginFieldInput(field, view.config?.[field.key] ?? field.default)}
+      <span class="hint">${esc(field.description || "")}${field.required ? "（必填）" : ""}</span></div>`).join("");
+  const secretRows = secrets.length ? `
+    <div class="card"><h3>密钥字段</h3>
+      <p class="muted">这些字段不接受明文；要用具名密钥绑定，值只存在密钥库里。</p>
+      ${secrets.map((field) => `<div class="form-row"><label>${esc(field.label || field.key)}</label>
+        <span class="pill ${bound.has(field.key) ? "ok" : ""}">${bound.has(field.key) ? "已绑定" : "未绑定"}</span></div>`).join("")}
+    </div>` : "";
+  const resources = (manifest.resources || []).map((resource) => `
+    <div class="form-row"><label>${esc(resource.label || resource.name)}</label>
+      <button class="mini" onclick="openPluginRecords('${esc(id)}','${esc(resource.name)}')">查看记录</button></div>`).join("");
+  formFrame(`插件配置 — ${esc(id)}`, `
+    ${view.missingRequired?.length ? `<p class="err">还缺必填项：${view.missingRequired.map(esc).join(", ")}</p>` : ""}
+    ${configRows || '<p class="muted">这个插件没有声明配置项。</p>'}
+    ${secretRows}
+    ${resources ? `<div class="card"><h3>资源</h3>${resources}</div>` : ""}`,
+    async () => {
+      const config = {};
+      for (const field of fields) {
+        const value = pluginFieldValue(field);
+        if (value !== undefined && value !== null) config[field.key] = value;
+      }
+      const result = await api("/api/plugins/" + encodeURIComponent(id) + "/config", {
+        method: "POST", body: JSON.stringify({ config }),
+      });
+      loadPlugins();
+      return result;
+    });
+}
+
+async function openPluginRecords(id, resource) {
+  let reply;
+  try {
+    reply = await api("/api/plugins/" + encodeURIComponent(id) + "/records/" + encodeURIComponent(resource));
+  } catch (e) {
+    alert(e.message);
+    return;
+  }
+  const records = reply.records || [];
+  const rows = records.map((record) => `<tr>
+    <td class="wrap"><code>${esc(record.id)}</code></td>
+    <td class="wrap"><code>${esc(JSON.stringify(record.value))}</code></td>
+    <td><button class="mini danger" onclick="deletePluginRecord('${esc(id)}','${esc(resource)}','${esc(record.id)}')">删</button></td>
+  </tr>`).join("");
+  formFrame(`记录 — ${esc(id)} / ${esc(resource)}`, `
+    <div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>id</th><th>内容</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="3" class="muted">还没有记录</td></tr>'}</tbody></table></div>
+    <div class="form-row"><label>新记录</label><textarea id="pr-json" rows="4" placeholder='{"id": "a1", ...}'></textarea></div>`,
+    async () => {
+      const raw = document.getElementById("pr-json").value.trim();
+      if (!raw) { showFormError("填一条记录或点取消"); return false; }
+      const value = JSON.parse(raw);
+      await api("/api/plugins/" + encodeURIComponent(id) + "/records/" + encodeURIComponent(resource), {
+        method: "POST", body: JSON.stringify({ record: value }),
+      });
+      openPluginRecords(id, resource);
+      return false;
+    });
+}
+
+async function deletePluginRecord(id, resource, recordId) {
+  if (!confirm(`删除记录「${recordId}」？`)) return;
+  try {
+    await api("/api/plugins/" + encodeURIComponent(id) + "/records/" + encodeURIComponent(resource) + "/delete", {
+      method: "POST", body: JSON.stringify({ id: recordId }),
+    });
+  } catch (e) { alert(e.message); }
+  openPluginRecords(id, resource);
+}
+
+function pluginRegistryTable(registry) {
+  if (!registry || !registry.length) return "";
+  const rows = registry.map((plugin) => `<tr>
+    <td class="wrap"><code>${esc(plugin.id)}</code><br><span class="muted">${esc(plugin.commandKind)}</span></td>
+    <td>${esc(plugin.kind)}</td>
+    <td>${plugin.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill">停用</span>'}</td>
+    <td>${plugin.degraded ? `<span class="err">${esc(plugin.degraded)}</span>` : (plugin.fingerprintOk ? '<span class="muted">ok</span>' : '<span class="err">指纹漂移</span>')}</td>
+    <td>${esc(plugin.storage?.kind || "")}</td>
+    <td>${esc((plugin.policy?.capabilities || []).join(", "))}</td>
+    <td><button class="mini" onclick="openPluginConfig('${esc(plugin.id)}')">配置</button></td>
+  </tr>`).join("");
+  return `<div class="card"><h2>注册表<button class="mini" onclick="loadPlugins()" style="float:right">刷新</button></h2>
+    <p class="muted">命令、策略、存储与能力声明都以库为准；degraded 的插件会在启动时跳过安装。</p>
+    <div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>id</th><th>种类</th><th>状态</th><th>检查</th><th>存储</th><th>能力</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
+}
+
 async function loadPlugins() {
   const box = $("#plugins");
   const error = $("#plugins-error");
@@ -832,9 +977,10 @@ async function loadPlugins() {
   error.textContent = "";
   box.innerHTML = loadingBox();
   try {
-    const { plugins } = await api("/api/plugins");
+    const { plugins, registry } = await api("/api/plugins");
+    const registryHtml = pluginRegistryTable(registry);
     if (!plugins.length) {
-      box.innerHTML = emptyBox("console.plugins.empty");
+      box.innerHTML = registryHtml + (registryHtml ? "" : emptyBox("console.plugins.empty"));
       return;
     }
     const rows = plugins.map((p) => {
@@ -854,7 +1000,7 @@ async function loadPlugins() {
         <td>${pluginActions(p)}</td>
       </tr>`;
     }).join("");
-    box.innerHTML = `<div class="table-wrap"><table class="table-responsive">
+    box.innerHTML = registryHtml + `<div class="table-wrap"><table class="table-responsive">
       <thead><tr><th>${esc(t("console.plugins.col.id"))}</th><th>${esc(t("console.plugins.col.extension"))}</th>
       <th>${esc(t("console.plugins.col.source"))}</th><th>${esc(t("console.plugins.col.state"))}</th>
       <th>${esc(t("console.plugins.col.refs"))}</th><th>${esc(t("console.plugins.col.health"))}</th>

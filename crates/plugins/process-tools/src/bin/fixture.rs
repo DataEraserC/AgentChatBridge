@@ -48,6 +48,12 @@ fn main() -> ExitCode {
                 }]}),
             ),
             "call_tool" => match mode {
+                "env" => {
+                    let vars: std::collections::BTreeMap<String, String> = std::env::vars()
+                        .filter(|(key, _)| key.starts_with("ACB_PLUGIN_"))
+                        .collect();
+                    reply(&mut stdout, id, json!({"result": {"env": vars}}));
+                }
                 "hang" => continue,
                 "crash" => return ExitCode::FAILURE,
                 "crash-once"

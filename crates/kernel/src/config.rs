@@ -761,6 +761,8 @@ pub struct ToolPluginConfig {
     pub args: Vec<String>,
     /// 单次调用超时；`None` 用默认 5 秒。
     pub timeout_ms: Option<u64>,
+    /// 传给子进程的额外环境变量。插件配置以 `ACB_PLUGIN_*` 形式从这里进来。
+    pub env: Vec<(String, String)>,
 }
 
 impl ToolPluginConfig {
@@ -2064,6 +2066,7 @@ impl Config {
                 command,
                 args,
                 timeout_ms: raw_plugin.timeout_ms,
+                env: Vec::new(),
             });
         }
 
