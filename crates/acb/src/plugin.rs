@@ -347,7 +347,8 @@ struct AddOptions {
 }
 
 fn add_options(args: &[String]) -> Result<AddOptions, String> {
-    let base = options_with_positional(args, 0)?;
+    let mut config = PathBuf::from("config.toml");
+    let mut config_dir = None;
     let mut id = None;
     let mut command = None;
     let mut plugin_args = Vec::new();
@@ -357,7 +358,20 @@ fn add_options(args: &[String]) -> Result<AddOptions, String> {
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--config" | "--config-dir" => index += 1,
+            "--config" => {
+                index += 1;
+                config = PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| "--config needs a value".to_string())?,
+                );
+            }
+            "--config-dir" => {
+                index += 1;
+                config_dir = Some(PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| "--config-dir needs a value".to_string())?,
+                ));
+            }
             "--id" => {
                 index += 1;
                 id = Some(
@@ -416,8 +430,8 @@ fn add_options(args: &[String]) -> Result<AddOptions, String> {
     }
     let command = command.ok_or_else(|| "--command is required".to_string())?;
     Ok(AddOptions {
-        config: base.config,
-        config_dir: base.config_dir,
+        config,
+        config_dir,
         id,
         command,
         args: plugin_args,

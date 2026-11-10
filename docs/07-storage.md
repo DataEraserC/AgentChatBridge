@@ -177,7 +177,7 @@ EOF
 
 ## 结构版本
 
-`meta.schema_version` 记着这个库是第几版结构；当前 `SCHEMA_VERSION = 15`。
+`meta.schema_version` 记着这个库是第几版结构；当前 `SCHEMA_VERSION = 17`。
 
 - 库比程序**新** → 拒绝打开，报「库是第 N 版，本程序只认识第 M 版」。这是故意的：老程序往新库里写，比起不来严重得多。
 - 库比程序**老** → 就地升级（补列、建索引，最后才改版本号），老数据照旧读得出来。
@@ -198,6 +198,8 @@ EOF
 | 12 → 13 | 加 `policy_rules` / `policy_rooms` / `policy_accounts` / `policy_admins` 四张表 | 权限与审批路由从 `config.toml` 搬进库（ADR-0009 的「业务对象只认库」）。新表由建表语句建，不搬数据；首次启动把 TOML 的 `[grants]` 一次性导入并打上 `meta.policy_initialized` |
 | 13 → 14 | 加 `model_fallbacks` 表 | 主模型被上游拒（内容审核 / 限流 / 下线）时按顺序换模型重放这一轮。纯新增、不搬数据；空表 = 不重试，行为与之前一致 |
 | 14 → 15 | 加 `config_objects` 表（`kind` + `id` + TOML 原文） | 连接/会话/人格/记忆/harness 从配置文件搬进库。存的是每一条的 TOML 原文，读出来拼回合并文档再解析（校验、默认值、密钥引用都还是原来那条路）。纯新增、不搬数据；首次启动把合并后的那五段一次性导入并打上 `meta.config_objects_initialized`，之后库是唯一源 |
+| 15 → 16 | 加 `policy_roles` / `policy_assignments`（含能力/角色快照）、`settings`、`secrets`、`policy_audit` 四组表 | RBAC 角色与指派、运行时可变设置、库内密钥（默认加密）、判定与配置写入审计。纯新增；设置初值在代码里，不从文件导入 |
+| 16 → 17 | 加插件平台七张表：`plugin_registry` / `plugin_capabilities` / `plugin_policy` / `plugin_storage` / `plugin_config` / `plugin_secret_refs` / `plugin_records` | `[[tool_plugins]]` 从配置文件搬进库：命令、指纹、启用状态、作用域、存储位置与能力声明都能审计/热改。纯新增；首次启动把文件里的插件 seed 进库并打上 `meta.plugins_initialized`，之后库是唯一源；命令不可执行只标 degraded，不阻塞启动 |
 
 ## 已知限制
 
