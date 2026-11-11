@@ -556,6 +556,45 @@ test("事件记录里的原始载荷不摊开，但给一句可读摘要", () =>
   assert.match(withTool, /fetch_records/, "工具存在时才给具体查法")
 })
 
+test("D7 投递：渲染完整未读区间、触发标记和重投次数", () => {
+  const base = delivery()
+  const text = renderTurn(
+    {
+      ...base,
+      trigger_id: 12,
+      unread_ranges: [
+        [1, 20],
+        [30, 30],
+      ],
+      unread_count: 21,
+      unread_redelivered: 2,
+      max_times: 3,
+      more: 20,
+    },
+    { now: Date.now(), tools: ["fetch_records"] },
+  )
+
+  assert.match(text, /本轮触发/, "要标出是哪条消息叫醒的")
+  assert.match(text, /未读 #1–#20、#30（共 21 条）/, `区间要完整地写出来：${text}`)
+  assert.match(text, /还有 20 条等你自己回看/)
+  assert.match(text, /fetch_records/, "有回看工具就该推荐")
+  assert.match(text, /2 条已经投过 2 次以上（最高 3 次）/, "反复重投的要单独提醒")
+  assert.ok(!text.includes("从旧到新的一段连续记录"), "旧策略的说法不该再出现")
+})
+
+test("D7 投递：未读全部投了正文时不再说「还有没投的」", () => {
+  const base = delivery()
+  const text = renderTurn({
+    ...base,
+    trigger_id: 12,
+    unread_ranges: [[12, 12]],
+    unread_count: 1,
+  })
+  assert.match(text, /未读 #12（共 1 条）：这些正文已经都在上面了/)
+  assert.ok(!text.includes("还有"), `没有积压就别提「还有」：${text}`)
+  assert.ok(!text.includes("投过 2 次"), "没有重投就别提次数")
+})
+
 test("投递超限提示按连续投递描述，工具面没有回看工具时不推荐", () => {
   const truncated = { ...delivery(), more: 3 }
   const text = renderTurn(truncated, { now: Date.now() })
@@ -680,4 +719,3 @@ test("其它工具原样透传，顺手去掉空字段", () => {
     { op: "set", key: "k", value: "v", room: "qq:group/1" },
   )
 })
-

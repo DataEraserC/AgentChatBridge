@@ -24,7 +24,10 @@ use crate::ticket::Ticket;
 /// 7：`turn_end` 增加可选结构化 `failure`，harness 可以标注失败属于模型还是后端，
 ///    以及 `model_unavailable` / `model_unconfigured` / `auth_failed` 等分类。
 ///    字段可选，v6 harness 不带 `failure` 时走原有文本去重路径。
-pub const PROTOCOL_VERSION: u32 = 7;
+/// 8：`delivery` 的投递格式从「按条数截断正文」改为「触发前后 N 条正文 + 完整未读
+///    编号区间」——加 `trigger_id` / `unread_ranges` / `unread_count` /
+///    `unread_redelivered` / `max_times`。`more` / `omitted` 保留，半升级时仍能用。
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// 单帧上限：1 MiB。超了直接断连，不做截断。
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -67,6 +70,23 @@ pub struct Delivery {
     /// 自定义 composer 跳段时才用，和 `more` 一起给，让模型能直接按编号回看。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted: Option<Omitted>,
+    /// 触发这一轮的那条记录。时钟轮次、攒批唤醒、没有具体触发记录时为空。
+    /// 模型据此知道「这一轮是围着哪条消息展开的」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_id: Option<u64>,
+    /// 本轮**完整**的未读编号区间，闭区间，按编号升序，例如 `[[1,20],[30,40]]`。
+    /// 不截断、不抽样：正文没投的编号也在里面，模型可以按需回看再确认。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_ranges: Vec<[u64; 2]>,
+    /// 上面这些区间覆盖的未读总条数（编号有空洞，不等于区间长度之和）。
+    #[serde(default)]
+    pub unread_count: usize,
+    /// 未读里已经被投过 ≥2 次的条数。用来提示「这些反复出现，该确认或说明不处理」。
+    #[serde(default)]
+    pub unread_redelivered: usize,
+    /// 未读里被投过的最高次数。
+    #[serde(default)]
+    pub max_times: u32,
     /// 这一轮最多跑多久（毫秒）。`None` = 桥没带（harness 用自己的默认兜底）；
     /// `Some(0)` = 桥明确关闭了超时，harness 别自己掐——等到 turn/end 为止；
     /// `Some(n)` = 超过 n 毫秒还没结束就**主动打断**本侧会话（能打断的打断，
@@ -332,9 +352,9 @@ impl Frame {
     }
 }
 
-/// 协议版本是否兼容。v7 增加的是可选字段，旧 v6 harness 仍然可用。
+/// 协议版本是否兼容。v7/v8 增加的都是可选字段，旧 v6 harness 仍然可用。
 pub fn version_compatible(version: u32) -> bool {
-    version == PROTOCOL_VERSION || version == 6
+    (6..=PROTOCOL_VERSION).contains(&version)
 }
 
 /// 编码成一帧（含行尾换行）。
@@ -422,6 +442,11 @@ mod tests {
             persona: None,
             more: None,
             omitted: None,
+            trigger_id: Some(1),
+            unread_ranges: vec![[1, 3]],
+            unread_count: 3,
+            unread_redelivered: 1,
+            max_times: 2,
             turn_timeout_ms: None,
             prompts: Vec::new(),
         }
@@ -577,8 +602,38 @@ mod tests {
     #[test]
     fn version_accepts_v6_during_transition() {
         assert!(version_compatible(PROTOCOL_VERSION));
+        assert!(
+            version_compatible(7),
+            "只多了可选字段，v7 harness 不必强制换"
+        );
         assert!(version_compatible(6), "v6 harness 仍要能连上新桥");
+        assert!(!version_compatible(5));
         assert!(!version_compatible(PROTOCOL_VERSION + 1));
+    }
+
+    #[test]
+    fn v7_delivery_decodes_without_new_fields() {
+        // 新桥还会给 `more` / `omitted`，所以旧 harness 的渲染路径仍能工作；
+        // 反过来，v7 桥发来的 delivery 没有区间字段，新 harness 必须照常解出来。
+        let legacy = serde_json::json!({
+            "frame": "turn_start",
+            "delivery": {
+                "ticket": "t-1",
+                "session": "main",
+                "room": { "connection": "qq", "path": ["group", "123"] },
+                "records": [],
+                "reason": "wake"
+            }
+        });
+        let frame = decode(&legacy.to_string()).expect("缺新字段要能解");
+        match frame {
+            Frame::TurnStart { delivery } => {
+                assert!(delivery.unread_ranges.is_empty());
+                assert_eq!(delivery.unread_count, 0);
+                assert!(delivery.trigger_id.is_none());
+            }
+            other => panic!("应当解成 delivery，实际是 {}", other.kind()),
+        }
     }
 
     #[test]

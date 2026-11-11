@@ -1161,6 +1161,7 @@ impl WakeProvider for DylibWakeProvider {
                         decision,
                         reason,
                         delay_ms,
+                        batch,
                     },
                 ..
             }) => match decision.as_str() {
@@ -1168,6 +1169,7 @@ impl WakeProvider for DylibWakeProvider {
                     decision: WakeDecision::Wake,
                     reason,
                     delay_ms,
+                    batch,
                 },
                 "stay" => WakeVerdict::stay(),
                 other => {
@@ -1590,6 +1592,11 @@ impl DeliveryComposer for DylibDeliveryComposer {
             room: request.room.to_string(),
             limit: request.limit,
             records: request.records.to_vec(),
+            context: request.context.to_vec(),
+            trigger_id: request.trigger_id,
+            context_before: request.context_before,
+            context_after: request.context_after,
+            batch_head: request.batch_head,
         };
         let message = CoreMessage::Decide {
             id: self.channel.next(),
@@ -1604,6 +1611,7 @@ impl DeliveryComposer for DylibDeliveryComposer {
             }) => DeliveryPlan {
                 keep: plan.keep,
                 omitted: plan.omitted,
+                unread_ranges: plan.unread_ranges,
             },
             // plan = null 与 Lua 的 nil 一样：明确要求用内置选批。
             Ok(AdapterMessage::Reply {

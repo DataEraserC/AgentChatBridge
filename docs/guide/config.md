@@ -512,7 +512,7 @@ max_publish_bytes = "4 GiB"                            # 单个文件上限，�
 
 ```toml
 worktrees_root = "state/worktrees"   # 每个「会话 × 记忆」的 worktree 放哪
-delivery_limit = 30                  # 一轮最多投多少条；0 = 不截断
+delivery_limit = 30                  # 一轮最多投多少条**正文**；0 = 只受字节预算限制
 default_on_turn_error = []           # 会话没配 on_turn_error 时的默认动作：log / send:<房间>
 turn_timeout_secs = 0                # 默认关闭；写 n > 0 才启用 n 秒超时
 

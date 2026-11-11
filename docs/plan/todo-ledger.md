@@ -545,3 +545,22 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 4. **第四波（最大面）**：R10 的硬门禁全量 → R5。先让「新增 unix-only」被挡住，再逐文件把 platform 抽象抽出来；Windows 端到端放最后。
 
 关键依赖：R1、R2 完成前 R8 只能白名单；R3 完成前 R12 必红；R5 依赖 R10 先立规矩。**不要**先做 R5——它会把 R1/R2 的字段搬家冲突放大。
+
+## 14. 投递格式 D7（2026-11-11 完成）
+
+用户 2026-11-10 定稿、2026-11-11 实施：投递从「按 `delivery_limit` 连续投正文」改为
+「触发消息前后 N 条正文 + 完整未读编号区间 + 投递次数映射」。规格见
+[config-rbac-plugin-platform-plan-v2.md](config-rbac-plugin-platform-plan-v2.md) §8.2；
+变更台账见 [downstream-changes.md](downstream-changes.md) D7。
+
+| 落点 | 改了什么 | 验收 |
+|---|---|---|
+| `crates/proto/src/frame.rs` | `Delivery` 加 `trigger_id` / `unread_ranges` / `unread_count` / `unread_redelivered` / `max_times`；`PROTOCOL_VERSION` 8，兼容 6/7 | `v7_delivery_decodes_without_new_fields` |
+| `crates/kernel/src/config.rs` | `DeliveryWindow`（3/3/3）挂在 `Session` 与 `Subscription` 上，订阅逐项覆盖；越界报 `BadDeliveryWindow` | `delivery_window_defaults_to_three_and_three` 等 3 条 |
+| `crates/kernel/src/plugin.rs` | `DeliveryRequest` 加 `context` / `trigger_id` / 三个窗口值；`DeliveryPlan` 加 `unread_ranges`；默认计划改为「触发前后 N 条，超限先砍最远的上下文」 | `crates/kernel/tests/delivery_plan.rs` 6 条 |
+| `crates/kernel/src/engine.rs` | 触发前上下文从 `store.before` 取（含已确认记录）；区间按未读集合压缩；次数用 `delivery_count` 先读后写 | `delivery_is_the_trigger_window_plus_complete_unread_ranges` 等 |
+| `crates/kernel/src/storage*` | `Transcript::before`、`Deliveries::delivery_count` / `stuck_unread`（含 SQLite 实现） | `before_and_stuck_unread_work_on_sqlite` |
+| `harnesses/opencode/plugin/acb-wire.mjs` | `renderTurn` 渲染区间、触发标记、重投提醒；`PROTOCOL_VERSION` 8 | `wire.test.mjs` 的 2 条 D7 用例 |
+| `crates/bridge/src/console.*` | 会话页 `stuck_unread`（≥3 次未确认）按会话聚合、按房间列明细 | `stuck_unread` 字段出现在 `/api/sessions` |
+
+遗留：`more` / `omitted` 仍保留（旧 harness 与自定义 composer 用）；等所有部署都升到 v8 后可再议删除。

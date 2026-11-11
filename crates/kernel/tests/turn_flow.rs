@@ -214,6 +214,7 @@ impl DeliveryComposer for LatestOnly {
         DeliveryPlan {
             keep,
             omitted: None,
+            unread_ranges: Vec::new(),
         }
     }
 }
@@ -713,8 +714,20 @@ fn own_messages_never_come_back_as_unread() {
     let ids: Vec<u64> = second.records.iter().map(|record| record.id).collect();
     assert_eq!(
         ids,
-        vec![1, 3],
-        "自己发的 2 号不该出现在投递里，哪怕水位还没推过它"
+        vec![1, 2, 3],
+        "自己发的 #2 不进未读，但作为触发前的上下文仍然可见"
+    );
+    assert_eq!(
+        second.unread_ranges,
+        vec![[1, 1], [3, 3]],
+        "自己发的不算未读"
+    );
+    assert_eq!(second.unread_count, 2);
+    let own = &second.records[1];
+    assert_eq!(own.id, 2);
+    assert!(
+        own.redelivery.is_none() && own.note.is_none(),
+        "上下文里的自己人不能被标成重投"
     );
 }
 
@@ -899,6 +912,121 @@ fn unacked_records_come_back_marked_as_redelivery() {
 
 /// 乱序确认过的记录不能重投：本轮只确认 #2、留下 #1，下一轮只该看到 #1 和新消息。
 #[test]
+fn delivery_is_the_trigger_window_plus_complete_unread_ranges() {
+    let (mut bridge, _sends) = bridge();
+    // 先来 10 条没人 @ 的消息（攒批阈值 50，不会开轮），第 11 条 @ 我。
+    for index in 1..=10 {
+        bridge
+            .ingest(message(
+                "qq:group/123",
+                "10001",
+                &format!("闲聊{index}"),
+                false,
+            ))
+            .expect("能记下来");
+    }
+    bridge
+        .ingest(message("qq:group/123", "10001", "叫你呢", true))
+        .expect("能记下来");
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
+    assert_eq!(delivery.trigger_id, Some(11), "触发消息要带编号");
+    let ids: Vec<u64> = delivery.records.iter().map(|record| record.id).collect();
+    assert_eq!(ids, vec![8, 9, 10, 11], "触发消息 + 之前 3 条正文");
+    assert_eq!(
+        delivery.unread_ranges,
+        vec![[1, 11]],
+        "未读区间完整，不抽样"
+    );
+    assert_eq!(delivery.unread_count, 11);
+    assert_eq!(
+        delivery.more,
+        Some(7),
+        "剩下 7 条只在区间里，等 agent 自己回看"
+    );
+    assert_eq!(delivery.unread_redelivered, 0);
+    assert_eq!(delivery.max_times, 1, "这一轮才第一次投");
+}
+
+#[test]
+fn accumulate_wake_delivers_the_oldest_batch_without_a_trigger() {
+    // 攒够 2 条就醒：没有「触发消息」，所以按 batch_head 投最旧的几条，
+    // 水位才能顺着往前走（否则 #1、#2 永远只剩编号区间，水位推不动）。
+    let text = config().replace(
+        "        room = \"group/123\"\n",
+        "        room = \"group/123\"\n\n        [sessions.subscriptions.wake]\n        accumulate = 2\n",
+    );
+    let sends: Sends = Arc::new(Mutex::new(Vec::new()));
+    let mut bridge = Bridge::new(
+        acb_kernel::Config::parse_fixture(&text).expect("配置合法"),
+        MemoryStore::new(),
+        Box::new(Recorder {
+            sends: sends.clone(),
+        }),
+    );
+    for index in 1..=4 {
+        bridge
+            .ingest(message(
+                "qq:group/123",
+                "10001",
+                &format!("第{index}条"),
+                false,
+            ))
+            .expect("能记下来");
+    }
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
+    assert_eq!(delivery.trigger_id, None, "攒批唤醒没有触发消息");
+    let ids: Vec<u64> = delivery.records.iter().map(|record| record.id).collect();
+    assert_eq!(ids, vec![1, 2, 3], "默认投最旧的 3 条正文");
+    assert_eq!(delivery.unread_ranges, vec![[1, 4]]);
+    assert_eq!(delivery.more, Some(1));
+
+    // 最旧的一批确认掉，水位推进到 3。
+    let acked = bridge
+        .tool_call(
+            &delivery.ticket,
+            &sessions(),
+            "ack_messages",
+            json!({"ids": [1, 2, 3]}),
+        )
+        .expect("能确认");
+    assert_eq!(acked["watermark"], 3);
+}
+
+#[test]
+fn repeated_deliveries_show_up_as_redelivered_counts() {
+    let (mut bridge, _sends) = bridge();
+    // 三轮都不确认：每轮的未读都在变多，投递次数也在涨。
+    for round in 1..=3 {
+        bridge
+            .ingest(message(
+                "qq:group/123",
+                "10001",
+                &format!("第 {round} 句"),
+                true,
+            ))
+            .expect("能记下来");
+        let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
+        if round > 1 {
+            assert_eq!(
+                delivery.max_times, round as u32,
+                "第 {round} 轮应当能看到最高投递次数"
+            );
+            assert_eq!(
+                delivery.unread_redelivered,
+                round - 1,
+                "前 {round} 条里除最新那条外都重投过"
+            );
+            let first = delivery.records.first().expect("有正文");
+            assert_eq!(first.id, 1);
+            assert_eq!(first.redelivery, Some(round as u32));
+        }
+        bridge.end_turn(&delivery.ticket, None).expect("能收工");
+    }
+}
+
+#[test]
 fn out_of_order_acks_are_not_delivered_again() {
     let (mut bridge, _sends) = bridge();
     bridge
@@ -926,7 +1054,16 @@ fn out_of_order_acks_are_not_delivered_again() {
         .expect("能记下来");
     let second = bridge.poll_turn().expect("能开轮").expect("有活");
     let ids: Vec<u64> = second.records.iter().map(|record| record.id).collect();
-    assert_eq!(ids, vec![1, 3], "#2 已经确认过，不能再投一遍");
+    assert_eq!(
+        ids,
+        vec![1, 2, 3],
+        "#2 已经确认过，只作为触发前的上下文回来，不算未读"
+    );
+    assert_eq!(second.unread_ranges, vec![[1, 1], [3, 3]]);
+    assert!(
+        second.records[1].note.is_none() && second.records[1].redelivery.is_none(),
+        "已确认的 #2 不该被标重投"
+    );
     assert_eq!(second.records[0].redelivery, Some(2), "#1 仍然要标重投");
 }
 
@@ -1725,17 +1862,18 @@ fn ack_accepts_records_read_this_turn_but_not_delivered() {
     let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
     let ticket = delivery.ticket;
     let ids: Vec<u64> = delivery.records.iter().map(|record| record.id).collect();
-    assert_eq!(ids, vec![1], "上限 1 条从最旧的开始投");
+    assert_eq!(ids, vec![3], "上限 1 条：保住触发消息，砍掉更早的上下文");
+    assert_eq!(delivery.unread_ranges, vec![[1, 3]], "没投正文的靠区间告知");
     assert_eq!(delivery.more, Some(2));
-    assert_eq!(delivery.omitted, None, "连续投递不跳段");
+    assert_eq!(delivery.omitted, None, "默认策略不跳段");
 
-    // 补读本轮没投递的 #2、#3；读到的编号进本轮 read set。
+    // 补读本轮没投正文的 #1、#2；读到的编号进本轮 read set。
     let fetched = bridge
         .tool_call(
             &ticket,
             &sessions(),
             "fetch_records",
-            json!({"ids": [2, 3]}),
+            json!({"ids": [1, 2]}),
         )
         .expect("能补读");
     assert_eq!(fetched["returned"], 2);
@@ -4001,8 +4139,8 @@ fn a_reply_is_acked_for_every_subscriber_not_just_the_speaker() {
     assert_eq!(side.session, "side");
     assert_eq!(
         side.records.iter().map(|r| r.id).collect::<Vec<_>>(),
-        vec![2],
-        "side 只欠 #2；自己人的 #3 不该出现"
+        vec![1, 2],
+        "side 只欠 #2；#1 是触发前的上下文，#3 已被自动确认不进正文"
     );
     let acked = bridge
         .tool_call(
@@ -4040,9 +4178,10 @@ fn a_reply_is_acked_for_every_subscriber_not_just_the_speaker() {
     let side = bridge.poll_turn().expect("能开轮").expect("side 有活");
     assert_eq!(
         side.records.iter().map(|r| r.id).collect::<Vec<_>>(),
-        vec![5],
-        "只有新戳的 #5；#4 是自己发的，自愈时已确认"
+        vec![2, 3, 4, 5],
+        "未读只有新戳的 #5；#2–#4 只作为触发前的上下文回来，自愈时已确认"
     );
+    assert_eq!(side.unread_ranges, vec![[5, 5]], "已确认的不算未读");
     let acked = bridge
         .tool_call(
             &side.ticket,
@@ -4074,14 +4213,13 @@ fn delivery_carries_the_session_persona() {
 }
 
 // ---------------------------------------------------------------------------
-// 投递截断：从旧到新连续投一段，剩下的下一轮接着投
-// （2026-11-08 修复：分叉投递会留下永远补不齐的洞）
+// 投递截断：`delivery_limit` 是正文条数上限，超了从离触发消息最远的开始砍
+// （2026-11-11 改为 D7：触发前后 N 条 + 完整未读区间）
 // ---------------------------------------------------------------------------
 
 #[test]
-fn delivery_truncation_keeps_the_oldest_contiguous_slice() {
-    // 积压 5 条、上限 2 条：只投最旧的连续两条。水位每轮都能前进，
-    // #3–#5 下一轮接着投；不跳过中段，也就不会留下永久洞。
+fn delivery_limit_trims_the_farthest_context_first() {
+    // 积压 5 条、上限 2 条：正文只留离触发消息最近的 #4、#5，其余靠未读区间。
     let text = format!("delivery_limit = 2\n{}", config());
     let sends: Sends = Arc::new(Mutex::new(Vec::new()));
     let mut bridge = Bridge::new(
@@ -4100,25 +4238,45 @@ fn delivery_truncation_keeps_the_oldest_contiguous_slice() {
 
     let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
     let ids: Vec<u64> = delivery.records.iter().map(|r| r.id).collect();
-    assert_eq!(ids, vec![1, 2], "从最旧开始连续投，不掺最新一批");
-    assert_eq!(delivery.more, Some(3), "还有 3 条在后续轮次补齐");
+    assert_eq!(ids, vec![4, 5], "上限只管正文条数，先砍离触发点最远的");
+    assert_eq!(delivery.unread_ranges, vec![[1, 5]], "未读区间仍然是完整的");
+    assert_eq!(delivery.unread_count, 5);
+    assert_eq!(delivery.more, Some(3), "没投正文的 3 条要如实上报");
     assert_eq!(delivery.omitted, None, "默认策略不跳过中段");
 
-    // 确认前两条后水位前进；下一轮从 #3 继续，而不是回到 #1 或直接跳到 #5。
+    // 只投了正文的 #4、#5 能直接确认；#1–#3 得先补读（D7：区间里的编号不能直接 ack）。
     let ticket = delivery.ticket;
     bridge
-        .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [1, 2]}))
+        .tool_call(&ticket, &sessions(), "ack_messages", json!({"ids": [4, 5]}))
         .expect("投过的能确认");
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "fetch_records",
+            json!({"ids": [1, 2, 3]}),
+        )
+        .expect("能补读");
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "ack_messages",
+            json!({"ids": [1, 2, 3]}),
+        )
+        .expect("读过的能确认");
     bridge.end_turn(&ticket, None).expect("能收工");
 
-    // 新消息触发的下一轮：从 #3 继续，而不是回到 #1 或直接跳到 #5。
+    // 新消息触发的下一轮：未读只剩 #6，上下文照旧带上前几条。
     bridge
         .ingest(message("qq:group/123", "10001", "第6条", true))
         .expect("能记下来");
     let next = bridge.poll_turn().expect("能开轮").expect("有活");
     let ids: Vec<u64> = next.records.iter().map(|r| r.id).collect();
-    assert_eq!(ids, vec![3, 4], "水位推进后接着投下一段");
-    assert_eq!(next.more, Some(2), "剩下 #5、#6 还没投");
+    assert_eq!(ids, vec![5, 6], "上限 2 条：触发消息 + 前一条");
+    assert_eq!(next.unread_ranges, vec![[6, 6]], "已确认的不算未读");
+    assert_eq!(next.unread_count, 1);
+    assert_eq!(next.more, None, "未读全部投了正文");
     assert_eq!(next.omitted, None);
 }
 

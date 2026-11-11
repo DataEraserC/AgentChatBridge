@@ -1102,11 +1102,20 @@ fn delivery_request_table(lua: &Lua, request: &DeliveryRequest<'_>) -> mlua::Res
     table.set("session", request.session)?;
     table.set("room", request.room.to_string())?;
     table.set("limit", request.limit)?;
+    table.set("trigger_id", request.trigger_id)?;
+    table.set("context_before", request.context_before)?;
+    table.set("context_after", request.context_after)?;
+    table.set("batch_head", request.batch_head)?;
     let records = lua.create_table()?;
     for (index, record) in request.records.iter().enumerate() {
         records.set(index + 1, record_table(lua, record)?)?;
     }
     table.set("records", records)?;
+    let context = lua.create_table()?;
+    for (index, record) in request.context.iter().enumerate() {
+        context.set(index + 1, record_table(lua, record)?)?;
+    }
+    table.set("context", context)?;
     Ok(table)
 }
 
@@ -1322,7 +1331,20 @@ fn interpret_delivery_plan(value: Value) -> mlua::Result<DeliveryPlan> {
         }),
         None => None,
     };
-    Ok(DeliveryPlan { keep, omitted })
+    let mut unread_ranges = Vec::new();
+    if let Some(ranges) = table.get::<Option<Table>>("unread_ranges")? {
+        for value in ranges.sequence_values::<Table>() {
+            let pair = value?;
+            let from: u64 = pair.get(1)?;
+            let to: u64 = pair.get(2)?;
+            unread_ranges.push([from.min(to), from.max(to)]);
+        }
+    }
+    Ok(DeliveryPlan {
+        keep,
+        omitted,
+        unread_ranges,
+    })
 }
 
 fn turn_error_request_table(lua: &Lua, request: &TurnErrorRequest<'_>) -> mlua::Result<Table> {
@@ -1671,18 +1693,10 @@ fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
 
 fn interpret_wake(value: Value) -> mlua::Result<WakeVerdict> {
     match value {
-        Value::Boolean(true) => Ok(WakeVerdict {
-            decision: WakeDecision::Wake,
-            reason: None,
-            delay_ms: 0,
-        }),
+        Value::Boolean(true) => Ok(WakeVerdict::wake_batch("")),
         Value::Boolean(false) => Ok(WakeVerdict::stay()),
         Value::String(text) => match text.to_string_lossy().as_str() {
-            "wake" => Ok(WakeVerdict {
-                decision: WakeDecision::Wake,
-                reason: None,
-                delay_ms: 0,
-            }),
+            "wake" => Ok(WakeVerdict::wake_batch("")),
             "stay" => Ok(WakeVerdict::stay()),
             other => Err(mlua::Error::runtime(acb_i18n::t!(
                 "plugin.lua.wake_result",
@@ -1693,11 +1707,13 @@ fn interpret_wake(value: Value) -> mlua::Result<WakeVerdict> {
             let decision: String = table.get("decision")?;
             let reason: Option<String> = table.get("reason")?;
             let delay_ms: Option<u64> = table.get("delay_ms")?;
+            let batch: Option<bool> = table.get("batch")?;
             match decision.as_str() {
                 "wake" => Ok(WakeVerdict {
                     decision: WakeDecision::Wake,
                     reason,
                     delay_ms: delay_ms.unwrap_or(0),
+                    batch: batch.unwrap_or(false),
                 }),
                 "stay" => Ok(WakeVerdict::stay()),
                 other => Err(mlua::Error::runtime(acb_i18n::t!(

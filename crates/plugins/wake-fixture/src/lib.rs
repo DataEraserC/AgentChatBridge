@@ -140,6 +140,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                         decision: if wake { "wake" } else { "stay" }.into(),
                         reason: wake.then(|| format!("fixture：@ 或关键词 {keyword} 命中")),
                         delay_ms: 0,
+                        batch: false,
                     }
                 }
                 "access" => {
@@ -153,6 +154,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                         decision: if allow { "allow" } else { "deny" }.into(),
                         reason: None,
                         delay_ms: 0,
+                        batch: false,
                     }
                 }
                 "receive" => {
@@ -166,6 +168,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                         decision: if drop { "drop" } else { "record" }.into(),
                         reason: None,
                         delay_ms: 0,
+                        batch: false,
                     }
                 }
                 "delivery" => {
@@ -195,7 +198,11 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                         None
                     };
                     WireResult::Delivery {
-                        plan: Some(WireDeliveryPlan { keep, omitted }),
+                        plan: Some(WireDeliveryPlan {
+                            keep,
+                            omitted,
+                            unread_ranges: Vec::new(),
+                        }),
                     }
                 }
                 "turn_error" => {
@@ -231,6 +238,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                             decision: "ok".into(),
                             reason: None,
                             delay_ms: 0,
+                            batch: false,
                         }
                     }
                 }
@@ -245,6 +253,7 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                         decision: if due { "due" } else { "skip" }.into(),
                         reason: None,
                         delay_ms: 0,
+                        batch: false,
                     }
                 }
                 other => WireResult::Error {

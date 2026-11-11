@@ -9,7 +9,7 @@ import net from "node:net"
 import { t } from "../../shared/i18n.mjs"
 
 /// 协议版本。和 `acb_proto::frame::PROTOCOL_VERSION` 必须一致。
-export const PROTOCOL_VERSION = 7
+export const PROTOCOL_VERSION = 8
 
 const MAX_FRAME_BYTES = 1024 * 1024
 const HANDSHAKE_TIMEOUT_MS = 10_000
@@ -494,7 +494,8 @@ export function renderTurn(delivery, { now = Date.now(), tools = null } = {}) {
     return lines.join("\n")
   }
 
-  lines.push(`[${room}] ${reason}，${count} 条新记录：`)
+  // 「新」不准确了：D7 之后正文里既有新消息，也有触发点之前的上下文（可能早就读过）。
+  lines.push(`[${room}] ${reason}，${count} 条记录：`)
 
   for (const record of delivery.records) {
     const when = formatTime(record.at, now)
@@ -512,6 +513,8 @@ export function renderTurn(delivery, { now = Date.now(), tools = null } = {}) {
       )
     }
     if (record.at_self) marks.push("冲你来的")
+    // 这一轮是被哪条消息叫醒的：上下文里可能有前后好几条，标出来模型才知道重点。
+    if (delivery.trigger_id === record.id) marks.push("本轮触发")
     // 引用我发的某条消息 = 在跟我说，但不是 @。分两个词，模型才知道对方是在追问哪件事。
     if (record.reply_to_self) marks.push("回你的话")
     if (Array.isArray(record.labels) && record.labels.includes("recall")) {
@@ -532,8 +535,13 @@ export function renderTurn(delivery, { now = Date.now(), tools = null } = {}) {
   }
 
   lines.push("")
-  // 消息太多被截断时，明确告诉模型这一轮只投了一段连续的旧记录。
-  // 只在工具面里真的有回看工具时才推荐它；否则就按默认策略等下一轮。
+  // 未读区间：桥给了完整编号（不截断、不抽样），正文只投了其中一部分。
+  // 渲染成「#1–#20、#30」这种紧凑写法，模型据此决定要不要回看。
+  const ranges = Array.isArray(delivery.unread_ranges) ? delivery.unread_ranges : []
+  const unreadText = ranges
+    .map(([from, to]) => (from === to ? `#${from}` : `#${from}–#${to}`))
+    .join("、")
+  // 自定义 composer 主动跳过中段时，仍然用它自己的 `omitted` 说明。
   if (delivery.omitted) {
     const omitted = delivery.omitted
     const advice =
@@ -546,12 +554,29 @@ export function renderTurn(delivery, { now = Date.now(), tools = null } = {}) {
       `⚠️ 还有 #${omitted.from}–#${omitted.to} 共 ${omitted.count} 条未读没投（自定义投递策略跳过了中段）。${advice}`
     )
     lines.push("")
+  } else if (unreadText) {
+    const advice = hasTool("fetch_records")
+      ? "需要哪条就用 fetch_records 按编号回看。"
+      : "需要哪条就按编号问，别假设没投的都在最新一端。"
+    const tail = delivery.more
+      ? `本轮只投了其中 ${count} 条正文，还有 ${delivery.more} 条等你自己回看。${advice}`
+      : "这些正文已经都在上面了。"
+    lines.push(`未读 ${unreadText}（共 ${delivery.unread_count} 条）：${tail}`)
+    lines.push("")
   } else if (delivery.more) {
     const advice = hasTool("fetch_records")
       ? "需要更早的上下文时用 fetch_records 按编号回看。"
       : "本轮只投递一段，剩余记录会按顺序在后续轮次补齐。"
     lines.push(
       `⚠️ 投递超限，还有 ${delivery.more} 条没投（本轮只投递了从旧到新的一段连续记录）。${advice}`
+    )
+    lines.push("")
+  }
+  // 反复投了还没确认的记录：直接点名，别让它一直占着上下文。
+  if (delivery.unread_redelivered > 0) {
+    lines.push(
+      `⚠️ 未读里有 ${delivery.unread_redelivered} 条已经投过 2 次以上（最高 ${delivery.max_times} 次）：` +
+        `确认掉，或者说明为什么不处理。`
     )
     lines.push("")
   }

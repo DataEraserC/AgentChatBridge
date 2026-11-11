@@ -187,7 +187,10 @@ access / receive / clock / delivery / turn_error 的策略配置也有同名的 
 Lua 的 `turn_error` 收到 `decide(request, options)`；动态库的 `turn_error` 每次 `Decide` 也带最新 options。
 
 动态库插件通过 `CoreMessage::Decide` 收到 `WireWakeRequest`（发送者、正文、@/引用/拍、
-`has_body`、标签、未读数、上次唤醒时间），返回 `WireResult::Decision { decision = "wake" | "stay", delay_ms }`。
+`has_body`、标签、未读数、上次唤醒时间），返回
+`WireResult::Decision { decision = "wake" | "stay", reason, delay_ms, batch }`。
+`batch = true` 表示这次是「攒够一批」而不是「某一条点到我」：core 不把它当作触发消息，
+投递按订阅的 `batch_head` 投最旧几条正文。默认 `false`。
 解析失败或插件报错按 `stay` 兜底，不会误把会话叫醒。wake 判定在 core 的入库路径里，
 所以只开放进程内载体（动态库与 Lua）；外置进程会在 core 锁内做 I/O，等以后有异步判定再开。
 

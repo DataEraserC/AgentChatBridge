@@ -16,11 +16,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use acb_kernel::{
-    Bridge, CONSOLE_CONFIG_FILENAME, ConfigSource, ControlRegistry, DependencyRegistry, QueueStats,
-    RouteWorker, Store,
+    Bridge, CONSOLE_CONFIG_FILENAME, ConfigSource, ControlRegistry, Cursor, DependencyRegistry,
+    QueueStats, RouteWorker, Store, StuckUnread,
 };
 use acb_proto::Frame;
 use serde_json::json;
+
+/// 投过多少次还没确认就算「卡住」。与 D7 的提示阈值保持一致（`unread_redelivered` 从 2 起算，
+/// 这是警告线）。
+const STUCK_UNREAD_THRESHOLD: u32 = 3;
 
 /// `/api/status` 的队列视图。入站与路由共用同一套字段，路由额外带 busy。
 fn queue_status(
@@ -1453,6 +1457,26 @@ impl<S: Store + Send + 'static> Console<S> {
             .iter()
             .map(|session| {
                 let map = maps.iter().find(|m| m.session == session.id);
+                // 投过 ≥3 次还没确认的未读：agent 可能卡住了，也可能是该换人看一眼。
+                // 只读，不推进水位；控制台每次刷新现算。
+                let stuck: Vec<(String, StuckUnread)> = session
+                    .subscriptions
+                    .iter()
+                    .filter_map(|subscription| {
+                        let cursor = Cursor::new(session.id.clone(), subscription.room.clone());
+                        let stuck = bridge
+                            .store()
+                            .stuck_unread(&cursor, STUCK_UNREAD_THRESHOLD)
+                            .unwrap_or_default();
+                        (stuck.count > 0).then(|| (subscription.room.to_string(), stuck))
+                    })
+                    .collect();
+                let stuck_count: usize = stuck.iter().map(|(_, stuck)| stuck.count).sum();
+                let stuck_max = stuck
+                    .iter()
+                    .map(|(_, stuck)| stuck.max_times)
+                    .max()
+                    .unwrap_or(0);
                 json!({
                     "id": session.id,
                     "name": session.name,
@@ -1461,6 +1485,15 @@ impl<S: Store + Send + 'static> Console<S> {
                     "model": session.model,
                     "memories": session.memories,
                     "subscriptions": session.subscriptions.iter().map(|s| s.room.to_string()).collect::<Vec<_>>(),
+                    "stuck_unread": {
+                        "count": stuck_count,
+                        "max_times": stuck_max,
+                        "rooms": stuck.iter().map(|(room, stuck)| json!({
+                            "room": room,
+                            "count": stuck.count,
+                            "max_times": stuck.max_times,
+                        })).collect::<Vec<_>>(),
+                    },
                     "map": map.map(|m| json!({
                         "harness_session": m.harness_session,
                         "meta": m.meta,

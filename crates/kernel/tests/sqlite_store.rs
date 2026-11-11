@@ -1200,3 +1200,40 @@ fn secrets_and_settings_roundtrip() {
         Some(&serde_json::json!(20))
     );
 }
+
+#[test]
+fn before_and_stuck_unread_work_on_sqlite() {
+    let db = TempDb::new("before-stuck");
+    let mut store = acb_kernel::SqliteStore::open(db.path()).expect("能打开");
+    let qq = room("qq:private/1");
+    for text in ["a", "b", "c", "d", "e"] {
+        store.append(message(&qq, text)).expect("可写");
+    }
+    let main = Cursor::new("main", qq.clone());
+
+    let ids: Vec<u64> = store
+        .before(&qq, 5, 2)
+        .expect("能读")
+        .into_iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(ids, vec![3, 4], "SQL 得按 DESC 取再翻回升序");
+
+    for _ in 0..3 {
+        store.count_delivery(&main, 2).expect("能记");
+    }
+    assert_eq!(store.delivery_count(&main, 2).expect("能读"), 3);
+    let counts = store.delivery_counts(&main).expect("能读");
+    assert_eq!(counts.get(&2).copied(), Some(3), "批量读要包含已投的");
+    assert_eq!(counts.get(&1), None, "没投过的不在表里");
+    let stuck = store.stuck_unread(&main, 3).expect("能读");
+    assert_eq!(stuck.count, 1);
+    assert_eq!(stuck.max_times, 3);
+
+    store.ack(&main, &[1, 2]).expect("能确认");
+    assert_eq!(
+        store.stuck_unread(&main, 3).expect("能读").count,
+        0,
+        "确认之后不该还算卡住"
+    );
+}

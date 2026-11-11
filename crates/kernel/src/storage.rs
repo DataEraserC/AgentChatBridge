@@ -228,6 +228,13 @@ pub trait Transcript {
     /// 取编号大于 `after` 的记录，最多 `limit` 条，按编号升序。
     fn since(&self, room: &RoomId, after: u64, limit: usize) -> Result<Vec<Record>, StorageError>;
 
+    /// 取编号小于 `before` 的最近 `limit` 条，按编号升序。
+    ///
+    /// 用途只有一个：唤醒时把触发消息**之前**的几条也带进上下文。这些记录可能
+    /// 早就确认过（在水位之下），所以不能走 [`unread`]。
+    fn before(&self, room: &RoomId, before: u64, limit: usize)
+    -> Result<Vec<Record>, StorageError>;
+
     /// 房间里最大的编号；空房间给 `None`。
     fn latest(&self, room: &RoomId) -> Result<Option<u64>, StorageError>;
 
@@ -464,8 +471,31 @@ pub trait Deliveries {
     /// 记一次投递，返回这是第几次（第一次给 1）。
     fn count_delivery(&mut self, cursor: &Cursor, id: u64) -> Result<u32, StorageError>;
 
+    /// 查这条被投过几次，**不记**一次投递。没投过给 0。
+    ///
+    /// 渲染本轮「未读里有多少条重投过」时用：只想统计，不能因为统计而把计数抬高。
+    fn delivery_count(&self, cursor: &Cursor, id: u64) -> Result<u32, StorageError>;
+
+    /// 一次取出这个游标下所有投递计数。渲染一轮时用，避免按编号逐条查。
+    fn delivery_counts(&self, cursor: &Cursor) -> Result<HashMap<u64, u32>, StorageError>;
+
+    /// 未读里被投过至少 `threshold` 次、且还没确认的条数与最高次数。
+    ///
+    /// 控制台的 `stuck_unread` 指标用它：这些记录反复投给 agent 却一直没被确认，
+    /// 要么是 agent 卡住了，要么是该换人看一眼。只读，不推进水位。
+    fn stuck_unread(&self, cursor: &Cursor, threshold: u32) -> Result<StuckUnread, StorageError>;
+
     /// 丢掉计数。确认之后这条不会再投了，留着只是垃圾。
     fn forget_delivery(&mut self, cursor: &Cursor, id: u64) -> Result<(), StorageError>;
+}
+
+/// `stuck_unread` 的聚合结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StuckUnread {
+    /// 满足条件的条数。
+    pub count: usize,
+    /// 这些记录里最高的投递次数。
+    pub max_times: u32,
 }
 
 /// 会话映射：acb 会话 id → harness 内部会话 id。
@@ -1166,6 +1196,29 @@ impl Transcript for MemoryStore {
             .collect())
     }
 
+    fn before(
+        &self,
+        room: &RoomId,
+        before: u64,
+        limit: usize,
+    ) -> Result<Vec<Record>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(records) = self.records.get(room) else {
+            return Ok(Vec::new());
+        };
+        let mut picked: Vec<Record> = records
+            .iter()
+            .filter(|record| record.id < before)
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect();
+        picked.reverse();
+        Ok(picked)
+    }
+
     fn latest(&self, room: &RoomId) -> Result<Option<u64>, StorageError> {
         Ok(self.next_id.get(room).copied())
     }
@@ -1354,6 +1407,49 @@ impl Deliveries for MemoryStore {
         let count = self.deliveries.entry((cursor.clone(), id)).or_insert(0);
         *count += 1;
         Ok(*count)
+    }
+
+    fn delivery_count(&self, cursor: &Cursor, id: u64) -> Result<u32, StorageError> {
+        Ok(self
+            .deliveries
+            .get(&(cursor.clone(), id))
+            .copied()
+            .unwrap_or(0))
+    }
+
+    fn delivery_counts(&self, cursor: &Cursor) -> Result<HashMap<u64, u32>, StorageError> {
+        Ok(self
+            .deliveries
+            .iter()
+            .filter(|((owner, _), _)| owner == cursor)
+            .map(|((_, id), times)| (*id, *times))
+            .collect())
+    }
+
+    fn stuck_unread(&self, cursor: &Cursor, threshold: u32) -> Result<StuckUnread, StorageError> {
+        if threshold == 0 {
+            return Ok(StuckUnread::default());
+        }
+        let watermark = self.watermark(cursor)?;
+        let acked: BTreeSet<u64> = self.acked(cursor)?.into_iter().collect();
+        let Some(records) = self.records.get(&cursor.room) else {
+            return Ok(StuckUnread::default());
+        };
+        let mut stuck = StuckUnread::default();
+        for record in records {
+            if record.id <= watermark || record.suppressed || acked.contains(&record.id) {
+                continue;
+            }
+            let Some(times) = self.deliveries.get(&(cursor.clone(), record.id)) else {
+                continue;
+            };
+            if *times < threshold {
+                continue;
+            }
+            stuck.count += 1;
+            stuck.max_times = stuck.max_times.max(*times);
+        }
+        Ok(stuck)
     }
 
     fn forget_delivery(&mut self, cursor: &Cursor, id: u64) -> Result<(), StorageError> {
@@ -2325,5 +2421,67 @@ mod tests {
         store.append(draft(qq.clone(), "a")).expect("可写");
 
         assert_eq!(store.rooms().expect("可读"), vec![discord, qq]);
+    }
+
+    #[test]
+    fn before_returns_the_tail_before_an_id_in_order() {
+        let mut store = MemoryStore::new();
+        let qq = room("qq", "1");
+        for text in ["a", "b", "c", "d", "e"] {
+            store.append(draft(qq.clone(), text)).expect("可写");
+        }
+        let ids: Vec<u64> = store
+            .before(&qq, 5, 2)
+            .expect("可读")
+            .into_iter()
+            .map(|record| record.id)
+            .collect();
+        assert_eq!(ids, vec![3, 4], "取 #5 之前最近两条，按编号升序");
+        assert!(store.before(&qq, 1, 2).expect("可读").is_empty());
+        assert!(store.before(&qq, 5, 0).expect("可读").is_empty());
+    }
+
+    #[test]
+    fn delivery_count_only_reads() {
+        let mut store = MemoryStore::new();
+        let qq = room("qq", "1");
+        store.append(draft(qq.clone(), "a")).expect("可写");
+        let main = cursor("main", &qq);
+        assert_eq!(store.delivery_count(&main, 1).expect("可读"), 0);
+        store.count_delivery(&main, 1).expect("能记");
+        assert_eq!(
+            store.delivery_count(&main, 1).expect("可读"),
+            1,
+            "只读不改：连着查两次还是 1"
+        );
+        assert_eq!(store.delivery_count(&main, 1).expect("可读"), 1);
+        let counts = store.delivery_counts(&main).expect("可读");
+        assert_eq!(counts.get(&1).copied(), Some(1));
+    }
+
+    #[test]
+    fn stuck_unread_counts_acked_and_resolved_records_out() {
+        let mut store = MemoryStore::new();
+        let qq = room("qq", "1");
+        for text in ["a", "b", "c"] {
+            store.append(draft(qq.clone(), text)).expect("可写");
+        }
+        let main = cursor("main", &qq);
+        for _ in 0..3 {
+            store.count_delivery(&main, 1).expect("能记");
+        }
+        store.count_delivery(&main, 2).expect("能记");
+
+        let stuck = store.stuck_unread(&main, 3).expect("可读");
+        assert_eq!(stuck.count, 1, "只有 #1 投过 3 次");
+        assert_eq!(stuck.max_times, 3);
+
+        // 确认之后不再算「卡住」；水位推进到 #2 的 #3 也不再算未读。
+        store.ack(&main, &[1, 2, 3]).expect("能确认");
+        assert_eq!(
+            store.stuck_unread(&main, 3).expect("可读").count,
+            0,
+            "已确认的不该再提示"
+        );
     }
 }

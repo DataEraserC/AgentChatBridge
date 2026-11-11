@@ -8,8 +8,8 @@
 - 一条长连接（本机套接字或 TCP），**每帧一行 JSON**，UTF-8。
 - 单帧上限 1 MiB，超了直接断连。
 - 首帧必须是 `hello`，带协议版本与令牌（TCP 时必填）。版本不符由桥拒绝并说明原因。
-  当前 `PROTOCOL_VERSION = 7`；wire 形状变了就加一，文档和 `crates/proto` 同时改。
-  v7 兼容 v6 harness：`turn_end.failure` 是可选字段，旧 harness 不带时走原路径。
+  当前 `PROTOCOL_VERSION = 8`；wire 形状变了就加一，文档和 `crates/proto` 同时改。
+  v8 兼容 v6/v7 harness：新增字段都可选，旧 harness 不带时走原渲染路径。
 
 ## 接入点
 
@@ -91,8 +91,13 @@ sequenceDiagram
 | `session_info` | 会话身份：id / name / harness / model（model 为空 = harness 侧自己决定） |
 | `persona` | 人格卡 `{id, name, text}`。桥只给语义，怎么塞进模型上下文由 harness 适配器决定 |
 | `room` | 本轮只涉及这一个房间 |
-| `records` | 投递的记录，可能为空 |
-| `more` | 非 0 表示投递超限、有 N 条未读没投进来（按条数或 512 KiB 字节预算截断）。默认策略按从旧到新连续投，这些记录会在后续轮次接着投；自定义 composer 跳段时数值与 `omitted.count` 一致 |
+| `records` | 本轮投正文的记录，可能为空。默认是「触发消息前后 N 条」：触发点之前的可能是早先确认过的上下文，之后的通常是未读 |
+| `trigger_id` | 触发这一轮的记录编号；时钟/攒批唤醒为空 |
+| `unread_ranges` | 本轮**完整**的未读编号区间（闭区间，升序），例如 `[[1,20],[30,40]]`。不截断、不抽样 |
+| `unread_count` | 区间覆盖的未读总条数（编号有空洞，不等于区间长度之和） |
+| `unread_redelivered` | 未读里已投过 ≥2 次的条数。>0 时 harness 应提醒模型确认或说明为什么不处理 |
+| `max_times` | 未读里被投过的最高次数 |
+| `more` | 未读里没投正文的条数（`unread_count` 减去本轮 `records` 中的未读条数）。旧 harness 靠它提示「还有 N 条」；v8 起以 `unread_ranges` 为准 |
 | `omitted` | 被 composer **主动跳过**的未读区间：`{from, to, count}`。默认连续投递不会设置；只有自定义 composer 跳段时才有。需要时用 `get_history({after, before})` 或 `fetch_records` 回看 |
 | `reason` | 为什么开这一轮：`wake` / `clock` |
 | `turn_timeout_ms` | 本轮超时（毫秒），来自配置 `turn_timeout_secs`；0 = 关闭超时。到点 harness 应主动打断这轮（如 dsh 的 session/cancel），打断按失败处理走 `on_turn_error` |

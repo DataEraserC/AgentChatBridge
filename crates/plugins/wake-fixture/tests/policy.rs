@@ -207,6 +207,11 @@ fn decision_providers_use_the_shared_wire() {
             session: "main",
             room: &room,
             records: &records,
+            context: &[],
+            trigger_id: None,
+            context_before: 3,
+            context_after: 3,
+            batch_head: 3,
             limit: 10,
         };
         let plan = plugins

@@ -6,7 +6,7 @@
 //! 表结构见 `docs/07-storage.md`。改动表结构时把 `SCHEMA_VERSION` 加一，并且**先写迁移**
 //! 再写代码——现在遇到不认识的版本会直接拒绝打开，而不是往老库里写坏数据。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
@@ -19,8 +19,8 @@ use super::{
     FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind,
     Notes, PluginDataStore, PluginsStore, Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded,
     SecretsStore, SessionMap, SessionMaps, SettingsStore, StorageError, StoredPluginConfig,
-    StoredPluginRecord, StoredSecret, TaskRecord, TaskStatus, Tasks, TopicStatus, Transcript,
-    Watermarks,
+    StoredPluginRecord, StoredSecret, StuckUnread, TaskRecord, TaskStatus, Tasks, TopicStatus,
+    Transcript, Watermarks,
 };
 use crate::config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 use crate::grants::{
@@ -855,6 +855,60 @@ impl Transcript for SqliteStore {
         Ok(max.map(|value| value.max(0) as u64))
     }
 
+    fn before(
+        &self,
+        room: &RoomId,
+        before: u64,
+        limit: usize,
+    ) -> Result<Vec<Record>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT record_id, kind, event, sender_id, sender_name, sender_role, at, at_self,
+                        reply_to_self, platform_id, elements, event_meta, labels, suppressed
+                 FROM records
+                 WHERE connection = ?1 AND room_key = ?2 AND record_id < ?3
+                 ORDER BY record_id DESC
+                 LIMIT ?4",
+            )
+            .map_err(io_error)?;
+
+        let rows = statement
+            .query_map(
+                params![room.connection, room.key(), before as i64, limit as i64],
+                |row| {
+                    Ok(RawRow {
+                        id: row.get::<_, i64>(0)?.max(0) as u64,
+                        kind: row.get(1)?,
+                        event: row.get(2)?,
+                        sender_id: row.get(3)?,
+                        sender_name: row.get(4)?,
+                        sender_role: row.get(5)?,
+                        at: row.get(6)?,
+                        at_self: row.get::<_, i64>(7)? != 0,
+                        reply_to_self: row.get::<_, i64>(8)? != 0,
+                        platform_id: row.get(9)?,
+                        elements: row.get(10)?,
+                        event_meta: row.get(11)?,
+                        labels: row.get(12)?,
+                        suppressed: row.get::<_, i64>(13)? != 0,
+                    })
+                },
+            )
+            .map_err(io_error)?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let raw = row.map_err(io_error)?;
+            records.push(raw.into_record(room)?);
+        }
+        records.reverse();
+        Ok(records)
+    }
+
     fn rooms(&self) -> Result<Vec<RoomId>, StorageError> {
         let mut statement = self
             .conn
@@ -1547,6 +1601,88 @@ impl Deliveries for SqliteStore {
             )
             .map_err(io_error)?;
         Ok(())
+    }
+
+    fn delivery_count(&self, cursor: &Cursor, id: u64) -> Result<u32, StorageError> {
+        let times: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT times FROM deliveries
+                 WHERE session = ?1 AND connection = ?2 AND room_key = ?3 AND record_id = ?4",
+                params![
+                    cursor.session,
+                    cursor.room.connection,
+                    cursor.room.key(),
+                    id as i64
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io_error)?;
+        Ok(times.unwrap_or(0).max(0) as u32)
+    }
+
+    fn delivery_counts(&self, cursor: &Cursor) -> Result<HashMap<u64, u32>, StorageError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT record_id, times FROM deliveries
+                 WHERE session = ?1 AND connection = ?2 AND room_key = ?3",
+            )
+            .map_err(io_error)?;
+        let rows = statement
+            .query_map(
+                params![cursor.session, cursor.room.connection, cursor.room.key()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?.max(0) as u64,
+                        row.get::<_, i64>(1)?.max(0) as u32,
+                    ))
+                },
+            )
+            .map_err(io_error)?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            let (id, times) = row.map_err(io_error)?;
+            counts.insert(id, times);
+        }
+        Ok(counts)
+    }
+
+    fn stuck_unread(&self, cursor: &Cursor, threshold: u32) -> Result<StuckUnread, StorageError> {
+        if threshold == 0 {
+            return Ok(StuckUnread::default());
+        }
+        let (count, max_times): (i64, Option<i64>) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*), MAX(d.times)
+                 FROM records r
+                 JOIN deliveries d
+                   ON d.session = ?1 AND d.connection = ?2 AND d.room_key = ?3
+                  AND d.record_id = r.record_id
+                 WHERE r.connection = ?2 AND r.room_key = ?3 AND r.suppressed = 0
+                   AND r.record_id > COALESCE(
+                       (SELECT watermark FROM watermarks
+                        WHERE session = ?1 AND connection = ?2 AND room_key = ?3), 0)
+                   AND d.times >= ?4
+                   AND NOT EXISTS (
+                       SELECT 1 FROM acks a
+                       WHERE a.session = ?1 AND a.connection = ?2 AND a.room_key = ?3
+                         AND a.record_id = r.record_id)",
+                params![
+                    cursor.session,
+                    cursor.room.connection,
+                    cursor.room.key(),
+                    threshold as i64
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(io_error)?;
+        Ok(StuckUnread {
+            count: count.max(0) as usize,
+            max_times: max_times.unwrap_or(0).max(0) as u32,
+        })
     }
 }
 

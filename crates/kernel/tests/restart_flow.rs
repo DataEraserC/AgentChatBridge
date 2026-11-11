@@ -190,11 +190,15 @@ fn a_restart_continues_numbering_and_redelivery_counts() {
     assert_eq!(result["watermark"], 2);
     bridge.end_turn(&delivery.ticket, None).expect("能收工");
 
-    // 第三程：水位也是落盘的，重启后不该重投。
+    // 第三程：水位也是落盘的，已确认的不会再算未读。这个房间是攒批唤醒（accumulate = 1），
+    // 没有触发消息，所以只投最旧的一批正文 —— 这里就剩 #3。
     let mut bridge = open_bridge(db.path());
     bridge.ingest(message("第三句")).expect("能记");
     let delivery = bridge.poll_turn().expect("能开轮").expect("应当有一轮");
-    assert_eq!(delivery.records.len(), 1, "已确认的不会再投");
-    assert_eq!(delivery.records[0].id, 3);
+    assert_eq!(delivery.unread_count, 1, "已确认的不算未读");
+    assert_eq!(delivery.unread_ranges, vec![[3, 3]]);
+    assert_eq!(delivery.trigger_id, None, "攒批唤醒没有触发消息");
+    let ids: Vec<u64> = delivery.records.iter().map(|record| record.id).collect();
+    assert_eq!(ids, vec![3], "已确认的不会跟着回来");
     assert_eq!(delivery.records[0].redelivery, None);
 }

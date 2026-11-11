@@ -55,7 +55,7 @@ use crate::plugin::{
     Health, InterruptScope, PluginError, PluginManager, PromptContext, PromptDraft, PromptProvider,
     ProviderId, ReceiveDecision, ReceiveRequest, ReloadScope, RouteAction, RouteContext,
     RouteDecision, SendContext, SendHook, SendOrigin, TurnErrorProvider, TurnErrorRequest,
-    WakeContext, default_delivery_plan, provider_is_external,
+    WakeContext, compress_ids, default_delivery_plan, provider_is_external,
 };
 use crate::plugin_meta::{PluginLifecycle, PluginSource};
 use crate::policy::{CorePolicy, Policy, PolicyError};
@@ -268,6 +268,8 @@ struct Pending {
     /// 由「某条记录命中唤醒策略」触发。只有这种唤醒才保证触发记录还在未读里；
     /// 到点若已被同会话的另一轮投走，就该丢空轮（其余唤醒是让模型「看一眼」）。
     from_record: bool,
+    /// 触发这一轮的那条记录。投递时据此取「前后 N 条」的上下文；时钟/攒批为空。
+    trigger_id: Option<u64>,
 }
 
 /// 正在跑的一轮。挂在会话上：一个会话同一时刻只有这一轮。
@@ -1871,6 +1873,7 @@ impl<S: Store> Bridge<S> {
                 now_millis(),
                 0,
                 false,
+                None,
             );
         }
     }
@@ -3219,11 +3222,7 @@ impl<S: Store> Bridge<S> {
                         Ok(verdict) => verdict,
                         Err(error) => {
                             self.record_provider_call_failure(&id, "wake.decide", &error);
-                            WakeVerdict {
-                                decision: WakeDecision::Stay,
-                                reason: None,
-                                delay_ms: 0,
-                            }
+                            WakeVerdict::stay()
                         }
                     }
                 }
@@ -3241,6 +3240,9 @@ impl<S: Store> Bridge<S> {
                     now,
                     verdict.delay_ms,
                     true,
+                    // 攒批唤醒没有「触发消息」：投递按 batch_head 投最旧的几条，
+                    // 水位才能顺着往前走。单条命中才按触发消息前后 N 条投。
+                    (!verdict.batch).then_some(record.id),
                 );
             }
         }
@@ -3961,6 +3963,7 @@ impl<S: Store> Bridge<S> {
                 now,
                 0,
                 false,
+                None,
             );
             self.record_wake_audit(
                 now,
@@ -7935,6 +7938,7 @@ impl<S: Store> Bridge<S> {
                 now,
                 0,
                 false,
+                None,
             );
         }
     }
@@ -8023,6 +8027,7 @@ impl<S: Store> Bridge<S> {
                     now,
                     0,
                     false,
+                    None,
                 );
                 queued += 1;
             }
@@ -8862,6 +8867,7 @@ impl<S: Store> Bridge<S> {
                         now,
                         0,
                         false,
+                        None,
                     );
                     self.clock_last.insert(key, now);
                     queued += 1;
@@ -8899,6 +8905,7 @@ impl<S: Store> Bridge<S> {
         at: i64,
         delay_ms: u64,
         from_record: bool,
+        trigger_id: Option<u64>,
     ) {
         self.wake_last.insert((session.clone(), room.clone()), at);
         let not_before = at.saturating_add(delay_ms.min(MAX_WAKE_DELAY_MS) as i64);
@@ -8913,6 +8920,10 @@ impl<S: Store> Bridge<S> {
             if origin_sender.is_some() {
                 existing.origin_sender = origin_sender;
             }
+            // 后来的唤醒带着更具体的触发记录时，用它来定位「前后 N 条」。
+            if trigger_id.is_some() {
+                existing.trigger_id = trigger_id;
+            }
             return;
         }
         self.pending.push_back(Pending {
@@ -8923,6 +8934,7 @@ impl<S: Store> Bridge<S> {
             origin_sender,
             not_before,
             from_record,
+            trigger_id,
         });
     }
 
@@ -8950,18 +8962,36 @@ impl<S: Store> Bridge<S> {
         // 引用里的平台编号翻成本房间编号，跟平台编号并排放（ADR-0024）。
         self.fill_quote_refs(&pending.room, &mut records);
 
+        // 投递窗口：触发消息前后各带几条正文。订阅级配置优先，会话级是默认值。
+        let window = turn_config
+            .subscription(&pending.session, &pending.room)
+            .map(|subscription| subscription.window)
+            .unwrap_or_default();
+        // 触发消息之前的上下文可能早就确认过（在水位之下），所以单独从流水里取，
+        // 不能指望 `pending_records`。被抑制的记录只进流水，不进上下文。
+        let context: Vec<Record> = match pending.trigger_id {
+            Some(trigger_id) => self
+                .store
+                .before(&pending.room, trigger_id, window.context_before)?
+                .into_iter()
+                .filter(|record| !record.suppressed)
+                .collect(),
+            None => Vec::new(),
+        };
+
         // 先选本轮真正要投的批次，再计数、再进 delivered：
         // 没投出去的记录不能算「投过」，否则 ack_messages 会放行没见过的编号，
         // 投递次数也会被白白加上一次。
         //
-        // 消息过多时只投一段从旧到新的连续记录：水位每轮都能前进，
-        // 剩下的记录下一轮接着投，积压自然收敛；不再给「最旧一小段 + 最新一批」
-        // 的分叉，避免中间留下永远补不齐的洞。
+        // 默认计划只投「触发消息前后 N 条」正文，其余未读只给完整编号区间；
+        // `delivery_limit` 退化成正文条数的硬上限，不再是未读的截断点。
         let limit = if turn_config.delivery_limit == 0 {
             MAX_DELIVERY
         } else {
             turn_config.delivery_limit.min(MAX_DELIVERY)
         };
+        let unread_ids: BTreeSet<u64> = records.iter().map(|record| record.id).collect();
+        let trigger_id = pending.trigger_id;
         // composer 只决定「投哪些编号」；它看不到 store、票和水位，选出来的编号
         // 还要在这里过一遍真实记录集合——未知编号、重复编号都不会凭空进 delivered。
         let delivery_policy = turn_config
@@ -8994,6 +9024,7 @@ impl<S: Store> Bridge<S> {
             let own_session = pending.session.clone();
             let own_room = pending.room.clone();
             let own_records = records.clone();
+            let own_context = context.clone();
             let composer = Arc::clone(&composer);
             match self
                 .plugins
@@ -9004,6 +9035,11 @@ impl<S: Store> Bridge<S> {
                             session: &own_session,
                             room: &own_room,
                             records: &own_records,
+                            context: &own_context,
+                            trigger_id,
+                            context_before: window.context_before,
+                            context_after: window.context_after,
+                            batch_head: window.batch_head,
                             limit,
                         },
                     )
@@ -9015,6 +9051,11 @@ impl<S: Store> Bridge<S> {
                         session: &pending.session,
                         room: &pending.room,
                         records: &records,
+                        context: &context,
+                        trigger_id,
+                        context_before: window.context_before,
+                        context_after: window.context_after,
+                        batch_head: window.batch_head,
                         limit,
                     })
                 }
@@ -9026,13 +9067,24 @@ impl<S: Store> Bridge<S> {
                     session: &pending.session,
                     room: &pending.room,
                     records: &records,
+                    context: &context,
+                    trigger_id,
+                    context_before: window.context_before,
+                    context_after: window.context_after,
+                    batch_head: window.batch_head,
                     limit,
                 },
             )
         };
-        let total = records.len();
         let omitted = plan.omitted;
-        let mut by_id: HashMap<u64, Record> = records.into_iter().map(|r| (r.id, r)).collect();
+        // 上下文与未读可能重叠（触发消息之前那几条也可能是未读），以未读副本为准。
+        let mut by_id: HashMap<u64, Record> = HashMap::new();
+        for record in context {
+            by_id.insert(record.id, record);
+        }
+        for record in records {
+            by_id.insert(record.id, record);
+        }
         let mut selected = Vec::with_capacity(plan.keep.len());
         for id in &plan.keep {
             if let Some(record) = by_id.remove(id) {
@@ -9040,31 +9092,68 @@ impl<S: Store> Bridge<S> {
             }
         }
         records = selected;
-        // 本轮没投出去的都算「还有」：默认连续投递时是后续批次，
-        // composer 主动跳段时也一样，harness 据此提示并把回看工具带上。
-        let more = total.saturating_sub(records.len());
-        let more = (more > 0).then_some(more);
+
+        // 未读区间必须完整、不抽样。composer 给了就按它来（只保留真的未读编号），
+        // 没给就按未读集合自己压缩。编号可能有空洞，区间按连续段切。
+        let unread_sorted: Vec<u64> = unread_ids.iter().copied().collect();
+        let ranged: Vec<u64> = if plan.unread_ranges.is_empty() {
+            unread_sorted
+        } else {
+            unread_sorted
+                .into_iter()
+                .filter(|id| {
+                    plan.unread_ranges
+                        .iter()
+                        .any(|[from, to]| from <= id && id <= to)
+                })
+                .collect()
+        };
+        let unread_ranges = compress_ids(ranged);
+        let unread_count = unread_ids.len();
 
         let mut delivered = BTreeSet::new();
         let cursor = Cursor::new(pending.session.clone(), pending.room.clone());
+        // 先读一遍旧计数：统计「未读里投过 ≥2 次」的条数时不能因为统计而抬高计数。
+        // 一次取出整个游标的计数，别按编号逐条查 SQL。
+        let mut times = self.store.delivery_counts(&cursor)?;
+        times.retain(|id, _| unread_ids.contains(id));
+        for id in &unread_ids {
+            times.insert(*id, self.store.delivery_count(&cursor, *id)?);
+        }
         for record in &mut records {
-            // 计数落在存储里：重启之后同一个 N 接着数，不然看着像从没投过。
-            let count = self.store.count_delivery(&cursor, record.id)?;
-            if count > 1 {
-                record.redelivery = Some(count);
-                // 「第 N 次投递」和「怎么让它别再重投」必须跟着记录一起到模型眼前。
-                // 这件事放在桥里做，不指望每个 harness 都记得补：harness 的职责只是
-                // 把 records 塞进上下文，多一句话都不该由它发明（ADR-0010）。
-                //
-                // 注意写在 `note` 上，不塞进 elements：elements 是发送者说的话，
-                // 系统的旁白混进去会让人（和模型）以为是对方打的字。
-                record.note = Some(format!(
-                    "第 {} 次投递；调 ack_messages 确认 #{} 之后就不再重复投递",
-                    count, record.id
-                ));
+            // 上下文里已经确认过的记录不算一次新投递：否则老消息的次数会一直涨。
+            let is_unread = unread_ids.contains(&record.id);
+            if is_unread {
+                let count = self.store.count_delivery(&cursor, record.id)?;
+                times.insert(record.id, count);
+                if count > 1 {
+                    record.redelivery = Some(count);
+                    // 「第 N 次投递」和「怎么让它别再重投」必须跟着记录一起到模型眼前。
+                    // 这件事放在桥里做，不指望每个 harness 都记得补：harness 的职责只是
+                    // 把 records 塞进上下文，多一句话都不该由它发明（ADR-0010）。
+                    //
+                    // 注意写在 `note` 上，不塞进 elements：elements 是发送者说的话，
+                    // 系统的旁白混进去会让人（和模型）以为是对方打的字。
+                    record.note = Some(format!(
+                        "第 {} 次投递；调 ack_messages 确认 #{} 之后就不再重复投递",
+                        count, record.id
+                    ));
+                }
             }
             delivered.insert(record.id);
         }
+
+        let mut unread_redelivered = 0usize;
+        let mut max_times = 0u32;
+        for id in &unread_ids {
+            let count = times.get(id).copied().unwrap_or(0);
+            if count >= 2 {
+                unread_redelivered += 1;
+            }
+            max_times = max_times.max(count);
+        }
+        let undelivered_unread = unread_ids.difference(&delivered).count();
+        let more = (undelivered_unread > 0).then_some(undelivered_unread);
 
         self.ticket_seq += 1;
         let ticket = Ticket::new(format!(
@@ -9120,7 +9209,7 @@ impl<S: Store> Bridge<S> {
             pending.wake_reason.as_deref(),
         );
 
-        // 批次已经由 composer 选好（默认从旧到新连续投一段），这里直接用它。
+        // 批次已经由 composer 选好（默认是触发消息前后 N 条），这里直接用它。
         Ok(Some(Delivery {
             ticket,
             session: pending.session,
@@ -9133,6 +9222,11 @@ impl<S: Store> Bridge<S> {
             persona,
             more,
             omitted,
+            trigger_id,
+            unread_ranges,
+            unread_count,
+            unread_redelivered,
+            max_times,
             // 0 = 配置里关了超时，harness 收到就别自己掐。
             turn_timeout_ms: Some(turn_config.turn_timeout_ms()),
             prompts,
@@ -10836,6 +10930,7 @@ impl<S: Store> Bridge<S> {
                         at,
                         0,
                         false,
+                        None,
                     );
                     if !woke.iter().any(|session| session == &item.session) {
                         woke.push(item.session.clone());

@@ -904,6 +904,7 @@ function sessionCard(s, isBusy) {
       ${row("console.sessions.field.map", map
         ? `${esc(map.harness_session)}<br><span class="muted">${esc(t("console.sessions.mapUpdated", { at: new Date(map.updated_at).toLocaleString(locale) }))}</span>`
         : `<span class="muted">${esc(t("console.sessions.mapNone"))}</span>`)}
+      ${stuckUnreadRow(s)}
     </div>
     <div class="kv" style="margin-top:var(--space-2)">
       <div class="k">${esc(t("console.sessions.field.subscriptions"))}</div>
@@ -911,6 +912,26 @@ function sessionCard(s, isBusy) {
     </div>
     <div id="reset-note-${esc(s.id)}" class="card-note"></div>
   </div>`;
+}
+
+// 投过 ≥3 次还没确认：会话卡住了，或者这批消息该有人看一眼。没有就整行不显示。
+function stuckUnreadRow(s) {
+  const stuck = s.stuck_unread;
+  if (!stuck || !stuck.count) return "";
+  const detail = (stuck.rooms || [])
+    .map((room) =>
+      t("console.sessions.stuckUnreadRoom", {
+        room: room.room,
+        count: room.count,
+        times: room.max_times,
+      }),
+    )
+    .join("<br>");
+  return `<div class="k">${esc(t("console.sessions.field.stuckUnread"))}</div>` +
+    `<div><span class="pill pending">${esc(t("console.sessions.stuckUnread", {
+      count: stuck.count,
+      times: stuck.max_times,
+    }))}</span><br><span class="muted">${esc(detail)}</span></div>`;
 }
 
 async function interruptSession(id) {

@@ -48,8 +48,15 @@ pub const DEFAULT_MAX_RECORDS_PER_ROOM: u64 = 5000;
 pub const DEFAULT_MAX_AGE_DAYS: u64 = 90;
 
 /// 一轮投递最多塞多少条新记录的默认值。来源：实现默认，可推翻。
-/// 超过这个数就只投前这么多条，末尾提示「还有 N 条，用 fetch_records 抓」。
+/// 这是「正文条数」的硬上限，不是未读上限：未读永远以完整编号区间给出。
 pub const DEFAULT_DELIVERY_LIMIT: usize = 30;
+
+/// 投递窗口的默认条数：触发前后各 3 条、时钟唤醒投最旧 3 条。来源：实现默认，
+/// 可在 `[[sessions]]` 或 `[[sessions.subscriptions]]` 里覆盖。
+pub const DEFAULT_CONTEXT_RECORDS: usize = 3;
+
+/// 投递窗口能配的最大条数。上下文是给人看的，不是批量搬运；再大只会挤掉正文预算。
+pub const MAX_CONTEXT_RECORDS: usize = 50;
 
 /// 一轮的默认超时：关闭。模型想跑多久跑多久，桥和 harness 都不自动掐；
 /// 需要钳制时在配置里写 `turn_timeout_secs = n`。
@@ -920,6 +927,35 @@ pub struct Subscription {
     pub wake: WakePolicy,
     /// 时钟策略（ADR-0011）。默认关闭。
     pub clock: ClockPolicy,
+    /// 这个房间的投递窗口。订阅没写的字段继承会话级默认值。
+    pub window: DeliveryWindow,
+}
+
+/// 投递窗口：正文带多少、区间怎么留。
+///
+/// 唤醒时只投「触发消息前后 N 条」的完整正文，其余未读只给编号区间；时钟/攒批
+/// 唤醒没有触发消息，就投最旧的 `batch_head` 条正文。默认 3/3/3。
+///
+/// 这是用户 2026-11-10 定稿的投递格式（见 `docs/plan/downstream-changes.md` D7）：
+/// 上下文由桥给够，读多少由 agent 自己决定，避免一次把几十条正文塞进上下文。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveryWindow {
+    /// 触发消息之前带几条正文（可能已经确认过）。
+    pub context_before: usize,
+    /// 触发消息之后带几条正文。
+    pub context_after: usize,
+    /// 时钟/攒批唤醒投最旧的几条正文。
+    pub batch_head: usize,
+}
+
+impl Default for DeliveryWindow {
+    fn default() -> Self {
+        Self {
+            context_before: DEFAULT_CONTEXT_RECORDS,
+            context_after: DEFAULT_CONTEXT_RECORDS,
+            batch_head: DEFAULT_CONTEXT_RECORDS,
+        }
+    }
 }
 
 /// 一个会话的访问策略。
@@ -1077,6 +1113,11 @@ pub struct WakeVerdict {
     /// 这段时间里同房间的新消息照常入库；到点 `open_turn` 会一起取走。
     /// 给「只有 @、没有正文」的场景留出等后续内容的时间。
     pub delay_ms: u64,
+    /// 这次命中是「攒够一批」而不是「某一条消息点到我」。
+    ///
+    /// 攒批唤醒没有触发消息：投递按 `batch_head` 投最旧的几条，让水位能顺着往前走；
+    /// 单条命中则按触发消息前后 N 条投。默认 false（按触发消息算）。
+    pub batch: bool,
 }
 
 impl WakeVerdict {
@@ -1085,6 +1126,7 @@ impl WakeVerdict {
             decision: WakeDecision::Wake,
             reason: Some(reason.into()),
             delay_ms: 0,
+            batch: false,
         }
     }
 
@@ -1094,6 +1136,17 @@ impl WakeVerdict {
             decision: WakeDecision::Wake,
             reason: Some(reason.into()),
             delay_ms,
+            batch: false,
+        }
+    }
+
+    /// 攒够一批才醒：没有触发消息，投递走 `batch_head`。
+    pub fn wake_batch(reason: impl Into<String>) -> Self {
+        Self {
+            decision: WakeDecision::Wake,
+            reason: Some(reason.into()),
+            delay_ms: 0,
+            batch: true,
         }
     }
 
@@ -1102,6 +1155,7 @@ impl WakeVerdict {
             decision: WakeDecision::Stay,
             reason: None,
             delay_ms: 0,
+            batch: false,
         }
     }
 }
@@ -1240,7 +1294,11 @@ impl WakePolicy {
         if let Some(threshold) = self.accumulate {
             if threshold > 0 && input.unread >= threshold {
                 // 阈值和实际积压分开写：阈值是配置，实际条数才是这轮要处理的量。
-                return wake_with_backlog(input, format!("积压达到阈值（{threshold} 条）"));
+                // 攒批没有「触发消息」：投递要按最旧的一批走，水位才能往前推。
+                return WakeVerdict::wake_batch(wake_with_backlog_reason(
+                    input,
+                    format!("积压达到阈值（{threshold} 条）"),
+                ));
             }
         }
         WakeVerdict::stay()
@@ -1249,11 +1307,16 @@ impl WakePolicy {
 
 /// 命中后统一补一句实际积压量。主因由调用方给，这里只把「涉及多少条」讲清楚。
 fn wake_with_backlog(input: &WakeInput<'_>, reason: impl Into<String>) -> WakeVerdict {
+    WakeVerdict::wake(wake_with_backlog_reason(input, reason))
+}
+
+/// 同上，但只拼文案；攒批唤醒要用 `wake_batch` 包装同一段文案。
+fn wake_with_backlog_reason(input: &WakeInput<'_>, reason: impl Into<String>) -> String {
     let mut reason = reason.into();
     if input.unread > 1 {
         reason.push_str(&format!("，这轮共 {} 条未读", input.unread));
     }
-    WakeVerdict::wake(reason)
+    reason
 }
 
 /// TOML 的自由表 → JSON，原样交给 provider。core 不解释里面的键。
@@ -1330,6 +1393,13 @@ pub enum ConfigError {
         session: String,
         room: String,
         detail: String,
+    },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_delivery_window", session = session, room = room, field = field, value = value))]
+    BadDeliveryWindow {
+        session: String,
+        room: String,
+        field: String,
+        value: usize,
     },
     #[error("{}", acb_i18n::t!("kernel.config.unknown_connection", session = session, room = room, connection = connection))]
     UnknownConnection {
@@ -2276,10 +2346,20 @@ impl Config {
                 }
             }
 
+            // 会话级投递窗口默认值：订阅没写的字段用它，再没写就用 3/3/3。
+            let session_window = DeliveryWindow {
+                context_before: raw_session
+                    .context_before
+                    .unwrap_or(DEFAULT_CONTEXT_RECORDS),
+                context_after: raw_session.context_after.unwrap_or(DEFAULT_CONTEXT_RECORDS),
+                batch_head: raw_session.batch_head.unwrap_or(DEFAULT_CONTEXT_RECORDS),
+            };
+            validate_window(&id, "", &session_window)?;
+
             let mut subscriptions = Vec::with_capacity(raw_session.subscriptions.len());
             let mut seen_rooms: Vec<RoomId> = Vec::new();
             for raw_subscription in raw_session.subscriptions {
-                let subscription = build_subscription(&id, raw_subscription)?;
+                let subscription = build_subscription(&id, session_window, raw_subscription)?;
                 // 订阅连的连接必须真的存在，否则这个房间永远发不出去。
                 let Some(connection) = connections
                     .iter()
@@ -2689,7 +2769,11 @@ fn build_receive(connection: &str, raw: RawReceive) -> Result<ReceivePolicy, Con
     })
 }
 
-fn build_subscription(session: &str, raw: RawSubscription) -> Result<Subscription, ConfigError> {
+fn build_subscription(
+    session: &str,
+    session_window: DeliveryWindow,
+    raw: RawSubscription,
+) -> Result<Subscription, ConfigError> {
     let room = RoomId::new(raw.connection.trim(), raw.room.trim()).map_err(|error| {
         ConfigError::BadRoom {
             session: session.to_owned(),
@@ -2700,8 +2784,40 @@ fn build_subscription(session: &str, raw: RawSubscription) -> Result<Subscriptio
 
     let wake = build_wake(session, &room, raw.wake.unwrap_or_default())?;
     let clock = build_clock(session, &room, raw.clock)?;
+    // 逐项覆盖：订阅写了的用自己的，没写的继承会话级默认值。
+    let window = DeliveryWindow {
+        context_before: raw.context_before.unwrap_or(session_window.context_before),
+        context_after: raw.context_after.unwrap_or(session_window.context_after),
+        batch_head: raw.batch_head.unwrap_or(session_window.batch_head),
+    };
+    validate_window(session, &room.to_string(), &window)?;
 
-    Ok(Subscription { room, wake, clock })
+    Ok(Subscription {
+        room,
+        wake,
+        clock,
+        window,
+    })
+}
+
+/// 投递窗口的边界检查：正文条数可以有 0（不要上下文），但时钟唤醒至少投 1 条，
+/// 否则「看一眼」的轮次会没有任何正文。
+fn validate_window(session: &str, room: &str, window: &DeliveryWindow) -> Result<(), ConfigError> {
+    for (field, value, minimum) in [
+        ("context_before", window.context_before, 0),
+        ("context_after", window.context_after, 0),
+        ("batch_head", window.batch_head, 1),
+    ] {
+        if value < minimum || value > MAX_CONTEXT_RECORDS {
+            return Err(ConfigError::BadDeliveryWindow {
+                session: session.to_owned(),
+                room: room.to_owned(),
+                field: field.to_owned(),
+                value,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn build_clock(
@@ -3730,6 +3846,13 @@ struct RawSession {
     /// 上下文注入 provider 列表（默认空 = 不注入）。
     #[serde(default)]
     prompts: Vec<String>,
+    /// 投递窗口的会话级默认值；订阅可以逐项覆盖。不写 = 3/3/3。
+    #[serde(default)]
+    context_before: Option<usize>,
+    #[serde(default)]
+    context_after: Option<usize>,
+    #[serde(default)]
+    batch_head: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3942,6 +4065,10 @@ struct RawSubscription {
     room: String,
     wake: Option<RawWake>,
     clock: Option<RawClock>,
+    /// 投递窗口覆盖项；不写就继承会话级默认值。
+    context_before: Option<usize>,
+    context_after: Option<usize>,
+    batch_head: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4441,6 +4568,65 @@ mod tests {
         let config = Config::parse_fixture(&text).expect("覆盖值能解析");
         assert_eq!(config.tickets.request_cooldown_secs, 5);
         assert_eq!(config.tickets.admin_cooldown_secs, 2);
+    }
+
+    #[test]
+    fn delivery_window_defaults_to_three_and_three() {
+        let config =
+            Config::parse_fixture(&config_with(ONE_CONNECTION, ONE_SESSION)).expect("能解析");
+        let window = config.sessions[0].subscriptions[0].window;
+        assert_eq!(
+            window,
+            DeliveryWindow {
+                context_before: 3,
+                context_after: 3,
+                batch_head: 3
+            }
+        );
+    }
+
+    #[test]
+    fn subscription_overrides_session_window_per_field() {
+        let text = config_with(ONE_CONNECTION, ONE_SESSION).replace(
+            "token = { secret = \"t-main\" }",
+            "token = { secret = \"t-main\" }\n        context_before = 5",
+        );
+        let text = text.replace(
+            "room = \"group/123\"",
+            "room = \"group/123\"\n        context_after = 1",
+        );
+        let config = Config::parse_fixture(&text).expect("能解析");
+        let window = config.sessions[0].subscriptions[0].window;
+        assert_eq!(window.context_before, 5, "会话级默认值");
+        assert_eq!(window.context_after, 1, "订阅逐项覆盖");
+        assert_eq!(window.batch_head, 3, "没写的还是默认值");
+    }
+
+    #[test]
+    fn delivery_window_rejects_zero_batch_head_and_oversized_values() {
+        let zero = config_with(ONE_CONNECTION, ONE_SESSION).replace(
+            "room = \"group/123\"",
+            "room = \"group/123\"\n        batch_head = 0",
+        );
+        assert!(
+            matches!(
+                Config::parse_fixture(&zero),
+                Err(ConfigError::BadDeliveryWindow { .. })
+            ),
+            "batch_head = 0 会让时钟轮没有正文"
+        );
+
+        let huge = config_with(ONE_CONNECTION, ONE_SESSION).replace(
+            "room = \"group/123\"",
+            "room = \"group/123\"\n        context_before = 51",
+        );
+        assert!(
+            matches!(
+                Config::parse_fixture(&huge),
+                Err(ConfigError::BadDeliveryWindow { .. })
+            ),
+            "超过上限应当直接报错，而不是悄悄截断"
+        );
     }
 
     const ONE_CONNECTION: &str = r#"

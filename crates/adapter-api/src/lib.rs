@@ -282,6 +282,18 @@ pub struct WireDeliveryRequest {
     pub limit: usize,
     #[serde(default)]
     pub records: Vec<Record>,
+    /// 触发消息之前的上下文（可能已确认过）。
+    #[serde(default)]
+    pub context: Vec<Record>,
+    /// 触发这一轮的消息编号；时钟/攒批唤醒为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_id: Option<u64>,
+    #[serde(default)]
+    pub context_before: usize,
+    #[serde(default)]
+    pub context_after: usize,
+    #[serde(default)]
+    pub batch_head: usize,
 }
 
 /// composer 选出的编号与跳过的中段；字段语义同 kernel 的 `DeliveryPlan`。
@@ -291,6 +303,9 @@ pub struct WireDeliveryPlan {
     pub keep: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted: Option<Omitted>,
+    /// 完整未读区间；空 = core 自己算。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_ranges: Vec<[u64; 2]>,
 }
 
 /// 失败通知动作的 wire 形状。
@@ -522,6 +537,10 @@ pub enum WireResult {
         /// wake 判定：命中后先等多久再开轮（毫秒）。0 / 不写 = 立即。
         #[serde(default, skip_serializing_if = "is_zero")]
         delay_ms: u64,
+        /// wake 判定：这次命中是「攒够一批」而不是「某一条点到我」。
+        /// 攒批唤醒投最旧的 `batch_head` 条正文，没有触发消息。
+        #[serde(default, skip_serializing_if = "is_false")]
+        batch: bool,
     },
     /// 投递批次：本轮的编号与跳过的中段；`plan = null` 表示用内置默认选批。
     Delivery {
@@ -616,6 +635,10 @@ fn default_extension() -> String {
 
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn default_param_type() -> String {

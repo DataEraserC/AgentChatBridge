@@ -341,6 +341,9 @@ return { decision = "wake", reason = "只有 @，等后续内容", delay_ms = 50
 ```
 
 动态库的 `WireResult::Decision` 也接受同一个 `delay_ms`（默认 0）。
+如果这次命中是「攒够一批消息」而不是「某一条点到我」，加上 `batch = true`（Lua 表同名字段，
+默认 false）：core 会把这个房间当成攒批唤醒，按订阅的 `batch_head` 投最旧的几条正文，
+而不是围着某条消息取前后上下文。
 `WakeContext` 和 `ClockContext` 都带 `last_wake_at`（这个会话×房间上一次因任何原因
 开轮的时间）。做「多久没醒就醒一次」时，wake 端只能覆盖「有入站记录时」的判定；
 没人说话也要到点开轮，必须再配一个 clock provider。参考

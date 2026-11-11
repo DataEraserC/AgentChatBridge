@@ -17,7 +17,7 @@
 | D4 | 库内密钥必须由 unit 提供 `ACB_KEY_FILE`，不能只写本地 drop-in | done | rebuild 会清掉未纳管的 drop-in；缺 key 时 bridge 以 78 退出且无 LKG 可退 | `nix-config` 的 `modules/nixos/base/custom/ai/acb/default.nix` Environment | 重启/重建后整条桥起不来 | `systemctl --user show acb-bridge -p Environment` 含 `ACB_KEY_FILE=`；`FragmentPath=/etc/...` |
 | D5 | `acb-bridge` 挂 `default.target`（配合 linger 开机自启） | done | 用户级 unit 默认不随登录拉起，只能手工 `acbctl up all` | 同上模块的 `wantedBy` | 重启后桥不自动起，表现为「unit=inactive」 | `systemctl --user is-enabled acb-bridge` = `enabled` |
 | D6 | 新建会话的第一条订阅自动创建 `[[sessions.subscriptions]]` 段 | done | 新会话没有该段，加订阅会 400 并要求用户改 TOML | `crates/bridge/src/config_patch.rs` `subscription_op` | 控制台「加订阅没反应」复发 | 对裸会话加订阅返回 200，配置里出现订阅段 |
-| D7 | 投递格式改为「触发前后 N 条 + 完整未读区间 + 投递次数映射」 | **planned** | 用户 2026-11-10 定稿；当前仍是 `delivery_limit` 连续投递 | `docs/plan/config-rbac-plugin-platform-plan-v2.md` §8.2；实现点见该节列表 | 长积压仍一次塞 30 条正文，模型无法自己决定读哪些 | `unread_ranges` / `context_before` / `stuck_unread` 在代码里出现并有测试 |
+| D7 | 投递格式改为「触发前后 N 条 + 完整未读区间 + 投递次数映射」 | done（2026-11-11） | 用户 2026-11-10 定稿；旧行为按 `delivery_limit` 连续投，长积压会一次塞 30 条正文 | `crates/proto/src/frame.rs`（v8 字段）、`crates/kernel/src/{config,plugin,engine,storage}.rs`、`harnesses/opencode/plugin/acb-wire.mjs`、`crates/bridge/src/console.*`；规格见 §8.2 | 回退成连续投递会让刚被 @ 的消息排到队尾，模型无法自己决定读哪些 | `delivery_plan.rs` / `turn_flow.rs` / `wire.test.mjs` 的 D7 用例全绿；`stuck_unread` 出现在 `/api/sessions` |
 | D8 | 组件 `failed` 是锁存终态，跨 launcher 重启保留 | done（约定） | 避免坏组件无限重启；但失败原因修好后需要人工解除 | `state/components/<name>.json`；`acbctl` 无 reset 命令 | 修好配置也不会自愈，表现为「怎么重启都不起」 | 删除对应 json 或改配置 sha 后能重新拉起 |
 | D9 | acbl 预设脚本来自 acbl 包，payload 换代不覆盖 | done（约定） | 组件表在 `supervisor.toml`，脚本在 `share/acb/presets` | 部署/升级流程 | 以为换代能更新脚本，结果跑的还是旧包 | `ps -o cmd` 里的脚本路径等于当前 acbl store 路径 |
 

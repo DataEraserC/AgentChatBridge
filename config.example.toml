@@ -340,6 +340,12 @@ on_turn_error = []
 connection = "qq"
 room = "group/123456789"
 
+# 投递窗口：唤醒时正文带多少条、时钟唤醒投多少条。不写就是 3/3/3。
+# 只影响正文，未读永远以完整编号区间下发。会话级也能写，订阅逐项覆盖。
+# context_before = 3   # 触发消息之前带几条（可能已经读过）
+# context_after = 3    # 触发消息之后带几条
+# batch_head = 3       # 时钟/攒批唤醒投最旧的几条
+
 [sessions.subscriptions.wake]
 provider = "acb.wake.default"  # 唤醒策略实现（ADR-0026）；不写就是内置
 at_mention = true

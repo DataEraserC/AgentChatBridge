@@ -564,6 +564,7 @@ pub trait WakeProvider: Send + Sync {
             decision: self.decide(options, context),
             reason: None,
             delay_ms: 0,
+            batch: false,
         }
     }
 }
@@ -787,7 +788,19 @@ impl AccessProvider for SubscribedAccessProvider {
 pub struct DeliveryRequest<'a> {
     pub session: &'a str,
     pub room: &'a RoomId,
+    /// 未读记录，按编号从旧到新。默认计划只在这里挑正文。
     pub records: &'a [Record],
+    /// 触发消息之前的几条记录（可能已经确认过），按编号从旧到新。
+    /// 默认计划挑最后 `context_before` 条当上下文。
+    pub context: &'a [Record],
+    /// 触发这一轮的那条记录；时钟/攒批唤醒为空。
+    pub trigger_id: Option<u64>,
+    /// 触发消息之前带几条正文。
+    pub context_before: usize,
+    /// 触发消息之后带几条正文。
+    pub context_after: usize,
+    /// 时钟/攒批唤醒投最旧的几条正文。
+    pub batch_head: usize,
     /// 条数上限；字节预算由 composer 自己管（默认实现有 512 KiB 上限）。
     pub limit: usize,
 }
@@ -799,6 +812,8 @@ pub struct DeliveryPlan {
     pub keep: Vec<u64>,
     /// 被跳过的中段。`None` = 没跳。
     pub omitted: Option<Omitted>,
+    /// 本轮完整的未读编号区间（闭区间，升序）。空 = core 自己按未读集合压缩。
+    pub unread_ranges: Vec<[u64; 2]>,
 }
 
 /// 投递批次选择 provider。它只决定「投什么」，不碰水位、票和 ack——
@@ -817,12 +832,13 @@ impl DeliveryComposer for DefaultDeliveryComposer {
     }
 }
 
-/// 默认选批算法。composer 出错时 core 也用它兜底，保证一轮不会空手开。
+/// 默认选批算法：**触发消息前后 N 条正文 + 完整未读区间**。
 ///
-/// 只投一段**连续**的旧记录，不搞「最旧一小段 + 最新一批」的分叉：分叉会在
-/// 中间留下一个本轮补不齐的洞，水位只能推进到最旧那段的末尾。连续投递让
-/// `ack_messages` 每轮都能把水位往前推，没投到的记录在下一轮接着投，积压
-/// 随 `delivery_limit` 自然收敛。
+/// 消息再多也只投围着触发消息的一小段，其余未读只给编号区间，由 agent 自己决定
+/// 要不要回看。这样长积压不会一次塞满上下文，也不会因为「只投最旧一段」而让
+/// 刚被 @ 的那条排到最后。
+///
+/// 时钟/攒批唤醒没有触发消息，就投最旧的 `batch_head` 条正文。
 pub fn default_delivery_plan(request: &DeliveryRequest<'_>) -> DeliveryPlan {
     let records = request.records;
     let len = records.len();
@@ -830,37 +846,111 @@ pub fn default_delivery_plan(request: &DeliveryRequest<'_>) -> DeliveryPlan {
         return DeliveryPlan {
             keep: Vec::new(),
             omitted: None,
+            unread_ranges: Vec::new(),
         };
     }
-    let limit = request.limit.max(1);
 
-    let sizes: Vec<usize> = records
-        .iter()
-        .map(|record| {
-            serde_json::to_vec(record)
-                .map(|bytes| bytes.len())
-                .unwrap_or(0)
-        })
-        .collect();
+    let unread_ranges = compress_ids(records.iter().map(|record| record.id));
+    let context_before = request.context_before.min(request.context.len());
+    let context = &request.context[request.context.len() - context_before..];
+    let anchor = request
+        .trigger_id
+        .and_then(|id| records.iter().position(|record| record.id == id));
 
-    let mut budget = MAX_DELIVERY_BYTES;
-    // 从旧往新装；第一条就算超预算也要留着（等同于「至少保一条」）。
-    let mut keep_count = 0usize;
-    while keep_count < limit && keep_count < len {
-        let size = sizes[keep_count];
-        if keep_count > 0 && size > budget {
-            break;
+    let mut entries: Vec<(u64, usize)> = Vec::new();
+    let mut anchor_index = None;
+    match anchor {
+        Some(index) => {
+            for record in context {
+                push_entry(&mut entries, record);
+            }
+            anchor_index = Some(entries.len());
+            let last = (index + request.context_after).min(len - 1);
+            for record in &records[index..=last] {
+                push_entry(&mut entries, record);
+            }
         }
-        budget = budget.saturating_sub(size);
-        keep_count += 1;
+        None => {
+            // 没有触发点：投最旧的几条正文，其余靠区间。
+            let head = request.batch_head.clamp(1, len);
+            for record in &records[..head] {
+                push_entry(&mut entries, record);
+            }
+        }
     }
 
+    trim_to_limit(&mut entries, request.limit.max(1), anchor_index);
+    trim_to_budget(&mut entries, anchor_index);
+
     DeliveryPlan {
-        keep: records[..keep_count]
-            .iter()
-            .map(|record| record.id)
-            .collect(),
+        keep: entries.into_iter().map(|(id, _)| id).collect(),
         omitted: None,
+        unread_ranges,
+    }
+}
+
+/// 往计划里放一条正文。上下文里可能混着未读记录（触发消息之前那几条），
+/// 同一个编号只留一次，顺序以先到的为准（上下文在前，靠近触发点）。
+fn push_entry(entries: &mut Vec<(u64, usize)>, record: &Record) {
+    if entries.iter().any(|(id, _)| *id == record.id) {
+        return;
+    }
+    let size = serde_json::to_vec(record)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    entries.push((record.id, size));
+}
+
+/// 把编号压成闭区间，例如 `[1,2,3,7,8]` → `[[1,3],[7,8]]`。
+pub fn compress_ids(ids: impl IntoIterator<Item = u64>) -> Vec<[u64; 2]> {
+    let mut ranges: Vec<[u64; 2]> = Vec::new();
+    for id in ids {
+        match ranges.last_mut() {
+            Some(last) if id == last[1] + 1 => last[1] = id,
+            Some(last) if id <= last[1] => {}
+            _ => ranges.push([id, id]),
+        }
+    }
+    ranges
+}
+
+/// 超出条数上限时，优先砍触发点之后的上下文，再砍之前的。
+fn trim_to_limit(entries: &mut Vec<(u64, usize)>, limit: usize, anchor: Option<usize>) {
+    let mut anchor = anchor;
+    while entries.len() > limit {
+        match anchor {
+            // 没有触发点：从末尾砍，保住最旧的几条。
+            None => {
+                entries.pop();
+            }
+            Some(index) if index + 1 < entries.len() => {
+                entries.pop();
+            }
+            Some(0) => break,
+            Some(index) => {
+                entries.remove(0);
+                anchor = Some(index - 1);
+            }
+        }
+    }
+}
+
+/// 字节预算：超了就按同样的优先级砍。第一条（或触发点本身）永远保留。
+fn trim_to_budget(entries: &mut Vec<(u64, usize)>, anchor: Option<usize>) {
+    let mut anchor = anchor;
+    let mut total: usize = entries.iter().map(|(_, size)| *size).sum();
+    while total > MAX_DELIVERY_BYTES && entries.len() > 1 {
+        let index = match anchor {
+            None => entries.len() - 1,
+            Some(index) if index + 1 < entries.len() => entries.len() - 1,
+            Some(0) => entries.len() - 1,
+            Some(_) => 0,
+        };
+        let (_, size) = entries.remove(index);
+        total = total.saturating_sub(size);
+        if index == 0 {
+            anchor = anchor.map(|value| value.saturating_sub(1));
+        }
     }
 }
 
