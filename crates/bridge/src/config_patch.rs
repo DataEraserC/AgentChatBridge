@@ -269,10 +269,7 @@ fn subscription_op(
     let (connection, path) = split_room(&string_field(op, "room")?, op)?;
     // 新建会话默认没有 subscriptions 段：第一次订阅就当场建表，别让用户回去改 TOML。
     if session.get("subscriptions").is_none() {
-        session.insert(
-            "subscriptions",
-            Item::ArrayOfTables(ArrayOfTables::new()),
-        );
+        session.insert("subscriptions", Item::ArrayOfTables(ArrayOfTables::new()));
     }
     let subs = session
         .get_mut("subscriptions")
