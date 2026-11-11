@@ -514,3 +514,34 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
   控制台删的，不是补丁丢数据。失控告警撤回，守卫不需要改。
 - 动态刷新的时序：会话表一变就立刻重放 presets（不受 30s 失败退避限制），否则会出现
   驱动先起、preset 后到的空窗（实测约 26s）。
+
+## 13. 需求对齐批（2026-11-11，源头 `~/tmp/acb_requirements.txt`）
+
+需求原文七条：接 AI agent 进聊天平台 / harness 无关 / 平台无关 / 可扩展（native、so、lua，loader 可第三方实现）/ 可自迭代（AI 写代码升级、失败回退）/ OS 无关（Linux、Windows，不强依赖 nix/systemd）/ 文档清晰分级、禁字符画、单页不许塞大段。
+
+对照代码后，差距与护栏合并成一批。`判定` 里的「照做」= 需求明确且方案已定；「先定方案」= 还有取舍没拍。
+
+| id | 原待办 | 判定 | 说明 | 验收 | 状态 |
+|---|---|---|---|---|---|
+| R1 | harness 中立：`Session.driver_port` 是 dsh 专属字段（`config.rs:891`） | 先定方案 | 两种走法：改名成通用「驱动端口」并由 adapter 解释；或移进 adapter 的 per-session extras。前者改动小但要改 `acbctl sessions` 输出契约，后者干净但要动库 schema | kernel 非测试代码不再出现 dsh 专名；drivers preset 仍能拿到端口 | next |
+| R2 | 平台中立：`deps.rs` 里的 SnowLuma compat floor 与 `snowlumaMin` key | 照做 | 改成 adapter 自报的通用 `implementation.compat` 映射，核心只存键值，不解释语义 | `grep -n snowluma crates/kernel/src` 只剩测试；依赖面板字段不丢 | next |
+| R3 | 第三方 loader：loader 全部在 `main.rs` 编译期安装 | 先定方案 | 最小闭环：配置声明一个 loader（动态库或子进程协议），由 core 在启动时发现并注册；先选一种载体，别一次做全 | 仓库外编译的 fixture loader 不改 bridge 源码即可加载并列出插件 | next |
+| R4 | 自迭代闭环：升级链有，但缺「构建」与失败诊断 | 照做 | 不把编译塞进桥；补两件事：LKG 未提升时的失败给可操作诊断；加 seed→好 payload→坏 payload→自动回退的 e2e | `deploy/verify.sh` 跑回退 e2e 通过；日志能区分「没 LKG」与「回退失败」 | next |
+| R5 | OS 无关：symlink/libc/flock/bash 全是 Unix 假设 | 先定方案 | 先做 platform 抽象层（symlink、signal、flock、权限），再落 Windows copy 模式与无 systemd 启动。范围大，必须分步 | kernel/bridge `cargo check --target x86_64-pc-windows-gnu` 通过；`acbctl run --mode direct` 在无 systemd 容器可用 | next |
+| R6 | 文档：`06-harness-adapters.md` 779 行且含框线字符画 | 照做 | 按 06 的内容拆成 harness 契约 / dsh 适配 / opencode 适配三页，框线图换 mermaid | 单页 ≤300 行；`grep -E "┌|└|├|│" docs/*.md` 无命中（mermaid 除外） | next |
+| R7 | 需求追溯：7 条需求没有「实现模块 + 测试」映射 | 照做 | 把 `~/tmp/acb_requirements.txt` 收进 `docs/plan/requirements.md`，每条一行映射 | 每条需求至少被一个测试或 gate 引用 | next |
+| R8 | 护栏：核心中立性扫描 | 照做 | `verify.sh guards` 扫 `crates/kernel/src`、`crates/bridge/src` 非测试代码里的 `dsh|opencode|qq|onebot|snowluma`；白名单文件必须写理由。**先白名单模式上线**，再随 R1/R2 逐条清空 | 新增违规即 FAIL；白名单条目为零或都有理由 | next |
+| R9 | 护栏：依赖边界 | 照做 | `cargo metadata` 断言 `acb-kernel` 不依赖 `acb-adapters*`、`acb-plugin-*`；只有 bridge 能依赖 | guards 阶段可重复执行，失败信息指出 crate | next |
+| R10 | 护栏：跨平台棘轮 | 照做 | CI 加 `cargo check --target x86_64-pc-windows-gnu`（先只对 kernel/bridge）；禁止 `std::os::unix|libc::` 出现在 `platform/` 之外；payload 里 bash 脚本数不得增加（现有 20 个进白名单） | 新 unix-only 代码 FAIL；bash 数不增长 | next |
+| R11 | 护栏：文档规则 | 照做 | 每页 ≤300 行；禁框线/字符画（mermaid 除外）；每页必须出现在 nav；每页首行标受众（用户/ACB 开发者/插件开发者） | `deploy/verify.sh` 文档阶段可拦截；现有页面要么达标要么进白名单 | next |
+| R12 | 护栏：第三方 loader fixture | 照做 | 一个仓库外形态的测试 loader（cargo test 里的独立 crate 或示例），证明「不改 bridge 源码可注册」当前不成立，作为 R3 的验收器 | 现在应 FAIL；R3 完成后转 PASS | next |
+| R13 | 护栏：升级回退 e2e | 照做 | 隔离 tmpdir：seed → 好 payload → 坏 payload → 断言回到 LKG；覆盖「LKG 未提升」分支 | verify.sh 内可跑；失败时给出具体阶段 | next |
+
+### 执行顺序（依赖与风险）
+
+1. **第一波（低风险、立刻止损）**：R7 → R8（白名单模式）→ R9 → R11 → R6。先把「口径」和「拦截」建起来，再改代码；R6 是纯文档拆分，可以并行。
+2. **第二波（小改动、暴露差距）**：R2 → R12 → R4 → R13。R2 是最小的中立性修复，做完 R8 白名单能少一条；R12 故意先红，作为 R3 的验收器；R4/R13 是升级链的可靠性，互相配套。
+3. **第三波（语义变更、要拍方案）**：R1 → R3。都要动配置/契约或 loader 接口，必须先把方案写进 ADR 再动手。
+4. **第四波（最大面）**：R10 的硬门禁全量 → R5。先让「新增 unix-only」被挡住，再逐文件把 platform 抽象抽出来；Windows 端到端放最后。
+
+关键依赖：R1、R2 完成前 R8 只能白名单；R3 完成前 R12 必红；R5 依赖 R10 先立规矩。**不要**先做 R5——它会把 R1/R2 的字段搬家冲突放大。
