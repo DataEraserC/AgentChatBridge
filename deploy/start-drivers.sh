@@ -13,7 +13,7 @@ REPO=$(cd "$HERE/.." && pwd)
 ACB_DATA=${ACB_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/acb}
 CONFIG=${ACB_CONFIG_FILE:-$ACB_DATA/config/config.toml}
 DRIVER=$REPO/harnesses/dsh/src/driver.mjs
-PATCH=$REPO/harnesses/dsh/dsh-mcp.patch.yml
+PATCH=${ACB_DSH_PATCH:-$REPO/harnesses/dsh/dsh-mcp.patch.yml}
 
 NODE=${NODE:-$(command -v node || echo /etc/profiles/per-user/nixos/bin/node)}
 [[ -x $NODE ]] || { echo "找不到 node：$NODE" >&2; exit 1; }
@@ -22,7 +22,8 @@ ACBCTL=${ACBCTL_BIN:-$REPO/result/bin/acbctl}
 [[ -x $ACBCTL ]] || ACBCTL=$(command -v acbctl || true)
 [[ -x $ACBCTL ]] || { echo "找不到 acbctl；用 ACBCTL_BIN 指定" >&2; exit 1; }
 
-# 模型：以 dsh-mcp.patch.yml 的 agent-default-model 为准，脚本不另存一份。
+# 模型：以 ACB_DSH_PATCH（用户自己的 dsh patch）里的 agent-default-model 为准，
+# 仓库里那份 dsh-mcp.patch.yml 只是契约占位、内容为空。
 # 为什么要传给驱动：dsh 把「上次用的模型」记在会话记录里，复用老会话时它优先于默认模型，
 # 所以光改补丁不生效——驱动得在每轮开始前对这个会话 selectModel 一次（见 driver.mjs）。
 patch_model() {

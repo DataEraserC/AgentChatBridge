@@ -1,123 +1,16 @@
 %YAML 1.1
 ---
-# 生产 nix-web-acb 用的 overlay（v2：多会话并行 + preset 隔离）。
+# 占位文件，故意为空。
 #
-# **这份文件是仓库里的权威副本**，原先是 ~/qqab-scratch/dsh-live/web-acb-prod-v2.patch.yml。
-# 搬过来的原因：/home/nixos/qqab-scratch 落在 btrfs 的 /root 子卷上，重启即清空；而本仓库在
-# @persistent 子卷，重启不丢。部署层的东西必须放这边，否则一重启就得凭记忆重拼一遍。
+# 为什么还留着一个空文件：payload 契约要求它存在——`crates/acb/src/profile.rs`
+# 的固定必带项和 `deploy/acb-contract.json` 的 layout 都列了它。删文件会让
+# `profile add` / 升级直接报 `payload_missing_path`；要真正删掉得升 contract
+# 版本，而当前 acbl 只支持 contract 1。
 #
-# 它自带三样东西，单独一个 --patch 就够，不必再叠别人的：
-#   1. llm-pi-ai 的 provider 声明（new-api 网关）——缺了报 NO_ADAPTER；
-#   2. agent-default-model + agent-preset-registry；
-#   3. 四个 agent preset，各自挂自己的 streamable-http MCP（端口由 `acbctl sessions`
-#      推导：3101 + [[sessions]] 下标，即 3101–3104）。
-# 密钥不在这里：走 apiKeyEnv，值由 deploy/acb.env 提供（该文件不入库）。
-# 把默认模型指到 new-api 网关，并按「每 acb 会话一个 agent preset、每 preset 挂自己的
-# streamable-http MCP」隔离工具面（见 ADR-0019）。
-# 用 --patch 叠加在 nix-web-acb 之上，不碰 nix 托管的生产 profile 文件。
+# 为什么是空的：provider、默认模型、agent preset 属于**使用者自己的部署配置**，
+# 不该由这个仓库替用户决定。用户把需要的行写进自己的 dsh patch：
+#   - 运行时以 unit 的 ACB_DSH_PATCH 为准（本机指向 $DSH_HOME/cordis.patch.yml）；
+#   - 可抄的示例见同目录 `dsh-mcp.example.yml`。
 #
-# 与旧版（web-acb-prod.patch.yml）的区别：
-#   旧版：多个 MCP client 挂在顶层全局 scope，模型看到多套工具，不知道当前会话属于哪个，
-#          只能试错 → unauthorized。
-#   新版：每个 MCP client 移到对应 agent preset 的 plugins 里，streamable-http 连各自 driver
-#          （端口由 `acbctl sessions` 推导，preset 名固定为 `acb-<会话 id>`）。driver 建
-#          session 传 agentPreset，模型在某个 session 里只看到那一套工具。
-- id: ui-settings-general
-  name: "@deepseek-ai/dsh-client-ui-settings-general"
-  config:
-    welcomeNoticeVersion: 2026-09-28.1
-- id: agent-default-model
-  name: "@deepseek-ai/dsh-agent-default-model"
-  config:
-    # 统一走 new-api 网关，provider 在下面的 llm-pi-ai 里声明。
-    # 旧的 trae/deepseek-v4.1-flash 是 dsh-our-free-model 插件装进来的默认，不再使用。
-    provider: new-api-y9000p2025-openai-responses
-    model: 1Agent2Api/glm-5.3-flash
-    reasoningEffort: high
-
-# 关键：内置 web 模板的 llm-pi-ai 是空配置，必须在这里把 new-api 的 provider
-# 路由声明出来，否则 agent-loop 会报 NO_ADAPTER（provider 没注册 adapter）。
-- id: llm-pi-ai
-  name: "@deepseek-ai/dsh-llm-pi-ai"
-  config:
-    providers:
-      new-api-y9000p2025-openai-responses:
-        api: openai-completions
-        apiKeyEnv: NEW_API_Y9000P2025_OPENAI_RESPONSES_API_KEY
-        baseURL: http://localhost:1100/v1
-        models:
-          - id: 1Agent2Api/glm-5.3-flash
-            name: 1Agent2Api/glm-5.3-flash
-            # GLM 上游只认 system/user/assistant/tool；pi-ai 在 reasoning 模型上
-            # 默认用 developer 角色，new-api 会转成上游 400「角色信息不正确」。
-            compat:
-              supportsDeveloperRole: false
-            reasoningEfforts:
-              "off": null
-              low: low
-              medium: medium
-              high: high
-
-# agent preset 注册表：default 指向 acb-dsh-qas（新 session 没指名时用这个；
-# 派生规则是 preset = acb-<会话 id>，所以原来写死的 acb-dsh 已不存在）。
-- id: agent-preset-registry
-  name: "@deepseek-ai/dsh-agent-preset-registry"
-  config:
-    default: acb-dsh-qas
-
-# 四个 agent preset（新增条目，必须用 insert:，不能平铺成顶层 - id:——顶层是「覆盖已存在
-# 条目」，会报 entry not found）。每个 preset 只挂它自己的那个 MCP。端口 = 3101 +
-# [[sessions]] 下标：dsh-qas→3101、dsh-dev→3102、dsh-snowluma-test→3103、dsh-group2→3104；
-# 模型在某个 session 里只看到那一套工具。
-- insert:
-    # 会话一（acb 的 dsh-qas 会话）：只挂它自己的 MCP，连 3101 那个 driver 进程。
-    - id: preset-acb-dsh-qas
-      name: "@deepseek-ai/dsh-agent-preset"
-      config:
-        id: acb-dsh-qas
-        plugins:
-          - id: mcp-acb-dsh-qas
-            name: "@deepseek-ai/dsh-mcp-client"
-            config:
-              transport: streamable-http
-              serverName: acb
-              url: http://127.0.0.1:3101/mcp
-
-    # 会话二（acb 的 dsh-dev 会话）：只挂它自己的 MCP，连 3102 那个 driver 进程。
-    - id: preset-acb-dsh-dev
-      name: "@deepseek-ai/dsh-agent-preset"
-      config:
-        id: acb-dsh-dev
-        plugins:
-          - id: mcp-acb-dsh-dev
-            name: "@deepseek-ai/dsh-mcp-client"
-            config:
-              transport: streamable-http
-              serverName: acb
-              url: http://127.0.0.1:3102/mcp
-
-    # 会话三（acb 的 dsh-snowluma-test 会话）：只挂它自己的 MCP，连 3103 那个 driver 进程。
-    - id: preset-acb-dsh-snowluma-test
-      name: "@deepseek-ai/dsh-agent-preset"
-      config:
-        id: acb-dsh-snowluma-test
-        plugins:
-          - id: mcp-acb-dsh-snowluma-test
-            name: "@deepseek-ai/dsh-mcp-client"
-            config:
-              transport: streamable-http
-              serverName: acb
-              url: http://127.0.0.1:3103/mcp
-
-    # 会话四（acb 的 dsh-group2 会话）：只挂它自己的 MCP，连 3104 那个 driver 进程。
-    - id: preset-acb-dsh-group2
-      name: "@deepseek-ai/dsh-agent-preset"
-      config:
-        id: acb-dsh-group2
-        plugins:
-          - id: mcp-acb-dsh-group2
-            name: "@deepseek-ai/dsh-mcp-client"
-            config:
-              transport: streamable-http
-              serverName: acb
-              url: http://127.0.0.1:3104/mcp
+# 空 patch 是合法的，dsh 会用它自带/用户 profile 里的配置。
+[]

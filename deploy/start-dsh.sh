@@ -7,7 +7,8 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
-PATCH=$REPO/harnesses/dsh/dsh-mcp.patch.yml
+# 运行时 patch 归用户：优先 unit 的 ACB_DSH_PATCH，仓库里那份只是空占位。
+PATCH=${ACB_DSH_PATCH:-$REPO/harnesses/dsh/dsh-mcp.patch.yml}
 ENV_FILE=$HERE/acb.env
 
 fail() { echo "✗ $*" >&2; exit 1; }

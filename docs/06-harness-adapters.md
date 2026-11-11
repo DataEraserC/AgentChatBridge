@@ -291,7 +291,7 @@ ESTAB 127.0.0.1:44758  127.0.0.1:7700   users:((".opencode2-wrap",pid=169923,fd=
   `modelSelection.lastUsed`，复用老会话时它优先于 `agent-default-model`（那个只管新建会话）。
   所以换模型后老会话会一声不响继续打旧渠道——桥这边不报错，只有看上游网关的日志才发现
   请求还在打旧模型。现在驱动每轮开始前会 `session/selectModel` 钉一次（`TurnDriver#pinModel`），
-  模型值由 `deploy/start-drivers.sh` 从 `dsh-mcp.patch.yml` 的 `agent-default-model` 读出来传进去。
+  模型值由 `deploy/start-drivers.sh` 从 `ACB_DSH_PATCH`（用户自己的 dsh patch）里的 `agent-default-model` 读出来传进去；仓库的 `harnesses/dsh/dsh-mcp.patch.yml` 只是空的契约占位。
 
 ## 重启桥的代价：正在跑的那一轮作废（来源：实现默认）
 
