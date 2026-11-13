@@ -44,7 +44,7 @@
 | **时钟策略** | clock policy | 按时间触发的评估：固定间隔或房间空闲超时后检查「有没有未处理完的、要不要主动说话」，需要就开一轮。默认关闭、按订阅开启（见 ADR-0011） |
 | **适配器** | adapter | 一种平台协议的实现（OneBot SnowLuma，协议 OneBot 11；还有 Satori、将来的 Discord / KOOK 直连）。职责：把平台帧解成事件、把动作编成平台帧 |
 | **harness 适配器** | harness adapter | 和上面那个不是一回事：桥**外面**那一半，活在 harness 里。干两件事——把桥的工具挂进 harness（工具面），把推来的一轮变成 harness 里的一次对话并知道什么时候结束（轮次驱动）。这两件事可以分开缺席（见 [06](06-harness-adapters.md)） |
-| **harness** | harness | 承载 agent 的运行环境（DSH、WorkBuddy、Trae、Codex……）。桥不实现 agent，只接 harness |
+| **harness** | harness | 承载 agent 的运行环境（DSH、CodeBuddy、Trae、Codex……）。桥不实现 agent，只接 harness |
 | **接入点** | endpoint | harness 连接桥的通道（本机套接字 / TCP + 接入令牌） |
 | **反馈** | feedback | agent 写给做桥的人的一条建议：正文 + 出处编号 + 自称撞了几次。桥自己补现场（会话/房间/模型/票），同标题合并累加（ADR-0021） |
 | **接入令牌** | token | harness 握手时出示。配置里写同一个 token 的那几个会话由这条 harness 连接代表（Ready 帧会带回名单和已落盘的映射）；令牌对不上任何会话直接断开 |

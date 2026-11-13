@@ -1,6 +1,6 @@
 # acb-bridge 是什么
 
-把 AI agent（DSH、WorkBuddy、Trae、Codex、OpenClaw……这类运行时）接进聊天平台（QQ、KOOK、Discord、Telegram……）的一座桥。
+把 AI agent（DSH、CodeBuddy、Trae、Codex、OpenClaw……这类运行时）接进聊天平台（QQ、KOOK、Discord、Telegram……）的一座桥。
 
 装好之后，你可以在 QQ 群里、私聊里跟自己的 agent 说话。它在群里看起来像个普通群友：
 被 @ 会回话、发图、查资料、记东西——大脑在 agent 那边，桥只负责「翻译」和「调度」。

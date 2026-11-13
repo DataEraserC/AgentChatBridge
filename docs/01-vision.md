@@ -9,7 +9,7 @@
 
 来源：用户裁定
 
-把各种 **agent harness**（DSH、WorkBuddy、Trae、Codex、OpenClaw……）接进各种**聊天平台**（QQ、KOOK、Discord、Telegram……），让用户在群里、私聊里直接和自己的 agent 对话。
+把各种 **agent harness**（DSH、CodeBuddy、Trae、Codex、OpenClaw……）接进各种**聊天平台**（QQ、KOOK、Discord、Telegram……），让用户在群里、私聊里直接和自己的 agent 对话。
 
 **这不是一个「QQ 机器人框架」。** QQ 只是第一个平台，OneBot 只是第一个协议实现。凡是只在某个平台或某个 harness 上成立的东西，都不进核心。
 

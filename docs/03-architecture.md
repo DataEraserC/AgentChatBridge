@@ -7,7 +7,7 @@
 
 ```mermaid
 flowchart LR
-    H["harness：DSH / WorkBuddy / Trae / …"] <-->|"接入点协议"| K
+    H["harness：DSH / CodeBuddy / Trae / …"] <-->|"接入点协议"| K
     subgraph B["桥（本项目，一个常驻进程）"]
         direction LR
         K["核心：连接 / 订阅 / 唤醒 / 未读 / 水位 / 流水 / 笔记 / 工具面"] <--> A["适配器：一个账号一条连接（OneBot11 / 将来的 Discord / KOOK）"]
