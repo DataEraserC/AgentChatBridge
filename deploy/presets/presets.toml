@@ -117,3 +117,25 @@ default_enabled = false
 [preset.restart]
 policy = "on-failure"
 max_attempts = 3
+
+[[preset]]
+id = "acp_driver_acb"
+component = "acp"
+type = "simple"
+source = "acb"
+script = "acp/acp_driver_acb.sh"
+description = "通用 ACP 驱动：按会话起 `harnesses/acp` 的驱动（ACB_ACP_HARNESSES 命中才起），一个会话一个进程"
+default_enabled = false
+
+# 只读 `acbctl sessions` + 会话令牌；桥没起来也能先起，驱动自己会重连。
+[preset.readiness]
+kind = "process"
+startup_grace_secs = 30
+
+# 驱动自己按会话起子进程，停组件时必须整组回收。
+[preset.process]
+kill_mode = "group"
+
+[preset.restart]
+policy = "on-failure"
+max_attempts = 5

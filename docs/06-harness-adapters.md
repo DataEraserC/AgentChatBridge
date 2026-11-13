@@ -637,6 +637,18 @@ ACB_ENDPOINT=127.0.0.1:7700 ACB_TOKEN=... ACB_HARNESS=codebuddy ACB_ACP_COMMAND=
 里加包装器（例如 `["multi-instance","workbuddy","1","codebuddy-acp","--acp"]`）——适配器
 不需要知道那是什么。
 
+### 作为组件维护
+
+`acp` 组件（`acbctl component status` 里能单独看到）负责进程侧：仓库里
+`deploy/presets/acp/acp_driver_acb.sh` 每 5s 读一次 `acbctl sessions`，凡 harness 命中
+`ACB_ACP_HARNESSES` 的会话，就按该会话自己的令牌起一个
+`node profile/current/harnesses/acp/src/driver.mjs`；会话删除、令牌变化、声明变化都会
+触发只重启那一个进程，崩溃按 1→2→4…60s 退避重试。
+
+acbl 的预设清单在系统包里，新预设有两条落地路径：等 acbl 换代后直接用
+`preset = "acp_driver_acb"`；没换代之前，组件用内联 `command` 指向仓库里的同一份脚本
+（当前线上就是这条）。两条路跑的是同一个文件，换代时只改 supervisor 里的一行。
+
 ### 已知边界
 
 - `session/set_config_option`（换模型/权限模式）还没接：目前用 agent 自己的默认模型；
