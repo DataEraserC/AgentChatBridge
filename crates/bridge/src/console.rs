@@ -2120,8 +2120,12 @@ fn parse_request_line(header_text: &str) -> (String, String, String) {
     let path = parts.next().unwrap_or_default().to_owned();
     let mut auth = String::new();
     for line in lines {
-        if let Some(value) = line.strip_prefix("Authorization:") {
-            auth = value.trim().to_owned();
+        // 头名大小写不敏感（RFC 9110 §5.1）：Go/Node 的客户端会把 `Authorization`
+        // 规范化成小写，按字面匹配等于把整类客户端挡在门外。
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("authorization") {
+                auth = value.trim().to_owned();
+            }
         }
     }
     (method, path, auth)
@@ -2304,6 +2308,17 @@ fn persist_console_config(config_dir: &str, text: &str) -> std::io::Result<Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_request_line_reads_authorization_case_insensitively() {
+        // Node/Go 客户端会把头名规范成小写；按字面匹配会让它们全部 401。
+        let (_, _, auth) =
+            parse_request_line("GET /api/status HTTP/1.1\r\nauthorization: Bearer abc\r\n\r\n");
+        assert_eq!(auth, "Bearer abc");
+        let (_, _, auth) =
+            parse_request_line("GET /api/status HTTP/1.1\r\nAUTHORIZATION:  Bearer def \r\n\r\n");
+        assert_eq!(auth, "Bearer def");
+    }
 
     fn is_cjk(ch: char) -> bool {
         matches!(
