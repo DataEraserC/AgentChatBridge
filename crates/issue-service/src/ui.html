@@ -30,10 +30,13 @@
   button { cursor: pointer; }
   .app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
   header {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px;
     padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
   }
-  header h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 600; letter-spacing: .01em; }
+  header h1 {
+    font-size: 15px; margin: 0 12px 0 0; font-weight: 600; letter-spacing: .01em;
+    white-space: nowrap;
+  }
   .grow { flex: 1; }
   .field {
     display: inline-flex; align-items: center; gap: 6px;
@@ -41,7 +44,9 @@
   }
   .field > span { color: var(--muted); font-size: 12px; }
   .field input, .field select { border: 0; outline: 0; background: transparent; min-width: 90px; }
-  .search input { min-width: 240px; }
+  .search { flex: 1 1 260px; }
+  .search input { min-width: 0; width: 100%; }
+  .field select, .field input { max-width: 160px; }
   .btn {
     border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 6px 12px;
   }
@@ -52,7 +57,11 @@
   .btn.ghost:hover { background: #eceff3; }
   .btn.sm { padding: 3px 9px; font-size: 12px; }
 
-  main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; min-height: 0; }
+  main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; min-height: 0; min-width: 0; }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; grid-template-rows: minmax(220px, 40vh) 1fr; }
+    .list { border-right: 0; border-bottom: 1px solid var(--line); }
+  }
   .list { border-right: 1px solid var(--line); background: var(--panel); overflow: auto; }
   .list-head {
     position: sticky; top: 0; z-index: 2; background: var(--panel);
