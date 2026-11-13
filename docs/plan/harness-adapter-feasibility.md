@@ -239,13 +239,14 @@ ACB 现有两套接入的权威说明在 [`docs/06-harness-adapters.md`](../06-h
 
 四件事都有公开、可验证的接法；本地 CLI 的 `--help`、`--version`、`mcp list` 已经跑通。端到端模型轮次没有在本机跑（需要登录/额度），所以「可直接做」的剩余风险是**认证与厂商 CLI 行为**，不是扩展面缺失。缺 full TUI bundle 是上游 WorkBuddy 发行物的取舍，不是 Nix 打包问题；适配器用 headless bundle 即可，不需要修包。
 
-**实现状态（2026-11-06）**：`harnesses/workbuddy/` 已完成进程外驱动 + MCP 工具面 +
-多实例。`node --test harnesses/workbuddy/test/*.test.mjs` 22 个用例覆盖完整一轮、ticket、
-第二轮 `-r` 复用、resume 重试、result error、MCP 未连接、超时、reset，以及两个实例并行
-（MCP 端口、state/HOME、会话 id 前缀互不共享）。另用真实 `codebuddy-headless.js`（未登录）
-验证了 `--mcp-config` 的 MCP 连接与工具名、auth 错误形状、resume 成功/缺失形状，并确认
-`HOME` + `CODEBUDDY_CONFIG_DIR` 指向实例目录时 CLI 的 `local_storage`/`user-state` 落在
-实例目录内；真实模型回话与额度仍待登录。
+**实现状态（2026-11-06，已被 2026-11-13 的 ACP 方案取代）**：当时的 `harnesses/workbuddy/`
+是进程外驱动 + MCP 工具面 + 多实例，22 个用例覆盖完整一轮、ticket、`-r` 复用、resume 重试、
+result error、MCP 未连接、超时、reset 与两实例并行；另用真实 `codebuddy-headless.js`（未登录）
+验证了 `--mcp-config` 连接、工具名与 auth 错误形状。**该实现已删除**：`codebuddy-headless.js`
+的 `-p --output-format stream-json` 是厂商私有面，而 `codebuddy-acp` 提供了标准 ACP 面，
+所以改成 `harnesses/acp/` 的通用 ACP 适配器（启动命令声明化，CodeBuddy 用
+`codebuddy-acp --acp` 接）。下面 4.6/4.8 关于「`dist/codebuddy` 缺失」「stream-json 漂移」
+的记录仍保留，作为当时为什么走 headless 的证据。
 
 ### 4.6 主要风险
 

@@ -1,0 +1,12 @@
+{
+  "codebuddy": {
+    "title": "CodeBuddy (ACP)",
+    "processExecutables": ["codebuddy", "codebuddy-acp"],
+    "commands": [
+      {
+        "match": ["codebuddy", "--acp"],
+        "acp": ["codebuddy-acp", "--acp"]
+      }
+    ]
+  }
+}

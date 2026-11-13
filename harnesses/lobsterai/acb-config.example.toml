@@ -5,7 +5,7 @@
 # 要在实例里重新登录并等它生成 openclaw/state。
 # driver 侧 ACB_LA_STATE_DIR 必须是 ~/.config/LobsterAI/openclaw/state（或该实例里
 # 等价的 openclaw/state），ACB_MCP_PORT=7717，不能指 ~/.openclaw。
-# 当前 LobsterAI 待登录后启用，槽位暂由 workbuddy-1 顶替（见 workbuddy 的样例）。
+# 当前 LobsterAI 待登录后启用；CodeBuddy 走通用 ACP（见 harnesses/acp/agents.example.json）。
 
 [[harnesses]]
 id = "lobsterai"

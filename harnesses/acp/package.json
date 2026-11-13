@@ -1,0 +1,10 @@
+{
+  "name": "acb-acp",
+  "private": true,
+  "type": "module",
+  "description": "acb 的通用 ACP 适配器：按声明的 argv 拉起任意 stdio ACP agent，工具走 MCP",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "start": "node src/driver.mjs"
+  }
+}

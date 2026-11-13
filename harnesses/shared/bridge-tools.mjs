@@ -1,7 +1,7 @@
 // 新适配器共用的「桥工具面」小工具。
 //
 // dsh 的 driver.mjs 里已经有一份同样的逻辑；那个文件是既有实现，不改。这里把
-// 只读、无状态的部分抽出来给 lobsterai / workbuddy 复用：
+// 只读、无状态的部分抽出来给 lobsterai / acp 复用：
 //   - toolDefsForSurface：按桥下发的 surface 选本轮 MCP 工具定义；
 //   - callBridge：把 MCP tools/call 转成带当前 ticket 的 tool_call；
 //   - overflowTools：投递溢出时临时注入回看工具。

@@ -1,11 +1,11 @@
 # 06 · harness 适配器
 
 > 状态：opencode v2 插件、dsh 驱动都已真机跑通（2026-10-31 / 11-02 复验）；opencode 当前
-> 用 `opencode2 serve` 常驻（见下面「常驻部署」）。WorkBuddy 与 LobsterAI 的**协议层**
-> 已实现并通过本地 mock（2026-11-06）：WorkBuddy 另用真实 headless CLI 做了未登录探测，
-> 真实登录/额度下的整轮仍未验证；Trae 本轮明确放弃。**LobsterAI 因 app 未运行/未登录暂时
-> 搁置（代码保留，不回退），当前用 WorkBuddy instance 1 顶替它的槽位。** 早期 2.0.22 的
-> 插件加载问题记在文末，作为历史记录保留。
+> 用 `opencode2 serve` 常驻（见下面「常驻部署」）。**通用 ACP 适配器（`harnesses/acp/`）
+> 2026-11-13 落地**：启动命令是声明出来的 argv，任何说 ACP 的 stdio agent 都能接；
+> CodeBuddy 用 `codebuddy-acp --acp` 接上，真机握手/建会话/整轮已验。Trae 本轮明确放弃。
+> LobsterAI 因 app 未运行/未登录暂时搁置（代码保留，不回退）。早期 2.0.22 的插件加载问题
+> 记在文末，作为历史记录保留。
 > 原则：桥不懂 harness 的内脏，harness 也不懂平台细节。适配器是那个翻译。
 
 ## 一个适配器要干两件事
@@ -57,7 +57,7 @@ API 才退到进程外驱动或 MCP。这条判断写进了 [ADR-0013](adr/0013-
 |---------|--------|----------|------|
 | opencode | 插件（v2：`export default { id, setup(ctx) }`；工具用 `ctx.tool.transform` 注册，模型经 `execute` 调 `tools.X`） | 进程内：`ctx.session.prompt` 排话 + `ctx.session.wait` 等它说完 | 插件型，见 `harnesses/opencode/plugin/`；真机整轮已验（私聊 + 群）；2026-10-31 在 opencode2 2.0.22 上复验：插件加载正常、模型一次答全 25 个工具名 |
 | DSH | MCP（`dsh-mcp-client`，工具名 `mcp__acb__*`） | 进程外：驱动器调 webui HTTP/WS API（`session/prompt` + `session/follow` 等 `turn/end`） | 进程外 + MCP，见 `harnesses/dsh/`；协议层真机已验，模型真回话待配模型 |
-| WorkBuddy | CLI（headless bundle；`--mcp-config` + `--strict-mcp-config`） | 进程外：每轮 spawn `codebuddy-headless.js -p … --output-format stream-json`，`result` 事件/进程退出即结束 | 进程外 + MCP，见 `harnesses/workbuddy/`；支持多实例，协议层已验（22 个用例 + 真实 CLI 未登录探测），模型真回话待登录。**当前用 instance 1 顶替 LobsterAI 槽位** |
+| 任意 ACP agent（CodeBuddy 等） | ACP：stdio JSON-RPC；桥工具作为 MCP server 在 `session/new` 里下发 | 进程外：按**声明的 argv** 拉起 agent，`session/prompt` 一轮，`stopReason` 即结束 | 见 `harnesses/acp/`。启动命令是数据（`ACB_ACP_AGENTS` / `ACB_ACP_COMMAND`），不认安装布局、不认 multi-instance。CodeBuddy 用 `codebuddy-acp --acp` 接上并真机跑通 |
 | LobsterAI | MCP（OpenClaw `mcp.servers`，streamable-http） | 进程外：WS 连 LobsterAI 内置 gateway，`chat.send` + `agent.wait` | 进程外 + MCP，见 `harnesses/lobsterai/`；假 gateway 协议层已验（16 个用例），**app 未运行/未登录，暂时搁置（代码保留）**，待登录后启用 |
 | Trae | — | — | 本轮放弃（可行性文档 3.8 的 spike 已经证明稳定 API 没有轮次完成信号） |
 | Codex | 无插件；有 `codex exec` 这类无头入口 | 进程外：每轮起一次 | 大概率进程外 + MCP 补工具面 |
@@ -190,8 +190,8 @@ node harnesses/opencode/probe.mjs --token <接入令牌>
 # 5. LobsterAI 协议层：假桥 + 假 gateway（16 个）
 node --test harnesses/lobsterai/test/*.test.mjs
 
-# 6. WorkBuddy 协议层：假桥 + 假 headless CLI + 多实例并行（22 个）
-node --test harnesses/workbuddy/test/*.test.mjs
+# 6. 通用 ACP：假桥 + 假 ACP agent + 真 MCP HTTP（36 个）
+node --test harnesses/acp/test/*.test.mjs
 ```
 
 第 3 步里 `probe.mjs` 会把投递的内容打出来、回一句话、确认水位。它和插件用的是同一个
@@ -552,162 +552,104 @@ dsh 的模型适配器（trae / deepseek-v4.1-flash）有三种写法：标准 J
 - **MCP 工具面真被 dsh 加载**：MCP server 的协议（initialize/tools/list/tools/call）
   单测验过，但还没让真 dsh 的 `dsh-mcp-client` 拉起它跑一次。
 
-## WorkBuddy 这一份（2026-11-06）
+## 通用 ACP 这一份（2026-11-13）
 
-**形态：进程外 + MCP。** 每轮 spawn 一次 CLI，进程退出（或最终 `result` 事件）就是这一轮
-结束；工具面是适配器自己起的 streamable-http MCP server，CLI 用 `--mcp-config` 连它，
-`--strict-mcp-config` 保证只连这一个。
+**形态：进程外 + ACP + MCP。** 适配器按**声明的 argv** 拉起一个 stdio ACP agent，讲
+JSON-RPC（`initialize` / `session/new` / `session/prompt` / `session/cancel`），
+`session/prompt` 的 `stopReason` 就是这一轮的结束；工具面是适配器自己起的
+streamable-http MCP server，在 `session/new` 的 `mcpServers` 里下发，agent 主动连过来。
 
 ```
-桥(acb) ──turn_start/tool_call──> WorkBuddy 驱动器(harnesses/workbuddy/src/driver.mjs)
+桥(acb) ──turn_start/tool_call──> ACP 驱动器(harnesses/acp/src/driver.mjs)
                                     ├─ acb 客户端：BridgeLink（复用 acb-wire.mjs）
                                     ├─ MCP streamable-http server（桥工具）
-                                    └─ 每轮 spawn:
-                                       node cli/dist/codebuddy-headless.js
-                                         -p --output-format stream-json
-                                         --mcp-config {"mcpServers":{"acb":{"type":"http","url":...}}}
-                                         --strict-mcp-config --settings {...}
-                                         --allowedTools ... --session-id/-r ...
+                                    └─ spawn 声明的 ACP argv（任何 stdio ACP agent）
+                                       initialize → session/new(mcpServers) → session/prompt
 ```
+
+**为什么强调「启动指令无关」**：上一版 WorkBuddy 适配器把安装布局写死在代码里
+（从 `bin/workbuddy` 反推 `opt/WorkBuddy/resources/.../codebuddy-headless.js`），换一个
+agent、换一种启动方式（`multi-instance` vs 直接启动）、甚至换个包名就得改代码。现在
+启动命令只是数据：
+
+```jsonc
+// ACB_ACP_AGENTS
+{
+  "codebuddy": {
+    "title": "CodeBuddy (ACP)",
+    "processExecutables": ["codebuddy", "codebuddy-acp"],
+    "commands": [
+      { "match": ["codebuddy", "--acp"], "acp": ["codebuddy-acp", "--acp"] }
+    ]
+  }
+}
+```
+
+- 只有 `commands[].acp` 会被执行：完整 argv，不拼 shell、不拆空格、不扫描参数。
+- `match` / `launcher` / `resume` / `processExecutables` 按同样形状接受并校验，但 ACB
+  不会用它们——ACB 没有要接管的 TUI，恢复会话走 ACP 的 `session/load`。保留这些字段是
+  为了**同一份声明可以原样喂给 webmux**（`WEBMUX_ACP_AGENTS` 是同一个形状）。
+- 单 agent 的快捷方式：`ACB_ACP_COMMAND='["codebuddy-acp","--acp"]'`，不必写 JSON 对象。
+- 选哪个 agent：`ACB_ACP_AGENT=<id>`；只声明一个时可以省略；声明多个又不指定就直接报错
+  并列出可用 id，不猜。
 
 ### 文件
 
-- `harnesses/workbuddy/src/config.mjs` — CLI 发现、headless 入口守卫、会话 id 规则、默认预批准工具。
-- `harnesses/workbuddy/src/codebuddy-client.mjs` — spawn CLI、解析 stream-json、超时/打断、resume 缺失识别。
-- `harnesses/workbuddy/src/driver.mjs` — 单进程三件事：BridgeLink + MCP server + CLI 驱动。
-- `harnesses/workbuddy/workbuddy.env.example`、`mcp-config.example.json`、`acb-config.example.toml` — 可抄的配置样例。
+- `harnesses/acp/src/agents.mjs` — 声明解析：id/argv/上限校验，坏条目跳过并记账。
+- `harnesses/acp/src/client.mjs` — ACP 客户端：JSON-RPC over stdio、超时、子进程回收、
+  `session/request_permission` 应答、`session/cancel`。
+- `harnesses/acp/src/driver.mjs` — 单进程三件事：BridgeLink + MCP server + ACP 驱动；
+  会话映射（`report_map`）、人格注入、工具面刷新、打断/重置、失败分类。
+- `harnesses/acp/agents.example.json` — 可抄的声明。
 
-### 硬约束：只用 headless bundle
+### 环境变量
 
-上游 WorkBuddy 发行物只有 `cli/dist/codebuddy-headless.js` / `codebuddy-lite-wb.mjs`，
-没有 `dist/codebuddy.js`。配置阶段会拒绝非 headless 入口：
+| 变量 | 作用 |
+|------|------|
+| `ACB_ENDPOINT` / `ACB_TOKEN` / `ACB_HARNESS` | 桥接入点、接入令牌、本进程服务的 harness id（都必填） |
+| `ACB_ACP_AGENTS` / `ACB_ACP_AGENT` / `ACB_ACP_COMMAND` | agent 声明与选择（见上） |
+| `ACB_MCP_PORT` | 桥工具的 MCP 回调端口；0 = 系统分配 |
+| `ACB_ACP_CWD` | agent 子进程的工作目录，默认当前目录 |
+| `ACB_ACP_PERMISSION` | `allow`（默认，自动选第一个 allow 选项）或 `reject` |
+| `ACB_ACP_AUTH_METHOD` | 需要登录时指名 `authMethods` 里的 id，握手后自动 `authenticate` |
 
-- `codebuddy-headless.js` 直接放行；
-- `bin/codebuddy` 必须显式 `CODEBUDDY_FORCE_HEADLESS_BUNDLE=1` 才放行；
-- GUI 的 `bin/workbuddy`、`codebuddy.js` 全量 TUI 一律拒绝。
+### 接 CodeBuddy
 
-不填 `ACB_WB_CLI` 时，从 PATH 里的 `workbuddy` 真实路径推导
-`…/opt/WorkBuddy/resources/app.asar.unpacked/cli/dist/codebuddy-headless.js`（Nix 布局已实测
-能推导到本机 5.6.2.40046327 的 bundle）。
+本机的 `codebuddy-acp`（`codebuddy` 的通用 ACP 包装器）直接可用：
 
-### 2026-11-06 用真实 CLI（未登录）探到的形状
+```toml
+[[harnesses]]
+id = "codebuddy"
+name = "CodeBuddy"
 
-| 探测 | 结果 |
-|---|---|
-| `--mcp-config` + `--strict-mcp-config` | init 返回 `mcp_servers:[{name:"acb",status:"connected"}]`，工具表里有 `mcp__acb__send_message`；`type:"http"` 这个写法是对的 |
-| 未登录跑 `-p` | `assistant` 输出 `Authentication required. Please use /login command…`；`result` 是 `subtype:"error_during_execution"`、`is_error:true`、`errors:["Authentication required…"]`，**exit code 仍是 0**。适配器按 result 判失败并归到 `model/auth_failed` |
-| `-r` 指向不存在的会话 | 只发一帧 `{"type":"error","error":"No conversation found with session ID: …"}`，没有 `result`，exit 0。适配器识别为 resume 缺失，改用 `--session-id` 重建 |
-| `--tools ""` | **没有**移除内置工具：init 的 `tools` 里仍有 Bash/Edit/Read/WebFetch 等。适配器默认不传 `--tools`，并在 system prompt 里明确要求不要用 shell/HTTP 绕桥 |
-
-### 验过的
-
-- `node --test harnesses/workbuddy/test/*.test.mjs`：22 个用例，覆盖完整一轮
-  （`turn_start` → spawn → MCP `send_message` → `result` → `turn_end`）、ticket 校验、
-  第二轮 `-r` 复用、resume 失败重试、result error、MCP 未连接、超时杀进程、reset 换代次，
-  以及**两个实例并行**（MCP 端口、state/HOME、会话 id 前缀互不共享）。
-- 真实 `codebuddy-headless.js` 的未登录探测：MCP 连接、工具名、auth 错误形状、resume 缺失
-  形状都按上面的结果被适配器识别。
-
-### 多实例（2026-11-06）
-
-一个实例 = 一个独立 driver 进程。实例之间不共享登录态、`-r` 会话记录、MCP 端口：
-
-| 维度 | 配置 | 隔离方式 |
-|---|---|---|
-| 实例标识 | `ACB_WB_INSTANCE=workbuddy-1` | 进会话 id 前缀 |
-| 桥 harness | `ACB_HARNESS=workbuddy-1` | 桥的串行键；与实例名不一致时配置阶段直接拒绝 |
-| state 根 | `ACB_WB_STATE_DIR=.../workbuddy-1` | 子进程 `HOME` / `USERPROFILE`、`CODEBUDDY_CONFIG_DIR` / `WORKBUDDY_CONFIG_DIR`、`CODEBUDDY_DATA_ROOT` 全指向它 |
-| MCP 端口 | `ACB_MCP_PORT=7718` | 每实例自己的回调 URL：`http://127.0.0.1:7718/mcp` |
-| 会话 id | `acb-workbuddy-1-<acb-session>` | 第二轮 `-r` 只续本实例 |
-
-不填 `ACB_WB_STATE_DIR` 时默认落到
-`<XDG_STATE_HOME 或 ~/.local/state>/acb/workbuddy/<instance>`，所以两个实例天然不同目录。
-`ACB_MCP_PORT` 不填则由系统分配（端口各自独立，但排障时 URL 会变；生产建议固定）。
-
-**GUI 侧启动方式：不要直接启动 app，走 multi-instance wrapper。**
+[[sessions]]
+id = "codebuddy-main"
+harness = "codebuddy"
+persona = "default"
+token = { secret = "codebuddy-token" }
+```
 
 ```bash
-multi-instance workbuddy 1   # instance 2 用 multi-instance workbuddy 2
+ACB_ENDPOINT=127.0.0.1:7700 ACB_TOKEN=... ACB_HARNESS=codebuddy ACB_ACP_COMMAND='["codebuddy-acp","--acp"]' node harnesses/acp/src/driver.mjs
 ```
 
-- 入口是 `/run/current-system/sw/bin/multi-instance`，签名
-  `multi-instance <app> <instance> [args...]`，两个位置参数都必填；
-  可用 app 含 `codebuddy workbuddy workbuddy-ai lobsterai trae trae-cn zcode zcode-cn codearts`。
-- 它用 bwrap 把实例状态目录 bind-mount 到 `$HOME` 下固定路径，真实 `~/.codebuddy`、
-  `~/.config/LobsterAI` 不会被写入。instance 1 的 GUI 状态目录是
-  `~/.local/state/multi-instance/workbuddy/1`（instance 2 换成 `/2`）。
-- 首次启动是**空 profile**，必须在实例窗口里重新登录 WorkBuddy；不登录时 CLI 的
-  `result` 仍是 auth 错误（见上面的探测表）。
-- driver 的 `ACB_WB_STATE_DIR` 默认 `~/.local/state/acb/workbuddy/<instance>`，和 GUI
-  实例目录是**两套**。不推荐把它指到 GUI 实例目录共用登录态：同一个 `.codebuddy`
-  双写有锁/DB 竞争风险。确需复用，按受控步骤来：先在实例里登录、退出 GUI，再让单个
-  driver 独占指向该目录试一次；出问题立刻退回独立目录。
+登录态由 `codebuddy-acp` 自己管（默认沿用 `~/.codebuddy`）。要隔离实例就在声明的 argv
+里加包装器（例如 `["multi-instance","workbuddy","1","codebuddy-acp","--acp"]`）——适配器
+不需要知道那是什么。
 
-**instance 1 的具体配置**（完整版见
-[`instance-1.env.example`](https://github.com/DataEraserC/AgentChatBridge/blob/dev_20261025/harnesses/workbuddy/instance-1.env.example)）：
+### 已知边界
 
-```
-ACB_HARNESS=workbuddy-1
-ACB_WB_INSTANCE=workbuddy-1
-ACB_WB_STATE_DIR=/home/you/.local/state/acb/workbuddy/workbuddy-1
-ACB_MCP_PORT=7718
-# 回调 MCP URL（适配器每轮传给 CLI）：http://127.0.0.1:7718/mcp
-ACB_WB_ALLOWED_TOOLS=send_message,send_message_to,list_rooms,capabilities,platform_call,access_request,access_ticket_get,ack_messages,get_history,fetch_records
-# 完整清单（笔记/记忆/任务/反馈等）见 instance-1.env.example
-```
-
-instance 2 只改四项：`ACB_HARNESS=workbuddy-2`、`ACB_WB_INSTANCE=workbuddy-2`、
-`ACB_WB_STATE_DIR=.../workbuddy-2`、`ACB_MCP_PORT=7719`（见 `instance-2.env.example`）。
-
-**与 LobsterAI 槽位对调**（只改配置，不改代码）：
-
-1. 桥配置里把 `[[sessions]]` 的 `harness` 从 `lobsterai` 改成 `workbuddy-1`，
-   并加一条 `[[harnesses]] id = "workbuddy-1"`；`token` 保持不变。
-2. GUI 侧用 `multi-instance workbuddy 1` 启动 instance 1，并在实例窗口里登录；
-   driver 侧按上面的 instance 1 环境变量启动。
-3. 切回 LobsterAI 时，把 `harness` 改回 `lobsterai`，GUI 侧用
-   `multi-instance lobsterai 1` 启动并登录，driver 的 `ACB_LA_STATE_DIR` 指回
-   `~/.config/LobsterAI/openclaw/state`（不是 `~/.openclaw`）。ACB 会话 id / 订阅 /
-   水位保留；harness 侧会话映射由新 driver 重新 `report_map`，旧 WorkBuddy 的
-   `-r` 映射不再使用。
-
-**已知限制**：CLI 的会话/配置根是 `CODEBUDDY_CONFIG_DIR`（默认 `~/.codebuddy`），
-适配器同时把 `HOME` 指到实例 state 根。如果某个 CLI 版本把登录 token 放进操作系统钥匙串
-而不是这个目录，`HOME` 隔离不会分开登录态；这一条要等真实登录后验证。
-GUI 侧经 multi-instance wrapper 启动后，状态落在
-`~/.local/state/multi-instance/workbuddy/<instance>`，与 driver 默认 state 根隔离；
-两边不是同一次登录，也就没有共享会话记录。
-
-### 内置工具关不掉：三个候选方案（只做取舍，不实施）
-
-实测 `--tools ""` 不会移除 Bash/Edit/Read/WebFetch 等内置工具；`--allowedTools` 只是
-预批准，不是限制。要保证「模型只走 MCP 桥工具」，现在有三条路：
-
-| 方案 | 能做到什么 | 代价 / 风险 |
-|---|---|---|
-| **允许清单** | CLI 若支持真正的工具白名单/禁用列表，最干净：只留 `mcp__acb__*` | 当前 `--tools` 语义不满足；依赖上游版本，可能随升级变化 |
-| **钩子（hooks）** | 在 CLI 的 hook 层拦截 `Bash`/`WebFetch`/网络类工具，fail closed，能真正阻止绕桥 | 要维护 hook 脚本、覆盖工具名和逃生路径；和 CLI 版本绑定，hook 自身出错要保证拒绝而不是放行 |
-| **审计告警** | 从 stream-json 的 tool_use/事件里发现内置工具调用，记日志/发告警；不改变行为 | 只能发现不能阻止；适合做兜底，不适合当唯一控制 |
-
-**建议**：短期用「钩子拦截 + 审计告警兜底」；允许清单等上游给出稳定的禁用语义再做。
-本轮不实施，保持现状：适配器在 system prompt 里明确要求不要用 shell/HTTP 绕桥，并在
-文档里记录风险。
-
-### 还没验的（需要登录/额度）
-
-- 已登录模型真的回话、真的调用 `mcp__acb__send_message`，以及额度扣减。
-- `--permission-mode` / `--allowedTools` 在真实 MCP 工具调用下是否完全不弹权限。
-- CLI 的会话持久化目录（`~/.codebuddy/`）与 GUI（`~/.workbuddy/`）的实际隔离行为。
-- 多实例在真实登录态下的隔离：如果 CLI 把登录 token 放进 OS 钥匙串，`HOME` 隔离可能
-  只隔离会话记录、不隔离登录态。
-- `--serve` / `--acp` 常驻模式（本轮不做，每轮 spawn 足够）。
-- 内置工具与 MCP 工具同时存在时模型的工具选择偏好；`--tools` 的可用写法。
+- `session/set_config_option`（换模型/权限模式）还没接：目前用 agent 自己的默认模型；
+  桥侧 `[[sessions]] model` 对 ACP agent 不生效，日志里会如实打出来。
+- 客户端能力只声明「不读文件、不开终端」：agent 的文件/命令工具由它自己执行，
+  适配器不代做，也不假装能做。
+- 权限请求只有 `allow` / `reject` 两档策略；没有「按工具白名单」这种细粒度。
 
 ## LobsterAI 这一份（2026-11-06）
 
-> 状态：**暂时搁置（代码保留，不回退）**。本机 app 未运行、未登录，真实 gateway 还没握过手；
-> 当前桥上的槽位由 WorkBuddy instance 1 顶替。LobsterAI 登录后，把桥配置的
-> `[[sessions]] harness` 切回 `lobsterai` 即可启用，不需要改代码。
+> 状态：**暂时搁置（代码保留，不回退）**。本机 app 未运行、未登录，真实 gateway 还没握过手。
+> LobsterAI 登录后，把桥配置的 `[[sessions]] harness` 切回 `lobsterai` 即可启用，不需要改代码；
+> 同一台机器上 CodeBuddy 走通用 ACP（`harnesses/acp/`），两条路互不影响。
 
 **形态：进程外 + MCP，但轮次必须走 LobsterAI 自己的 gateway。** LobsterAI 内置
 OpenClaw 2026.8.1；模型链路是 `lobsterai-server` → 本地 token proxy →
@@ -743,7 +685,7 @@ multi-instance lobsterai 1
 wrapper 用 bwrap 把实例状态挂到 `$HOME` 下固定路径，真实 `~/.config/LobsterAI` 不会被
 写入。首次是空 profile，必须在实例窗口里登录 LobsterAI，并等它生成 `openclaw/state`
 （`openclaw.json`、`gateway-port.json`、`gateway-token`）；app 没运行/没登录时 driver
-没有 gateway 可连，直接报错。当前 LobsterAI 仍是搁置状态，槽位由 workbuddy-1 顶替。
+没有 gateway 可连，直接报错。当前 LobsterAI 仍是搁置状态；同一台机器上的 CodeBuddy 走通用 ACP，不占它的槽位。
 
 - state 目录必须是 `<userData>/openclaw/state`（Linux 即
   `~/.config/LobsterAI/openclaw/state`，可用 `ACB_LA_STATE_DIR` / `ACB_LA_USER_DATA`

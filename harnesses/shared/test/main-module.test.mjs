@@ -28,19 +28,16 @@ const DRIVERS = [
     env: () => ({ ACB_MCP_PORT: "0", ACB_HARNESS: "dsh-1" }),
   },
   {
-    name: "workbuddy",
-    script: path.join(HARNESSES, "workbuddy/src/driver.mjs"),
-    ready: /WorkBuddy driver ready/,
-    env: (tmp) => {
-      const cli = path.join(tmp, "fake/codebuddy-headless.js")
-      fs.mkdirSync(path.dirname(cli), { recursive: true })
-      fs.writeFileSync(cli, "// fake headless CLI for entry-point test\n")
-      return {
-        ACB_MCP_PORT: "0",
-        ACB_WB_CLI: cli,
-        ACB_WB_STATE_DIR: path.join(tmp, "state/workbuddy"),
-      }
-    },
+    name: "acp",
+    script: path.join(HARNESSES, "acp/src/driver.mjs"),
+    ready: /ACP driver ready/,
+    env: () => ({
+      ACB_MCP_PORT: "0",
+      ACB_HARNESS: "acp-1",
+      // 入口探测只要求「起得来」：随便给一条 ACP 命令，握手失败也不影响就绪行
+      // 之前的过程——但为了不让它真去 spawn，指向一个必定失败的路径并允许失败。
+      ACB_ACP_COMMAND: '["/nonexistent/acp-agent"]',
+    }),
   },
   {
     name: "lobsterai",

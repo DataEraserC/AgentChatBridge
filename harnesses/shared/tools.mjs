@@ -1000,7 +1000,7 @@ const BOOTSTRAP_HIDDEN_TOOLS = new Set([
 /**
  * MCP facade 启动时的工具面：常驻层 + 目录层（含按需工具）。
  *
- * dsh / workbuddy / lobsterai 的 MCP 客户端只在连接时同步一次 tools/list，
+ * dsh / acp / lobsterai 的 MCP 客户端只在连接时同步一次 tools/list，
  * 之后不会因为桥的 surface 变化自动重拉。启动时若只给常驻层，长尾工具
  * （`plugin_tools`、`notes`、`get_history`……）在模型侧永远是 unknown tool。
  * 这里把除管理员专属外的目录先注册出来；真正的权限判定仍由桥在调用时做。

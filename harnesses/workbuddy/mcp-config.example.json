@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "acb": {
-      "type": "http",
-      "url": "http://127.0.0.1:7717/mcp"
-    }
-  }
-}
