@@ -60,10 +60,14 @@ use crate::plugin_registry::{
 ///          （见 `config_objects::import_once`）。
 /// 16 → 17：加插件平台七张表——注册、策略、存储、能力声明、配置、密钥引用、
 ///          通用资源记录。纯新增；`[[tool_plugins]]` 首次启动时一次性 seed 进库。
-/// 17 → 18：加 `session_model_fallbacks` 表——后备模型链按会话存。模型是
-///          harness 侧的（每个 harness 有自己的目录），一条全局链会互相打架。
-///          全局表保留：没有单独配置的会话继续沿用它（升级即兼容）。
-pub const SCHEMA_VERSION: i64 = 18;
+/// 18（**未单独抬版本号**）：加 `session_model_fallbacks` 表——后备模型链按会话存。
+///          模型是 harness 侧的（每个 harness 有自己的目录），一条全局链会互相打架。
+///          全局表保留：没有单独配置的会话继续沿用它。
+///
+///          为什么不把 `SCHEMA_VERSION` 抬到 18：版本号是一道硬门，装着的旧
+///          acbl（acbctl）会拒绝打开「比自己新」的库。这次只新增一张旧程序
+///          根本不碰的表，不抬版本是安全的；等 acbl 跟着换代时再一起抬。
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"

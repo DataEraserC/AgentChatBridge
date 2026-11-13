@@ -200,7 +200,7 @@ EOF
 | 13 → 14 | 加 `model_fallbacks` 表 | 主模型被上游拒（内容审核 / 限流 / 下线）时按顺序换模型重放这一轮。纯新增、不搬数据；空表 = 不重试，行为与之前一致 |
 | 14 → 15 | 加 `config_objects` 表（`kind` + `id` + TOML 原文） | 连接/会话/人格/记忆/harness 从配置文件搬进库。存的是每一条的 TOML 原文，读出来拼回合并文档再解析（校验、默认值、密钥引用都还是原来那条路）。纯新增、不搬数据；首次启动把合并后的那五段一次性导入并打上 `meta.config_objects_initialized`，之后库是唯一源 |
 | 15 → 16 | 加 `policy_roles` / `policy_assignments`（含能力/角色快照）、`settings`、`secrets`、`policy_audit` 四组表 | RBAC 角色与指派、运行时可变设置、库内密钥（默认加密）、判定与配置写入审计。纯新增；设置初值在代码里，不从文件导入 |
-| 17 → 18 | 加 `session_model_fallbacks` 表 | 后备链按会话存：模型目录在 harness 侧，一条全局链会把别的 harness 的模型钉进来，钉模型直接失败。全局表保留作默认值，升级即兼容 |
+| 17（未抬版本） | 加 `session_model_fallbacks` 表 | 后备链按会话存：模型目录在 harness 侧，一条全局链会把别的 harness 的模型钉进来，钉模型直接失败。全局表保留作默认值。**版本号保持 17**：旧 acbl 的 acbctl 会拒绝打开更高版本的库，而这张新表它根本不碰；等 acbl 跟着换代时再抬 |
 | 16 → 17 | 加插件平台七张表：`plugin_registry` / `plugin_capabilities` / `plugin_policy` / `plugin_storage` / `plugin_config` / `plugin_secret_refs` / `plugin_records` | `[[tool_plugins]]` 从配置文件搬进库：命令、指纹、启用状态、作用域、存储位置与能力声明都能审计/热改。纯新增；首次启动把文件里的插件 seed 进库并打上 `meta.plugins_initialized`，之后库是唯一源；命令不可执行只标 degraded，不阻塞启动 |
 
 ## 已知限制
