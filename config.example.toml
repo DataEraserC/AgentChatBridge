@@ -287,6 +287,12 @@ name = "OpenCode"
 [[harnesses]]
 id = "dsh"
 name = "DeepSeek"
+# 这个 harness 认识的模型（provider/model）。空 = 不限制。
+# 模型目录在 harness 侧，不同 harness 的列表不同；会话选模型、后备链校验都看这份。
+# models = [
+#   "new-api/deepseek-flash",
+#   "trae/deepseek-v4.1-flash",
+# ]
 
 # ---------------------------------------------------------------------------
 # 会话

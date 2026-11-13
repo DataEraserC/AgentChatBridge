@@ -26,7 +26,8 @@ path = "/var/lib/acb/bridge.db"
 | `policy_rooms` | 房间政策：信任、可信成员、审批路由 | 按房间键 `qq:group/123` |
 | `policy_accounts` | 账号级审批路由 | 按账号键 `qq:10001` |
 | `policy_admins` | `bot_admin` / `system_admin` 两个单例 | 按角色 |
-| `model_fallbacks` | 后备模型链：主模型被拒时按 `position` 从小到大换 | 按 `provider/model` |
+| `model_fallbacks` | 全局后备模型链：主模型被拒时按 `position` 从小到大换；没有单独配置的会话用它 | 按 `provider/model` |
+| `session_model_fallbacks` | 会话自己的后备链（schema 18）：模型在 harness 侧，每个 harness 的目录不同 | 按 `(session, model_ref)` |
 | `meta` | 结构版本号、`policy_initialized` 标记 | 一个键值对 |
 
 **策略为什么在库里**（schema 13 起）：`[grants]` 以前只能手改 `config.toml`，改错要重启，
@@ -199,6 +200,7 @@ EOF
 | 13 → 14 | 加 `model_fallbacks` 表 | 主模型被上游拒（内容审核 / 限流 / 下线）时按顺序换模型重放这一轮。纯新增、不搬数据；空表 = 不重试，行为与之前一致 |
 | 14 → 15 | 加 `config_objects` 表（`kind` + `id` + TOML 原文） | 连接/会话/人格/记忆/harness 从配置文件搬进库。存的是每一条的 TOML 原文，读出来拼回合并文档再解析（校验、默认值、密钥引用都还是原来那条路）。纯新增、不搬数据；首次启动把合并后的那五段一次性导入并打上 `meta.config_objects_initialized`，之后库是唯一源 |
 | 15 → 16 | 加 `policy_roles` / `policy_assignments`（含能力/角色快照）、`settings`、`secrets`、`policy_audit` 四组表 | RBAC 角色与指派、运行时可变设置、库内密钥（默认加密）、判定与配置写入审计。纯新增；设置初值在代码里，不从文件导入 |
+| 17 → 18 | 加 `session_model_fallbacks` 表 | 后备链按会话存：模型目录在 harness 侧，一条全局链会把别的 harness 的模型钉进来，钉模型直接失败。全局表保留作默认值，升级即兼容 |
 | 16 → 17 | 加插件平台七张表：`plugin_registry` / `plugin_capabilities` / `plugin_policy` / `plugin_storage` / `plugin_config` / `plugin_secret_refs` / `plugin_records` | `[[tool_plugins]]` 从配置文件搬进库：命令、指纹、启用状态、作用域、存储位置与能力声明都能审计/热改。纯新增；首次启动把文件里的插件 seed 进库并打上 `meta.plugins_initialized`，之后库是唯一源；命令不可执行只标 degraded，不阻塞启动 |
 
 ## 已知限制

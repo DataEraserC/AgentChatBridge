@@ -880,6 +880,12 @@ pub struct Harness {
     pub id: String,
     /// 显示名，给人看的。
     pub name: String,
+    /// 这个 harness 认识的模型列表（`provider/model`）。空 = 不限制。
+    ///
+    /// 模型目录本来就是 harness 侧的：dsh 有它自己的 provider 表，opencode
+    /// 又有一份。所以列表挂在 harness 上，会话选模型、后备链校验都看自己那份，
+    /// 不能拿一份全局列表去套所有 harness。
+    pub models: Vec<String>,
 }
 
 /// 一个 harness 会话：一个串行单元。
@@ -956,6 +962,20 @@ impl Default for DeliveryWindow {
             batch_head: DEFAULT_CONTEXT_RECORDS,
         }
     }
+}
+
+/// 校验一条 `provider/model` 引用。
+///
+/// 规则只有这一处：驱动侧也是按**第一个** `/` 拆，模型名里可以再带 `/`。
+/// 校验写在配置层而不是 HTTP 层，库里的数据才能保证形状对。
+pub fn validate_model_ref(model_ref: &str) -> Result<(), String> {
+    let (provider, model) = model_ref
+        .split_once('/')
+        .ok_or_else(|| format!("模型要写成 provider/model，这一项不是：{model_ref:?}"))?;
+    if provider.trim().is_empty() || model.trim().is_empty() {
+        return Err(format!("provider 和模型名都不能为空：{model_ref:?}"));
+    }
+    Ok(())
 }
 
 /// 一个会话的访问策略。
@@ -1490,6 +1510,18 @@ pub enum ConfigError {
     },
     #[error("{}", acb_i18n::t!("kernel.config.unknown_harness", session = session, harness = harness))]
     UnknownHarness { session: String, harness: String },
+    #[error("{}", acb_i18n::t!("kernel.config.bad_harness_model", harness = harness, model = model, detail = detail))]
+    BadHarnessModel {
+        harness: String,
+        model: String,
+        detail: String,
+    },
+    #[error("{}", acb_i18n::t!("kernel.config.model_not_in_harness", session = session, harness = harness, model = model))]
+    ModelNotInHarness {
+        session: String,
+        harness: String,
+        model: String,
+    },
     /// 入库的业务对象（connections / sessions / personas / memories / harnesses）
     /// 原文有问题。五类对象存的是 TOML 原文，坏文本必须在加载时报出来，
     /// 不能等到用的时候才发现少一条会话。
@@ -2261,7 +2293,20 @@ impl Config {
                     field: "name",
                 });
             }
-            harnesses.push(Harness { id, name });
+            let mut models: Vec<String> = Vec::new();
+            for model_ref in raw_harness.models {
+                let model_ref = model_ref.trim().to_owned();
+                if model_ref.is_empty() || models.contains(&model_ref) {
+                    continue;
+                }
+                validate_model_ref(&model_ref).map_err(|detail| ConfigError::BadHarnessModel {
+                    harness: id.clone(),
+                    model: model_ref.clone(),
+                    detail,
+                })?;
+                models.push(model_ref);
+            }
+            harnesses.push(Harness { id, name, models });
         }
 
         let mut sessions = Vec::with_capacity(raw.sessions.len());
@@ -2405,6 +2450,21 @@ impl Config {
                     Some(trimmed)
                 }
             });
+            // 会话模型必须在这个 harness 的列表里（列表为空 = 不限制，兼容旧配置）。
+            if let (Some(model), Some(harness_config)) = (
+                model.as_deref(),
+                harnesses.iter().find(|candidate| candidate.id == harness),
+            ) {
+                if !harness_config.models.is_empty()
+                    && !harness_config.models.iter().any(|known| known == model)
+                {
+                    return Err(ConfigError::ModelNotInHarness {
+                        session: id.clone(),
+                        harness: harness.clone(),
+                        model: model.to_owned(),
+                    });
+                }
+            }
 
             let on_turn_error = parse_turn_error_actions(&raw_session.on_turn_error)?;
             let access = build_access(&id, raw_session.access)?;
@@ -2500,6 +2560,14 @@ impl Config {
     /// 找一个会话。
     pub fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|session| session.id == id)
+    }
+
+    /// 某个会话所属 harness 的模型列表；空 = 不限制。
+    pub fn harness_models(&self, session: &str) -> &[String] {
+        self.session(session)
+            .and_then(|session| self.harness(&session.harness))
+            .map(|harness| harness.models.as_slice())
+            .unwrap_or(&[])
     }
 
     /// 找会话的某条订阅。发送与工具鉴权都从这里查。
@@ -3808,6 +3876,9 @@ struct RawMemory {
 struct RawHarness {
     id: String,
     name: String,
+    /// 这个 harness 的模型列表；不写 = 不限制。
+    #[serde(default)]
+    models: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

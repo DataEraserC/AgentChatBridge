@@ -60,7 +60,10 @@ use crate::plugin_registry::{
 ///          （见 `config_objects::import_once`）。
 /// 16 → 17：加插件平台七张表——注册、策略、存储、能力声明、配置、密钥引用、
 ///          通用资源记录。纯新增；`[[tool_plugins]]` 首次启动时一次性 seed 进库。
-pub const SCHEMA_VERSION: i64 = 17;
+/// 17 → 18：加 `session_model_fallbacks` 表——后备模型链按会话存。模型是
+///          harness 侧的（每个 harness 有自己的目录），一条全局链会互相打架。
+///          全局表保留：没有单独配置的会话继续沿用它（升级即兼容）。
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"
@@ -277,6 +280,16 @@ CREATE TABLE IF NOT EXISTS model_fallbacks (
     model_ref  TEXT PRIMARY KEY,     -- provider/model
     position   INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
+);
+
+-- 会话自己的后备模型链（schema 18）。没有条目的会话回落到上面那张全局表。
+-- 主键带上 session：同一个模型可以出现在不同会话的链里，各自排序。
+CREATE TABLE IF NOT EXISTS session_model_fallbacks (
+    session    TEXT NOT NULL,
+    model_ref  TEXT NOT NULL,        -- provider/model
+    position   INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (session, model_ref)
 );
 
 -- 业务对象（schema 15）。连接/会话/人格/记忆/harness 从配置文件搬进库。
@@ -2775,6 +2788,74 @@ impl ModelFallbacks for SqliteStore {
         }
         transaction.commit().map_err(io_error)?;
         Ok(())
+    }
+
+    fn session_model_fallbacks(&self, session: &str) -> Result<Vec<String>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT model_ref FROM session_model_fallbacks
+                 WHERE session = ?1 ORDER BY position, model_ref",
+            )
+            .map_err(io_error)?;
+        let rows = stmt
+            .query_map(params![session], |row| row.get::<_, String>(0))
+            .map_err(io_error)?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item.map_err(io_error)?);
+        }
+        Ok(out)
+    }
+
+    fn replace_session_model_fallbacks(
+        &mut self,
+        session: &str,
+        list: &[String],
+    ) -> Result<(), StorageError> {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let transaction = self.conn.transaction().map_err(io_error)?;
+        transaction
+            .execute(
+                "DELETE FROM session_model_fallbacks WHERE session = ?1",
+                params![session],
+            )
+            .map_err(io_error)?;
+        for (index, model_ref) in list.iter().enumerate() {
+            transaction
+                .execute(
+                    "INSERT INTO session_model_fallbacks (session, model_ref, position, updated_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![session, model_ref, index as i64, at],
+                )
+                .map_err(io_error)?;
+        }
+        transaction.commit().map_err(io_error)?;
+        Ok(())
+    }
+
+    fn session_model_fallbacks_map(&self) -> Result<BTreeMap<String, Vec<String>>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session, model_ref FROM session_model_fallbacks
+                 ORDER BY session, position, model_ref",
+            )
+            .map_err(io_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(io_error)?;
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for row in rows {
+            let (session, model_ref) = row.map_err(io_error)?;
+            out.entry(session).or_default().push(model_ref);
+        }
+        Ok(out)
     }
 }
 

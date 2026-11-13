@@ -693,6 +693,11 @@ pub struct Bridge<S: Store> {
     /// 为什么不挂在 `config` 上：它跟 `[grants]` 一样，以库为准，配置里没有对应段。
     /// 轮次边界重读，和策略同一个时机——一轮里换模型会让同一轮的上下文前后不一致。
     model_fallbacks: Vec<String>,
+    /// 每个会话自己的后备链（键 = acb 会话 id）。没有条目的会话沿用上面那条全局链。
+    ///
+    /// 为什么按会话分：模型目录在 harness 侧，dsh 认识的模型 opencode 未必认识。
+    /// 一条全局链会把别的 harness 的模型钉进来，会话直接起不来。
+    session_model_fallbacks: std::collections::BTreeMap<String, Vec<String>>,
     /// 等待在轮次边界执行的动态插件卸载。
     pending_unloads: Vec<ProviderId>,
     /// 等待在轮次边界执行的动态插件重新加载。
@@ -975,6 +980,7 @@ impl<S: Store> Bridge<S> {
             staged_config: None,
             pending_policy_reload: false,
             model_fallbacks: Vec::new(),
+            session_model_fallbacks: std::collections::BTreeMap::new(),
             pending_unloads: Vec::new(),
             pending_reloads: Vec::new(),
             plugin_errors: HashMap::new(),
@@ -2396,25 +2402,68 @@ impl<S: Store> Bridge<S> {
         }
     }
 
-    /// 把库里的后备模型链读进来。变了就把配置版本 +1（控制台的「配置版本」要能看出来）。
+    /// 把库里的后备模型链读进来（全局 + 每会话）。变了就把配置版本 +1。
     fn reload_model_fallbacks(&mut self) {
-        match self.store.model_fallbacks() {
-            Ok(list) => {
-                if list != self.model_fallbacks {
-                    self.model_fallbacks = list;
-                    self.config_version += 1;
-                }
-            }
+        let global = match self.store.model_fallbacks() {
+            Ok(list) => Some(list),
             Err(error) => {
                 // 读失败**不清空**：清空等于「模型被拒就再也不重试」，而库抖动是暂时的。
                 eprintln!("[model] 读后备链失败，继续用当前这一份：{error}");
+                None
             }
+        };
+        let per_session = match self.store.session_model_fallbacks_map() {
+            Ok(map) => Some(map),
+            Err(error) => {
+                eprintln!("[model] 读会话后备链失败，继续用当前这一份：{error}");
+                None
+            }
+        };
+        let mut changed = false;
+        if let Some(list) = global {
+            if list != self.model_fallbacks {
+                self.model_fallbacks = list;
+                changed = true;
+            }
+        }
+        if let Some(map) = per_session {
+            if map != self.session_model_fallbacks {
+                self.session_model_fallbacks = map;
+                changed = true;
+            }
+        }
+        if changed {
+            self.config_version += 1;
+            // 只在真的变了时打一行：出问题时先看「链到底有没有进内存」。
+            eprintln!(
+                "[model] 后备链：全局 {} 条，会话级 {} 条",
+                self.model_fallbacks.len(),
+                self.session_model_fallbacks.len()
+            );
         }
     }
 
     /// 当前生效的后备模型链（控制台展示用）。
     pub fn model_fallbacks(&self) -> &[String] {
         &self.model_fallbacks
+    }
+
+    /// 某个会话实际生效的后备链：自己配了用自己那份，否则回落全局。
+    pub fn session_fallbacks(&self, session: &str) -> &[String] {
+        self.session_model_fallbacks
+            .get(session)
+            .map(Vec::as_slice)
+            .unwrap_or(self.model_fallbacks.as_slice())
+    }
+
+    /// 某个会话有没有单独配过链（控制台用来区分「继承全局」与「空链」）。
+    pub fn has_session_fallbacks(&self, session: &str) -> bool {
+        self.session_model_fallbacks.contains_key(session)
+    }
+
+    /// 所有单独配置过的会话链（控制台一次性展示）。
+    pub fn session_model_fallbacks(&self) -> &std::collections::BTreeMap<String, Vec<String>> {
+        &self.session_model_fallbacks
     }
 
     /// 库里的业务对象快照（连接/会话/人格/记忆/harness）。
@@ -2574,18 +2623,20 @@ impl<S: Store> Bridge<S> {
         Ok(())
     }
 
-    /// 整份替换后备链。写完只置标记，轮次边界生效。
+    /// 整份替换后备链。`session = Some(id)` 改那个会话自己的链，`None` 改全局默认。
+    /// 写完只置标记，轮次边界生效。
     ///
     /// 校验在这里做而不是在 HTTP 层：`provider/model` 的拆分规则只有一处（驱动侧
     /// 按第一个 `/` 拆），放两处必然对不上。写库前先判，坏值一个字节都不落。
-    pub fn replace_model_fallbacks(&mut self, list: &[String]) -> Result<(), String> {
+    /// 会话级还要对一遍所属 harness 的模型列表——链里放别的 harness 的模型，
+    /// 钉模型必然失败，那是配置错误，不该等到运行期才发现。
+    pub fn replace_model_fallbacks(
+        &mut self,
+        session: Option<&str>,
+        list: &[String],
+    ) -> Result<(), String> {
         for model_ref in list {
-            let (provider, model) = model_ref
-                .split_once('/')
-                .ok_or_else(|| format!("模型要写成 provider/model，这一项不是：{model_ref:?}"))?;
-            if provider.trim().is_empty() || model.trim().is_empty() {
-                return Err(format!("provider 和模型名都不能为空：{model_ref:?}"));
-            }
+            crate::config::validate_model_ref(model_ref)?;
         }
         let mut seen = std::collections::BTreeSet::new();
         for model_ref in list {
@@ -2593,9 +2644,30 @@ impl<S: Store> Bridge<S> {
                 return Err(format!("后备链里有重复项：{model_ref:?}"));
             }
         }
-        self.store
-            .replace_model_fallbacks(list)
-            .map_err(|error| error.to_string())?;
+        match session {
+            Some(id) => {
+                let Some(known) = self.config.session(id) else {
+                    return Err(format!("没有这个会话：{id:?}"));
+                };
+                let harness = known.harness.clone();
+                let allowed: Vec<String> = self.config.harness_models(id).to_vec();
+                if !allowed.is_empty() {
+                    if let Some(unknown) = list.iter().find(|item| !allowed.contains(item)) {
+                        return Err(format!(
+                            "harness {harness} 的模型列表里没有 {unknown}，先把它加进该 harness 的 models"
+                        ));
+                    }
+                }
+                self.store
+                    .replace_session_model_fallbacks(id, list)
+                    .map_err(|error| error.to_string())?;
+            }
+            None => {
+                self.store
+                    .replace_model_fallbacks(list)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         // 和策略同一个时机生效：一轮里换模型会让同一轮的前后上下文不一致。
         self.pending_policy_reload = true;
         Ok(())
@@ -9190,7 +9262,7 @@ impl<S: Store> Bridge<S> {
                 harness: session.harness.clone(),
                 model: session.model.clone(),
                 // 后备链是全局的：会话自己的 model 优先，被拒了才按这条链往下走。
-                model_fallbacks: self.model_fallbacks.clone(),
+                model_fallbacks: self.session_fallbacks(&pending.session).to_vec(),
             });
         // 人格卡：桥原样下发，怎么塞进模型上下文由 harness 适配器决定。
         let persona = turn_config

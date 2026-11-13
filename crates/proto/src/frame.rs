@@ -153,8 +153,9 @@ pub struct SessionInfo {
     /// 每项是 `provider/model`。空 = 不重试。
     ///
     /// 为什么不升协议版本：这是**可选字段**，老驱动不认识就忽略（serde 默认丢弃
-    /// 未知字段），行为退化成「不重试」，不会解析失败。链本身由桥持有（库表
-    /// `model_fallbacks`），驱动只照单办事，不自己猜该换哪个。
+    /// 未知字段），行为退化成「不重试」，不会解析失败。链本身由桥持有（全局表
+    /// `model_fallbacks`，或会话表 `session_model_fallbacks`），驱动只照单办事，
+    /// 不自己猜该换哪个。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_fallbacks: Vec<String>,
 }

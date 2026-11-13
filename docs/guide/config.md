@@ -285,6 +285,17 @@ cargo test -p acb-wasm-host --features native-so
 
 ## 会话与订阅：谁在哪个群、怎么醒
 
+模型列表挂在 harness 上：每个 harness 认识哪些模型是它自己的事（dsh 的 provider 表
+和 opencode 的不是同一份）。`models` 不写 = 不限制；写了之后，会话的 `model` 必须
+在列表里，会话的后备链也只能从这份列表里挑。
+
+```toml
+[[harnesses]]
+id = "dsh"
+name = "DeepSeek"
+models = ["new-api/deepseek-flash", "trae/deepseek-v4.1-flash"]
+```
+
 ```toml
 [[sessions]]
 id = "main"

@@ -1433,7 +1433,7 @@ async function loadPolicy() {
 }
 
 // ---------------------------------------------------------------------------
-// 模型后备链（库表 model_fallbacks，schema 14）
+// 模型后备链（库表 model_fallbacks + session_model_fallbacks，schema 18）
 //
 // 为什么需要：上游 router 会用 400 content-blocked 拒掉一整轮（2026-11-09 现场：
 // 连着 6 轮全被拒，而「本轮出错」的通知每房间 10 分钟只发 3 条，用户看到的就是
@@ -1443,11 +1443,25 @@ async function loadPolicy() {
 // 宁可失败也不让群里出现两条相近的回复。
 // ---------------------------------------------------------------------------
 let modelsCache = null;
+// null = 全局默认；字符串 = 某个会话自己的链。
+let modelsScope = null;
 
 async function loadModels() {
-  const r = await api("/api/model-fallbacks");
-  modelsCache = r;
-  const list = r.models || [];
+  const [globalView, sessionsView] = await Promise.all([
+    api("/api/model-fallbacks"),
+    api("/api/sessions").catch(() => ({ sessions: [] })),
+  ]);
+  const sessions = sessionsView.sessions || [];
+  const scoped = modelsScope
+    ? await api("/api/model-fallbacks?session=" + encodeURIComponent(modelsScope))
+    : globalView;
+  modelsCache = scoped;
+  const list = scoped.models || [];
+  const available = scoped.available || [];
+  const scopeOptions = [
+    `<option value=""${modelsScope ? "" : " selected"}>全局默认（没有单独配置的会话）</option>`,
+    ...sessions.map((s) => `<option value="${esc(s.id)}"${modelsScope === s.id ? " selected" : ""}>${esc(s.id)}（${esc(s.harness)}）</option>`),
+  ].join("");
   const rows = list.map((m, i) => `<tr>
     <td>${i + 1}</td>
     <td class="wrap"><code>${esc(m)}</code></td>
@@ -1456,26 +1470,43 @@ async function loadModels() {
       <button class="mini" onclick="moveModel(${i}, 1)"${i === list.length - 1 ? " disabled" : ""}>下移</button>
       <button class="mini danger" onclick="delModel(${i})">删</button>
     </td></tr>`).join("");
-  const pending = r.pending_reload
+  const pending = scoped.pending_reload
     ? `<div class="banner">${icon("alert")}<span>改动已入库，下一次开轮生效（正在跑的这一轮仍用旧链）。</span></div>`
     : "";
-  $("#models").innerHTML = `${pending}
-  <div class="card"><h2>后备模型链<button class="mini" onclick="addModel()" style="float:right">+ 加一个</button></h2>
+  const inherited = scoped.inherited
+    ? `<div class="banner">${icon("alert")}<span>这个会话没有自己的链，正在用<b>全局默认</b>。想单独配就点「复制成自己的链」。</span></div>`
+    : "";
+  const harnessNote = scoped.harness
+    ? `<p class="muted">会话 <code>${esc(modelsScope)}</code> 属于 harness <b>${esc(scoped.harness)}</b>。
+       ${available.length ? `可选模型来自这个 harness 的模型列表（${available.length} 个）。` : `这个 harness 还没配模型列表（<code>[[harnesses]] models</code>），所以只能手写。`}</p>`
+    : `<p class="muted">全局链是兜底：会话没单独配时用它。<b>模型目录在 harness 侧</b>，不同 harness 认识的模型不同，所以真正跑起来的会话最好各自配一条。</p>`;
+  const action = modelsScope && scoped.inherited
+    ? `<button class="mini" onclick="copyGlobalToSession()">复制成自己的链</button>`
+    : `<button class="mini" onclick="addModel()">+ 加一个</button>`;
+  $("#models").innerHTML = `${pending}${inherited}
+  <div class="card"><h2>后备模型链 <span class="muted">（${modelsScope ? esc(modelsScope) : "全局默认"}）</span><span style="float:right">${action}</span></h2>
+    <div class="form-row"><label>配置范围</label>
+      <select id="models-scope" onchange="switchModelScope(this.value)">${scopeOptions}</select></div>
+    ${harnessNote}
     <p class="muted">主模型被上游拒（<b>内容审核 / 限流 / 模型下线</b>）时，驱动按这个顺序换模型，把这一轮<b>重放</b>一遍。
     顺序就是优先级，写成 <code>provider/model</code>（如 <code>trae/deepseek-v4.1-flash</code>）。</p>
     <p class="muted">两条边界：① 这一轮已经调过桥工具（可能已经说过话）就<b>不重放</b>，避免群里出现两条相近回复；
     ② 会话自己的 <code>model</code> 永远排在最前面，这里的链只在它失败后启用。</p>
-    <p class="muted">权威来源：<b>${esc(r.source === "database" ? "数据库" : r.source)}</b></p>
     <div class="table-wrap"><table class="table-responsive">
       <thead><tr><th>#</th><th>模型</th><th></th></tr></thead>
       <tbody>${rows || '<tr><td colspan="3" class="muted">空的 = 主模型失败就照常报错，不重试</td></tr>'}</tbody></table></div></div>`;
+}
+
+function switchModelScope(value) {
+  modelsScope = value || null;
+  loadModels().catch((e) => reportError(e.message));
 }
 
 async function saveModels(next) {
   try {
     await api("/api/model-fallbacks", {
       method: "POST",
-      body: JSON.stringify({ models: next }),
+      body: JSON.stringify({ session: modelsScope, models: next }),
     });
     await loadModels();
     return true;
@@ -1485,9 +1516,22 @@ async function saveModels(next) {
   }
 }
 
+async function copyGlobalToSession() {
+  const globalView = await api("/api/model-fallbacks");
+  if (!(globalView.models || []).length) {
+    reportError("全局链是空的，没有可复制的项");
+    return;
+  }
+  await saveModels([...globalView.models]);
+}
+
 function addModel() {
+  const available = modelsCache?.available || [];
+  const field = available.length
+    ? `<select id="mm-ref">${available.map((m) => `<option>${esc(m)}</option>`).join("")}</select>`
+    : `<input type="text" id="mm-ref" placeholder="trae/deepseek-v4.1-flash" style="max-width:420px">`;
   formFrame("加一个后备模型", `
-    <div class="form-row"><label>模型</label><input type="text" id="mm-ref" placeholder="trae/deepseek-v4.1-flash" style="max-width:420px">
+    <div class="form-row"><label>模型</label>${field}
       <span class="hint">写成 provider/model；追加到链尾（优先级最低）</span></div>`,
     async () => {
       const ref = document.getElementById("mm-ref").value.trim();
@@ -2159,10 +2203,19 @@ function delSub(sessionId, subIndex) {
 function editSession(sessionId) {
   const s = findSession(sessionId);
   if (!s) return alert(t("console.config.errors.noSession"));
+  // 模型列表挂在 harness 上：有列表就下拉选，没列表才手写。
+  const harnessModels = ((cfgCache?.harnesses || []).find((h) => h.id === s.harness)?.models) || [];
+  const modelField = harnessModels.length
+    ? `<select id="e-model">
+         <option value=""${s.model ? "" : " selected"}>${esc(t("console.sessions.modelByHarness"))}</option>
+         ${harnessModels.map((m) => `<option value="${esc(m)}"${m === s.model ? " selected" : ""}>${esc(m)}</option>`).join("")}
+         ${s.model && !harnessModels.includes(s.model) ? `<option value="${esc(s.model)}" selected>${esc(s.model)}（不在 harness 列表里）</option>` : ""}
+       </select>`
+    : `<input type="text" id="e-model" placeholder="${esc(t("console.config.field.modelHint"))}" value="${esc(s.model || "")}">`;
   formFrame(esc(t("console.config.session.editTitle", { id: sessionId })), `
     <div class="form-row"><label>${esc(t("console.config.field.displayName"))}</label><input type="text" id="e-name" value="${esc(s.name || "")}"></div>
     <div class="form-row"><label>${esc(t("console.config.field.persona"))}</label><select id="e-persona">${(cfgCache?.personas || []).map((p) => `<option ${p.id === s.persona ? "selected" : ""}>${esc(p.id)}</option>`).join("")}</select></div>
-    <div class="form-row"><label>${esc(t("console.config.field.model"))}</label><input type="text" id="e-model" placeholder="${esc(t("console.config.field.modelHint"))}" value="${esc(s.model || "")}"></div>
+    <div class="form-row"><label>${esc(t("console.config.field.model"))}</label>${modelField}<span class="hint">${esc(s.harness)} 的模型列表</span></div>
     <div class="form-row"><label>${esc(t("console.config.field.memories"))}</label><input type="text" id="e-mems" value="${esc((s.memories || []).join(", "))}"></div>
     <p class="hint">${esc(t("console.config.session.tokenHint"))}</p>`,
     () => {

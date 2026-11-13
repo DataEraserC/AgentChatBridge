@@ -349,7 +349,49 @@ fn harness_op(
     op: &serde_json::Value,
     changes: &mut Vec<Message>,
 ) -> Result<(), PatchError> {
-    upsert_named_table(doc, "harnesses", op, &["name"], changes)
+    upsert_named_table(doc, "harnesses", op, &["name"], changes)?;
+    // `models` 是字符串数组，`upsert_named_table` 只认字符串字段，所以单独处理。
+    // 空数组 = 删掉这个键（回到「不限制」），和用户手写时删掉一行等价。
+    let Some(models) = op.get("models") else {
+        return Ok(());
+    };
+    let id = string_field(op, "id")?;
+    let values = models
+        .as_array()
+        .ok_or(msg!("bridge.patch.harness_models_not_array", id = &id))?;
+    let array = doc
+        .get_mut("harnesses")
+        .and_then(Item::as_array_of_tables_mut)
+        .and_then(|tables| {
+            tables
+                .iter_mut()
+                .find(|table| table.get("id").and_then(Item::as_str) == Some(id.as_str()))
+        })
+        .ok_or(msg!(
+            "bridge.patch.entry_missing",
+            label = format!("harnesses/{id}")
+        ))?;
+    if values.is_empty() {
+        array.remove("models");
+    } else {
+        let mut list = toml_edit::Array::new();
+        for item in values {
+            let Some(text) = item.as_str() else {
+                return Err(PatchError::new(msg!(
+                    "bridge.patch.harness_models_not_string",
+                    id = &id
+                )));
+            };
+            list.push(text);
+        }
+        array.insert("models", Item::Value(Value::Array(list)));
+    }
+    changes.push(msg!(
+        "bridge.patch.entry_field_updated",
+        label = format!("harnesses/{id}"),
+        field = "models"
+    ));
+    Ok(())
 }
 
 /// 按 id 找 `[[harnesses]]` 里的那张表（新建会话时要校验引用存在）。

@@ -564,3 +564,14 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 | `crates/bridge/src/console.*` | 会话页 `stuck_unread`（≥3 次未确认）按会话聚合、按房间列明细 | `stuck_unread` 字段出现在 `/api/sessions` |
 
 遗留：`more` / `omitted` 仍保留（旧 harness 与自定义 composer 用）；等所有部署都升到 v8 后可再议删除。
+
+## 15. 模型列表与后备链（2026-11-13）
+
+用户指出三件事：① 模型列表是每个 harness 各自的；② 后备链要一个 harness 会话一条；
+③ 目前后备链不起效。前两件是结构问题，第三件是 bug，已一并处理。
+
+| 项 | 根因 / 方案 | 落点 | 验收 |
+|---|---|---|---|
+| 后备链不起效 | dsh 把上游 400 的语义塞在 `error.message` 的 JSON 里，外层 code 只有 `INVALID_REQUEST`；`classifyTurnReason` 只看外层 code，判不出 `content-blocked`，于是不重试 | `harnesses/dsh/src/driver.mjs` 的 `errorEvidence`（code + message + 内嵌 JSON） | `上游把 code 藏在 body 里时也要认出来并换后备模型`、`真正的坏请求不触发后备链` |
+| 模型列表按 harness | `[[harnesses]]` 加 `models`；会话模型必须属于所属 harness 的列表（列表为空 = 不限制，兼容旧配置） | `config.rs`、控制台会话编辑器 | `kernel.config.model_not_in_harness`；控制台模型字段变成下拉 |
+| 后备链按会话 | 新表 `session_model_fallbacks`（schema 18）；全局 `model_fallbacks` 退化为默认值。投递时下发该会话实际生效的链 | `storage*`、`engine.rs`、`/api/model-fallbacks?session=`、控制台 Models 页 | `model_fallbacks.rs` 的 3 条新用例；`sqlite_store` 不回归 |

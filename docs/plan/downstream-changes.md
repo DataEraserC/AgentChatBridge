@@ -25,3 +25,5 @@
 
 - 需求对齐批与执行顺序：`docs/plan/todo-ledger.md` 第 13 节（R1–R13）。
 - 投递格式的完整规格：`docs/plan/config-rbac-plugin-platform-plan-v2.md` §8.2。
+| D10 | 模型列表挂在 harness 上（`[[harnesses]] models`），会话模型与后备链只能从这份列表里挑 | done（2026-11-13） | 模型目录本来就是 harness 侧的（dsh 与 opencode 各一份），一份全局列表会把别的 harness 的模型钉进来 | `crates/kernel/src/config.rs` `Harness.models` + `validate_model_ref`；控制台的会话编辑器按 harness 列表给下拉 | 会话选到本 harness 不认识的模型，开轮时 `selectModel` 直接失败 | `session_chain_must_come_from_its_harness_model_list`；`config.example.toml` 有示例 |
+| D11 | 后备模型链按会话存（`session_model_fallbacks`，schema 18），全局链退化为默认值 | done（2026-11-13） | 同上；一个 harness 有多个会话时，各自的模型组合可以不同 | `crates/kernel/src/storage*`、`engine.rs` `session_fallbacks`、`/api/model-fallbacks?session=`、控制台 Models 页 | 回退成全局链会让每个会话都试同一个不属于自己 harness 的模型 | `session_chain_overrides_global_only_for_that_session`、`sqlite_persists_session_chain_across_reopen` |

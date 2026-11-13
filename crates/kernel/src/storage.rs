@@ -776,6 +776,24 @@ pub trait ModelFallbacks {
 
     /// 整份替换。顺序即优先级；空列表 = 清空。
     fn replace_model_fallbacks(&mut self, list: &[String]) -> Result<(), StorageError>;
+
+    /// 某个会话自己的后备链；空 = 没单独配，调用方回落到全局链。
+    ///
+    /// 为什么要按会话分：模型是 harness 侧的（每个 harness 有自己的模型目录），
+    /// 一条全局链会把 A harness 才有的模型塞给 B harness，钉模型直接失败。
+    fn session_model_fallbacks(&self, session: &str) -> Result<Vec<String>, StorageError>;
+
+    /// 整份替换某个会话的后备链；空列表 = 清掉单独配置，回落全局。
+    fn replace_session_model_fallbacks(
+        &mut self,
+        session: &str,
+        list: &[String],
+    ) -> Result<(), StorageError>;
+
+    /// 所有单独配置过后备链的会话。启动时一次读进来，别按会话逐条查。
+    fn session_model_fallbacks_map(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, StorageError>;
 }
 
 /// 业务对象的落库接口：`connections` / `sessions` / `personas` / `memories` /
@@ -1044,6 +1062,8 @@ pub struct MemoryStore {
     policy: GrantsConfig,
     /// 后备模型链（顺序即优先级）。
     model_fallbacks: Vec<String>,
+    /// 会话自己的后备链。没有条目 = 回落上面那条全局链。
+    session_model_fallbacks: BTreeMap<String, Vec<String>>,
     /// 有没有被写过。和 sqlite 的 `policy_initialized` 标记同一个意思：
     /// 「导入过一份空的」和「从没导入过」必须分得开，否则重启会把清空当成首次导入。
     policy_initialized: bool,
@@ -1709,6 +1729,32 @@ impl ModelFallbacks for MemoryStore {
     fn replace_model_fallbacks(&mut self, list: &[String]) -> Result<(), StorageError> {
         self.model_fallbacks = list.to_vec();
         Ok(())
+    }
+
+    fn session_model_fallbacks(&self, session: &str) -> Result<Vec<String>, StorageError> {
+        Ok(self
+            .session_model_fallbacks
+            .get(session)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn replace_session_model_fallbacks(
+        &mut self,
+        session: &str,
+        list: &[String],
+    ) -> Result<(), StorageError> {
+        if list.is_empty() {
+            self.session_model_fallbacks.remove(session);
+        } else {
+            self.session_model_fallbacks
+                .insert(session.to_owned(), list.to_vec());
+        }
+        Ok(())
+    }
+
+    fn session_model_fallbacks_map(&self) -> Result<BTreeMap<String, Vec<String>>, StorageError> {
+        Ok(self.session_model_fallbacks.clone())
     }
 }
 

@@ -39,6 +39,7 @@ fn config() -> &'static str {
         [[harnesses]]
         id = "dsh"
         name = "DeepSeek"
+        models = ["trae/primary", "trae/backup", "trae/b", "trae/c", "trae/d"]
 
         [[sessions]]
         id = "main"
@@ -140,7 +141,7 @@ fn invalid_model_refs_are_rejected_before_they_reach_the_store() {
     let mut bridge = bridge();
     for bad in ["deepseek-chat", "/x", "trae/", " / "] {
         let error = bridge
-            .replace_model_fallbacks(&[bad.to_owned()])
+            .replace_model_fallbacks(None, &[bad.to_owned()])
             .expect_err("格式不对必须拒绝");
         assert!(
             error.contains("provider/model") || error.contains("不能为空"),
@@ -157,7 +158,7 @@ fn invalid_model_refs_are_rejected_before_they_reach_the_store() {
 fn duplicate_entries_are_rejected() {
     let mut bridge = bridge();
     let error = bridge
-        .replace_model_fallbacks(&["trae/b".into(), "trae/b".into()])
+        .replace_model_fallbacks(None, &["trae/b".into(), "trae/b".into()])
         .expect_err("重复项必须拒绝");
     assert!(error.contains("重复"), "要说清是重复，实际：{error}");
 }
@@ -171,7 +172,7 @@ fn chain_reaches_the_next_delivery_only_after_a_turn_boundary() {
     );
 
     bridge
-        .replace_model_fallbacks(&["trae/backup".into()])
+        .replace_model_fallbacks(None, &["trae/backup".into()])
         .expect("能写");
     assert!(
         bridge.has_pending_policy_reload(),
@@ -202,4 +203,116 @@ fn no_chain_means_no_retry() {
         info.model_fallbacks.is_empty(),
         "没配就下发空链：驱动据此决定不重试"
     );
+}
+
+#[test]
+fn session_chain_overrides_global_only_for_that_session() {
+    let mut bridge = bridge();
+    bridge
+        .replace_model_fallbacks(None, &["trae/b".into()])
+        .expect("全局链能写");
+    bridge
+        .replace_model_fallbacks(Some("main"), &["trae/c".into()])
+        .expect("会话链能写");
+
+    // 写完先入库；内存里的快照在轮次边界才换（和全局链同一个时机）。
+    assert_eq!(
+        bridge.store().session_model_fallbacks("main").expect("读"),
+        vec!["trae/c".to_owned()],
+        "库里的会话链要立刻写进去"
+    );
+    bridge.ingest(message()).expect("入库 = 轮次边界");
+
+    assert_eq!(
+        bridge.session_fallbacks("main"),
+        ["trae/c".to_owned()],
+        "会话自己配了就用自己的"
+    );
+    assert_eq!(
+        bridge.model_fallbacks(),
+        ["trae/b".to_owned()],
+        "全局链不能被会话链改掉"
+    );
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
+    let info = delivery.session_info.expect("会话信息");
+    assert_eq!(
+        info.model_fallbacks,
+        vec!["trae/c".to_owned()],
+        "投递要下发这个会话实际生效的链"
+    );
+}
+
+#[test]
+fn session_chain_must_come_from_its_harness_model_list() {
+    let mut bridge = bridge();
+    let error = bridge
+        .replace_model_fallbacks(Some("main"), &["other/x".into()])
+        .expect_err("不在 harness 列表里的模型要拒绝");
+    assert!(
+        error.contains("dsh") && error.contains("other/x"),
+        "错误要说清哪个 harness 不认识它，实际：{error}"
+    );
+    assert!(
+        bridge
+            .store()
+            .session_model_fallbacks("main")
+            .expect("读")
+            .is_empty(),
+        "被拒的写入一个字节都不能落库"
+    );
+
+    // 列表里的就能写。
+    bridge
+        .replace_model_fallbacks(Some("main"), &["trae/backup".into()])
+        .expect("列表里的模型能写");
+}
+
+#[test]
+fn sqlite_persists_session_chain_across_reopen() {
+    let dir = std::env::temp_dir().join(format!(
+        "acb-session-fallbacks-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("时间")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("建目录");
+    let path = dir.join("acb.db");
+
+    {
+        let mut store = SqliteStore::open(&path).expect("开库");
+        store
+            .replace_session_model_fallbacks("main", &["trae/b".into(), "trae/c".into()])
+            .expect("写");
+        store
+            .replace_session_model_fallbacks("side", &["trae/d".into()])
+            .expect("写");
+    }
+    {
+        let store = SqliteStore::open(&path).expect("重开");
+        assert_eq!(
+            store.session_model_fallbacks("main").expect("读"),
+            vec!["trae/b".to_owned(), "trae/c".to_owned()],
+            "顺序要保住"
+        );
+        let map = store.session_model_fallbacks_map().expect("读");
+        assert_eq!(map.len(), 2, "两个会话各一条");
+        assert_eq!(map.get("side"), Some(&vec!["trae/d".to_owned()]));
+
+        let mut store = SqliteStore::open(&path).expect("再开");
+        store
+            .replace_session_model_fallbacks("main", &[])
+            .expect("清空");
+        assert!(
+            store
+                .session_model_fallbacks("main")
+                .expect("读")
+                .is_empty(),
+            "清空后不再有单独配置，回落全局"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
 }

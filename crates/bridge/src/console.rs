@@ -680,7 +680,9 @@ impl<S: Store + Send + 'static> Console<S> {
             // 在库里，不在 config.toml；所以它不走上面那条「改文件再暂存」的路。
             ("GET", "/api/policy") => self.policy_view(),
             ("POST", "/api/policy") => self.save_policy(body),
-            ("GET", "/api/model-fallbacks") => self.model_fallbacks_view(),
+            ("GET", "/api/model-fallbacks") => {
+                self.model_fallbacks_view(query_param(query, "session"))
+            }
             ("POST", "/api/model-fallbacks") => self.save_model_fallbacks(body),
             _ => error_response(404, acb_i18n::msg!("bridge.console.no_endpoint"), None),
         }
@@ -723,7 +725,7 @@ impl<S: Store + Send + 'static> Console<S> {
                 "id": m.id, "name": m.name, "kind": m.kind, "location": m.location,
             })).collect::<Vec<_>>(),
             "harnesses": config.harnesses.iter().map(|h| json!({
-                "id": h.id, "name": h.name,
+                "id": h.id, "name": h.name, "models": h.models,
             })).collect::<Vec<_>>(),
             "sessions": config.sessions.iter().map(|s| json!({
                 "id": s.id,
@@ -910,16 +912,34 @@ impl<S: Store + Send + 'static> Console<S> {
         }
     }
 
-    /// 后备模型链（库表 `model_fallbacks`，schema 14）。
+    /// 后备模型链（库表 `model_fallbacks` / `session_model_fallbacks`，schema 18）。
     ///
+    /// 不带 `session` = 全局默认链；带 `session` = 那个会话实际生效的链，
+    /// 并告诉调用方它是「自己配的」还是「继承全局」。
     /// 和策略同一个语义：库是唯一来源，改完轮次边界生效。
-    fn model_fallbacks_view(&self) -> (u16, String) {
+    fn model_fallbacks_view(&self, session: Option<&str>) -> (u16, String) {
         let bridge = lock(&self.bridge);
+        let config = bridge.config();
+        let models = match session {
+            Some(id) => bridge.session_fallbacks(id),
+            None => bridge.model_fallbacks(),
+        };
+        let (harness, available) = match session {
+            Some(id) => (
+                config.session(id).map(|session| session.harness.clone()),
+                config.harness_models(id).to_vec(),
+            ),
+            None => (None, Vec::new()),
+        };
         (
             200,
             json!({
                 "source": "database",
-                "models": bridge.model_fallbacks(),
+                "session": session,
+                "models": models,
+                "inherited": session.is_some_and(|id| !bridge.has_session_fallbacks(id)),
+                "harness": harness,
+                "available": available,
                 "pending_reload": bridge.has_pending_policy_reload(),
                 "config_version": bridge.config_version(),
             })
@@ -927,7 +947,8 @@ impl<S: Store + Send + 'static> Console<S> {
         )
     }
 
-    /// 整份保存后备链：`{"models": ["provider/model", ...]}`，顺序即优先级。
+    /// 整份保存后备链：`{"session": "id"?, "models": ["provider/model", ...]}`，
+    /// 顺序即优先级。不带 `session` 改全局默认。
     ///
     /// 校验在 kernel 里做（`provider/model` 的拆分规则只有一处）。这里只负责
     /// 把 JSON 变成 `Vec<String>`，以及把拒绝原因原样带回去——「哪一项写错了」
@@ -960,13 +981,20 @@ impl<S: Store + Send + 'static> Console<S> {
                 );
             }
         };
+        // 空 `session` 字符串按「没带」处理：前端清空选择框时会这样发。
+        let session = parsed
+            .get("session")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
 
         let mut bridge = lock(&self.bridge);
-        match bridge.replace_model_fallbacks(&models) {
+        match bridge.replace_model_fallbacks(session, &models) {
             Ok(()) => (
                 200,
                 json!({
                     "ok": true,
+                    "session": session,
                     "models": models,
                     "pending_reload": true,
                 })
@@ -1483,6 +1511,8 @@ impl<S: Store + Send + 'static> Console<S> {
                     "harness": session.harness,
                     "persona": session.persona,
                     "model": session.model,
+                    "model_fallbacks": bridge.session_fallbacks(&session.id),
+                    "model_fallbacks_inherited": !bridge.has_session_fallbacks(&session.id),
                     "memories": session.memories,
                     "subscriptions": session.subscriptions.iter().map(|s| s.room.to_string()).collect::<Vec<_>>(),
                     "stuck_unread": {
