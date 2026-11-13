@@ -497,12 +497,20 @@ export function renderTurn(delivery, { now = Date.now(), tools = null } = {}) {
   // 「新」不准确了：D7 之后正文里既有新消息，也有触发点之前的上下文（可能早就读过）。
   lines.push(`[${room}] ${reason}，${count} 条记录：`)
 
+  // 同一个人连着发好几句是群里最常见的形态。人名只在第一条出现，后面的写「同上」：
+  // 省掉重复的昵称和号码，但每条仍各占一行（编号、时间、内容都在），一眼能看出
+  // 这是三句话，而不是一句话被折成了三行。换人立刻恢复全称。
+  let previousSenderId = null
   for (const record of delivery.records) {
     const when = formatTime(record.at, now)
-    const who = record.sender.name || record.sender.id
+    const senderId = record.sender.id ?? ""
+    const who = record.sender.name || senderId
+    const sameSender = senderId !== "" && senderId === previousSenderId
+    previousSenderId = senderId === "" ? null : senderId
     const marks = []
     // 身份标签：桥判得出来才标，判不出（role 为空）就什么都不加。
-    const role = roleLabel(record.sender.role)
+    // 同一个人往下连发时不再重复——「同上」已经把身份说完了，再写一遍「群主」只是噪音。
+    const role = sameSender ? "" : roleLabel(record.sender.role)
     if (role) marks.push(role)
     if (record.kind?.kind === "event") {
       // 事件带跨平台语义标签（poke / reaction / notice …）：标签是配置唤醒策略用的，
@@ -526,7 +534,8 @@ export function renderTurn(delivery, { now = Date.now(), tools = null } = {}) {
       marks.push(`第 ${record.redelivery} 次投递`)
     }
     const tail = marks.length ? `（${marks.join("、")}）` : ""
-    lines.push(`#${record.id} ${when} ${who}(${record.sender.id})${tail}`)
+    const identity = sameSender ? "同上" : `${who}(${senderId})`
+    lines.push(`#${record.id} ${when} ${identity}${tail}`)
     lines.push(`  ${renderElements(deliverableElements(record, { showFetchHint: hasTool("fetch_records") }), { quoteRef: record.quote_ref })}`)
     // 桥的旁白不是对方说的话，单独一行，绝不拼进上面那行内容里。
     if (record.note) {

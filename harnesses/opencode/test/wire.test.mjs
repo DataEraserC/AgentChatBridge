@@ -289,6 +289,42 @@ test("wake_reason 写进开轮原因", () => {
   assert.match(text, /有新消息（@ 了我）/)
 })
 
+test("同一个人连发：人名只出现一次，但每条仍是独立一行", () => {
+  const now = Date.now()
+  const message = (id, sender, text) => ({
+    id,
+    room: { connection: "qq", path: ["group", "158296748"] },
+    kind: { kind: "message" },
+    sender,
+    at: now,
+    elements: [{ type: "text", text }],
+  })
+  const laowang = { id: "10001", name: "老王" }
+  const xiaoming = { id: "10002", name: "小明" }
+  const text = renderTurn(
+    delivery({
+      records: [
+        message(12, laowang, "第一句"),
+        message(13, laowang, "第二句"),
+        message(14, laowang, "第三句"),
+        message(15, xiaoming, "换人了"),
+        message(16, laowang, "又是我"),
+      ],
+    }),
+    { now },
+  )
+
+  // 人名只出现一次；后两条是同一个人，用「同上」顶掉昵称和号码。
+  assert.equal((text.match(/老王\(10001\)/g) ?? []).length, 2, "换人之后要恢复全称")
+  assert.equal((text.match(/同上/g) ?? []).length, 2)
+  // 每条消息都有自己的编号行：压缩的是人名，不是消息条数。
+  for (const id of [12, 13, 14, 15, 16]) assert.match(text, new RegExp(`^#${id} `, "m"))
+  // 内容逐条都在，顺序不乱。
+  assert.match(text, /#13 .*同上[\s\S]*第二句/)
+  assert.match(text, /#14 .*同上[\s\S]*第三句/)
+  assert.match(text, /#15 .*小明\(10002\)/)
+})
+
 test("空记录的一轮也要说清楚是例行检查", () => {
   const text = renderTurn({ ...delivery(), records: [], reason: "clock" })
   assert.match(text, /定时例行检查/)
