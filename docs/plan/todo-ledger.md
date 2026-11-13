@@ -575,3 +575,19 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 | 后备链不起效 | dsh 把上游 400 的语义塞在 `error.message` 的 JSON 里，外层 code 只有 `INVALID_REQUEST`；`classifyTurnReason` 只看外层 code，判不出 `content-blocked`，于是不重试 | `harnesses/dsh/src/driver.mjs` 的 `errorEvidence`（code + message + 内嵌 JSON） | `上游把 code 藏在 body 里时也要认出来并换后备模型`、`真正的坏请求不触发后备链` |
 | 模型列表按 harness | `[[harnesses]]` 加 `models`；会话模型必须属于所属 harness 的列表（列表为空 = 不限制，兼容旧配置） | `config.rs`、控制台会话编辑器 | `kernel.config.model_not_in_harness`；控制台模型字段变成下拉 |
 | 后备链按会话 | 新表 `session_model_fallbacks`（建表随启动，版本号保持 17）；全局 `model_fallbacks` 退化为默认值。投递时下发该会话实际生效的链 | `storage*`、`engine.rs`、`/api/model-fallbacks?session=`、控制台 Models 页 | `model_fallbacks.rs` 的 3 条新用例；`sqlite_store` 不回归 |
+
+## 16. CodeBuddy 适配器（2026-11-13）
+
+| 项 | 根因 / 方案 | 落点 | 验收 |
+|---|---|---|---|
+| 线上起不来 | `ACB_ACP_AGENTS` 给 `codebuddy-acp` 套了 `multi-instance`，实例目录里的 `~/.codebuddy` 没有登录态：握手能过，`session/new` 回 `Authentication required` | 线上 `supervisor.toml` 改成 `["codebuddy-acp","--acp"]`（沿用真实 `~/.codebuddy`）；重启 `acb-bridge` | `acbctl component status acp` → `process: healthy`；`state/acp/codebuddy-test.log` 出现 `bound sessions codebuddy-test` |
+| 真机验证 | 直连 `codebuddy-acp --acp`：`initialize`（protocol 1、`loadSession=true`）、`session/new` + `prompt` 一轮、MCP(http) 下发的 `acb` server 被调用、换进程 `session/load` 记住上下文 | `harnesses/acp/` 未改；文档补「别套 multi-instance」 | 外部探针 4 段全过；假桥端到端 `send_message` + `ack_messages` + `turn_end ok`（26.8s） |
+| 控制台 401 | `parse_request_line` 按字面 `Authorization:` 匹配，Node/Go 客户端把头名规范成小写就全 401 | `crates/bridge/src/console.rs` | `parse_request_line_reads_authorization_case_insensitively` |
+
+遗留：`codebuddy-test` 会话已建但无订阅（不会自己回消息）；`session/set_config_option` 未接；权限只有 `allow`/`reject` 两档。
+
+## 17. 排队中（用户 2026-11-13 16:12 指定往后排）
+
+| id | 来源 | 内容 | 状态 |
+|---|---|---|---|
+| F1 | feedback #6（`console` 回复，记录 #243） | 「请评估 memory Git 的目标：仅做本机 worktree，还是支持跨机器共享的远端 Git」——回复说「目前状态似乎有变更，请你再次测试」，需要重新验证 `memory_git_*` 当前行为后回答 | hold |
