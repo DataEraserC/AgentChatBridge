@@ -376,9 +376,22 @@ mod tests {
         }
     }
 
+    /// 临时目录名必须每例唯一：并行跑时 `now_ms()` 会在同一毫秒撞车，两例共用
+    /// 一个目录，先写记录的那例就把另一例变成「已有实例」。
+    static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn temp_instance_dir(tag: &str) -> std::path::PathBuf {
+        let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "acb-instance-{tag}-{}-{seq}-{}",
+            std::process::id(),
+            now_ms()
+        ))
+    }
+
     #[test]
     fn missing_record_is_vacant_when_health_is_down() {
-        let dir = std::env::temp_dir().join(format!("acb-instance-{}", now_ms()));
+        let dir = temp_instance_dir("vacant");
         let path = dir.join(INSTANCE_FILE);
         match detect(&path, &spec("/bin/true", &[]), false) {
             DetectOutcome::Vacant => {}
@@ -388,7 +401,7 @@ mod tests {
 
     #[test]
     fn missing_record_conflicts_when_health_is_up() {
-        let dir = std::env::temp_dir().join(format!("acb-instance-{}", now_ms()));
+        let dir = temp_instance_dir("conflict");
         let path = dir.join(INSTANCE_FILE);
         match detect(&path, &spec("/bin/true", &[]), true) {
             DetectOutcome::Conflict(reason) => {
@@ -400,7 +413,7 @@ mod tests {
 
     #[test]
     fn record_for_dead_pid_is_vacant() {
-        let dir = std::env::temp_dir().join(format!("acb-instance-{}", now_ms()));
+        let dir = temp_instance_dir("record");
         let path = dir.join(INSTANCE_FILE);
         let record = InstanceRecord {
             schema: INSTANCE_SCHEMA,
