@@ -747,6 +747,102 @@ test("内容审核拒绝时换后备模型重试这一轮", async (t) => {
   await runPromise
 })
 
+test("上游把 code 藏在 body 里时也要认出来并换后备模型", async (t) => {
+  // 2026-11-13 真机：dsh 报的是
+  //   400: {"message":"content-blocked ...","code":"content-blocked"} (INVALID_REQUEST)
+  // 外层 code 是 INVALID_REQUEST，真正的语义在内嵌 JSON 里。只按外层 code 分类
+  // 会让后备链一次都不触发。
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/primary",
+        model_fallbacks: ["trae/backup"],
+      },
+    }),
+    link,
+  )
+
+  await waitFor(() => dsh.prompts.length === 1, "主模型 prompt 没被调")
+  dsh.lastFollow.push({
+    type: "turn/end",
+    data: {
+      turn: "t1",
+      reason: {
+        kind: "error",
+        error: {
+          message:
+            '400: {"message":"content-blocked (request id: 20261113095455839521132r977zW0ZXrune)","type":"agent_router_api_error","param":"","code":"content-blocked"}',
+          code: "INVALID_REQUEST",
+        },
+      },
+    },
+  })
+
+  await waitFor(() => dsh.prompts.length === 2, "内嵌 content-blocked 没触发后备链")
+  assert.deepEqual(
+    dsh.modelPicks.map((pick) => pick.model),
+    ["primary", "backup"],
+  )
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t2" } })
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.equal(turnEnd.error, undefined)
+  await runPromise
+})
+
+test("真正的坏请求（没有模型语义）不触发后备链", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const dsh = new ControllableDsh()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/primary",
+        model_fallbacks: ["trae/backup"],
+      },
+    }),
+    link,
+  )
+
+  await waitFor(() => dsh.prompts.length === 1, "prompt 没被调")
+  dsh.lastFollow.push({
+    type: "turn/end",
+    data: {
+      turn: "t1",
+      reason: {
+        kind: "error",
+        error: { message: "400: bad arguments for this endpoint", code: "INVALID_REQUEST" },
+      },
+    },
+  })
+
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.match(turnEnd.error ?? "", /bad arguments/)
+  assert.equal(turnEnd.failure, undefined, "业务错误不标模型故障")
+  assert.equal(dsh.prompts.length, 1, "不认识的失败不换模型重放")
+  await runPromise
+})
+
 test("已经调过桥工具的轮次不换模型重放（避免重复发言）", async (t) => {
   const bridge = await new FakeBridge().start()
   const dsh = new ControllableDsh()

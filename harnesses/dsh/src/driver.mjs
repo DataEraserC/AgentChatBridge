@@ -975,6 +975,47 @@ function normalizeErrorCode(code) {
     .replaceAll("_", "-")
 }
 
+/**
+ * 一个错误里所有能拿来分类的证据：外层 code、message 原文，以及 message 里
+ * 内嵌的上游错误体（dsh 会把 HTTP 4xx/5xx 的 body 塞进 message）。
+ *
+ * 为什么不能只看 `error.code`：上游 router 拒绝时，dsh 报的是
+ * `400: {"message":"content-blocked ...","code":"content-blocked"} (INVALID_REQUEST)`。
+ * 外层 code 只是 HTTP 层的 `INVALID_REQUEST`，真正的语义（content-blocked /
+ * do_request_failed / rate limit）在内嵌 JSON 里。只看外层 code 会让后备链
+ * 完全失效——2026-11-13 真机就是这么「配了链但一次都没换过模型」。
+ */
+function errorEvidence(...sources) {
+  const parts = []
+  for (const source of sources) {
+    if (source === null || source === undefined) continue
+    if (typeof source === "string") {
+      parts.push(normalizeErrorCode(source))
+      continue
+    }
+    parts.push(normalizeErrorCode(source.code))
+    const raw = String(source.message ?? "")
+    parts.push(normalizeErrorCode(raw))
+    const start = raw.indexOf("{")
+    const end = raw.lastIndexOf("}")
+    if (start >= 0 && end > start) {
+      try {
+        const body = JSON.parse(raw.slice(start, end + 1))
+        parts.push(normalizeErrorCode(body?.code))
+        parts.push(normalizeErrorCode(body?.error?.code))
+        parts.push(normalizeErrorCode(body?.message))
+      } catch {
+        // 不是 JSON：上面的原文已经进 parts 了。
+      }
+    }
+  }
+  return parts.filter(Boolean)
+}
+
+function evidenceMatches(evidence, ...needles) {
+  return evidence.some((text) => needles.some((needle) => text.includes(needle)))
+}
+
 /// 这些接口要等上游模型就绪才回话（selectModel 在 agentAvailable=false 时会一直挂着），
 /// 所以它们超时不能当成「dsh 连不上」。
 const MODEL_GATED_ENDPOINTS = new Set(["session/selectModel", "session/prompt"])
@@ -1008,6 +1049,24 @@ function classifyTurnError(error) {
   if (code === "auth-failed" || code === "unauthorized" || code === "forbidden") {
     return { component: "backend", class: "auth_failed" }
   }
+  // 走到这里的多半是 prompt 直接被拒（还没产生 turn/end），或者 selectModel
+  // 的错误体里带着上游语义。同样按 message 里的证据再认一遍。
+  const evidence = errorEvidence(error)
+  if (evidenceMatches(evidence, "content-blocked")) {
+    return { component: "model", class: "content_blocked" }
+  }
+  if (evidenceMatches(evidence, "rate-limit", "too many requests", "quota")) {
+    return { component: "model", class: "rate_limited" }
+  }
+  if (evidenceMatches(evidence, "overloaded", "service unavailable")) {
+    return { component: "model", class: "overloaded" }
+  }
+  if (evidenceMatches(evidence, "do-request-failed", "upstream error", "upstream-error")) {
+    return { component: "model", class: "model_unavailable" }
+  }
+  if (evidenceMatches(evidence, "model-unavailable", "model-not-found")) {
+    return { component: "model", class: "model_unavailable" }
+  }
   return null
 }
 
@@ -1015,30 +1074,31 @@ function classifyTurnError(error) {
 /// blocked / max-tokens / 业务错误不乱标成连通性 down。
 function classifyTurnReason(reason) {
   if (reason.kind !== "error") return null
-  const code = normalizeErrorCode(reason.error?.code)
-  if (code.includes("model-unconfigured")) {
+  const evidence = errorEvidence(reason.error)
+  if (evidenceMatches(evidence, "model-unconfigured")) {
     return { component: "model", class: "model_unconfigured" }
   }
-  if (code.includes("model-unavailable") || code.includes("model-not-found")) {
+  if (evidenceMatches(evidence, "model-unavailable", "model-not-found")) {
     return { component: "model", class: "model_unavailable" }
   }
-  if (
-    code.includes("auth") ||
-    code.includes("unauthorized") ||
-    code.includes("forbidden")
-  ) {
+  if (evidenceMatches(evidence, "auth", "unauthorized", "forbidden")) {
     return { component: "model", class: "auth_failed" }
   }
-  if (code.includes("rate") || code.includes("429") || code.includes("quota")) {
+  if (evidenceMatches(evidence, "rate-limit", "429 too many", "too many requests", "quota")) {
     return { component: "model", class: "rate_limited" }
   }
   // 内容审核拒绝：上游 router 回 400 content-blocked。它不是连通性故障（换网络没用），
   // 但**换个模型**可能就过了——所以单独一类，只用来触发后备链，不标 backend。
-  if (code.includes("content-blocked") || code.includes("content_blocked")) {
+  if (evidenceMatches(evidence, "content-blocked")) {
     return { component: "model", class: "content_blocked" }
   }
-  if (code.includes("overloaded") || code.includes("503") || code.includes("529")) {
+  if (evidenceMatches(evidence, "overloaded", "503 service", "service unavailable")) {
     return { component: "model", class: "overloaded" }
+  }
+  // 上游代理/网关自己挂了（dsh 报 500 + do_request_failed）：换一个 provider
+  // 常常能过，按「这个模型此刻不可用」处理。
+  if (evidenceMatches(evidence, "do-request-failed", "upstream-error", "upstream error")) {
+    return { component: "model", class: "model_unavailable" }
   }
   return null
 }
