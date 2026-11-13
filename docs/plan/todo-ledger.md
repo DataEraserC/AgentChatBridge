@@ -591,3 +591,16 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 | id | 来源 | 内容 | 状态 |
 |---|---|---|---|
 | F1 | feedback #6（`console` 回复，记录 #243） | 「请评估 memory Git 的目标：仅做本机 worktree，还是支持跨机器共享的远端 Git」——回复说「目前状态似乎有变更，请你再次测试」，需要重新验证 `memory_git_*` 当前行为后回答 | hold |
+
+## 18. 本轮收尾（2026-11-13 16:40）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| feedback 投递点名主语 | `renderTurn` 的事件抬头加「反馈 #6「标题；状态 acked」」：业务编号唯一，流水编号每轮都变，只给流水编号会认错条目 | `wire.test.mjs` 的 `feedback 事件抬头带上业务编号和标题` |
+| codebuddy 模型 | 线上 `ACB_ACP_AGENTS` 的 argv 加 `--model hy4`，驱动日志确认 `command codebuddy-acp --acp --model hy4` | `state/acp/codebuddy-test.log`；ACP 侧真机跑过一轮 `HY4-OK` |
+| 文档同步 | 概览/术语/架构/ADR-0008/指南里的示例 harness 由 WorkBuddy 改为 CodeBuddy；`06` 保留历史来龙去脉 | `grep -rn WorkBuddy docs/*.md docs/adr docs/guide` 只剩 `06` 两行 |
+| 旧提交尾注 | `297791d`、`74d6bc1` 补 `Assisted-by: LobsterAI (deepseek-flash)`；18 条提交改写后树与原提交完全一致，已强推到 `origin/dev_20261025` | `git log -1 --format=%b <sha>`；`git diff refs/original/... HEAD` 为空 |
+| 预设备份 | `~/.local/share/acb/presets-local.bak-20261111-0128/` 已删 | 目录不存在 |
+| 线上换代 | payload `/nix/store/zlr6wi8knwy4aq7z3bss2d24fd3cfaji-acb-payload-0.1.0` → `gen-1794559430805-819f243a`，acp 组件 healthy | `acbctl upgrade status req-1794559430732-c1092372`；`profile/current/harnesses/.../acb-wire.mjs` 含 `eventSubject` |
+
+遗留：issue 服务的 UI/新字段要重建系统配置并重启 `acb-issue-service.service`（system unit，需 root）。
