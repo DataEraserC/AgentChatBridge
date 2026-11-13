@@ -20,6 +20,20 @@ pub const STATUS_PENDING_VERIFICATION: &str = "pending_verification";
 pub const STATUS_DONE: &str = "done";
 pub const STATUS_CLOSED: &str = "closed";
 
+/// 枚举值的单一出处：`/v1/meta` 和 Web UI 都从这里取，避免前端再抄一份。
+pub const ISSUE_STATUSES: [&str; 5] = [
+    STATUS_NEW,
+    STATUS_IN_PROGRESS,
+    STATUS_PENDING_VERIFICATION,
+    STATUS_DONE,
+    STATUS_CLOSED,
+];
+pub const ISSUE_PRIORITIES: [&str; 4] = ["P0", "P1", "P2", "P3"];
+pub const LINK_KINDS: [&str; 4] = ["relates", "blocks", "duplicates", "parent"];
+
+/// 自带的 Web UI（单文件、无构建步骤）。`server.rs` 在 `GET /` 直接吐它。
+pub const UI_HTML: &str = include_str!("ui.html");
+
 pub const SCOPE_READ: &str = "issue:read";
 pub const SCOPE_WRITE: &str = "issue:write";
 pub const SCOPE_REPORT: &str = "issue:report";
@@ -88,6 +102,13 @@ pub struct Issue {
     pub body: String,
     pub status: String,
     pub priority: String,
+    /// 工作项类型：bug / task / feature / question。GitHub 的 label 语义太重，
+    /// Azure 的 work item type 更接近这里要的「一眼知道是什么」。
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// 里程碑（GitHub milestone / Azure iteration 的轻量版）：自由文本，不建表。
+    #[serde(default)]
+    pub milestone: Option<String>,
     pub tags: Vec<String>,
     pub assignee: Option<String>,
     pub reporter: String,
@@ -103,6 +124,20 @@ pub struct Issue {
     pub version: i64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub work_items: Vec<WorkItem>,
+}
+
+/// 区分「字段缺失」与「显式 null」：`Option<Option<T>>` 字段上配它，缺字段仍是
+/// `None`（不动），`null` 变成 `Some(None)`（清空）。
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn default_kind() -> String {
+    "task".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +210,10 @@ pub struct CreateIssue {
     #[serde(default)]
     pub priority: Option<String>,
     #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub milestone: Option<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub assignee: Option<String>,
@@ -200,8 +239,14 @@ pub struct UpdateIssue {
     #[serde(default)]
     pub priority: Option<String>,
     #[serde(default)]
-    pub tags: Option<Vec<String>>,
+    pub kind: Option<String>,
+    /// 三态：缺字段 = 不动，`null` = 清空，字符串 = 设值。serde 默认会把 `null` 和
+    /// 缺字段都解成 `None`，所以清空必须靠 `deserialize_some` 把 `null` 包成 `Some(None)`。
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub milestone: Option<Option<String>>,
     #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
     pub assignee: Option<Option<String>>,
     #[serde(default)]
     pub status: Option<String>,
@@ -455,6 +500,42 @@ pub fn migrate(conn: &Connection) -> IssueResult<()> {
         );
         "#,
     )?;
+    // 2 → kind / milestone：GitHub 的 label + milestone、Azure 的 work item type，
+    // 都是「先有字段再谈视图」。列可空/带默认值，老库原地升级，不搬数据。
+    ensure_column(conn, "issues", "kind", "TEXT NOT NULL DEFAULT 'task'")?;
+    ensure_column(conn, "issues", "milestone", "TEXT")?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS issue_links (
+            id TEXT PRIMARY KEY,
+            from_issue TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+            to_issue TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE(from_issue, to_issue, kind)
+        );
+        CREATE INDEX IF NOT EXISTS issue_links_from ON issue_links(from_issue, created_at);
+        CREATE INDEX IF NOT EXISTS issue_links_to ON issue_links(to_issue, created_at);
+        "#,
+    )?;
+    Ok(())
+}
+
+/// 给老库补列：`PRAGMA table_info` 查得到就跳过。只增不改，和 ACB 的迁移规矩一致。
+fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> IssueResult<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if names.iter().any(|name| name == column) {
+        return Ok(());
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"),
+        [],
+    )?;
     Ok(())
 }
 
@@ -637,6 +718,11 @@ fn row_to_issue(row: &rusqlite::Row<'_>, tags: Vec<String>) -> Issue {
         updated_at: row.get(15).unwrap_or(0),
         closed_at: row.get(16).unwrap_or(None),
         version: row.get(17).unwrap_or(1),
+        kind: row
+            .get::<_, Option<String>>(18)
+            .unwrap_or(None)
+            .unwrap_or_else(default_kind),
+        milestone: row.get(19).unwrap_or(None),
         tags,
         work_items: Vec::new(),
     }
@@ -653,7 +739,8 @@ fn load_issue(conn: &Connection, id: &str) -> IssueResult<Issue> {
         .query_row(
             "SELECT id, title, body, status, priority, assignee, reporter, source_type, source_ref, \
                     related, resolution, verification_owner, verification_due_at, \
-                    verification_escalated_at, created_at, updated_at, closed_at, version \
+                    verification_escalated_at, created_at, updated_at, closed_at, version, \
+                    kind, milestone \
              FROM issues WHERE id = ?",
             params![id],
             |row| {
@@ -885,11 +972,14 @@ pub fn create_issue(
     let source = input.source.unwrap_or_default();
     let reporter = input.reporter.unwrap_or_else(|| actor.to_owned());
     let priority = input.priority.unwrap_or_else(|| "P2".to_owned());
+    let kind = normalized_kind(input.kind.as_deref());
+    validate_kind(&kind)?;
+    let milestone = clean_text(input.milestone);
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO issues (id, title, body, status, priority, assignee, reporter, source_type, \
-            source_ref, related, verification_owner, created_at, updated_at, version) \
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+            source_ref, related, verification_owner, created_at, updated_at, version, kind, milestone) \
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)",
         params![
             id,
             title,
@@ -905,7 +995,9 @@ pub fn create_issue(
                 .map(|value| serde_json::to_string(&value).unwrap_or_default()),
             input.verification_owner,
             now,
-            now
+            now,
+            kind,
+            milestone
         ],
     )?;
     for tag in normalized_tags(&input.tags) {
@@ -938,6 +1030,34 @@ fn normalized_tags(tags: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// 工作项类型：封闭枚举。写错就报错，不静默落成 task——否则筛选项永远对不上。
+const ISSUE_KINDS: [&str; 5] = ["bug", "task", "feature", "question", "chore"];
+
+fn normalized_kind(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.to_lowercase(),
+        None => default_kind(),
+    }
+}
+
+fn validate_kind(kind: &str) -> IssueResult<()> {
+    if ISSUE_KINDS.contains(&kind) {
+        Ok(())
+    } else {
+        Err(bad_request(format!(
+            "kind must be one of {} (got {kind:?})",
+            ISSUE_KINDS.join(", ")
+        )))
+    }
+}
+
+/// 里程碑是自由文本：首尾空白去掉，空串等于清空。
+fn clean_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
 pub fn update_issue(
     conn: &Connection,
     id: &str,
@@ -950,6 +1070,7 @@ pub fn update_issue(
     let current = load_issue(conn, id)?;
     let tx = conn.unchecked_transaction()?;
     let mut issue = current.clone();
+    let mut meta_changes: Vec<String> = Vec::new();
     if let Some(title) = input.title {
         if title.trim().is_empty() {
             return Err(IssueError::BadRequest("title is required".to_owned()));
@@ -960,7 +1081,28 @@ pub fn update_issue(
         issue.body = body;
     }
     if let Some(priority) = input.priority {
+        if priority != issue.priority {
+            meta_changes.push(format!("priority {}", priority));
+        }
         issue.priority = priority;
+    }
+    if let Some(kind) = input.kind {
+        let kind = normalized_kind(Some(&kind));
+        validate_kind(&kind)?;
+        if kind != issue.kind {
+            meta_changes.push(format!("kind {kind}"));
+        }
+        issue.kind = kind;
+    }
+    if let Some(milestone) = input.milestone {
+        let milestone = clean_text(milestone);
+        if milestone != issue.milestone {
+            meta_changes.push(match &milestone {
+                Some(value) => format!("milestone {value}"),
+                None => "milestone cleared".to_owned(),
+            });
+        }
+        issue.milestone = milestone;
     }
     if let Some(assignee) = input.assignee {
         issue.assignee = assignee;
@@ -1069,9 +1211,24 @@ pub fn update_issue(
             now,
         )?;
     }
+    if !meta_changes.is_empty() {
+        emit_event(
+            &tx,
+            id,
+            None,
+            "issue.updated",
+            actor,
+            None,
+            None,
+            &meta_changes.join("; "),
+            None,
+            None,
+            now,
+        )?;
+    }
     issue.updated_at = now;
     let changed = tx.execute(
-        "UPDATE issues SET title=?, body=?, status=?, priority=?, assignee=?, resolution=?, \
+        "UPDATE issues SET title=?, body=?, status=?, priority=?, kind=?, milestone=?, assignee=?, resolution=?, \
             verification_owner=?, verification_due_at=?, verification_escalated_at=?, \
             closed_at=?, updated_at=?, version=version+1 WHERE id=? AND version=?",
         params![
@@ -1079,6 +1236,8 @@ pub fn update_issue(
             issue.body,
             issue.status,
             issue.priority,
+            issue.kind,
+            issue.milestone,
             issue.assignee,
             issue.resolution,
             issue.verification_owner,
@@ -1314,6 +1473,14 @@ pub struct SearchQuery {
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub milestone: Option<String>,
+    #[serde(default)]
+    pub reporter: Option<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub assignee: Option<String>,
@@ -1340,12 +1507,53 @@ pub fn search_issues(conn: &Connection, query: &SearchQuery) -> IssueResult<Sear
     let mut sql = String::from(
         "SELECT id, title, body, status, priority, assignee, reporter, source_type, source_ref, \
                 related, resolution, verification_owner, verification_due_at, \
-                verification_escalated_at, created_at, updated_at, closed_at, version FROM issues WHERE 1=1",
+                verification_escalated_at, created_at, updated_at, closed_at, version, kind, milestone \
+         FROM issues WHERE 1=1",
     );
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(status) = query.status.as_deref() {
         sql.push_str(" AND status = ?");
         args.push(Box::new(status.to_owned()));
+    }
+    if let Some(kind) = query
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        sql.push_str(" AND kind = ?");
+        args.push(Box::new(kind.to_lowercase()));
+    }
+    if let Some(priority) = query
+        .priority
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        sql.push_str(" AND priority = ?");
+        args.push(Box::new(priority.to_uppercase()));
+    }
+    if let Some(milestone) = query
+        .milestone
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if milestone == "none" {
+            sql.push_str(" AND milestone IS NULL");
+        } else {
+            sql.push_str(" AND milestone = ?");
+            args.push(Box::new(milestone.to_owned()));
+        }
+    }
+    if let Some(reporter) = query
+        .reporter
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        sql.push_str(" AND reporter = ?");
+        args.push(Box::new(reporter.to_owned()));
     }
     if let Some(assignee) = query.assignee.as_deref() {
         if assignee == "unassigned" {
@@ -1806,6 +2014,236 @@ pub fn events_for_issue(conn: &Connection, issue_id: &str) -> IssueResult<Vec<Is
     let mut stmt = conn.prepare(
         "SELECT id, issue_id, work_item_id, kind, actor, from_status, to_status, summary, created_at, payload \
          FROM issue_events WHERE issue_id=? ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map(params![issue_id], |row| {
+        let payload: Option<String> = row.get(9).unwrap_or(None);
+        Ok(IssueEvent {
+            id: row.get(0)?,
+            issue_id: row.get(1)?,
+            work_item_id: row.get(2)?,
+            kind: row.get(3)?,
+            actor: row.get(4)?,
+            from_status: row.get(5)?,
+            to_status: row.get(6)?,
+            summary: row.get(7)?,
+            created_at: row.get(8)?,
+            payload: payload.and_then(|text| serde_json::from_str(&text).ok()),
+        })
+    })?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+// ── 评论与关联 ────────────────────────────────────────────────────────────
+
+/// 评论就是一条 `issue.comment_added` 事件：不另建表，时间线与通知、ack 账本
+/// 天然复用同一份数据；将来要编辑/删除评论，再给事件加 `edited_at` 之类的字段。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommentInput {
+    pub body: String,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub on_behalf_of: Option<String>,
+}
+
+const MAX_COMMENT_BYTES: usize = 64 * 1024;
+
+pub fn add_comment(
+    conn: &Connection,
+    issue_id: &str,
+    input: CommentInput,
+    actor: &str,
+    now: i64,
+) -> IssueResult<IssueEvent> {
+    let body = input.body.trim();
+    if body.is_empty() {
+        return Err(bad_request("comment body is required".to_owned()));
+    }
+    if body.len() > MAX_COMMENT_BYTES {
+        return Err(bad_request(format!(
+            "comment is too long ({} bytes, max {MAX_COMMENT_BYTES})",
+            body.len()
+        )));
+    }
+    let issue = load_issue(conn, issue_id)?;
+    let tx = conn.unchecked_transaction()?;
+    let event_id = emit_event(
+        &tx,
+        issue_id,
+        None,
+        "issue.comment_added",
+        actor,
+        None,
+        None,
+        body,
+        input.idempotency_key.as_deref(),
+        None,
+        now,
+    )?;
+    // 评论刷新 issue 的 updated_at/version：列表排序、stale_version 都要看得到。
+    tx.execute(
+        "UPDATE issues SET updated_at=?, version=version+1 WHERE id=?",
+        params![now, issue.id],
+    )?;
+    tx.commit()?;
+    let id = event_id.ok_or_else(|| IssueError::NotFound(format!("comment {issue_id}")))?;
+    load_event(conn, &id)
+}
+
+fn load_event(conn: &Connection, id: &str) -> IssueResult<IssueEvent> {
+    let event = conn
+        .query_row(
+            "SELECT id, issue_id, work_item_id, kind, actor, from_status, to_status, summary, \
+                    created_at, payload FROM issue_events WHERE id = ?",
+            params![id],
+            |row| {
+                let payload: Option<String> = row.get(9).unwrap_or(None);
+                Ok(IssueEvent {
+                    id: row.get(0)?,
+                    issue_id: row.get(1)?,
+                    work_item_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    actor: row.get(4)?,
+                    from_status: row.get(5)?,
+                    to_status: row.get(6)?,
+                    summary: row.get(7)?,
+                    created_at: row.get(8)?,
+                    payload: payload.and_then(|text| serde_json::from_str(&text).ok()),
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| IssueError::NotFound(format!("event {id}")))?;
+    Ok(event)
+}
+
+/// 关联类型：GitHub 的 relates/blocks/duplicates，Azure 的 parent/child。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    Relates,
+    Blocks,
+    Duplicates,
+    Parent,
+}
+
+impl LinkKind {
+    fn parse(value: &str) -> IssueResult<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "relates" | "related" => Ok(Self::Relates),
+            "blocks" | "blocked_by" => Ok(Self::Blocks),
+            "duplicates" | "duplicated_by" => Ok(Self::Duplicates),
+            "parent" | "child" => Ok(Self::Parent),
+            other => Err(bad_request(format!(
+                "link kind must be relates/blocks/duplicates/parent (got {other:?})"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Relates => "relates",
+            Self::Blocks => "blocks",
+            Self::Duplicates => "duplicates",
+            Self::Parent => "parent",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueLink {
+    pub id: String,
+    pub from_issue: String,
+    pub to_issue: String,
+    pub kind: String,
+    pub actor: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateLink {
+    #[serde(default)]
+    pub to_issue: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub on_behalf_of: Option<String>,
+}
+
+pub fn create_link(
+    conn: &Connection,
+    issue_id: &str,
+    input: CreateLink,
+    actor: &str,
+    now: i64,
+) -> IssueResult<IssueLink> {
+    let to_issue = input
+        .to_issue
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| bad_request("to_issue is required".to_owned()))?;
+    if to_issue == issue_id {
+        return Err(bad_request("an issue cannot link to itself".to_owned()));
+    }
+    let kind = LinkKind::parse(input.kind.as_deref().unwrap_or("relates"))?;
+    load_issue(conn, issue_id)?;
+    load_issue(conn, to_issue)?;
+    let id = new_id("ln", now);
+    conn.execute(
+        "INSERT OR IGNORE INTO issue_links (id, from_issue, to_issue, kind, actor, created_at) \
+         VALUES (?,?,?,?,?,?)",
+        params![id, issue_id, to_issue, kind.as_str(), actor, now],
+    )?;
+    // 幂等：同一对 (from,to,kind) 已存在时返回原记录。
+    conn.query_row(
+        "SELECT id, from_issue, to_issue, kind, actor, created_at FROM issue_links \
+         WHERE from_issue=? AND to_issue=? AND kind=?",
+        params![issue_id, to_issue, kind.as_str()],
+        |row| {
+            Ok(IssueLink {
+                id: row.get(0)?,
+                from_issue: row.get(1)?,
+                to_issue: row.get(2)?,
+                kind: row.get(3)?,
+                actor: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        },
+    )
+    .map_err(IssueError::from)
+}
+
+pub fn list_links(conn: &Connection, issue_id: &str) -> IssueResult<Vec<IssueLink>> {
+    load_issue(conn, issue_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, from_issue, to_issue, kind, actor, created_at FROM issue_links \
+         WHERE from_issue=? OR to_issue=? ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map(params![issue_id, issue_id], |row| {
+        Ok(IssueLink {
+            id: row.get(0)?,
+            from_issue: row.get(1)?,
+            to_issue: row.get(2)?,
+            kind: row.get(3)?,
+            actor: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+pub fn delete_link(conn: &Connection, id: &str) -> IssueResult<bool> {
+    let removed = conn.execute("DELETE FROM issue_links WHERE id=?", params![id])?;
+    Ok(removed > 0)
+}
+
+/// 评论列表：就是事件链里 `issue.comment_added` 那一段。
+/// 单独开一个入口是为了让 UI 能「先画评论、再画事件」，而不必自己过滤。
+pub fn comments_for_issue(conn: &Connection, issue_id: &str) -> IssueResult<Vec<IssueEvent>> {
+    load_issue(conn, issue_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, issue_id, work_item_id, kind, actor, from_status, to_status, summary, created_at, payload \
+         FROM issue_events WHERE issue_id=? AND kind='issue.comment_added' ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map(params![issue_id], |row| {
         let payload: Option<String> = row.get(9).unwrap_or(None);

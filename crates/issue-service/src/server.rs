@@ -10,12 +10,14 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::{
-    CreateIssue, CreateSubscription, CreateWorkItem, IssueError, MyWorkQuery, ReportResult,
-    SCOPE_ADMIN, SCOPE_READ, SCOPE_REPORT, SCOPE_SUBSCRIBE, SCOPE_VERIFY, SCOPE_WRITE, SearchQuery,
-    UpdateIssue, VerifyWorkItem, ack_events, authenticate, create_issue, create_subscription,
-    create_token, create_work_item, deactivate_subscription, events_for_issue, list_subscriptions,
-    list_work_items_public, my_work, now_ms, open_db, report_result, require_scope, revoke_token,
-    rotate_token, run_due, search_issues, update_issue, verify_work_item,
+    CommentInput, CreateIssue, CreateLink, CreateSubscription, CreateWorkItem, IssueError,
+    MyWorkQuery, ReportResult, SCOPE_ADMIN, SCOPE_READ, SCOPE_REPORT, SCOPE_SUBSCRIBE,
+    SCOPE_VERIFY, SCOPE_WRITE, SearchQuery, UpdateIssue, VerifyWorkItem, ack_events, add_comment,
+    authenticate, comments_for_issue, create_issue, create_link, create_subscription, create_token,
+    create_work_item, deactivate_subscription, delete_link, events_for_issue, list_links,
+    list_subscriptions, list_work_items_public, my_work, now_ms, open_db, report_result,
+    require_scope, revoke_token, rotate_token, run_due, search_issues, update_issue,
+    verify_work_item,
 };
 
 pub struct ServerState {
@@ -50,6 +52,11 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> std::io::Res
     let Some(request) = read_request(&mut stream)? else {
         return Ok(());
     };
+    // 自带 Web UI：静态壳不需要 token（页面自己让用户填），所有数据仍走 `/v1/*`
+    // 的 Bearer 鉴权。放在鉴权之前，是因为它不含任何数据。
+    if request.method == "GET" && (request.path == "/" || request.path == "/ui") {
+        return write_html(&mut stream, 200, crate::UI_HTML);
+    }
     let conn = match open_db(&state.db) {
         Ok(conn) => conn,
         Err(error) => {
@@ -195,6 +202,14 @@ fn route(
             let events = events_for_issue(conn, parts[2])?;
             return Ok((200, serde_json::to_value(events).unwrap_or(json!({}))));
         }
+        if parts.len() == 4 && parts[3] == "comments" {
+            let comments = comments_for_issue(conn, parts[2])?;
+            return Ok((200, serde_json::to_value(comments).unwrap_or(json!({}))));
+        }
+        if parts.len() == 4 && parts[3] == "links" {
+            let links = list_links(conn, parts[2])?;
+            return Ok((200, serde_json::to_value(links).unwrap_or(json!({}))));
+        }
         if parts.len() == 4 && parts[3] == "work_items" {
             let items = list_work_items_public(conn, parts[2])?;
             return Ok((200, serde_json::to_value(items).unwrap_or(json!({}))));
@@ -221,6 +236,46 @@ fn route(
             let item = create_work_item(conn, parts[2], input, &actor, now)?;
             return Ok((200, serde_json::to_value(item).unwrap_or(json!({}))));
         }
+    }
+    if request.method == "POST" && path.starts_with("/v1/issues/") && path.ends_with("/comments") {
+        require_scope(&principal, SCOPE_WRITE)?;
+        let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+        if parts.len() == 4 {
+            let input: CommentInput = parse_body(request)?;
+            let actor = principal.actor_for(input.on_behalf_of.as_deref());
+            let event = add_comment(conn, parts[2], input, &actor, now)?;
+            return Ok((200, serde_json::to_value(event).unwrap_or(json!({}))));
+        }
+    }
+    if request.method == "POST" && path.starts_with("/v1/issues/") && path.ends_with("/links") {
+        require_scope(&principal, SCOPE_WRITE)?;
+        let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+        if parts.len() == 4 {
+            let input: CreateLink = parse_body(request)?;
+            let actor = principal.actor_for(input.on_behalf_of.as_deref());
+            let link = create_link(conn, parts[2], input, &actor, now)?;
+            return Ok((200, serde_json::to_value(link).unwrap_or(json!({}))));
+        }
+    }
+    if request.method == "DELETE" && path.starts_with("/v1/links/") {
+        require_scope(&principal, SCOPE_WRITE)?;
+        let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+        if parts.len() == 3 {
+            let removed = delete_link(conn, parts[2])?;
+            return Ok((200, json!({"ok": true, "removed": removed})));
+        }
+    }
+    if request.method == "GET" && path == "/v1/meta" {
+        require_scope(&principal, SCOPE_READ)?;
+        return Ok((
+            200,
+            json!({
+                "kinds": crate::ISSUE_KINDS,
+                "statuses": crate::ISSUE_STATUSES,
+                "priorities": crate::ISSUE_PRIORITIES,
+                "link_kinds": crate::LINK_KINDS,
+            }),
+        ));
     }
     if request.method == "GET" && path.starts_with("/v1/work_items/") {
         require_scope(&principal, SCOPE_READ)?;
@@ -340,6 +395,10 @@ fn parse_body<T: serde::de::DeserializeOwned>(request: &Request) -> Result<T, Is
 fn search_query(query: &str) -> SearchQuery {
     SearchQuery {
         status: query_value(query, "status"),
+        kind: query_value(query, "kind"),
+        priority: query_value(query, "priority"),
+        milestone: query_value(query, "milestone"),
+        reporter: query_value(query, "reporter"),
         tags: query_value(query, "tags")
             .map(|value| {
                 value
@@ -474,5 +533,13 @@ fn write_json(stream: &mut TcpStream, status: u16, value: &Value) -> std::io::Re
         stream,
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n{challenge}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
+    )
+}
+
+fn write_html(stream: &mut TcpStream, status: u16, html: &str) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status} OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+        html.len()
     )
 }

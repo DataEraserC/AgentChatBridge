@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Issue 工作台</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --line: #e3e6ea;
+    --ink: #1c2128;
+    --muted: #6a737d;
+    --accent: #2f6feb;
+    --accent-soft: #e8f0ff;
+    --ok: #1a7f37;
+    --warn: #9a6700;
+    --bad: #b42318;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", sans-serif;
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  .app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 600; letter-spacing: .01em; }
+  .grow { flex: 1; }
+  .field {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px;
+  }
+  .field > span { color: var(--muted); font-size: 12px; }
+  .field input, .field select { border: 0; outline: 0; background: transparent; min-width: 90px; }
+  .search input { min-width: 240px; }
+  .btn {
+    border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 6px 12px;
+  }
+  .btn:hover { border-color: #cfd6dd; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: #2559c4; }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+  .btn.ghost:hover { background: #eceff3; }
+  .btn.sm { padding: 3px 9px; font-size: 12px; }
+
+  main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; min-height: 0; }
+  .list { border-right: 1px solid var(--line); background: var(--panel); overflow: auto; }
+  .list-head {
+    position: sticky; top: 0; z-index: 2; background: var(--panel);
+    padding: 8px 14px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px;
+  }
+  .issue {
+    display: block; width: 100%; text-align: left; border: 0; background: transparent;
+    border-bottom: 1px solid var(--line); padding: 10px 14px;
+  }
+  .issue:hover { background: #fafbfc; }
+  .issue[aria-current="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+  .issue .title { font-weight: 600; margin-bottom: 4px; }
+  .issue .sub { color: var(--muted); font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .issue .body {
+    color: var(--muted); font-size: 12px; margin-top: 4px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+
+  .detail { overflow: auto; padding: 20px 26px 60px; }
+  .detail-empty { color: var(--muted); margin-top: 12vh; text-align: center; }
+  .detail h2 { margin: 0 0 6px; font-size: 20px; line-height: 1.3; }
+  .crumb { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-bottom: 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 16px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    border-radius: 999px; padding: 2px 10px; font-size: 12px;
+    border: 1px solid var(--line); background: #fff;
+  }
+  .chip b { font-weight: 600; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .s-new .dot { background: #57606a; }
+  .s-in_progress .dot { background: var(--accent); }
+  .s-pending_verification .dot { background: var(--warn); }
+  .s-done .dot { background: var(--ok); }
+  .s-closed .dot { background: #8c959f; }
+  .k-bug { color: var(--bad); border-color: #f3c3bf; background: #fff5f4; }
+  .k-feature { color: #6f42c1; border-color: #d8c8f5; background: #f8f4ff; }
+  .k-question { color: var(--warn); border-color: #e8d6a8; background: #fffaeb; }
+  .k-chore { color: #57606a; }
+  .p-P0 { color: var(--bad); border-color: #f3c3bf; }
+  .p-P1 { color: #b54708; border-color: #f0d3b0; }
+
+  .block {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    margin-bottom: 14px; overflow: hidden;
+  }
+  .block > h3 {
+    margin: 0; padding: 9px 14px; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .block > .pad { padding: 12px 14px; }
+  .prose { white-space: pre-wrap; word-break: break-word; }
+  .prose:empty::before { content: "（没有正文）"; color: var(--muted); }
+
+  .comment { display: grid; grid-template-columns: 28px 1fr; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .comment:last-child { border-bottom: 0; }
+  .avatar {
+    width: 28px; height: 28px; border-radius: 50%; background: #dfe5ec; color: #46505a;
+    display: grid; place-items: center; font-size: 12px; font-weight: 600;
+  }
+  .comment .meta { color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+  .comment .meta b { color: var(--ink); font-weight: 600; }
+  .composer textarea {
+    width: 100%; min-height: 76px; resize: vertical; border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 11px; outline: 0;
+  }
+  .composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #dbe7ff; }
+  .composer .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+
+  table.events { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.events td { padding: 6px 14px; border-top: 1px solid var(--line); vertical-align: top; }
+  table.events td.when { color: var(--muted); white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
+  table.events td.who { color: var(--muted); white-space: nowrap; }
+  .tag { font-family: var(--mono); font-size: 11.5px; color: #46505a; background: #eef1f4; border-radius: 5px; padding: 1px 6px; }
+
+  .links { display: flex; flex-direction: column; }
+  .link-row { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--line); }
+  .link-row:first-child { border-top: 0; }
+  .link-row .kind { font-size: 12px; color: var(--muted); min-width: 74px; }
+  .link-row a { color: var(--accent); text-decoration: none; }
+  .link-row a:hover { text-decoration: underline; }
+
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 16px; }
+  .error { color: var(--bad); font-size: 12.5px; }
+  .flash {
+    position: fixed; right: 18px; bottom: 18px; background: #1c2128; color: #fff;
+    padding: 9px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .18s;
+    pointer-events: none; max-width: 60ch;
+  }
+  .flash.on { opacity: .95; }
+  .flash.bad { background: var(--bad); }
+
+  dialog { border: 0; border-radius: 14px; padding: 0; width: min(560px, 92vw); box-shadow: 0 24px 60px rgba(16,24,40,.22); }
+  dialog::backdrop { background: rgba(16,24,40,.35); }
+  dialog form { padding: 16px 18px 18px; display: grid; gap: 10px; }
+  dialog h2 { margin: 0 0 2px; font-size: 16px; }
+  dialog label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+  dialog input, dialog select, dialog textarea {
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; outline: 0; width: 100%;
+  }
+  dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #dbe7ff; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .gate { max-width: 460px; margin: 14vh auto; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+  .gate h2 { margin: 0 0 6px; font-size: 17px; }
+  .gate p { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .gate input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Issue 工作台</h1>
+    <div class="field search"><span>搜索</span><input id="q" placeholder="标题或正文" /></div>
+    <div class="field"><span>状态</span><select id="f-status"></select></div>
+    <div class="field"><span>类型</span><select id="f-kind"></select></div>
+    <div class="field"><span>优先级</span><select id="f-priority"></select></div>
+    <div class="field"><span>里程碑</span><input id="f-milestone" placeholder="名称 / none" /></div>
+    <div class="grow"></div>
+    <button class="btn" id="refresh" title="重新加载">刷新</button>
+    <button class="btn primary" id="new">新建 issue</button>
+    <button class="btn ghost" id="signout" title="清除本地令牌">退出</button>
+  </header>
+
+  <main>
+    <div class="list">
+      <div class="list-head"><span id="count">0 条</span><span class="grow"></span><span id="more-hint"></span></div>
+      <div id="rows"></div>
+    </div>
+    <div class="detail" id="detail">
+      <div class="detail-empty">左边选一条 issue，或者新建一条。</div>
+    </div>
+  </main>
+</div>
+
+<div class="gate" id="gate" hidden>
+  <h2>需要 API 令牌</h2>
+  <p>令牌只存在这台浏览器的 localStorage，请求直接打到同一台机器的 <code>/v1/*</code>。</p>
+  <input id="token" type="password" placeholder="粘贴 issue API token" autocomplete="off" />
+  <div class="row" style="display:flex;gap:8px;margin-top:10px">
+    <button class="btn primary" id="gate-go">进入</button>
+    <span class="error" id="gate-err"></span>
+  </div>
+</div>
+
+<dialog id="create">
+  <form method="dialog" id="create-form">
+    <h2>新建 issue</h2>
+    <label>标题<input id="c-title" required maxlength="300" /></label>
+    <label>正文<textarea id="c-body" rows="5" placeholder="发生了什么、期望是什么"></textarea></label>
+    <div class="grid2">
+      <label>类型<select id="c-kind"></select></label>
+      <label>优先级<select id="c-priority"></select></label>
+      <label>里程碑<input id="c-milestone" placeholder="可选" /></label>
+      <label>指派给<input id="c-assignee" placeholder="可选" /></label>
+    </div>
+    <label>标签<input id="c-tags" placeholder="逗号分隔，可选" /></label>
+    <div class="dialog-actions">
+      <span class="error grow" id="c-err"></span>
+      <button class="btn" value="cancel">取消</button>
+      <button class="btn primary" value="ok" id="c-ok">创建</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="flash" id="flash"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "acb.issue.token";
+  var state = { token: "", meta: null, issues: [], selected: null, detail: null };
+
+  var el = function (id) { return document.getElementById(id); };
+
+  function flash(message, bad) {
+    var node = el("flash");
+    node.textContent = message;
+    node.className = "flash on" + (bad ? " bad" : "");
+    clearTimeout(flash.timer);
+    flash.timer = setTimeout(function () { node.className = "flash"; }, 3200);
+  }
+
+  function api(path, options) {
+    options = options || {};
+    var headers = { "Authorization": "Bearer " + state.token };
+    if (options.body !== undefined) headers["Content-Type"] = "application/json";
+    return fetch(path, {
+      method: options.method || "GET",
+      headers: headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    }).then(function (response) {
+      return response.text().then(function (text) {
+        var payload = null;
+        try { payload = text ? JSON.parse(text) : null; } catch (_) { payload = { error: text }; }
+        if (!response.ok) {
+          var detail = payload && (payload.error || payload.message) || response.statusText;
+          throw new Error(detail);
+        }
+        return payload;
+      });
+    });
+  }
+
+  function esc(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function when(ms) {
+    if (!ms) return "";
+    var date = new Date(Number(ms));
+    var pad = function (n) { return String(n).padStart(2, "0"); };
+    return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) +
+      " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
+  }
+
+  function ago(ms) {
+    if (!ms) return "";
+    var diff = Date.now() - Number(ms);
+    if (diff < 60000) return "刚刚";
+    if (diff < 3600000) return Math.floor(diff / 60000) + " 分钟前";
+    if (diff < 86400000) return Math.floor(diff / 3600000) + " 小时前";
+    return Math.floor(diff / 86400000) + " 天前";
+  }
+
+  function fillSelect(node, values, blank) {
+    var html = blank ? '<option value="">' + esc(blank) + "</option>" : "";
+    values.forEach(function (value) {
+      html += '<option value="' + esc(value) + '">' + esc(value) + "</option>";
+    });
+    node.innerHTML = html;
+  }
+
+  function loadMeta() {
+    return api("/v1/meta").then(function (meta) {
+      state.meta = meta;
+      fillSelect(el("f-status"), meta.statuses, "全部");
+      fillSelect(el("f-kind"), meta.kinds, "全部");
+      fillSelect(el("f-priority"), meta.priorities, "全部");
+      fillSelect(el("c-kind"), meta.kinds, null);
+      fillSelect(el("c-priority"), meta.priorities, null);
+      el("c-priority").value = "P2";
+      el("c-kind").value = "task";
+    });
+  }
+
+  function filters() {
+    var query = [];
+    var add = function (key, value) {
+      if (value) query.push(encodeURIComponent(key) + "=" + encodeURIComponent(value));
+    };
+    add("q", el("q").value.trim());
+    add("status", el("f-status").value);
+    add("kind", el("f-kind").value);
+    add("priority", el("f-priority").value);
+    add("milestone", el("f-milestone").value.trim());
+    add("limit", "50");
+    return query.length ? "?" + query.join("&") : "";
+  }
+
+  function loadIssues() {
+    return api("/v1/issues" + filters()).then(function (page) {
+      state.issues = page.issues || [];
+      el("count").textContent = state.issues.length + " 条";
+      el("more-hint").textContent = page.next_cursor ? "还有更多，缩小范围再看" : "";
+      renderList();
+    }).catch(function (error) {
+      flash("加载失败：" + error.message, true);
+    });
+  }
+
+  function renderList() {
+    var rows = el("rows");
+    if (!state.issues.length) {
+      rows.innerHTML = '<div class="pad hint" style="padding:18px">没有匹配的 issue。</div>';
+      return;
+    }
+    rows.innerHTML = state.issues.map(function (issue) {
+      var tags = (issue.tags || []).slice(0, 3).map(function (tag) {
+        return '<span class="tag">' + esc(tag) + "</span>";
+      }).join(" ");
+      return '<button class="issue" data-id="' + esc(issue.id) + '"' +
+        (state.selected === issue.id ? ' aria-current="true"' : "") + ">" +
+        '<div class="title">' + esc(issue.title) + "</div>" +
+        '<div class="sub">' +
+        '<span class="chip s-' + esc(issue.status) + '"><i class="dot"></i>' + esc(issue.status) + "</span>" +
+        '<span class="chip k-' + esc(issue.kind) + '">' + esc(issue.kind) + "</span>" +
+        '<span class="chip p-' + esc(issue.priority) + '">' + esc(issue.priority) + "</span>" +
+        (issue.milestone ? "<span>" + esc(issue.milestone) + "</span>" : "") +
+        (issue.assignee ? "<span>@" + esc(issue.assignee) + "</span>" : "") +
+        "<span>" + esc(ago(issue.updated_at)) + "</span>" +
+        "</div>" +
+        (issue.body ? '<div class="body">' + esc(issue.body) + "</div>" : "") +
+        (tags ? '<div class="sub" style="margin-top:4px">' + tags + "</div>" : "") +
+        "</button>";
+    }).join("");
+  }
+
+  function openIssue(id) {
+    state.selected = id;
+    renderList();
+    el("detail").innerHTML = '<div class="detail-empty">加载中…</div>';
+    Promise.all([
+      api("/v1/issues/" + encodeURIComponent(id)),
+      api("/v1/issues/" + encodeURIComponent(id) + "/comments"),
+      api("/v1/issues/" + encodeURIComponent(id) + "/links"),
+      api("/v1/issues/" + encodeURIComponent(id) + "/events"),
+    ]).then(function (results) {
+      state.detail = { issue: results[0], comments: results[1] || [], links: results[2] || [], events: results[3] || [] };
+      renderDetail();
+    }).catch(function (error) {
+      el("detail").innerHTML = '<div class="detail-empty error">' + esc(error.message) + "</div>";
+    });
+  }
+
+  function nextStatuses(issue) {
+    var order = ["new", "in_progress", "pending_verification", "done", "closed"];
+    var at = order.indexOf(issue.status);
+    var list = [];
+    if (at >= 0 && at + 1 < order.length) list.push(order[at + 1]);
+    if (issue.status !== "closed") list.push("closed");
+    return list;
+  }
+
+  function renderDetail() {
+    var detail = state.detail;
+    var issue = detail.issue;
+    var statusButtons = nextStatuses(issue).map(function (status) {
+      return '<button class="btn sm" data-status="' + esc(status) + '">→ ' + esc(status) + "</button>";
+    }).join("");
+
+    var comments = detail.comments.map(function (comment) {
+      return '<div class="comment"><div class="avatar">' + esc(String(comment.actor || "?").slice(0, 1)) + "</div>" +
+        '<div><div class="meta"><b>' + esc(comment.actor) + "</b> · " + esc(when(comment.created_at)) + "</div>" +
+        '<div class="prose">' + esc(comment.summary) + "</div></div></div>";
+    }).join("");
+
+    var links = detail.links.map(function (link) {
+      var other = link.from_issue === issue.id ? link.to_issue : link.from_issue;
+      var direction = link.from_issue === issue.id ? "→" : "←";
+      return '<div class="link-row"><span class="kind">' + esc(link.kind) + " " + direction + "</span>" +
+        '<a href="#" data-open="' + esc(other) + '">' + esc(other) + "</a>" +
+        '<span class="grow"></span><button class="btn ghost sm" data-unlink="' + esc(link.id) + '">移除</button></div>';
+    }).join("");
+
+    var events = detail.events.map(function (event) {
+      return "<tr><td class=\"when\">" + esc(when(event.created_at)) + "</td><td class=\"who\">" + esc(event.actor) + "</td>" +
+        '<td><span class="tag">' + esc(event.kind) + "</span> " + esc(event.summary) + "</td></tr>";
+    }).join("");
+
+    el("detail").innerHTML =
+      '<div class="crumb">' + esc(issue.id) + " · 版本 " + esc(issue.version) + " · 报告人 " + esc(issue.reporter) + "</div>" +
+      "<h2>" + esc(issue.title) + "</h2>" +
+      '<div class="chips">' +
+        '<span class="chip s-' + esc(issue.status) + '"><i class="dot"></i>' + esc(issue.status) + "</span>" +
+        '<span class="chip k-' + esc(issue.kind) + '">' + esc(issue.kind) + "</span>" +
+        '<span class="chip p-' + esc(issue.priority) + '">' + esc(issue.priority) + "</span>" +
+        (issue.milestone ? '<span class="chip">里程碑 <b>' + esc(issue.milestone) + "</b></span>" : "") +
+        (issue.assignee ? '<span class="chip">指派 <b>' + esc(issue.assignee) + "</b></span>" : "") +
+        (issue.tags || []).map(function (tag) { return '<span class="tag">' + esc(tag) + "</span>"; }).join(" ") +
+      "</div>" +
+      '<div class="toolbar">' + statusButtons +
+        '<button class="btn sm" data-edit="1">改标题/正文</button>' +
+        '<button class="btn sm" data-milestone="1">设里程碑</button>' +
+      "</div>" +
+      '<div class="block"><h3>正文</h3><div class="pad prose">' + esc(issue.body) + "</div></div>" +
+      '<div class="block"><h3>评论 <span class="hint">' + detail.comments.length + "</span></h3>" +
+        (comments || '<div class="pad hint">还没有评论。</div>') +
+        '<div class="pad composer"><textarea id="c-text" placeholder="写一条评论（支持多行）"></textarea>' +
+        '<div class="row"><button class="btn primary sm" id="c-send">发表评论</button>' +
+        '<span class="error" id="c-error"></span></div></div></div>' +
+      '<div class="block"><h3>关联</h3>' + (links || '<div class="pad hint">还没有关联。</div>') +
+        '<div class="pad" style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<input id="l-to" placeholder="目标 issue id" style="flex:1;min-width:150px;border:1px solid var(--line);border-radius:8px;padding:7px 10px" />' +
+        '<select id="l-kind" style="border:1px solid var(--line);border-radius:8px;padding:7px 10px">' +
+          (state.meta.link_kinds || []).map(function (kind) { return '<option value="' + esc(kind) + '">' + esc(kind) + "</option>"; }).join("") +
+        "</select><button class=\"btn sm\" id=\"l-add\">添加</button>" +
+        '<span class="error" id="l-error"></span></div></div>' +
+      '<div class="block"><h3>时间线</h3><table class="events">' + events + "</table></div>";
+
+    bindDetail(issue);
+  }
+
+  function bindDetail(issue) {
+    Array.prototype.forEach.call(el("detail").querySelectorAll("[data-status]"), function (node) {
+      node.addEventListener("click", function () { patch({ status: node.getAttribute("data-status") }); });
+    });
+    Array.prototype.forEach.call(el("detail").querySelectorAll("[data-open]"), function (node) {
+      node.addEventListener("click", function (event) {
+        event.preventDefault();
+        openIssue(node.getAttribute("data-open"));
+      });
+    });
+    Array.prototype.forEach.call(el("detail").querySelectorAll("[data-unlink]"), function (node) {
+      node.addEventListener("click", function () {
+        api("/v1/links/" + encodeURIComponent(node.getAttribute("data-unlink")), { method: "DELETE" })
+          .then(function () { openIssue(issue.id); })
+          .catch(function (error) { flash("移除失败：" + error.message, true); });
+      });
+    });
+    var edit = el("detail").querySelector("[data-edit]");
+    if (edit) edit.addEventListener("click", function () {
+      var title = prompt("标题", issue.title);
+      if (title === null) return;
+      var body = prompt("正文", issue.body);
+      if (body === null) return;
+      patch({ title: title, body: body });
+    });
+    var milestone = el("detail").querySelector("[data-milestone]");
+    if (milestone) milestone.addEventListener("click", function () {
+      var value = prompt("里程碑（留空并确定 = 清除）", issue.milestone || "");
+      if (value === null) return;
+      patch({ milestone: value.trim() ? value.trim() : null });
+    });
+    el("c-send").addEventListener("click", function () {
+      var text = el("c-text").value.trim();
+      if (!text) return;
+      el("c-error").textContent = "";
+      api("/v1/issues/" + encodeURIComponent(issue.id) + "/comments", { method: "POST", body: { body: text } })
+        .then(function () { flash("评论已发表"); openIssue(issue.id); })
+        .catch(function (error) { el("c-error").textContent = error.message; });
+    });
+    el("l-add").addEventListener("click", function () {
+      var to = el("l-to").value.trim();
+      el("l-error").textContent = "";
+      if (!to) return;
+      api("/v1/issues/" + encodeURIComponent(issue.id) + "/links", {
+        method: "POST",
+        body: { to_issue: to, kind: el("l-kind").value },
+      }).then(function () { flash("已关联"); openIssue(issue.id); })
+        .catch(function (error) { el("l-error").textContent = error.message; });
+    });
+  }
+
+  function patch(payload) {
+    var issue = state.detail.issue;
+    payload.expected_version = issue.version;
+    api("/v1/issues/" + encodeURIComponent(issue.id), { method: "PATCH", body: payload })
+      .then(function () { flash("已更新"); loadIssues(); openIssue(issue.id); })
+      .catch(function (error) {
+        flash("更新失败：" + error.message, true);
+        if (/stale_version/.test(error.message)) openIssue(issue.id);
+      });
+  }
+
+  function boot() {
+    state.token = localStorage.getItem(TOKEN_KEY) || "";
+    if (!state.token) {
+      el("gate").hidden = false;
+      el("gate-go").addEventListener("click", function () {
+        var value = el("token").value.trim();
+        if (!value) return;
+        state.token = value;
+        localStorage.setItem(TOKEN_KEY, value);
+        el("gate-err").textContent = "";
+        api("/v1/meta").then(function () {
+          el("gate").hidden = true;
+          start();
+        }).catch(function (error) { el("gate-err").textContent = error.message; });
+      });
+      el("token").addEventListener("keydown", function (event) {
+        if (event.key === "Enter") el("gate-go").click();
+      });
+      return;
+    }
+    start();
+  }
+
+  function start() {
+    el("rows").addEventListener("click", function (event) {
+      var node = event.target.closest("[data-id]");
+      if (node) openIssue(node.getAttribute("data-id"));
+    });
+    ["q", "f-milestone"].forEach(function (id) {
+      el(id).addEventListener("keydown", function (event) {
+        if (event.key === "Enter") loadIssues();
+      });
+    });
+    ["f-status", "f-kind", "f-priority"].forEach(function (id) {
+      el(id).addEventListener("change", loadIssues);
+    });
+    el("refresh").addEventListener("click", function () { loadIssues(); if (state.selected) openIssue(state.selected); });
+    el("signout").addEventListener("click", function () {
+      localStorage.removeItem(TOKEN_KEY);
+      location.reload();
+    });
+    el("new").addEventListener("click", function () { el("create").showModal(); });
+    el("create-form").addEventListener("submit", function (event) {
+      if (event.submitter && event.submitter.value === "cancel") return;
+      event.preventDefault();
+      var title = el("c-title").value.trim();
+      if (!title) return;
+      var tags = el("c-tags").value.split(/[,，]/).map(function (s) { return s.trim(); }).filter(Boolean);
+      var payload = {
+        title: title,
+        body: el("c-body").value,
+        kind: el("c-kind").value,
+        priority: el("c-priority").value,
+        tags: tags,
+      };
+      var milestone = el("c-milestone").value.trim();
+      if (milestone) payload.milestone = milestone;
+      var assignee = el("c-assignee").value.trim();
+      if (assignee) payload.assignee = assignee;
+      el("c-err").textContent = "";
+      api("/v1/issues", { method: "POST", body: payload }).then(function (issue) {
+        el("create").close();
+        el("create-form").reset();
+        el("c-priority").value = "P2";
+        el("c-kind").value = "task";
+        flash("已创建 " + issue.id);
+        loadIssues();
+        openIssue(issue.id);
+      }).catch(function (error) { el("c-err").textContent = error.message; });
+    });
+
+    loadMeta().then(loadIssues).catch(function (error) {
+      flash("初始化失败：" + error.message, true);
+    });
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
