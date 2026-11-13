@@ -633,9 +633,15 @@ token = { secret = "codebuddy-token" }
 ACB_ENDPOINT=127.0.0.1:7700 ACB_TOKEN=... ACB_HARNESS=codebuddy ACB_ACP_COMMAND='["codebuddy-acp","--acp"]' node harnesses/acp/src/driver.mjs
 ```
 
-登录态由 `codebuddy-acp` 自己管（默认沿用 `~/.codebuddy`）。要隔离实例就在声明的 argv
-里加包装器（例如 `["multi-instance","workbuddy","1","codebuddy-acp","--acp"]`）——适配器
-不需要知道那是什么。
+登录态由 `codebuddy-acp` 自己管（默认沿用 `~/.codebuddy`）。**ACP 子进程不要套
+`multi-instance`**：它把 `~/.codebuddy` 重定向到实例目录，那里没有登录态，握手能过但
+`session/new` 会回 `Authentication required`。要隔离就得先在那个实例窗口里单独登录；
+桥要的是「能跑」而不是「隔离」，直接 `["codebuddy-acp","--acp"]` 即可。适配器本身不
+关心 argv 里是不是包装器——套不套是配置的事。
+
+真机验过的三件事：`initialize`（protocol 1、`loadSession=true`）→ `session/new` →
+`session/prompt` 一轮；MCP（`type:"http"`）下发的 `acb` server 能被直接调用；换进程后
+`session/load` 能接上同一会话并记住上下文。
 
 ### 作为组件维护
 
