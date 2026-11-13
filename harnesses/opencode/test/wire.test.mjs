@@ -280,6 +280,43 @@ test("一轮摊成给模型看的文本", () => {
   assert.match(text, /ack_messages/)
 })
 
+test("feedback 事件抬头带上业务编号和标题", () => {
+  // 用户回复的是 #6，agent 曾按流水编号去猜、答成 #10。抬头必须点名主语。
+  const text = renderTurn(
+    delivery({
+      records: [
+        {
+          id: 243,
+          room: { connection: "qq", path: ["private", "323622442"] },
+          kind: {
+            kind: "event",
+            event: "feedback",
+            tags: ["feedback", "feedback.reply"],
+            summary: "反馈 #6 有新回复（console）",
+            payload: {
+              feedback_id: 6,
+              title: "请评估 memory Git 的目标：仅做本机 worktree，还是支持远端 Git",
+              author: "console",
+              status: "acked",
+              reply: "目前状态似乎有变更，请你再次测试",
+            },
+          },
+          sender: { id: "acb.feedback", name: "feedback" },
+          at: Date.now(),
+          elements: [{ type: "text", text: "目前状态似乎有变更，请你再次测试" }],
+          at_self: true,
+        },
+      ],
+    }),
+    { now: Date.now() },
+  )
+
+  assert.match(text, /反馈 #6/)
+  assert.match(text, /memory Git/)
+  assert.match(text, /状态 acked/)
+  assert.match(text, /请你再次测试/)
+})
+
 test("wake_reason 写进开轮原因", () => {
   const text = renderTurn({
     ...delivery(),

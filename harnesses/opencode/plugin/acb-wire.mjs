@@ -516,9 +516,10 @@ export function renderTurn(delivery, { now = Date.now(), tools = null } = {}) {
       // 事件带跨平台语义标签（poke / reaction / notice …）：标签是配置唤醒策略用的，
       // 也给模型一个「这大概是什么事」的提示。
       const tags = record.kind.tags ?? []
-      marks.push(
-        tags.length ? `事件 ${record.kind.event}（标签 ${tags.join("、")}）` : `事件 ${record.kind.event}`,
-      )
+      const label =
+        tags.length ? `事件 ${record.kind.event}（标签 ${tags.join("、")}）` : `事件 ${record.kind.event}`
+      const subject = eventSubject(record.kind?.payload)
+      marks.push(subject ? `${label} ${subject}` : label)
     }
     if (record.at_self) marks.push("冲你来的")
     // 这一轮是被哪条消息叫醒的：上下文里可能有前后好几条，标出来模型才知道重点。
@@ -633,6 +634,27 @@ const EVENT_NOISE_FIELDS = new Set([
 ])
 const MAX_EVENT_FIELDS = 5
 const MAX_EVENT_FIELD_CHARS = 40
+
+/**
+ * 事件「说的是哪一条」。
+ *
+ * feedback 这类事件的正文只是一句话（比如「请你再次测试」），真正的主语在载荷里：
+ * feedback_id + title。不显示主语时，模型会把回复挂到别的条目上——实测错过一次：
+ * 用户回复的是 #6，agent 答的是 #10。所以事件抬头必须带主语，且用业务编号而不是
+ * 流水编号（流水编号每轮都变，业务编号才是对外的名字）。
+ */
+function eventSubject(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return ""
+  const feedbackId = payload.feedback_id
+  if (feedbackId !== undefined && feedbackId !== null) {
+    const title = typeof payload.title === "string" ? oneLine(payload.title) : ""
+    const status = typeof payload.status === "string" ? payload.status.trim() : ""
+    const head = `反馈 #${feedbackId}`
+    const tail = [title, status && `状态 ${status}`].filter(Boolean).join("；")
+    return tail ? `${head}「${tail}」` : head
+  }
+  return ""
+}
 
 function eventSummary(record, pointer) {
   const parts = []
