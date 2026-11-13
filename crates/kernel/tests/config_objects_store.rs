@@ -82,7 +82,9 @@ fn sample() -> ConfigObjects {
         memories: Vec::new(),
         harnesses: vec![ConfigObject {
             id: "dsh".to_owned(),
-            toml: "[[harnesses]]\nid = \"dsh\"\nname = \"DSH\"\n".to_owned(),
+            // `models` 是白名单数组：库是唯一源，写下去读回来必须一字不差。
+            toml: "[[harnesses]]\nid = \"dsh\"\nname = \"DSH\"\nmodels = [\"p/a\", \"p/b/c\"]\n"
+                .to_owned(),
         }],
     }
 }

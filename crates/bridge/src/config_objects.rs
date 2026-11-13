@@ -382,6 +382,51 @@ token = { secret = "t-main" }
     }
 
     #[test]
+    fn harness_models_走控制台补丁后仍然入库() {
+        // 控制台 Models 页改的是「库里的那份原文」：document → apply_patch →
+        // document_to_objects。`models` 是数组，最容易在这一趟里被丢掉，所以
+        // 单独盯住：改完必须原样回到对象里，且能再次拆出来。
+        set_token_env();
+        let (_dir, base, config_dir) = fixture("harness-models", BASE);
+        let loaded = Config::load_fixture(&base, Some(&config_dir)).expect("能加载");
+        let merged: toml::Value = toml::from_str(&loaded.merged_toml).expect("能解析");
+        let objects = ConfigObjects::from_merged(&merged).expect("抽得出");
+
+        let text = document(&objects);
+        let ops = vec![serde_json::json!({
+            "op": "harness",
+            "id": "dsh",
+            "models": ["p/a", "p/b/c"]
+        })];
+        let (patched, _changes) = crate::config_patch::apply_patch(&text, &ops).expect("能打补丁");
+        let back = document_to_objects(&patched).expect("拆得回");
+
+        let harness = back
+            .harnesses
+            .iter()
+            .find(|object| object.id == "dsh")
+            .expect("dsh 还在");
+        assert!(
+            harness.toml.contains("p/a") && harness.toml.contains("p/b/c"),
+            "models 必须留在库里的原文里：\n{}",
+            harness.toml
+        );
+        // 拆出来的是恰好一条 [[harnesses]]，重复渲染不会长出第二份。
+        let item = acb_kernel::config_objects::parse_object(
+            acb_kernel::ConfigObjectKind::Harness,
+            &harness.toml,
+        )
+        .expect("能解析");
+        assert_eq!(item.len(), 1);
+        let models = item[0]
+            .get("models")
+            .and_then(toml::Value::as_array)
+            .expect("models 是数组");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1].as_str(), Some("p/b/c"));
+    }
+
+    #[test]
     fn 覆盖层里的会话也要进首次导入() {
         // 真机上那 6 个会话全在 90-console 覆盖层里，base 里那份是死的。
         set_token_env();
