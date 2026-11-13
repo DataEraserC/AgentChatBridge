@@ -296,6 +296,11 @@ name = "DeepSeek"
 models = ["new-api/deepseek-flash", "trae/deepseek-v4.1-flash"]
 ```
 
+`[[harnesses]]` 和其他四类业务对象一样住在库里（`config_objects`）：上面这段是它的
+形状，**权威副本在库**。库初始化之后改文件里这一段不生效（启动日志会说已忽略）；
+要改就去控制台「Models」页选中 harness 编辑，保存即入库。`models` 是数组，
+控制台保存时会整段重渲染这条对象的原文，不会把它丢掉。
+
 ```toml
 [[sessions]]
 id = "main"
