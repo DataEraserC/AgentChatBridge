@@ -1447,11 +1447,14 @@ let modelsCache = null;
 let modelsScope = null;
 
 async function loadModels() {
-  const [globalView, sessionsView] = await Promise.all([
+  const [globalView, sessionsView, configView] = await Promise.all([
     api("/api/model-fallbacks"),
     api("/api/sessions").catch(() => ({ sessions: [] })),
+    api("/api/config").catch(() => ({ harnesses: [] })),
   ]);
   const sessions = sessionsView.sessions || [];
+  const harnesses = configView.harnesses || [];
+  cfgCache = configView;
   const scoped = modelsScope
     ? await api("/api/model-fallbacks?session=" + encodeURIComponent(modelsScope))
     : globalView;
@@ -1483,6 +1486,13 @@ async function loadModels() {
   const action = modelsScope && scoped.inherited
     ? `<button class="mini" onclick="copyGlobalToSession()">复制成自己的链</button>`
     : `<button class="mini" onclick="addModel()">+ 加一个</button>`;
+  const harnessRows = harnesses.map((h) => `<tr>
+    <td><code>${esc(h.id)}</code></td>
+    <td class="wrap">${(h.models || []).length
+      ? (h.models || []).map((m) => `<code>${esc(m)}</code>`).join("<br>")
+      : '<span class="muted">没配 = 不限制</span>'}</td>
+    <td><button class="mini" onclick="editHarnessModels('${esc(h.id)}')">编辑</button></td>
+  </tr>`).join("");
   $("#models").innerHTML = `${pending}${inherited}
   <div class="card"><h2>后备模型链 <span class="muted">（${modelsScope ? esc(modelsScope) : "全局默认"}）</span><span style="float:right">${action}</span></h2>
     <div class="form-row"><label>配置范围</label>
@@ -1494,7 +1504,27 @@ async function loadModels() {
     ② 会话自己的 <code>model</code> 永远排在最前面，这里的链只在它失败后启用。</p>
     <div class="table-wrap"><table class="table-responsive">
       <thead><tr><th>#</th><th>模型</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="3" class="muted">空的 = 主模型失败就照常报错，不重试</td></tr>'}</tbody></table></div></div>`;
+      <tbody>${rows || '<tr><td colspan="3" class="muted">空的 = 主模型失败就照常报错，不重试</td></tr>'}</tbody></table></div></div>
+  <div class="card"><h2>harness 模型列表</h2>
+    <p class="muted">模型目录在 harness 侧：这个列表只影响控制台能选什么、以及会话/后备链能不能用它。
+    不配 = 不限制（仍然可以手写任意 <code>provider/model</code>）。</p>
+    <div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>harness</th><th>模型</th><th></th></tr></thead>
+      <tbody>${harnessRows || '<tr><td colspan="3" class="muted">还没有 harness</td></tr>'}</tbody></table></div></div>`;
+}
+
+function editHarnessModels(id) {
+  const harness = (cfgCache?.harnesses || []).find((h) => h.id === id)
+    || { id, models: [] };
+  formFrame(`harness ${esc(id)} 的模型列表`, `
+    <div class="form-row"><label style="align-self:flex-start">模型</label>
+      <textarea id="hm-models" style="width:100%;min-height:120px" placeholder="provider/model，一行一个">${esc((harness.models || []).join("\n"))}</textarea>
+      <span class="hint">一行一个；空 = 不限制。模型名里可以再带 <code>/</code>，按第一个 <code>/</code> 拆 provider。</span></div>`,
+    () => {
+      const models = document.getElementById("hm-models").value
+        .split("\n").map((line) => line.trim()).filter((line) => line !== "");
+      return submitPatch([{ op: "harness", id, models }]);
+    });
 }
 
 function switchModelScope(value) {
