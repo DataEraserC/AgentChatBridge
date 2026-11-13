@@ -36,7 +36,9 @@ export class OpenClawGateway {
     url,
     token,
     log = () => {},
-    clientId = "acb-lobsterai",
+    // 真 gateway 只认注册表里的 id（cli / gateway-client / openclaw-* …）。
+    // 用 gateway-client + backend：本适配器是回环上的后端 RPC 客户端。
+    clientId = "gateway-client",
     clientVersion = "0.1.0",
   }) {
     if (!url) throw new Error(t("lobsterai.gateway_url_invalid", { url: "" }))
@@ -154,7 +156,8 @@ export class OpenClawGateway {
 
   /** 订阅某个 session 的 transcript 事件（会话内 tool/assistant 变更）。失败不致命。 */
   subscribeMessages(sessionKey) {
-    return this.request("sessions.messages.subscribe", { sessionKey }, { timeoutMs: 15_000 })
+    // 真 gateway 的参数名是 key（2026-11-13 实测：sessionKey 会 INVALID_REQUEST）。
+    return this.request("sessions.messages.subscribe", { key: sessionKey }, { timeoutMs: 15_000 })
   }
 
   /** 打断某个 run。 */
@@ -208,7 +211,8 @@ export class OpenClawGateway {
         id: this.clientId,
         version: this.clientVersion,
         platform: process.platform,
-        mode: "operator",
+        // 真 gateway 的 mode 枚举：webchat/cli/ui/backend/node/worker/probe/test。
+        mode: "backend",
       },
       role: "operator",
       scopes: ["operator.read", "operator.write"],

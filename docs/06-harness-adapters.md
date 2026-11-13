@@ -4,7 +4,9 @@
 > 用 `opencode2 serve` 常驻（见下面「常驻部署」）。**通用 ACP 适配器（`harnesses/acp/`）
 > 2026-11-13 落地**：启动命令是声明出来的 argv，任何说 ACP 的 stdio agent 都能接；
 > CodeBuddy 用 `codebuddy-acp --acp` 接上，真机握手/建会话/整轮已验。Trae 本轮明确放弃。
-> LobsterAI 因 app 未运行/未登录暂时搁置（代码保留，不回退）。早期 2.0.22 的插件加载问题
+> LobsterAI 的协议层已对真实 gateway 验证握手 / `chat.send` / MCP `tools/list` / 错误轮次
+> 的 `turn_end`（2026-11-13），但本机免费额度已用完、app 未运行，模型真回话仍未验证；
+> 桥上的槽位当前由 WorkBuddy instance 1 顶替。早期 2.0.22 的插件加载问题
 > 记在文末，作为历史记录保留。
 > 原则：桥不懂 harness 的内脏，harness 也不懂平台细节。适配器是那个翻译。
 
@@ -58,7 +60,7 @@ API 才退到进程外驱动或 MCP。这条判断写进了 [ADR-0013](adr/0013-
 | opencode | 插件（v2：`export default { id, setup(ctx) }`；工具用 `ctx.tool.transform` 注册，模型经 `execute` 调 `tools.X`） | 进程内：`ctx.session.prompt` 排话 + `ctx.session.wait` 等它说完 | 插件型，见 `harnesses/opencode/plugin/`；真机整轮已验（私聊 + 群）；2026-10-31 在 opencode2 2.0.22 上复验：插件加载正常、模型一次答全 25 个工具名 |
 | DSH | MCP（`dsh-mcp-client`，工具名 `mcp__acb__*`） | 进程外：驱动器调 webui HTTP/WS API（`session/prompt` + `session/follow` 等 `turn/end`） | 进程外 + MCP，见 `harnesses/dsh/`；协议层真机已验，模型真回话待配模型 |
 | 任意 ACP agent（CodeBuddy 等） | ACP：stdio JSON-RPC；桥工具作为 MCP server 在 `session/new` 里下发 | 进程外：按**声明的 argv** 拉起 agent，`session/prompt` 一轮，`stopReason` 即结束 | 见 `harnesses/acp/`。启动命令是数据（`ACB_ACP_AGENTS` / `ACB_ACP_COMMAND`），不认安装布局、不认 multi-instance。CodeBuddy 用 `codebuddy-acp --acp` 接上并真机跑通 |
-| LobsterAI | MCP（OpenClaw `mcp.servers`，streamable-http） | 进程外：WS 连 LobsterAI 内置 gateway，`chat.send` + `agent.wait` | 进程外 + MCP，见 `harnesses/lobsterai/`；假 gateway 协议层已验（16 个用例），**app 未运行/未登录，暂时搁置（代码保留）**，待登录后启用 |
+| LobsterAI | MCP（OpenClaw `mcp.servers`，streamable-http） | 进程外：WS 连 LobsterAI 内置 gateway，`chat.send` + `agent.wait` | 进程外 + MCP，见 `harnesses/lobsterai/`；假 gateway 16 个用例，**真 gateway 已验握手 / `chat.send` / MCP `tools/list` / 错误轮次 `turn_end`（2026-11-13）**；免费额度用完、app 未运行，模型真回话仍待验证。桥槽位当前由 workbuddy-1 顶替 |
 | Trae | — | — | 本轮放弃（可行性文档 3.8 的 spike 已经证明稳定 API 没有轮次完成信号） |
 | Codex | 无插件；有 `codex exec` 这类无头入口 | 进程外：每轮起一次 | 大概率进程外 + MCP 补工具面 |
 | OpenClaw | 由 LobsterAI 适配器覆盖（`mcp.servers`） | 进程外：`chat.send` + `agent.wait` | 不单独做通用 OpenClaw；本轮只做 LobsterAI 自己的 gateway/state |
@@ -665,8 +667,11 @@ acbl 的预设清单在系统包里，新预设有两条落地路径：等 acbl 
 
 ## LobsterAI 这一份（2026-11-06）
 
-> 状态：**暂时搁置（代码保留，不回退）**。本机 app 未运行、未登录，真实 gateway 还没握过手。
-> LobsterAI 登录后，把桥配置的 `[[sessions]] harness` 切回 `lobsterai` 即可启用，不需要改代码；
+> 状态：**真实 gateway 协议层已验（2026-11-13），模型真回话仍卡在额度**。实例状态在
+> `~/2/.config/LobsterAI/openclaw/state`（已登录，账号 `urs-phoneyd…@163.com`），但
+> 2026-11-13 16:45 的日志显示「免费额度已用完，请升级套餐」；app 未运行时本地 token
+> proxy 不在，模型调用直接报网络错误。桥配置里的 Slot 仍由 workbuddy-1 顶替，登录/额度
+> 恢复后把 `[[sessions]] harness` 切回 `lobsterai` 即可启用，不需要改代码；
 > 同一台机器上 CodeBuddy 走通用 ACP（`harnesses/acp/`），两条路互不影响。
 
 **形态：进程外 + MCP，但轮次必须走 LobsterAI 自己的 gateway。** LobsterAI 内置
@@ -718,22 +723,51 @@ wrapper 用 bwrap 把实例状态挂到 `$HOME` 下固定路径，真实 `~/.con
 
 ### 验过的
 
-- `node --test harnesses/lobsterai/test/*.test.mjs`：16 个用例，覆盖完整一轮
-  （假 gateway 接 `chat.send` → 假模型经 MCP 调 `send_message` → 假桥回 `tool_result` →
-  `agent.wait` ok → `turn_end`）、无票时 MCP 调用被拒、chat.send 拒绝、run error
-  （rate_limited 分类）、gateway 中途断开、超时 `chat.abort`、reset 换代次。
-- 配置路径：state 目录缺失、裸 `~/.openclaw`、quota 链路缺失、缺 `gateway-port.json`、
-  缺 `gateway-token`、显式地址/token 覆盖。
+**假 gateway（16 个用例）**：`node --test harnesses/lobsterai/test/*.test.mjs`，覆盖完整一轮
+（假 gateway 接 `chat.send` → 假模型经 MCP 调 `send_message` → 假桥回 `tool_result` →
+`agent.wait` ok → `turn_end`）、无票时 MCP 调用被拒、chat.send 拒绝、run error
+（rate_limited 分类）、gateway 中途断开、超时 `chat.abort`、reset 换代次；配置路径覆盖
+state 目录缺失、裸 `~/.openclaw`、quota 链路缺失、缺 `gateway-port.json`、缺
+`gateway-token`、显式地址/token 覆盖。
 
-### 还没验的（需要真实 app + 登录/额度）
+**真 gateway（2026-11-13，实例状态 `~/2`）**：用 LobsterAI 自带的 OpenClaw 2026.8.1
+（`resources/cfmind/openclaw.mjs`）按真实 state 启 gateway，适配器连上去跑了一轮：
 
-- 本机 `~/.config/LobsterAI` 为空、app 未运行，没有 `openclaw.json` / `gateway-token` /
-  `gateway-port.json`，所以连真实 gateway 都还没握过手；也还没验过
-  `multi-instance lobsterai 1` 实例里的首次登录和 state 生成。
-- 真实 gateway 的 `connect` 鉴权：token 是否够用、是否需要 device pairing、scope 是否
-  满足 `chat.send` / `agent.wait`。
-- 一次真实模型调用是否真的消耗 LobsterAI 额度（机制已核对，扣费未对账）。
-- `openclaw.user.json` 的 `mcp.servers.acb` 在应用下一次 sync 后是否保留。
-- 真实 `chat.send` → `agent.wait` 的完成信号、`sessions.messages.subscribe` 的流式事件。
-- 应用生命周期（gateway 重启、token 轮换）与 IM 双通道（LobsterAI 自带 QQ/微信/飞书）。
-- **未验证项不要把 mock 通过当成端到端通过。**
+```
+[verify] connected to LobsterAI gateway (protocol 4, OpenClaw 2026.8.1)
+[verify] turn start main-1: qq:group/159…, 1 record(s), OpenClaw session acb-main
+[verify] chat.send accepted: run main-1 (started)
+[verify] MCP tools/list #1
+[verify] error turn failed: Agent failed before reply: LLM request failed: network connection error
+[verify] turn_end sent: session main, ticket main-1
+```
+
+结论：
+
+- `connect` 握手、`chat.send` 接受、`agent.wait` 拿终态、错误也回 `turn_end`：真 gateway
+  上都成立。
+- 真 gateway 的 agent 会主动连适配器的 MCP server 并 `tools/list`（`mcp tools/list #1`），
+  所以 `mcp.servers.acb` 那条链路是对的。
+- **mock 通过掩盖了两个真实协议不符，已修**：
+  - `connect.params.client.id` 必须在上游注册表里（`cli` / `gateway-client` /
+    `openclaw-*` …），`mode` 只认 `webchat|cli|ui|backend|node|worker|probe|test`；
+    原先发 `acb-lobsterai` + `operator` 被真 gateway 以 `INVALID_REQUEST` 拒绝。现在是
+    `gateway-client` + `backend`。
+  - `sessions.messages.subscribe` 的参数名是 `key`，不是 `sessionKey`。假 gateway 之前
+    什么都收，所以没暴露；现在假 gateway 按真 schema 校验。
+- 直接用 state 目录的**副本**跑会被 `WorkspaceVanishedError` 拦住：`agents.entries.main.workspace`
+  是绝对路径，且 workspace 有过「最近初始化」的 attestation，复制出来的目录 inode 变了
+  就判定「消失」。要么用真 state，要么把 workspace 指到一个新目录（本轮用的是后者）。
+
+### 还没验的（需要用户操作）
+
+1. **app 在运行**（token proxy 在 `127.0.0.1:41853`）。app 不在时模型调用是
+   `LLM request failed: network connection error`，不是额度错误。
+2. **可用额度**。日志（2026-11-13 16:45）明确写着「免费额度已用完，请升级套餐」；
+   额度恢复前，模型不会真回话，也就无法验证模型是否真的调用 `mcp__acb__send_message`。
+3. 模型真回话后：一次成功轮次的 `turn_end`、工具调用真的发到桥、`sessions.messages.subscribe`
+   的流式事件、额度扣费对账。
+4. `openclaw.user.json` 的 `mcp.servers.acb` 在应用下一次 sync 后是否保留（本轮是直接写进
+   副本的 `openclaw.json`，没验应用自己的合并逻辑）。
+5. 应用生命周期（gateway 重启、token 轮换）与 IM 双通道（LobsterAI 自带 QQ/微信/飞书）。
+6. **未验证项不要把 mock 通过当成端到端通过。**

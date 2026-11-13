@@ -18,6 +18,29 @@ const FRAME_CLOSE = 0x8
 const FRAME_TEXT = 0x1
 const FRAME_PING = 0x9
 
+// 真 gateway 的注册表（2026-11-13 从 gateway-bundle.mjs 里读出来）。
+// 假 gateway 也照这个校验，否则客户端发错 id/mode 也能「通过」测试。
+const CLIENT_IDS = new Set([
+  "webchat-ui",
+  "openclaw-control-ui",
+  "openclaw-browser-copilot",
+  "openclaw-tui",
+  "webchat",
+  "cli",
+  "gateway-client",
+  "openclaw-macos",
+  "openclaw-linux",
+  "openclaw-ios",
+  "openclaw-watchos",
+  "openclaw-android",
+  "node-host",
+  "openclaw-worker",
+  "test",
+  "fingerprint",
+  "openclaw-probe",
+])
+const CLIENT_MODES = new Set(["webchat", "cli", "ui", "backend", "node", "worker", "probe", "test"])
+
 export class FakeGateway {
   constructor({
     token = "gw-token",
@@ -234,6 +257,14 @@ export class FakeGateway {
           this.#respondError(frame.id, "FORBIDDEN", "invalid gateway token")
           return
         }
+        if (!CLIENT_IDS.has(frame.params?.client?.id)) {
+          this.#respondError(frame.id, "INVALID_REQUEST", "invalid connect params: /client/id")
+          return
+        }
+        if (!CLIENT_MODES.has(frame.params?.client?.mode)) {
+          this.#respondError(frame.id, "INVALID_REQUEST", "invalid connect params: /client/mode")
+          return
+        }
         this.#respond(frame.id, {
           type: "hello-ok",
           protocol: 4,
@@ -249,6 +280,15 @@ export class FakeGateway {
         })
         return
       case "sessions.messages.subscribe":
+        // 真 gateway 只认 key；发 sessionKey 会 INVALID_REQUEST。
+        if (!frame.params || !("key" in frame.params) || "sessionKey" in frame.params) {
+          this.#respondError(
+            frame.id,
+            "INVALID_REQUEST",
+            "invalid sessions.messages.subscribe params: must have required property 'key'",
+          )
+          return
+        }
         this.subscriptions.push(frame.params)
         this.#respond(frame.id, { subscribed: true })
         return

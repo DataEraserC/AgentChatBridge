@@ -1,9 +1,10 @@
 # Harness 适配器可行性：Trae / WorkBuddy / LobsterAI
 
 > 状态：定稿（2026-11-06，含三条补充调查）；同日追加实现状态：**WorkBuddy** 与
-> **LobsterAI** 的适配器协议层已落地，**Trae 本轮不做**。**LobsterAI 因 app 未运行/未登录
-> 暂时搁置（代码保留），当前以 WorkBuddy instance 1 顶替它的槽位。** 协议层通过不等于
-> 端到端通过，未验证项见第 7 节。
+> **LobsterAI** 的适配器协议层已落地，**Trae 本轮不做**。**LobsterAI 的协议层已对真实
+> gateway 验证（2026-11-13：握手 / `chat.send` / MCP `tools/list` / 错误轮次 `turn_end`），
+> 但账号免费额度已用完且 app 未运行，模型真回话未验证；槽位当前仍由 WorkBuddy instance 1
+> 顶替。** 协议层通过不等于端到端通过，未验证项见第 7 节。
 > 证据等级：**已验证** = 本机命令输出、仓库/安装包文件内容或官方文档直接支持；**推断** = 由已验证事实推导、尚未端到端跑通；**未验证** = 只有间接线索或没有证据。
 > 范围：只判断「能否为 ACB 写 harness 适配器」，不判断 ACB 的平台侧（QQ/KOOK 等）适配器。
 
@@ -13,7 +14,7 @@
 |---|---|---|---|---|
 | **Trae** | **需要额外桥梁（高风险）；本轮不做** | VSIX/扩展宿主已验证可用；工具面和 prompt 注入有公开接法，但稳定 API 没有轮次完成信号 | 扩展 API 缺 `ChatSession`/轮次事件；私有 socket/DB 需逆向 | 工具面约 0.3× dsh；完整适配约 2–4× dsh，且不确定性高 |
 | **WorkBuddy** | **可直接做；协议层已实现；支持多实例** | CLI 四件事齐全：`-p` + `stream-json` + `--mcp-config` + `--append-system-prompt` + 会话续接；实例用独立 HOME/state/端口/会话前缀隔离 | 厂商 CLI 版本漂移、登录/权限、GUI 与 CLI 会话分离；缺 full bundle 是上游 WorkBuddy 发行物，不是 Nix 裁剪 | 约 1× dsh；约 1.5–2× opencode |
-| **LobsterAI** | **可直接做；协议层已实现（假 gateway）；app 未登录暂时搁置** | 内置 OpenClaw 运行时，gateway/CLI/MCP/ACP/agents 全部开放，且有 `openclaw.user.json` 覆盖层 | 应用状态目录/网关 token 的发现、应用生命周期、锁定 OpenClaw 版本；额度必须走 LobsterAI gateway/token proxy，裸 OpenClaw 不走 | 约 1.2–1.5× dsh；约 2× opencode |
+| **LobsterAI** | **可直接做；协议层已实现并经真 gateway 验证；额度/模型回话待恢复** | 内置 OpenClaw 运行时，gateway/CLI/MCP/ACP/agents 全部开放，且有 `openclaw.user.json` 覆盖层 | 应用状态目录/网关 token 的发现、应用生命周期、锁定 OpenClaw 版本；额度必须走 LobsterAI gateway/token proxy，裸 OpenClaw 不走 | 约 1.2–1.5× dsh；约 2× opencode |
 
 **一句话选型**：要最快闭环先做 WorkBuddy；要用 LobsterAI 免费额度/长期复用先做 LobsterAI（必须接 app 的 gateway/token proxy，不是裸 OpenClaw）；Trae 本轮不做。
 
@@ -398,7 +399,7 @@ multi-instance workbuddy 1   # instance 2 用 multi-instance workbuddy 2
 **需要补的工程**：
 
 1. **配置注入**：把 ACB MCP server 写进 OpenClaw 配置。优先走 `openclaw.user.json`（应用每次同步重新生成 `openclaw.json`，但用户覆盖文件会合并在上面）；也可以 `openclaw mcp add`，但要确认应用下一次 sync 不会覆盖。
-2. **状态/网关发现**：LobsterAI 生成 `openclaw.json` 的位置、gateway token、agent id/默认 agent，都由应用管理。`~/.config/LobsterAI` 本机为空，说明当前没有运行时状态；适配器需要在应用启动后找到 `<userData>/openclaw/` 或通过 `OPENCLAW_STATE_DIR`/配置路径定位。**这一条未验证**。
+2. **状态/网关发现**：LobsterAI 生成 `openclaw.json` 的位置、gateway token、agent id/默认 agent，都由应用管理。**已验（2026-11-13）**：实例状态在 `~/2/.config/LobsterAI/openclaw/state`（`~/2` 是独立 HOME），`gateway-port.json` = `18789`、`gateway-token` 可读，`config.mjs` 对这份真实文件解析出 `ws://127.0.0.1:18789` 和 token；`loopback-state.json` 里 token proxy = `41853`。仍然要靠 `ACB_LA_STATE_DIR` 指到对的实例。
 3. **轮次驱动（额度相关）**：**优先 gateway `chat.send`**，因为这就是 LobsterAI 自己的 gateway，模型走 `lobsterai-server` provider → 本地 token proxy → LobsterAI server，消耗 LobsterAI 额度。`openclaw agent --session-key ... --json` 也能走额度，但它是 Gateway client，默认读 `~/.openclaw`；必须把 `OPENCLAW_STATE_DIR`/`OPENCLAW_CONFIG_PATH` 指到 `~/.config/LobsterAI/openclaw/state`（或显式配 gateway remote url/token），否则是裸 OpenClaw，不走额度。`openclaw agent --local` 只有在使用 LobsterAI 生成的 `openclaw.json` + `LOBSTER_PROXY_TOKEN` + 运行中的 token proxy 时才走额度。**端到端未验证**。
 4. **避免双通道**：LobsterAI 自带 QQ/微信/飞书等 IM 通道（`@tencent-connect/openclaw-qqbot` 等插件）；ACB 接管 QQ 时，必须把对应 agent 的 QQ 通道关掉，或使用一个只被 ACB 驱动的专用 agent，避免同一条消息被两套桥重复回复。
 
@@ -434,14 +435,24 @@ LobsterAI 不是「只有一个 GUI」的产品：它的底层是 OpenClaw，Gat
 OpenClaw gateway WS 客户端。`node --test harnesses/lobsterai/test/*.test.mjs` 16 个用例
 用假 gateway 覆盖完整一轮、ticket、chat.send 拒绝、run error、gateway 断开、超时
 `chat.abort` 和 reset；配置测试覆盖 state 目录缺失、裸 `~/.openclaw`、quota 链路缺失、
-缺 gateway-port/token。真实 app 没运行、`~/.config/LobsterAI` 为空，所以真实 gateway
-握手、额度和模型回话仍未见（见第 7 节）。
+缺 gateway-port/token。
 
-**当前处置（2026-11-06）**：**LobsterAI 暂时搁置，代码保留、不回退**；桥上槽位由
-WorkBuddy instance 1 顶替。启用步骤：GUI 侧 `multi-instance lobsterai 1` 启动并在实例里
-登录，driver 侧 `ACB_LA_STATE_DIR=~/.config/LobsterAI/openclaw/state`、`ACB_MCP_PORT=7717`
-（或该实例里等价的 `openclaw/state`），然后把桥配置的 `[[sessions]] harness` 切回
-`lobsterai`；不需要改代码。
+**真 gateway 实测（2026-11-13）**：用 LobsterAI 自带的 OpenClaw 2026.8.1
+（`resources/cfmind/openclaw.mjs`）按真实 state 起 gateway，适配器连上去跑了一轮：
+握手成功（protocol 4）、`chat.send` 被接受、真 agent 主动连适配器 MCP server 并
+`tools/list`、模型失败时也回 `turn_end`。**mock 掩盖了两个真实协议不符，已修**：
+`connect.client.id/mode` 必须是注册表内的值（现为 `gateway-client` + `backend`；
+原来 `acb-lobsterai` + `operator` 被真 gateway 拒绝），`sessions.messages.subscribe`
+的参数名是 `key`（原来发 `sessionKey`）。假 gateway 现在按真 schema 校验这两处。
+模型没回话的原因不是协议：app 未运行导致 token proxy 不在（`LLM request failed:
+network connection error`），且日志显示账号免费额度已用完。
+
+**当前处置（2026-11-13）**：**LobsterAI 仍由 WorkBuddy instance 1 顶替槽位，代码保留、不回退**。
+启用前提：额度恢复 + app 在运行（token proxy 起来）。步骤：GUI 侧
+`multi-instance lobsterai 1` 启动并在实例里登录，driver 侧
+`ACB_LA_STATE_DIR=~/.config/LobsterAI/openclaw/state`、`ACB_MCP_PORT=7717`（或该实例里
+等价的 `openclaw/state`），然后把桥配置的 `[[sessions]] harness` 切回 `lobsterai`；
+不需要改代码。
 
 ### 5.6 主要风险
 
@@ -469,7 +480,7 @@ WorkBuddy instance 1 顶替。启用步骤：GUI 侧 `multi-instance lobsterai 1
 | **`chat.send` 到 app gateway** | **能走额度（机制已验证）** | app gateway 用生成的 `openclaw.json`，provider 是 `lobsterai-server` → token proxy；`chat.send` 是 gateway 的普通写入路径 |
 | **`openclaw agent --session-key`** | **能走额度，但前提是接到 LobsterAI 的 gateway/state** | `openclaw agent` 是 Gateway client；默认读 `~/.openclaw`（OpenClaw 默认），不会自动继承 LobsterAI 的 `<userData>/openclaw/state`（推断）。必须设 `OPENCLAW_STATE_DIR`/`OPENCLAW_CONFIG_PATH` 到该 state，或设置 gateway remote url/token；否则是裸 OpenClaw，不走额度 |
 | **`openclaw agent --local`** | **不一定** | `--local` 是嵌入式 agent；只有使用 LobsterAI 生成的 `openclaw.json` + `LOBSTER_PROXY_TOKEN` + 运行中的 token proxy 时才走额度；裸配置不走 |
-| **免费额度实际扣减** | **未验证** | 机制、endpoint、账号身份都已验证；没有做一次真实模型调用去对账 credits/usage。当前 `~/.config/LobsterAI` 为空，app 未运行，无法在本机做端到端 |
+| **免费额度实际扣减** | **未验证；当前账号额度已用完** | 机制、endpoint、账号身份都已验证。2026-11-13 的实例日志（16:45）明确写「免费额度已用完，请升级套餐」，所以现在连一次成功模型调用都做不了；额度恢复后再对账 credits/usage |
 
 **入口结论**：适配器要接的是 **LobsterAI 自己启动的 OpenClaw gateway + token proxy**，不是裸 OpenClaw：
 
@@ -477,7 +488,7 @@ WorkBuddy instance 1 顶替。启用步骤：GUI 侧 `multi-instance lobsterai 1
 - **次直接**：把 `OPENCLAW_STATE_DIR` 指到 `<userData>/openclaw/state`，跑 `openclaw agent --session-key ... --json`；但必须保证 gateway 在运行、`LOBSTER_PROXY_TOKEN` 在环境里，且 agent 的默认模型是 `lobsterai-server/*`。
 - **裸 OpenClaw / 自带 provider 的 `openclaw agent`**：**不走 LobsterAI 额度**。
 
-**结论分级**：**能走额度（机制已验证；实际扣费未验证）**。风险是 app 生命周期、token 读取、状态目录发现；不是扩展面缺失。当前 **app 未运行/未登录，暂时搁置**，以 WorkBuddy instance 1 顶替。
+**结论分级**：**能走额度（机制已验证；实际扣费未验证）**。风险是 app 生命周期、token 读取、状态目录发现；不是扩展面缺失。当前额度已用完、app 未运行，**适配器仍由 WorkBuddy instance 1 顶替槽位**，LobsterAI 代码保留待启用。
 
 ---
 
@@ -572,9 +583,9 @@ WorkBuddy instance 1 顶替。启用步骤：GUI 侧 `multi-instance lobsterai 1
 
 ### LobsterAI
 
-**当前处置（2026-11-06）**：app 未运行、未登录，**暂时搁置（代码保留，不回退）**；桥上槽位
-由 WorkBuddy instance 1 顶替。登录并生成 `<userData>/openclaw/state` 后，把桥配置的
-`[[sessions]] harness` 切回 `lobsterai` 即可启用，不需要改代码。
+**当前处置（2026-11-13）**：实例状态已在 `~/2`（独立 HOME）确认并已登录，但**免费额度用完
+且 app 未运行**，LobsterAI 仍由 WorkBuddy instance 1 顶替槽位（代码保留、不回退）。额度
+恢复后按 5.5 的步骤启用，不需要改代码。
 
 **已从「未验证」转「协议层已验证」（2026-11-06，假 gateway）**：
 
@@ -582,17 +593,27 @@ WorkBuddy instance 1 顶替。启用步骤：GUI 侧 `multi-instance lobsterai 1
 - ticket 校验、chat.send 拒绝、run error、gateway 断开、超时 `chat.abort`、reset。
 - 配置守卫：state 目录缺失、裸 `~/.openclaw`、quota 链路缺失、缺 gateway-port/token。
 
+**已从「未验证」转「真 gateway 已验证」（2026-11-13）**：
+
+- 本机实例状态在 `~/2/.config/LobsterAI/openclaw/state`：`gateway-port.json`=18789、
+  `gateway-token`、`openclaw.json`（provider `lobsterai-server`、apiKey `${LOBSTER_PROXY_TOKEN}`）、
+  `loopback-state.json`（token proxy 41853）；账号已登录。
+- 适配器的 state/gateway 发现对真实文件解析正确（`ws://127.0.0.1:18789` + token）。
+- 真 gateway 握手成功（protocol 4 / OpenClaw 2026.8.1），`chat.send` 被接受，
+  真 agent 连上适配器 MCP server 并 `tools/list`，失败时也回 `turn_end`。
+- 真 gateway 暴露并已修两个 mock 掩盖的协议差异：`client.id/mode` 注册表校验、
+  `sessions.messages.subscribe` 用 `key`。
+
 **仍未验证**：
 
-- 本机 `~/.config/LobsterAI` 为空、app 未运行，`openclaw.json` / `gateway-token` /
-  `gateway-port.json` 实际文件没生成过；真实 gateway 都没握过手。
-- 真实 gateway 鉴权：token 是否够用、是否需要 device pairing、scope 是否满足
-  `chat.send` / `agent.wait`。
-- **额度实际扣减未验证**：机制、endpoint、账号身份都已核对，但没有做一次真实模型调用去
-  对账 credits/usage。
+- **模型真回话**：app 未运行 → token proxy 不在（`LLM request failed: network connection
+  error`）；且实例日志（2026-11-13 16:45）显示「免费额度已用完，请升级套餐」。
+- 模型真实调用 `mcp__acb__send_message`、成功轮次的 `turn_end`、`sessions.messages.subscribe`
+  流式事件。
+- **额度实际扣减未验证**：机制、endpoint、账号身份都已核对，但没有成功模型调用可对账。
 - `openclaw.user.json` 覆盖 `mcp.servers` 后，应用下一次 sync 是否真的保留。
-- gateway `chat.send` + `sessions.messages.subscribe` 的流式事件/完成判定。
-- token proxy 端口/`LOBSTER_PROXY_TOKEN` 的读取路径；端口每次可能变。
+- 直接用 state 目录副本跑会触发 `WorkspaceVanishedError`（workspace 绝对路径 +
+  attestation）；只能用真 state 或改 workspace。
 - 应用生命周期（gateway 重启/token 轮换）与 LobsterAI 自带 QQ/微信/飞书通道的重复回复。
 
 ---

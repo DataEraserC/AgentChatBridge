@@ -83,6 +83,13 @@ test("完整一轮：turn_start → chat.send → MCP 工具 → agent.wait ok �
   const run = driver.run(delivery(), link)
 
   await fake.waitForChatSend()
+  // 真 gateway 只认注册表里的 client id / mode（假 gateway 也照着校验）。
+  const connectReq = fake.requests.find((frame) => frame.method === "connect")
+  assert.equal(connectReq.params.client.id, "gateway-client")
+  assert.equal(connectReq.params.client.mode, "backend")
+  // transcript 订阅的参数名是 key，不是 sessionKey。
+  await waitFor(() => fake.subscriptions.length > 0, "gateway 没收到 transcript 订阅")
+  assert.deepEqual(fake.subscriptions[0], { key: "acb-main" })
   assert.equal(fake.chatSendCalls.length, 1)
   assert.equal(fake.chatSendCalls[0].sessionKey, "acb-main")
   assert.equal(fake.chatSendCalls[0].idempotencyKey, TICKET)
