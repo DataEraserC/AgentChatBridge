@@ -1421,7 +1421,7 @@
   "adapter.qqbot.frame_parse_failed": "网关帧解析失败：{error}",
   "adapter.qqbot.submit_failed": "入站队列拒收记录：{error}",
   "adapter.qqbot.event_parse_failed": "事件解析失败：{detail}",
-  "adapter.qqbot.transport_unsupported": "不支持传输方式 {transport}（只支持 ws-client）",
+  "adapter.qqbot.transport_unsupported": "不支持传输方式 {transport}（只支持 qq-gateway）",
   "adapter.qqbot.appid_required": "连接 {id} 需要 account = 机器人的 AppID",
   "adapter.qqbot.secret_required": "连接 {id} 需要 token = 机器人的 AppSecret",
   "adapter.qqbot.room_mismatch": "房间 {room} 不属于这条连接",

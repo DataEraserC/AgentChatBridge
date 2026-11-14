@@ -197,6 +197,8 @@ pub struct OneBotSnowLumaAdapterFactory;
 /// manifest() 运行时注入。
 fn onebot11_options_schema() -> serde_json::Value {
     serde_json::json!({
+        // x-account：连接表单「账号」字段的适配器自定义提示。
+        "x-account": {"placeholder": "机器人 QQ 号"},
         "type": "object",
         "properties": {
             "http_listen": {

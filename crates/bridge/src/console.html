@@ -2550,10 +2550,17 @@ async function fetchAdapterList() {
   }
 }
 
+// 适配器对「账号」字段的自定义提示（manifest.options_schema.x-account）。
+function accountMeta(adapter) {
+  const meta = adapter?.options_schema?.["x-account"] || {};
+  return { placeholder: meta.placeholder || "", description: meta.description || "" };
+}
+
 async function addConnection() {
   const [adapters, secrets] = await Promise.all([fetchAdapterList(), fetchSecretsList()]);
   window.__ncAdapters = adapters;
   const defaultAdapter = adapters.find((a) => a.kind === "onebot11") || adapters[0] || null;
+  const defaultAccount = accountMeta(defaultAdapter);
   const adapterOptions = adapters.map((a) => {
     const label = a.title && a.title !== a.kind ? `${a.title} (${a.kind})` : a.kind;
     return `<option value="${esc(a.kind)}"${a === defaultAdapter ? " selected" : ""}>${esc(label)}</option>`;
@@ -2569,7 +2576,7 @@ async function addConnection() {
       <select id="nc-transport" onchange="onConnectionAdapterChange()">${initialTransports.map((tr) => `<option value="${esc(tr)}">${esc(tr)}</option>`).join("")}</select>
       <span class="hint">${esc(t("console.config.field.transportHint"))}</span></div>
     <div class="form-row" id="nc-url-row"><label>${esc(t("console.config.field.url"))}</label><input type="text" id="nc-url" placeholder="ws://127.0.0.1:53001" style="max-width:340px"><span class="hint">${esc(t("console.config.field.urlHint"))}</span></div>
-    <div class="form-row"><label>${esc(t("console.config.field.account"))}</label><input type="text" id="nc-account" placeholder="${esc(t("console.config.field.accountPlaceholder"))}"></div>
+    <div class="form-row"><label>${esc(t("console.config.field.account"))}</label><input type="text" id="nc-account" placeholder="${esc(defaultAccount.placeholder || t("console.config.field.accountPlaceholder"))}"><span class="hint" id="nc-account-hint">${esc(defaultAccount.description)}</span></div>
     <div class="form-row"><label>${esc(t("console.config.field.secretName"))}</label>
       <select id="nc-secret" onchange="toggleInlineSecretCreate('nc')">${secretSelectHtml(secrets, "")}</select>
       <span class="hint">${esc(t("console.config.field.secretNameSelectHint"))}</span></div>
@@ -2632,6 +2639,12 @@ function onConnectionAdapterChange() {
   }
   const urlRow = document.getElementById("nc-url-row");
   if (urlRow) urlRow.style.display = (transportSelect?.value || "").startsWith("ws") ? "" : "none";
+  // 账号提示跟随适配器（如 qqbot 填 AppID 而非 QQ 号）。
+  const account = document.getElementById("nc-account");
+  const meta = accountMeta(adapter);
+  if (account && meta.placeholder) account.placeholder = meta.placeholder;
+  const hint = document.getElementById("nc-account-hint");
+  if (hint) hint.textContent = meta.description || "";
   const container = document.getElementById("nc-options");
   if (!container) return;
   const schema = adapter?.options_schema;

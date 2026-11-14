@@ -67,6 +67,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// static 里不能调 json!（非 const），manifest() 运行时注入。
 fn process_options_schema() -> serde_json::Value {
     serde_json::json!({
+        "x-account": {"placeholder": "bot 标识"},
         "type": "object",
         "required": ["command"],
         "properties": {

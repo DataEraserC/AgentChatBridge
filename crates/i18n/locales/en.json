@@ -1421,7 +1421,7 @@
   "adapter.qqbot.frame_parse_failed": "bad gateway frame: {error}",
   "adapter.qqbot.submit_failed": "event queue rejected the record: {error}",
   "adapter.qqbot.event_parse_failed": "event parse failed: {detail}",
-  "adapter.qqbot.transport_unsupported": "transport {transport} is not supported (only ws-client)",
+  "adapter.qqbot.transport_unsupported": "transport {transport} is not supported (only qq-gateway)",
   "adapter.qqbot.appid_required": "connection {id} requires account = the bot AppID",
   "adapter.qqbot.secret_required": "connection {id} requires token = the bot AppSecret",
   "adapter.qqbot.room_mismatch": "room {room} does not belong to this connection",
