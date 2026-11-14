@@ -51,7 +51,8 @@ pub fn parse(
             at,
             "private",
             "user_openid",
-            false,
+            // 私聊消息天然「冲我来」：唤醒策略的 at_mention 才能在单聊里工作。
+            true,
         ),
         // 其余类型（FRIEND_ADD、interaction、audit…）记 suppressed 事件流水。
         _ => Ok(Parsed::Record(notice(connection, event_type, payload, at)?)),
