@@ -315,46 +315,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // 入站队列：适配器只往里丢记录，core 的 drain 线程统一 ingest。
     let (events, event_rx, inbound_stats) = EventQueue::channel_with(config.queues);
 
-    // 适配器自有状态目录的根：与 acb.db 同级（state/adapters/<kind|连接名>/）。
-    // 既给 per-connection 的 state_dir 用，也给适配器自有库（provider 侧）用。
-    let adapters_state_root = std::path::Path::new(&config.storage.path)
-        .parent()
-        .map(|parent| parent.join("adapters"))
-        .unwrap_or_else(|| std::path::PathBuf::from("state/adapters"));
-
-    // 双轨制合并：config 连接 + 适配器自有库的连接。config 优先（运维显式写的
-    // 赢），id 冲突的 provider 连接跳过并告警。
-    let mut merged_connections: Vec<acb_kernel::Connection> = config.connections.clone();
-    {
-        let mut seen: std::collections::HashSet<String> = merged_connections
-            .iter()
-            .map(|connection| connection.id.clone())
-            .collect();
-        for factory in plugins.adapter_factories() {
-            let Some(extra) = factory.connections(&adapters_state_root) else {
-                continue;
-            };
-            for connection in extra {
-                if !seen.insert(connection.id.clone()) {
-                    eprintln!(
-                        "{}",
-                        acb_i18n::t!(
-                            "bridge.main.duplicate_connection_skipped",
-                            id = connection.id
-                        )
-                    );
-                    continue;
-                }
-                merged_connections.push(connection);
-            }
-        }
-    }
-
+    // 适配器自有连接（state/adapters/<目录>/connections.db）由 kernel 的配置
+    // 构建阶段注入（校验之前），见 kernel config.rs 的 inject_adapter_connections。
     // 每条连接先占一个发送口，桥建好之后再起守护线程去连。
     // 适配器由 Root 按 kind 实例化；main 不再知道 onebot11 的构造细节。
     let mut outbounds = Outbounds::new();
     let mut launches = Vec::new();
-    for connection in &merged_connections {
+    for connection in &config.connections {
         let instance = match plugins.create_adapter(connection, events.clone()) {
             Ok(instance) => instance,
             Err(error) => {
@@ -446,6 +413,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         None
     };
 
+    // 适配器自有状态目录的根：与 acb.db 同级（state/adapters/<连接名>/）。
+    let adapters_state_root = std::path::Path::new(&config.storage.path)
+        .parent()
+        .map(|parent| parent.join("adapters"))
+        .unwrap_or_else(|| std::path::PathBuf::from("state/adapters"));
     for (connection_id, launch) in launches {
         let state_dir = adapters_state_root.join(&connection_id);
         if let Err(error) = std::fs::create_dir_all(&state_dir) {

@@ -1406,5 +1406,10 @@
   "adapter.onebot11.secret_key_missing": "连接 {id}：存在加密令牌但没有可用密钥，跳过该行",
   "adapter.onebot11.secret_decrypt_failed": "连接 {id}：令牌解密失败：{error}；跳过该行",
   "adapter.onebot11.state_open_failed": "onebot 连接库打开失败：{error}",
-  "adapter.onebot11.transport_unknown": "连接 {id}：未知传输方式 {transport}；跳过该行"
+  "adapter.onebot11.transport_unknown": "连接 {id}：未知传输方式 {transport}；跳过该行",
+  "kernel.config.adapter_connections_open_failed": "适配器连接库打开失败：{path}",
+  "kernel.config.adapter_connections_schema_mismatch": "适配器连接库不符合标准 schema：{path}",
+  "kernel.config.adapter_connections_row_invalid": "适配器连接库 {path}：行 {id} 缺必填字段；已跳过",
+  "kernel.config.adapter_connections_duplicate": "适配器连接库：连接 {id} 与 config 连接冲突，已跳过（config 优先）",
+  "kernel.config.adapter_connections_transport_unknown": "适配器连接库：连接 {id} 的传输方式 {transport} 未知；已跳过"
 }

@@ -3,17 +3,18 @@
 //! core 按 `kind = "qqbot"` 从 Root 取 `AdapterInstance`；连接线程由适配器
 //! 自己启动（`launch`），core 不持有 socket。
 //!
-//! 连接配置约定：
-//! - `account` = 机器人的 AppID（开放平台控制台的机器人 ID）；
-//! - `token` = AppSecret（用于换 access token；官方已废弃直接用 Bot Token）；
-//! - `url`（可选）= 网关地址，默认 `wss://api.sgroup.qq.com/websocket`；
-//! - `options.api_base`（可选）= REST 基地址（沙箱用 sandbox.api.sgroup.qq.com）；
-//! - `options.token_url`（可选）= token 接口（默认 api.bot.qq.com）。
+//! 连接配置约定（provider 模式，见 kernel 的 `ADAPTER_CONNECTIONS_SCHEMA_SQL`）：
+//! - 连接定义住在适配器自有库 `state/adapters/qqbot/connections.db`
+//!   （标准 schema，`launch` 时确保存在），运维直接维护行；
+//! - `account` = 机器人的 AppID；`token_secret` = secrets 体系里的引用名
+//!   （AppSecret 值存控制台/agenix，适配器库不存明文）；
+//! - `options_json` 可带 `api_base` / `token_url` 覆盖默认端点。
 
 use std::borrow::Cow;
 use acb_kernel::{
-    ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
-    AdapterInstance, AdapterManifest, Connection, EventQueue, PluginEffect, PluginMetadata,
+    ADAPTER_API_VERSION, ADAPTER_CONNECTIONS_SCHEMA_SQL, AdapterCapability, AdapterError,
+    AdapterFactory, AdapterHost, AdapterInstance, AdapterManifest, Connection, EventQueue,
+    PluginEffect, PluginMetadata,
 };
 
 use crate::{QqBotOfficialOutbound, TokenManager, supervise};
@@ -61,130 +62,14 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
     direct_room: None,
 };
 
-/// 自有库（`<state_root>/qqbot/connections.db`）里的连接定义。
-///
-/// 这是 provider 侧的真 schema：连接定义、凭据、群管理员都住在适配器自己的
-/// 库里，核心零改动。AppSecret 支持 AcbKey 加密（`v1:` 前缀，ACB_KEY_FILE/
-/// ACB_KEY 解密）与明文两种存储。
-struct OwnedConnection {
-    id: String,
-    app_id: String,
-    app_secret: String,
-    api_base: Option<String>,
-    ws_url: Option<String>,
-    admin_qqs: Vec<String>,
-}
-
-fn connections_db_path(state_root: &std::path::Path) -> std::path::PathBuf {
-    state_root.join("qqbot").join("connections.db")
-}
-
-fn open_connections_db(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let connection = rusqlite::Connection::open(path).map_err(|error| error.to_string())?;
-    connection
-        .execute(
-            "CREATE TABLE IF NOT EXISTS connections (
-                id          TEXT PRIMARY KEY,
-                app_id      TEXT NOT NULL,
-                app_secret  TEXT NOT NULL,
-                api_base    TEXT,
-                ws_url      TEXT,
-                admin_json  TEXT NOT NULL DEFAULT '[]',
-                created_at  INTEGER NOT NULL
-            )",
-            [],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(connection)
-}
-
-/// 从自有库读连接定义。解不开的密文（密钥缺失/换 kid）跳过并告警——
-/// 单行故障不拖垮其它连接。
-fn load_owned_connections(
-    path: &std::path::Path,
-) -> Vec<Connection> {
-    let Ok(connection) = open_connections_db(path) else {
-        return Vec::new();
+/// 确保 provider 侧的标准连接库存在（schema 由 core 定义，见
+/// `ADAPTER_CONNECTIONS_SCHEMA_SQL`）。行由运维修护
+/// （sqlite3 INSERT），适配器只保证文件与表就位。
+fn ensure_connections_db(path: &std::path::Path) {
+    let Ok(connection) = rusqlite::Connection::open(path) else {
+        return;
     };
-    let Ok(mut statement) = connection.prepare(
-        "SELECT id, app_id, app_secret, api_base, ws_url, admin_json
-         FROM connections ORDER BY created_at, id",
-    ) else {
-        return Vec::new();
-    };
-    let key = acb_kernel::crypto::AcbKey::load().ok().flatten();
-    let rows = statement.query_map([], |row| {
-        Ok(OwnedConnection {
-            id: row.get(0)?,
-            app_id: row.get(1)?,
-            app_secret: row.get(2)?,
-            api_base: row.get(3)?,
-            ws_url: row.get(4)?,
-            admin_qqs: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
-        })
-    });
-    let mut rows = match rows {
-        Ok(rows) => rows,
-        Err(error) => {
-            eprintln!(
-                "{}",
-                acb_i18n::t!("adapter.qqbot.state_open_failed", error = error.to_string())
-            );
-            return Vec::new();
-        }
-    };
-    let mut connections = Vec::new();
-    while let Some(Ok(owned)) = rows.next() {
-        let secret = if acb_kernel::crypto::is_encrypted(&owned.app_secret) {
-            let Some(key) = key.as_ref() else {
-                eprintln!(
-                    "{}",
-                    acb_i18n::t!(
-                        "adapter.qqbot.secret_key_missing",
-                        id = owned.id
-                    )
-                );
-                continue;
-            };
-            match key.decrypt(&owned.app_secret) {
-                Ok(plain) => plain,
-                Err(error) => {
-                    eprintln!(
-                        "{}",
-                        acb_i18n::t!(
-                            "adapter.qqbot.secret_decrypt_failed",
-                            id = owned.id,
-                            error = error
-                        )
-                    );
-                    continue;
-                }
-            }
-        } else {
-            owned.app_secret.clone()
-        };
-        let mut options = serde_json::Map::new();
-        if let Some(base) = owned.api_base {
-            options.insert("api_base".to_owned(), serde_json::Value::String(base));
-        }
-        connections.push(Connection {
-            id: owned.id.clone(),
-            platform: "qq".to_owned(),
-            kind: "qqbot".to_owned(),
-            transport: acb_kernel::Transport::WsClient,
-            url: owned.ws_url,
-            options: serde_json::Value::Object(options),
-            token: Some(secret),
-            account: owned.app_id,
-            admin_qqs: owned.admin_qqs,
-            receive: Default::default(),
-            routes: Vec::new(),
-        });
-    }
-    connections
+    let _ = connection.execute(ADAPTER_CONNECTIONS_SCHEMA_SQL, []);
 }
 
 #[derive(Debug, Default)]
@@ -193,13 +78,6 @@ pub struct QqBotOfficialAdapterFactory;
 impl AdapterFactory for QqBotOfficialAdapterFactory {
     fn manifest(&self) -> AdapterManifest {
         MANIFEST.clone()
-    }
-
-    fn connections(
-        &self,
-        state_root: &std::path::Path,
-    ) -> Option<Vec<Connection>> {
-        Some(load_owned_connections(&connections_db_path(state_root)))
     }
 
     fn create(
@@ -253,6 +131,15 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
         let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
             // 被动窗口锚点进自有库：重启后仍能回复（桥重启不丢 msg_id）。
             reply_state.bind(&host.state_dir.join("adapter.db"));
+            // provider 侧连接库（标准 schema，core 定义）：确保存在，运维在此
+            // 维护连接行；core 配置构建时注入。
+            ensure_connections_db(
+                &host
+                    .state_dir
+                    .parent()
+                    .expect("state_dir 有父目录")
+                    .join("qqbot"),
+            );
             supervise(
                 connection,
                 host.shutdown,
@@ -338,70 +225,35 @@ mod tests {
             .expect_err("只支持 ws-client");
         assert!(matches!(error, AdapterError::Create(_, _)));
     }
-}
 
-#[cfg(test)]
-mod provider_tests {
-    use super::*;
-
-    fn seed(db: &std::path::Path, rows: &[(&str, &str, &str, Option<&str>)]) {
-        let connection = open_connections_db(db).expect("建库");
-        let now = 1_000_000;
-        for (id, app_id, secret, api_base) in rows {
-            connection
-                .execute(
-                    "INSERT INTO connections (id, app_id, app_secret, api_base, admin_json, created_at)
-                     VALUES (?1, ?2, ?3, ?4, '[]', ?5)",
-                    rusqlite::params![id, app_id, secret, api_base, now],
-                )
-                .expect("插入");
+    #[test]
+    fn ensure_connections_db_creates_standard_schema() {
+        let dir = std::env::temp_dir().join(format!("qqbot-ensure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("connections.db");
+        ensure_connections_db(&path);
+        let connection = rusqlite::Connection::open(&path).expect("打开");
+        let columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(connections)")
+            .expect("pragma")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .filter_map(Result::ok)
+            .collect();
+        for expected in [
+            "id",
+            "platform",
+            "kind",
+            "transport",
+            "url",
+            "account",
+            "token_secret",
+            "admin_json",
+            "routes_json",
+            "options_json",
+            "created_at",
+        ] {
+            assert!(columns.contains(&expected.to_owned()), "缺列 {expected}");
         }
-    }
-
-    #[test]
-    fn provider_reads_plaintext_rows() {
-        let root = std::env::temp_dir().join(format!("qqbot-provider-{}", std::process::id()));
-        let db = connections_db_path(&root);
-        std::fs::create_dir_all(db.parent().expect("parent")).expect("目录");
-        seed(
-            &db,
-            &[
-                ("qqbot-a", "1111", "secret-a", Some("https://sandbox.example")),
-                ("qqbot-b", "2222", "secret-b", None),
-            ],
-        );
-        let connections = QqBotOfficialAdapterFactory
-            .connections(&root)
-            .expect("是 provider");
-        assert_eq!(connections.len(), 2);
-        let a = connections.iter().find(|c| c.id == "qqbot-a").expect("A");
-        assert_eq!(a.account, "1111");
-        assert_eq!(a.kind, "qqbot");
-        assert_eq!(a.platform, "qq");
-        assert_eq!(
-            a.options.get("api_base"),
-            Some(&serde_json::json!("https://sandbox.example"))
-        );
-        assert_eq!(a.token.as_deref(), Some("secret-a"));
-        let b = connections.iter().find(|c| c.id == "qqbot-b").expect("B");
-        assert!(b.options.get("api_base").is_none(), "None 不写 options");
-    }
-
-    #[test]
-    fn provider_skips_undecryptable_rows() {
-        let root = std::env::temp_dir().join(format!("qqbot-provider2-{}", std::process::id()));
-        let db = connections_db_path(&root);
-        std::fs::create_dir_all(db.parent().expect("parent")).expect("目录");
-        seed(
-            &db,
-            &[
-                ("qqbot-enc", "3333", "v1:deadbeef:notarealciphertext", None),
-                ("qqbot-plain", "4444", "plain-secret", None),
-            ],
-        );
-        // 无 ACB_KEY 的环境：密文行跳过，明文行照常。
-        let connections = QqBotOfficialAdapterFactory.connections(&root).expect("是 provider");
-        assert_eq!(connections.len(), 1);
-        assert_eq!(connections[0].id, "qqbot-plain");
     }
 }

@@ -261,19 +261,6 @@ pub trait AdapterFactory: Send + Sync {
         events: EventQueue,
     ) -> Result<AdapterInstance, AdapterError>;
 
-    /// 双轨制 provider 侧（可选）：适配器从自己的库里取连接定义（可能复数）。
-    ///
-    /// 返回 `Some` 的适配器在启动时把这些连接合并进寻址视图；config 连接优先，
-    /// id 冲突的 provider 连接跳过并告警。变更随桥重启生效——与 config 连接
-    /// 的 reload 语义一致（连接变更本来就是 restart-required）。运行时热注册
-    /// 是 ADR-0029 热重载成熟后的后续工作。
-    ///
-    /// `state_root` 是适配器状态目录的根（`state/adapters/`）：自有库放在
-    /// `<state_root>/<kind>/` 下，与 per-connection 的 `state_dir` 区分开。
-    fn connections(&self, state_root: &std::path::Path) -> Option<Vec<Connection>> {
-        let _ = state_root;
-        None
-    }
 
     /// 工厂级健康状态。默认 Unknown：平台连接状态由 `/api/dependencies` 维护，
     /// 不能在这里假装 Healthy；动态适配器可覆盖为句柄级健康。
@@ -574,6 +561,7 @@ mod tests {
             events: crate::event_queue::EventQueue::channel().0,
             shutdown,
             status: AdapterStatus::new(id, deps),
+            state_dir: std::path::PathBuf::from("/tmp/acb-test-state"),
         }
     }
 

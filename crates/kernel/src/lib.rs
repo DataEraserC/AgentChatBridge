@@ -41,6 +41,7 @@ pub use adapter::{
     manifest_supports_transport, run_adapter, validate_manifest,
 };
 pub use config::{
+    ADAPTER_CONNECTIONS_SCHEMA_SQL,
     AccessPolicy, CONSOLE_CONFIG_FILENAME, ClockPolicy, Config, ConfigSource, Connection,
     ConsoleConfig, DEFAULT_MAX_AGE_DAYS, DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH,
     DEFAULT_WORKTREES_ROOT, DeliveryPolicy, EndpointConfig, Harness, InBandNoticeConfig,

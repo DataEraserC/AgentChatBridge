@@ -1406,5 +1406,10 @@
   "adapter.onebot11.secret_key_missing": "connection {id}: encrypted token present but no ACB key; row skipped",
   "adapter.onebot11.secret_decrypt_failed": "connection {id}: token decrypt failed: {error}; row skipped",
   "adapter.onebot11.state_open_failed": "onebot connections db open failed: {error}",
-  "adapter.onebot11.transport_unknown": "connection {id}: unknown transport {transport}; row skipped"
+  "adapter.onebot11.transport_unknown": "connection {id}: unknown transport {transport}; row skipped",
+  "kernel.config.adapter_connections_open_failed": "adapter connections db open failed: {path}",
+  "kernel.config.adapter_connections_schema_mismatch": "adapter connections db does not match the standard schema: {path}",
+  "kernel.config.adapter_connections_row_invalid": "adapter connections db {path}: row {id} missing required fields; skipped",
+  "kernel.config.adapter_connections_duplicate": "adapter connections db: connection {id} clashes with a config connection; skipped (config wins)",
+  "kernel.config.adapter_connections_transport_unknown": "adapter connections db: connection {id} has unknown transport {transport}; skipped"
 }

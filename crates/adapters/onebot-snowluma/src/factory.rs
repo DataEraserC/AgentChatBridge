@@ -7,7 +7,6 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use serde_json::Value;
 
 use acb_kernel::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
@@ -80,6 +79,16 @@ pub static MANIFEST: AdapterManifest = AdapterManifest {
     direct_room: None,
 };
 
+/// 确保 provider 侧的标准连接库存在（schema 由 core 定义，见
+/// `acb_kernel::ADAPTER_CONNECTIONS_SCHEMA_SQL`）。行由运维修护
+/// （sqlite3 INSERT），适配器只保证文件与表就位。
+fn ensure_connections_db(path: &std::path::Path) {
+    let Ok(connection) = rusqlite::Connection::open(path) else {
+        return;
+    };
+    let _ = connection.execute(acb_kernel::ADAPTER_CONNECTIONS_SCHEMA_SQL, []);
+}
+
 /// 异步路径的上传时限：同步路径仍用 45 秒，后台任务给大文件留足时间。
 fn async_upload_timeout(connection: &Connection) -> Result<Duration, AdapterError> {
     match connection.options.get("async_upload_timeout_ms") {
@@ -97,159 +106,6 @@ fn async_upload_timeout(connection: &Connection) -> Result<Duration, AdapterErro
     }
 }
 
-/// 自有库（`<state_root>/onebot11/connections.db`）里的连接定义。
-///
-/// provider 侧的真 schema：连接定义（含 token 与路由）住在适配器自己的库里，
-/// 核心零改动。`token` 支持 AcbKey 加密（`v1:` 前缀，ACB_KEY_FILE/ACB_KEY
-/// 解密）与明文两种存储；密文解不开的行跳过并告警，不拖垮其它连接。
-struct OwnedOneBotConnection {
-    id: String,
-    transport: String,
-    url: Option<String>,
-    token: Option<String>,
-    account: String,
-    admin_qqs: Vec<String>,
-    routes_json: String,
-    options_json: String,
-}
-
-fn connections_db_path(state_root: &std::path::Path) -> std::path::PathBuf {
-    state_root.join("onebot11").join("connections.db")
-}
-
-fn open_connections_db(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let connection = rusqlite::Connection::open(path).map_err(|error| error.to_string())?;
-    connection
-        .execute(
-            "CREATE TABLE IF NOT EXISTS connections (
-                id          TEXT PRIMARY KEY,
-                transport   TEXT NOT NULL DEFAULT 'ws-client',
-                url         TEXT,
-                token       TEXT,
-                account     TEXT NOT NULL,
-                admin_json  TEXT NOT NULL DEFAULT '[]',
-                routes_json TEXT NOT NULL DEFAULT '[]',
-                options_json TEXT NOT NULL DEFAULT '{}',
-                created_at  INTEGER NOT NULL
-            )",
-            [],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(connection)
-}
-
-/// 从自有库读连接定义。
-fn load_owned_connections(path: &std::path::Path) -> Vec<Connection> {
-    let Ok(connection) = open_connections_db(path) else {
-        return Vec::new();
-    };
-    let Ok(mut statement) = connection.prepare(
-        "SELECT id, transport, url, token, account, admin_json, routes_json, options_json
-         FROM connections ORDER BY created_at, id",
-    ) else {
-        return Vec::new();
-    };
-    let rows = statement.query_map([], |row| {
-        Ok(OwnedOneBotConnection {
-            id: row.get(0)?,
-            transport: row.get(1)?,
-            url: row.get(2)?,
-            token: row.get(3)?,
-            account: row.get(4)?,
-            admin_qqs: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
-            routes_json: row.get(6)?,
-            options_json: row.get(7)?,
-        })
-    });
-    let mut rows = match rows {
-        Ok(rows) => rows,
-        Err(error) => {
-            eprintln!(
-                "{}",
-                acb_i18n::t!("adapter.onebot11.state_open_failed", error = error.to_string())
-            );
-            return Vec::new();
-        }
-    };
-    let key = acb_kernel::crypto::AcbKey::load().ok().flatten();
-    let mut connections = Vec::new();
-    while let Some(Ok(owned)) = rows.next() {
-        let token = match owned.token.as_deref() {
-            None => None,
-            Some(text) if acb_kernel::crypto::is_encrypted(text) => {
-                let Some(key) = key.as_ref() else {
-                    eprintln!(
-                        "{}",
-                        acb_i18n::t!("adapter.onebot11.secret_key_missing", id = owned.id)
-                    );
-                    continue;
-                };
-                match key.decrypt(text) {
-                    Ok(plain) => Some(plain),
-                    Err(error) => {
-                        eprintln!(
-                            "{}",
-                            acb_i18n::t!(
-                                "adapter.onebot11.secret_decrypt_failed",
-                                id = owned.id,
-                                error = error
-                            )
-                        );
-                        continue;
-                    }
-                }
-            }
-            Some(text) => Some(text.to_owned()),
-        };
-        // 路由：[{provider, options}] → RoutePolicy（RoutePolicy 无 Deserialize，
-        // 手工构造，与 build_routes 同形）。provider 非法的行跳过。
-        let mut routes = Vec::new();
-        if let Ok(list) = serde_json::from_str::<Value>(&owned.routes_json) {
-            let list = list.as_array().cloned().unwrap_or_default();
-            for route in list {
-                let Some(provider_text) = route.get("provider").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let Ok(provider) = acb_kernel::ProviderId::parse(provider_text) else {
-                    continue;
-                };
-                routes.push(acb_kernel::RoutePolicy {
-                    provider,
-                    options: route.get("options").cloned().unwrap_or(Value::Null),
-                });
-            }
-        }
-        let Some(transport) = acb_kernel::Transport::parse(&owned.transport) else {
-            eprintln!(
-                "{}",
-                acb_i18n::t!(
-                    "adapter.onebot11.transport_unknown",
-                    id = owned.id,
-                    transport = owned.transport
-                )
-            );
-            continue;
-        };
-        connections.push(Connection {
-            id: owned.id.clone(),
-            platform: "qq".to_owned(),
-            kind: "onebot11".to_owned(),
-            transport,
-            url: owned.url,
-            options: serde_json::from_str(&owned.options_json).unwrap_or_default(),
-            token,
-            account: owned.account,
-            admin_qqs: owned.admin_qqs,
-            receive: Default::default(),
-            routes,
-        });
-    }
-    connections
-}
-
 /// OneBot SnowLuma 的工厂。一个连接一个 `LinkSlot`，`launch` 里起守护线程。
 #[derive(Debug, Default)]
 pub struct OneBotSnowLumaAdapterFactory;
@@ -259,12 +115,6 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
         MANIFEST.clone()
     }
 
-    fn connections(
-        &self,
-        state_root: &std::path::Path,
-    ) -> Option<Vec<Connection>> {
-        Some(load_owned_connections(&connections_db_path(state_root)))
-    }
 
     fn create(
         &self,
@@ -321,6 +171,15 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
 
         let connection = connection.clone();
         let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
+            // provider 侧连接库（标准 schema，core 定义）：确保存在，运维在此
+            // 维护连接行；core 配置构建时注入。
+            ensure_connections_db(
+                &host
+                    .state_dir
+                    .parent()
+                    .expect("state_dir 有父目录")
+                    .join("onebot11"),
+            );
             supervise(slot, connection, host.shutdown, host.events, host.status);
         });
 
@@ -398,57 +257,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod provider_tests {
-    use super::*;
-
-    fn seed(db: &std::path::Path, rows: &[(&str, &str, Option<&str>, &str, &str)]) {
-        let connection = open_connections_db(db).expect("建库");
-        for (id, transport, url, account, admin) in rows {
-            connection
-                .execute(
-                    "INSERT INTO connections (id, transport, url, token, account, admin_json, created_at)
-                     VALUES (?1, ?2, ?3, NULL, ?4, ?5, 1)",
-                    rusqlite::params![id, transport, url, account, admin],
-                )
-                .expect("插入");
-        }
-    }
-
-    #[test]
-    fn provider_reads_ws_client_rows() {
-        let root = std::env::temp_dir().join(format!("onebot-provider-{}", std::process::id()));
-        let db = connections_db_path(&root);
-        std::fs::create_dir_all(db.parent().expect("parent")).expect("目录");
-        seed(
-            &db,
-            &[("qq2", "ws-client", Some("ws://127.0.0.1:53001"), "3683924053", r#"["323622442"]"#)],
-        );
-        let connections = OneBotSnowLumaAdapterFactory
-            .connections(&root)
-            .expect("是 provider");
-        assert_eq!(connections.len(), 1);
-        let connection = &connections[0];
-        assert_eq!(connection.id, "qq2");
-        assert_eq!(connection.kind, "onebot11");
-        assert_eq!(connection.platform, "qq");
-        assert_eq!(connection.url.as_deref(), Some("ws://127.0.0.1:53001"));
-        assert_eq!(connection.account, "3683924053");
-        assert_eq!(connection.admin_qqs, vec!["323622442".to_owned()]);
-        assert!(connection.token.is_none());
-        assert!(matches!(connection.transport, acb_kernel::Transport::WsClient));
-    }
-
-    #[test]
-    fn provider_reads_ws_server_rows() {
-        let root = std::env::temp_dir().join(format!("onebot-provider2-{}", std::process::id()));
-        let db = connections_db_path(&root);
-        std::fs::create_dir_all(db.parent().expect("parent")).expect("目录");
-        seed(&db, &[("qq3", "ws-server", None, "10002", "[]")]);
-        let connections = OneBotSnowLumaAdapterFactory
-            .connections(&root)
-            .expect("是 provider");
-        assert_eq!(connections.len(), 1);
-        assert!(matches!(connections[0].transport, acb_kernel::Transport::WsServer));
-    }
-}

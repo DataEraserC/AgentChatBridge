@@ -4322,6 +4322,224 @@ fn duplicate_rules_across_files(files: &[ParsedConfigFile]) -> bool {
     false
 }
 
+/// 适配器自有连接库的标准 schema。每个平台适配器可以拥有自己的连接库
+/// （`state/adapters/<目录>/connections.db`，可能复数），schema 由 core 定义、
+/// 数据归适配器所有；核心在配置构建阶段注入（见 [`inject_adapter_connections`]）。
+///
+/// `token_secret` 是 secrets 体系的引用名——适配器库不存明文凭据，值留在
+/// secrets 存储（ agenix / 控制台 / 库内密钥），解析走普通 secret 通道。
+pub const ADAPTER_CONNECTIONS_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS connections (
+    id           TEXT PRIMARY KEY,
+    platform     TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    transport    TEXT NOT NULL DEFAULT 'ws-client',
+    url          TEXT,
+    account      TEXT NOT NULL,
+    token_secret TEXT,
+    admin_json   TEXT NOT NULL DEFAULT '[]',
+    routes_json  TEXT NOT NULL DEFAULT '[]',
+    options_json TEXT NOT NULL DEFAULT '{}',
+    created_at   INTEGER NOT NULL
+)";
+
+/// JSON → TOML（适配器库里的 admin/routes/options 存 JSON）。
+fn json_to_toml(value: &serde_json::Value) -> toml::Value {
+    match value {
+        serde_json::Value::Null => toml::Value::String(String::new()),
+        serde_json::Value::Bool(flag) => toml::Value::Boolean(*flag),
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                toml::Value::Integer(int)
+            } else {
+                toml::Value::Float(number.as_f64().unwrap_or_default())
+            }
+        }
+        serde_json::Value::String(text) => toml::Value::String(text.clone()),
+        serde_json::Value::Array(items) => {
+            toml::Value::Array(items.iter().map(json_to_toml).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut table = toml::map::Map::new();
+            for (key, item) in map {
+                table.insert(key.clone(), json_to_toml(item));
+            }
+            toml::Value::Table(table)
+        }
+    }
+}
+
+/// 适配器自有连接库注入：`state/adapters/<目录>/connections.db`（标准 schema，
+/// 见 [`ADAPTER_CONNECTIONS_SCHEMA_SQL`]）。
+///
+/// 每个平台适配器由此声明自己的连接（可能复数）；注入发生在订阅校验之前，
+/// 引用 provider 连接的订阅与 config 连接同权。规则：
+///
+/// - **config 连接优先**：id 与 config 连接冲突的行跳过并告警；
+/// - 结构不合法的行（缺 id/platform/kind/account、未知 transport）跳过并告警，
+///   单行故障不拖垮启动；
+/// - 语义错误（secret 引用不存在、url 非法等）沿用 fail-closed：启动失败并
+///   点名连接，由运维修正后重启；
+/// - 库以只读方式打开——core 不写适配器的文件。
+fn inject_adapter_connections(merged: &mut toml::Value) {
+    let Some(storage_path) = merged
+        .get("storage")
+        .and_then(|storage| storage.get("path"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(root) = std::path::Path::new(&storage_path)
+        .parent()
+        .map(|parent| parent.join("adapters"))
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    let mut db_paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path().join("connections.db"))
+        .filter(|path| path.is_file())
+        .collect();
+    db_paths.sort();
+
+    for db_path in db_paths {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+        let Ok(connection) = rusqlite::Connection::open_with_flags(db_path.clone(), flags) else {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.config.adapter_connections_open_failed",
+                    path = db_path.display().to_string()
+                )
+            );
+            continue;
+        };
+        let Ok(mut statement) = connection.prepare(
+            "SELECT id, platform, kind, transport, url, account, token_secret,
+                    admin_json, routes_json, options_json
+             FROM connections ORDER BY created_at, id",
+        ) else {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.config.adapter_connections_schema_mismatch",
+                    path = db_path.display().to_string()
+                )
+            );
+            continue;
+        };
+        let Ok(rows) = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+            ))
+        }) else {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.config.adapter_connections_schema_mismatch",
+                    path = db_path.display().to_string()
+                )
+            );
+            continue;
+        };
+        for row in rows.flatten() {
+            let (id, platform, kind, transport, url, account, token_secret, admin_json, routes_json, options_json) = row;
+            if id.trim().is_empty() || platform.trim().is_empty() || kind.trim().is_empty() || account.trim().is_empty() {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.config.adapter_connections_row_invalid",
+                        path = db_path.display().to_string(),
+                        id = id
+                    )
+                );
+                continue;
+            }
+            // config 连接优先：id 已存在（config 或更早的行）就跳过。
+            if merged
+                .get("connections")
+                .and_then(toml::Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("id").and_then(toml::Value::as_str) == Some(id.as_str())
+                    })
+                })
+            {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.config.adapter_connections_duplicate",
+                        id = id
+                    )
+                );
+                continue;
+            }
+            if crate::Transport::parse(&transport).is_none() {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.config.adapter_connections_transport_unknown",
+                        id = id,
+                        transport = transport
+                    )
+                );
+                continue;
+            }
+            let mut entry = toml::map::Map::new();
+            entry.insert("id".to_owned(), toml::Value::String(id.clone()));
+            entry.insert("platform".to_owned(), toml::Value::String(platform));
+            entry.insert("kind".to_owned(), toml::Value::String(kind));
+            entry.insert("transport".to_owned(), toml::Value::String(transport));
+            if let Some(url) = url.filter(|url| !url.trim().is_empty()) {
+                entry.insert("url".to_owned(), toml::Value::String(url));
+            }
+            entry.insert("account".to_owned(), toml::Value::String(account));
+            if let Some(secret_name) = token_secret.filter(|name| !name.trim().is_empty()) {
+                entry.insert(
+                    "token".to_owned(),
+                    toml::Value::Table(
+                        [(
+                            "secret".to_owned(),
+                            toml::Value::String(secret_name),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                );
+            }
+            if let Ok(admin) = serde_json::from_str::<serde_json::Value>(&admin_json) {
+                entry.insert("admin_qqs".to_owned(), json_to_toml(&admin));
+            }
+            if let Ok(routes) = serde_json::from_str::<serde_json::Value>(&routes_json) {
+                entry.insert("routes".to_owned(), json_to_toml(&routes));
+            }
+            if let Ok(options) = serde_json::from_str::<serde_json::Value>(&options_json) {
+                entry.insert("options".to_owned(), json_to_toml(&options));
+            }
+            let connections = merged
+                .as_table_mut()
+                .expect("顶层是表")
+                .entry("connections")
+                .or_insert_with(|| toml::Value::Array(Vec::new()));
+            if let toml::Value::Array(items) = connections {
+                items.push(toml::Value::Table(entry));
+            }
+        }
+    }
+}
+
 fn finish_loaded(
     mut merged: toml::Value,
     sources: Vec<ConfigSource>,
@@ -4329,6 +4547,7 @@ fn finish_loaded(
     mode: SecretMode,
     preset: Option<&SecretPreset>,
 ) -> Result<LoadedConfig, ConfigError> {
+    inject_adapter_connections(&mut merged);
     dedupe_admin_lists(&mut merged);
     let merged_toml = toml::to_string(&merged).map_err(|error| ConfigError::ParseFailed {
         detail: error.to_string(),

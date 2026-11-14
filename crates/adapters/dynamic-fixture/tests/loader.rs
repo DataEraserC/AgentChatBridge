@@ -137,6 +137,7 @@ fn dynamic_adapter_loads_and_speaks_the_wire_protocol() {
         events,
         shutdown: Arc::clone(&shutdown),
         status: AdapterStatus::new("demo", deps.clone()),
+            state_dir: std::path::PathBuf::from("/tmp/acb-test-state"),
     };
     thread::spawn(move || launch(host));
 
