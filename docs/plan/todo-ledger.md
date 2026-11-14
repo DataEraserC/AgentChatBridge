@@ -629,3 +629,16 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 遗留：控制台内新建具名密钥入口未做；core 侧 `connections_list` 触发器未接（等外置 provider）；qqbot 回放推送未做；运行时创建适配器实例未做。
 
+## 21. D期落地（2026-11-15，换代 + onebot cutover）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 发现并修复注入空转根因 | unit 环境没有 ACB_DATA_DIR，3a613c1 的 fallback 分支多拼一层 `state`：注入找 `state/state/adapters`、工厂建在 `state/adapters`。`adapter_connections_root` 两分支各走各的拼法（dd8c7d1），bridge main 的 adapters_state_root 改走同一解析 | 回归测试 `adapter_connections_root_matches_factory_layout`；线上 `/api/connections` source 从 `config` 变 `provider:onebot11` |
+| 换代 | payload `/nix/store/wk2wkfcwqdn24a430ppvl6g65zfd66g6-acb-payload-0.1.0`（dev_20261025 @ dd8c7d1）→ `gen-1794681420303-324ccb97`，strategy=store | `acbctl upgrade --payload` 返回 req-1794681420256-e5aef461；桥 active、endpoint open、console 200 |
+| 回放推送验证 | onebot11 适配器启动时把自有库行推给运行时注册表 | `/api/connections`：qq → `source: provider:onebot11` |
+| onebot cutover | 删 config_objects 的 connection/qq 行（控制台 patch op delete）；连接由提供者库经注入接管，**桥无中断**（对比 7d587b5 之前的 outage #1） | patch 返回 `changes:["connections/qq: deleted"]`；删后 `SELECT COUNT(*)=0` 且连接仍在视图；依赖面板 qq `state=up accountOnline=true accountGood=true` |
+| B期注册表生效证据 | 重启后注册表基线来自提供者库 + 适配器回放 | source 标注（上两行） |
+
+遗留（需用户）：qqbot 连接要 AppSecret 录入控制台密钥库（qqbot-appsecret）后按 onebot11 同形补回放推送；QQ 官方机器人链路实测（发消息验证）待用户。upgrade status 请求终态停留在 `restarting`（pointer_committed），换代实际完成——状态机命名待查。
+
+
