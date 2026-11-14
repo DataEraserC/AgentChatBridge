@@ -677,6 +677,21 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 遗留：url 的显隐/必填性仍靠 transport 名前缀推断（声明式 x-url 留待后续）；edit 表单 options 编辑；密钥删除入口。
 
+## 28. 投递去重的正确形态（2026-11-15，用户两次纠偏后定稿）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 设计纠偏 1 | 用户裁定：**agent 自己用 ack_messages 决定哪些标已读**，现有机制已满足——delivery_auto_ack（自动 ack）整个撤回（工作树还原，未提交过） | 工作树干净，`git status` 无残留 |
+| 设计纠偏 2 | 用户明确形态：**给投递策略插件加选项**——取唤醒消息前后若干条时排除已读 | DeliveryPolicy.options 新键 `exclude_read` |
+| 实现 | open_turn 的上下文窗口过滤已读（已读 = 水位以下 + 乱序 ack 集合，两种形态都查——初版漏了水位被回归测试抓住）；未读正文不受影响；外置 composer 同样受益 | 回归测试：消息1已读 → exclude_read=true 只投消息2，false 照旧投 [1,2] |
+| 换代 | `/nix/store/cmf5wgff86w90x9fxmbq4wvfp8dmhghj-acb-payload-0.1.0`（5ce59ed）→ req-1794693325386-b1583276 | version 徽章 `0.1.0+5ce59ed` |
+
+会话配置示例（TOML 或对象补丁）：
+  [sessions.delivery.options]
+  exclude_read = true
+默认 false = 现状（上下文保留已读，给模型连续对话背景）。
+
+
 ## 27. C2C 消息不到——READY 控制帧修复 + dispatch 诊断日志（2026-11-15）
 
 | 项 | 结果 | 验收 |
