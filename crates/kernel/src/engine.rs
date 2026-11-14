@@ -13599,6 +13599,7 @@ mod target_param_tests {
             effect: Effect::Read,
             record: RecordMode::None,
             verification: Verification::verified("target param test"),
+            permissions: None,
         }
     }
 

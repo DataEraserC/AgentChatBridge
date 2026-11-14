@@ -280,6 +280,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "read".into(),
             record: "none".into(),
             verification: verified(),
+            permissions: None,
         },
         WireMethodSpec {
             name: "demo.send".into(),
@@ -293,6 +294,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "send".into(),
             record: "message".into(),
             verification: verified(),
+            permissions: None,
         },
         WireMethodSpec {
             name: "demo.fail".into(),
@@ -306,6 +308,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "read".into(),
             record: "none".into(),
             verification: verified(),
+            permissions: None,
         },
         WireMethodSpec {
             name: "demo.slow".into(),
@@ -319,6 +322,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "read".into(),
             record: "none".into(),
             verification: verified(),
+            permissions: None,
         },
     ]
 }

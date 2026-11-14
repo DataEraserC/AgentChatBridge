@@ -149,6 +149,7 @@ fn m(
         record: RecordMode::None,
         // 出处由 `catalog()` 按方法名补齐；这里只是构造期必填的占位。
         verification: Verification::verified(DEFAULT_SOURCE),
+        permissions: None,
     }
 }
 
@@ -177,6 +178,7 @@ fn cm(
         record: RecordMode::None,
         // 出处由 `catalog()` 按方法名补齐；这里只是构造期必填的占位。
         verification: Verification::verified(DEFAULT_SOURCE),
+        permissions: None,
     }
 }
 
@@ -2459,6 +2461,7 @@ pub fn catalog() -> std::sync::Arc<[MethodSpec]> {
                         effect,
                         record: record_of(method.name.as_ref()),
                         verification: verification_of(method.name.as_ref()),
+                        permissions: None,
                         ..method
                     }
                 })

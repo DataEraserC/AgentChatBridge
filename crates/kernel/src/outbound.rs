@@ -649,6 +649,46 @@ impl Verification {
     }
 }
 
+/// 权限字符的缺省建议。核心只记录，不替策略层决定；
+/// console 的授权矩阵把它当初始列，策略插件可以完全无视。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionDefault {
+    Allow,
+    Deny,
+    Ask,
+}
+
+impl PermissionDefault {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "allow" => Some(Self::Allow),
+            "deny" => Some(Self::Deny),
+            "ask" => Some(Self::Ask),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::Ask => "ask",
+        }
+    }
+}
+
+/// 方法声明的权限字符。
+///
+/// `grant` 是层级化的权限字符串：`<platform>:<op 名>`（如 `qq:msg.send`），
+/// 段间用 `:` 或 `.` 分层。授权规则按它精确匹配或尾部单层通配。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionSpec {
+    pub grant: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub default: PermissionDefault,
+}
+
 /// 一个平台方法的声明。适配器自己给，core 只认这个形状。
 ///
 /// 字段都是 `Cow`：内置适配器用静态借用，动态/外置适配器可以构造自己的目录。
@@ -676,9 +716,23 @@ pub struct MethodSpec {
     pub record: RecordMode,
     /// 这个声明从哪来、可信到什么程度。构造期必填。
     pub verification: Verification,
+    /// 方法声明的权限字符（细粒度授权的可选词表）。
+    ///
+    /// `None` = 未声明，核心按 `"<platform>:<op 名>"` 自动派生——开发者
+    /// 不写也有合理的权限身份。声明了就按声明走（可拆分/合并/别名）。
+    pub permissions: Option<Vec<PermissionSpec>>,
 }
 
 impl MethodSpec {
+    /// 本次调用要求的权限字符。声明了 `permissions` 就按声明；否则派生
+    /// `"<platform>:<op 名>"`。别名调用在进目录前已归一化到主 op。
+    pub fn permission_strings(&self, platform: &str) -> Vec<String> {
+        match &self.permissions {
+            Some(specs) => specs.iter().map(|spec| spec.grant.clone()).collect(),
+            None => vec![format!("{platform}:{}", self.name)],
+        }
+    }
+
     /// catalog 声明的授权目标种类。grants 判定必须用同一个种类，不能拿字符串猜。
     pub fn access_kind(&self) -> crate::grants::AccessTargetKind {
         match self.scope {
@@ -1218,6 +1272,7 @@ mod tests {
         effect: Effect::Read,
         record: RecordMode::None,
         verification: Verification::verified("kernel test fixture"),
+        permissions: None,
     }];
 
     impl Outbound for Platformy {
@@ -1289,6 +1344,7 @@ mod tests {
             effect: Effect::Read,
             record: RecordMode::None,
             verification: Verification::verified("kernel test fixture"),
+            permissions: None,
         };
         assert_eq!(spec.group(), "member");
         assert_eq!(spec.path(), "member");
@@ -1312,6 +1368,7 @@ mod tests {
                 effect: Effect::Send,
                 record: RecordMode::Message,
                 verification: Verification::verified("kernel test fixture"),
+                permissions: None,
             },
             MethodSpec {
                 name: Cow::Borrowed("member.info"),
@@ -1325,6 +1382,7 @@ mod tests {
                 effect: Effect::Read,
                 record: RecordMode::None,
                 verification: Verification::verified("kernel test fixture"),
+                permissions: None,
             },
         ];
 

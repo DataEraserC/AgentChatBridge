@@ -178,6 +178,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "read".into(),
             record: "none".into(),
             verification: verified(),
+            permissions: None,
         },
         WireMethodSpec {
             name: "fixture.send".into(),
@@ -191,6 +192,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "send".into(),
             record: "message".into(),
             verification: verified(),
+            permissions: None,
         },
         WireMethodSpec {
             name: "fixture.fail".into(),
@@ -204,6 +206,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "read".into(),
             record: "none".into(),
             verification: verified(),
+            permissions: None,
         },
         WireMethodSpec {
             name: "fixture.exit".into(),
@@ -217,6 +220,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "write".into(),
             record: "none".into(),
             verification: verified(),
+            permissions: None,
         },
     ]
 }

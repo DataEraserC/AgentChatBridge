@@ -37,6 +37,7 @@ fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
             effect: Effect::Write,
             record: RecordMode::None,
             verification: Verification::verified("access ticket test fake"),
+            permissions: None,
         },
         MethodSpec {
             name: "account.cookies".into(),
@@ -55,6 +56,7 @@ fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
             effect: Effect::Read,
             record: RecordMode::None,
             verification: Verification::verified("access ticket test fake"),
+            permissions: None,
         },
         MethodSpec {
             name: "group.unverified".into(),
@@ -68,6 +70,7 @@ fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
             effect: Effect::Write,
             record: RecordMode::None,
             verification: Verification::unverified(
+            permissions: None,
                 "add_type 语义只有单一来源",
                 "按 research §3.1 逐个回读",
             ),

@@ -44,6 +44,7 @@ impl Outbound for Recorder {
                 effect: Effect::Write,
                 record: RecordMode::None,
                 verification: Verification::verified("place/approval test fake"),
+                permissions: None,
             }])
         } else {
             Arc::from(Vec::<MethodSpec>::new())

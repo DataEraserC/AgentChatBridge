@@ -412,6 +412,22 @@ pub enum WireVerification {
 
 /// 一个平台方法的 wire 形状。
 #[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
+pub struct WirePermissionSpec {
+    pub grant: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_permission")]
+    pub default: String,
+}
+
+fn default_permission() -> String {
+    "ask".to_owned()
+}
+
+/// 一个平台方法的 wire 形状。
+#[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
 pub struct WireMethodSpec {
     pub name: String,
     /// 别名 op。目录不展开别名；core 解析时归一化到主 op。
@@ -433,6 +449,8 @@ pub struct WireMethodSpec {
     pub effect: String,
     #[serde(default = "default_record")]
     pub record: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<WirePermissionSpec>>,
     pub verification: WireVerification,
 }
 
@@ -715,6 +733,7 @@ mod tests {
                 effect: "read".into(),
                 record: "none".into(),
                 verification: WireVerification::Verified {
+                permissions: None,
                     source: "fixture docs".into(),
                 },
             }],

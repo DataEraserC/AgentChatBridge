@@ -220,6 +220,28 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
         };
 
         let aliases = spec.aliases.into_iter().map(Cow::Owned).collect::<Vec<_>>();
+        let permissions = spec
+            .permissions
+            .map(|specs| {
+                specs
+                    .into_iter()
+                    .map(|spec| {
+                        Ok(crate::outbound::PermissionSpec {
+                            grant: spec.grant,
+                            title: spec.title,
+                            description: spec.description,
+                            default: crate::outbound::PermissionDefault::parse(&spec.default)
+                                .ok_or_else(|| {
+                                    acb_i18n::t!(
+                                        "kernel.wire.unknown_permission_default",
+                                        default = spec.default
+                                    )
+                                })?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .transpose()?;
         Ok(MethodSpec {
             name: Cow::Owned(name.to_owned()),
             aliases: aliases.into(),
@@ -232,6 +254,7 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
             effect,
             record,
             verification,
+            permissions,
         })
     }
 }
@@ -436,6 +459,7 @@ mod tests {
             effect: "send".into(),
             record: "message".into(),
             verification: WireVerification::Verified {
+            permissions: None,
                 source: "demo adapter docs".into(),
             },
         }
