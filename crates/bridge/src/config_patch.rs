@@ -181,10 +181,7 @@ fn session_op(
             .ok_or(msg!("bridge.patch.session_persona_required"))?;
         let persona_id = persona.to_owned();
 
-        let sessions = doc
-            .get_mut("sessions")
-            .and_then(Item::as_array_of_tables_mut)
-            .ok_or(msg!("bridge.patch.session_section_missing"))?;
+        let sessions = array_of_tables_mut_or_create(doc, "sessions");
         let mut table = Table::new();
         table.insert("id", value(id.clone()));
         table.insert("harness", value(harness.to_owned()));
@@ -455,6 +452,27 @@ fn harness_table<'a>(doc: &'a mut DocumentMut, id: &str) -> Option<&'a Table> {
 /// - 修改：`{"op":"connection","id":"qq","patch":{"url":"..","secret":"..","account":".."}}`
 /// - 新建：`{"op":"connection","id":"qq2","create":{"platform":"qq","kind":"onebot11",
 ///   "url":"ws://..","account":"10002","secret":"qq-token"}}`
+/// 取「`[[section]]` 数组表」用于追加新建条目；段不存在时**先建空段**。
+///
+/// 库对象化（schema 15）之后，某类对象为零时生成的文档就没有对应段——
+/// 首个该类对象必须能凭空建出来（2026-11-15 实测：cutover 清空连接对象后
+/// 「新增连接」直接被段缺失拒绝）。create 语义 = 没有 → 建。
+fn array_of_tables_mut_or_create<'a>(
+    doc: &'a mut DocumentMut,
+    array_key: &str,
+) -> &'a mut ArrayOfTables {
+    if doc
+        .get(array_key)
+        .and_then(Item::as_array_of_tables)
+        .is_none()
+    {
+        doc.insert(array_key, Item::ArrayOfTables(ArrayOfTables::new()));
+    }
+    doc.get_mut(array_key)
+        .and_then(Item::as_array_of_tables_mut)
+        .expect("section was just inserted or already existed")
+}
+
 fn connection_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
@@ -496,10 +514,7 @@ fn connection_op(
             .and_then(serde_json::Value::as_str)
             .ok_or(msg!("bridge.patch.connection_account_required"))?;
 
-        let connections = doc
-            .get_mut("connections")
-            .and_then(Item::as_array_of_tables_mut)
-            .ok_or(msg!("bridge.patch.connection_section_missing"))?;
+        let connections = array_of_tables_mut_or_create(doc, "connections");
         let mut table = Table::new();
         table.insert("id", value(id.clone()));
         table.insert("platform", value(platform.to_owned()));
@@ -769,10 +784,7 @@ fn upsert_named_table(
     changes: &mut Vec<Message>,
 ) -> Result<(), PatchError> {
     let id = string_field(op, "id")?;
-    let array = doc
-        .get_mut(array_key)
-        .and_then(Item::as_array_of_tables_mut)
-        .ok_or(msg!("bridge.patch.section_missing", section = array_key))?;
+    let array = array_of_tables_mut_or_create(doc, array_key);
 
     let existing = array
         .iter_mut()
@@ -959,6 +971,39 @@ keywords = ["喂"]
 
     fn parse_ops(value: serde_json::Value) -> Vec<serde_json::Value> {
         value.as_array().expect("测试里都是数组").to_vec()
+    }
+
+    #[test]
+    fn create_first_entry_without_existing_section() {
+        // 库对象化后某类对象为零时，生成的文档没有对应段——首个对象必须能
+        // 凭空建出来（2026-11-15 实测：cutover 清空连接对象后「新增连接」
+        // 被段缺失拒绝）。create 语义 = 没有 → 建。
+        let text = r#"
+[storage]
+path = "state/acb.db"
+"#;
+        let ops = parse_ops(serde_json::json!([
+            {"op": "connection", "id": "qqbot-official", "create": {
+                "platform": "qq", "kind": "qqbot", "transport": "qq-gateway",
+                "account": "1906414316", "secret": "qq-bot-app-secret",
+                "options": {"api_base": "https://api.sgroup.qq.com"}
+            }}
+        ]));
+        let (new_text, changes) = super::apply_patch(&text, &ops).expect("补丁能打");
+        assert!(new_text.contains("[[connections]]"), "{new_text}");
+        assert!(
+            new_text.contains("transport = \"qq-gateway\""),
+            "{new_text}"
+        );
+        assert!(new_text.contains("api_base"), "{new_text}");
+        assert_eq!(changes.len(), 1);
+        // 整份还能被 Config::parse 接受。
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("补丁后配置合法");
+        assert_eq!(config.connections[0].id, "qqbot-official");
+        assert_eq!(
+            config.connections[0].options["api_base"],
+            "https://api.sgroup.qq.com"
+        );
     }
 
     #[test]
