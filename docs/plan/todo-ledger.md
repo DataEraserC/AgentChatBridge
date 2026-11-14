@@ -701,6 +701,18 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 用户侧下一步：再发一条私聊 → `grep "qqbot-official:private" ~/.local/state/acb/bridge.log`
 拿 openid 房间串 → dsh-qas 加订阅 → 私聊即可唤醒 agent（qqbot 被动回复窗口由适配器处理）。
 
+### 订阅后的最后一环：唤醒门（0d6ffb0，同日）
+
+用户加了订阅仍无回应。排查：订阅本身精确匹配（room=private/E62C60CB…），
+但新订阅的 wake 全关（C2C 文本消息无 @/关键词/引用可命中）→ 默认唤醒
+一律 stay。且 qqbot 适配器把私聊消息 at_self 硬编码 false——**私聊天然
+冲我来**，at_mention 在单聊里永远不可能命中（C2C 无 @ 语义）。修复：
+C2C at_self=true（0d6ffb0 已部署，version 徽章实测），补断言 a3655e2。
+
+用户侧最终一步：控制台会话页 dsh-qas → qqbot 订阅的 Wake → 打开
+at_mention → 保存 → 私聊即应答。
+
+
 
 
 ## 25. patch 缺段自动建段 + 端到端验证（2026-11-15，用户重试保存被段缺失拦截）
