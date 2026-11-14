@@ -689,6 +689,16 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 插曲：验证删除时 evaluate 里的 confirm 弹窗挂在页面上被用户 Esc 掉——测试行实际由 API 删除，无副作用。教训：浏览器脚本不要在可见 tab 上触发阻塞式 confirm。
 
+## 26. qqbot 订阅流程与发现日志（2026-11-15，用户要给 qas 订阅 323622442）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 语义澄清 | 官方机器人 API 不给 QQ 号→OpenID 映射：房间串是 `qq:group/<openid>` / `qq:private/<openid>`，订阅不能用 QQ 号；323622442 是 QQ 号，得先拿到它对 bot 的 OpenID | 代码事实（adapter event.rs） |
+| 发现日志 | 未订阅房间的事件原本无痕丢弃 → 每房间首次丢弃打一条含完整房间串的日志（去重不刷屏），用户拿它配订阅 | 回归测试 `unsubscribed_room_logs_once_then_drops`；换代 `req-1794688108691-5aaf619d`，version `0.1.0+9ddcc9f` |
+
+流程（用户侧）：重启桥（qqbot-official 实例建立）→ 用 323622442 私聊/群 @ 机器人一句 → `journalctl --user -u acb-bridge | grep 房间` 拿 openid 房间串 → 控制台会话页 dsh-qas「+ Subscribe」填该串 → 下一轮自动生效。
+
+
 
 
 
