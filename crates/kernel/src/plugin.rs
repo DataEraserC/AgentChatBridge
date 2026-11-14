@@ -799,6 +799,8 @@ pub struct DeliveryRequest<'a> {
     /// 已读编号快照（水位以下 + 乱序 ack），只读数据。composer 据此实现
     /// 自己的排除策略（如内置的 \`exclude_read\`）；core 不解释、不过滤。
     pub read_ids: &'a [u64],
+    /// 是否排除上下文里的已读记录（订阅级投递窗口字段，core 原样透传）。
+    pub exclude_read: bool,
     /// 触发这一轮的那条记录；时钟/攒批唤醒为空。
     pub trigger_id: Option<u64>,
     /// 触发消息之前带几条正文。
@@ -834,16 +836,11 @@ pub struct DefaultDeliveryComposer;
 
 impl DeliveryComposer for DefaultDeliveryComposer {
     fn compose(&self, options: &DeliveryPolicy, request: &DeliveryRequest<'_>) -> DeliveryPlan {
-        // 选项 exclude_read（默认 false）：上下文窗口排除已读（read_ids 里的）
-        // 记录——避免把 agent 已经看过的消息再投一遍。未读正文不受影响。
-        // 这是内置 composer 自己的策略；外置 composer 对 read_ids 自行解释。
-        if options
-            .options
-            .get("exclude_read")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-            && !request.read_ids.is_empty()
-        {
+        // 选项 exclude_read（订阅级投递窗口字段，默认 false）：上下文窗口
+        // 排除已读（read_ids 里的）记录——避免把 agent 已经看过的消息再投
+        // 一遍。未读正文不受影响。这是内置 composer 自己的策略；外置
+        // composer 对 read_ids 自行解释。
+        if request.exclude_read && !request.read_ids.is_empty() {
             let read: std::collections::BTreeSet<u64> = request.read_ids.iter().copied().collect();
             let filtered_context: Vec<Record> = request
                 .context

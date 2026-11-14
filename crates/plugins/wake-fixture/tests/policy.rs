@@ -209,6 +209,7 @@ fn decision_providers_use_the_shared_wire() {
             records: &records,
             context: &[],
             read_ids: &[],
+            exclude_read: false,
             trigger_id: None,
             context_before: 3,
             context_after: 3,

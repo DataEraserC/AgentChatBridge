@@ -1122,6 +1122,7 @@ fn delivery_request_table(lua: &Lua, request: &DeliveryRequest<'_>) -> mlua::Res
         read_ids.set(index + 1, *id)?;
     }
     table.set("read_ids", read_ids)?;
+    table.set("exclude_read", request.exclude_read)?;
     Ok(table)
 }
 

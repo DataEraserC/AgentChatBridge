@@ -9418,6 +9418,7 @@ impl<S: Store> Bridge<S> {
                             records: &own_records,
                             context: &own_context,
                             read_ids: &own_read_ids,
+                            exclude_read: window.exclude_read,
                             trigger_id,
                             context_before: window.context_before,
                             context_after: window.context_after,
@@ -9435,6 +9436,7 @@ impl<S: Store> Bridge<S> {
                         records: &records,
                         context: &context,
                         read_ids: &read_ids,
+                        exclude_read: window.exclude_read,
                         trigger_id,
                         context_before: window.context_before,
                         context_after: window.context_after,
@@ -9452,6 +9454,7 @@ impl<S: Store> Bridge<S> {
                     records: &records,
                     context: &context,
                     read_ids: &read_ids,
+                    exclude_read: window.exclude_read,
                     trigger_id,
                     context_before: window.context_before,
                     context_after: window.context_after,
@@ -14211,16 +14214,13 @@ mod connection_registry_tests {
         persona = "p"
         token = {{ secret = "t-main" }}
 
-        [sessions.delivery.options]
-        exclude_read = {flag}
-
+        # 订阅级投递窗口与 exclude_read：平铺字段（RawSubscription 无 window 嵌套表）
         [[sessions.subscriptions]]
         connection = "qq"
         room = "group/1"
-
-        [sessions.subscriptions.window]
         context_before = 3
         context_after = 0
+        exclude_read = {flag}
 
         [sessions.subscriptions.wake]
         provider = "acb.wake.default"

@@ -952,6 +952,10 @@ pub struct DeliveryWindow {
     pub context_after: usize,
     /// 时钟/攒批唤醒投最旧的几条正文。
     pub batch_head: usize,
+    /// 上下文窗口排除已读（acked/水位以下）记录。默认 false = 现状
+    /// （上下文保留已读，给模型连续对话背景）。过滤逻辑在投递 composer
+    /// （core 只供 read_ids 快照）；未读正文不受影响。
+    pub exclude_read: bool,
 }
 
 impl Default for DeliveryWindow {
@@ -960,6 +964,7 @@ impl Default for DeliveryWindow {
             context_before: DEFAULT_CONTEXT_RECORDS,
             context_after: DEFAULT_CONTEXT_RECORDS,
             batch_head: DEFAULT_CONTEXT_RECORDS,
+            exclude_read: false,
         }
     }
 }
@@ -1005,10 +1010,8 @@ impl Default for AccessPolicy {
 pub struct DeliveryPolicy {
     /// composer 的 provider id。不写就用内置「从旧到新连续投一段」。
     pub provider: ProviderId,
-    /// composer 专属配置。core 为内置投递路径认读一个键：`exclude_read`（布
-    /// 尔，默认 false）——取触发消息前后的上下文窗口时排除已读（acked）记
-    /// 录，避免把 agent 已经看过的消息再投一遍；上下文变短但不影响未读正文。
-    /// 外置 composer 也受益：引擎在把上下文交给 composer 之前统一过滤。
+    /// composer 专属配置；core 不解释（内置 composer 忽略它）。「投递上下文
+    /// 排除已读」是订阅级投递窗口字段（window.exclude_read），不在这里。
     pub options: serde_json::Value,
 }
 
@@ -2401,6 +2404,7 @@ impl Config {
                     .unwrap_or(DEFAULT_CONTEXT_RECORDS),
                 context_after: raw_session.context_after.unwrap_or(DEFAULT_CONTEXT_RECORDS),
                 batch_head: raw_session.batch_head.unwrap_or(DEFAULT_CONTEXT_RECORDS),
+                exclude_read: raw_session.exclude_read.unwrap_or(false),
             };
             validate_window(&id, "", &session_window)?;
 
@@ -2860,6 +2864,7 @@ fn build_subscription(
         context_before: raw.context_before.unwrap_or(session_window.context_before),
         context_after: raw.context_after.unwrap_or(session_window.context_after),
         batch_head: raw.batch_head.unwrap_or(session_window.batch_head),
+        exclude_read: raw.exclude_read.unwrap_or(session_window.exclude_read),
     };
     validate_window(session, &room.to_string(), &window)?;
 
@@ -3923,6 +3928,9 @@ struct RawSession {
     /// 投递窗口的会话级默认值；订阅可以逐项覆盖。不写 = 3/3/3。
     #[serde(default)]
     context_before: Option<usize>,
+    /// 投递过的自动标已读（订阅级可覆盖）；缺省 false。
+    #[serde(default)]
+    exclude_read: Option<bool>,
     #[serde(default)]
     context_after: Option<usize>,
     #[serde(default)]
@@ -4143,6 +4151,9 @@ struct RawSubscription {
     context_before: Option<usize>,
     context_after: Option<usize>,
     batch_head: Option<usize>,
+    /// 上下文排除已读；不写就继承会话级默认值。
+    #[serde(default)]
+    exclude_read: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5004,7 +5015,8 @@ mod tests {
             DeliveryWindow {
                 context_before: 3,
                 context_after: 3,
-                batch_head: 3
+                batch_head: 3,
+                exclude_read: false
             }
         );
     }
