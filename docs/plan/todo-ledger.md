@@ -704,6 +704,30 @@ Dylib 的 WireDeliveryRequest / Lua 的 request table 同步带 read_ids
 遗留：composer 的 options_schema 声明面（参考适配器 x-account 做法，
 让 exclude_read 之类选项在控制台可见可编辑，后续轮）。
 
+### 三次纠偏（e42eee6）：exclude_read 落订阅级投递窗口
+
+用户问「exclude_read 也是订阅级的吧？和投递上下多少条那个配置一致？」
+——是层级的正确位置：DeliveryWindow.exclude_read（默认 false），
+RawSession/RawSubscription 各加覆盖项，合并链与窗口一致（订阅覆盖 →
+会话默认 → false）。DeliveryRequest/WireDeliveryRequest/Lua table 透传
+window.exclude_read；内置 composer 改读 request.exclude_read；
+DeliveryPolicy.options 文档回退为「composer 专属配置，core 不解释」。
+
+教训：exclude_read 曾放在 [sessions.delivery.options]，而测试里写成
+[sessions.subscriptions.window] 子表——RawSubscription 是平铺字段没有
+window 嵌套表，整个子表被 serde 静默忽略，回归测试三易其稿才暴露。
+配置形态（订阅块内平铺）：
+
+  [[sessions.subscriptions]]
+  connection = "qqbot-official"
+  room = "private/<openid>"
+  exclude_read = true
+  context_before = 3
+  context_after = 0
+
+换代 req-1794696628775-51acfb17，version `0.1.0+e42eee6`；依赖面板
+六项全 up。
+
 
 
 ## 27. C2C 消息不到——READY 控制帧修复 + dispatch 诊断日志（2026-11-15）
