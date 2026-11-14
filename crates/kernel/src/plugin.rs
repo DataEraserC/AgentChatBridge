@@ -2412,6 +2412,12 @@ impl PluginManager {
     }
 
     /// 按连接配置实例化适配器。先查直接注册的工厂，再按 `kind` 委托 manager 子树。
+    /// 已注册的平台适配器工厂（含内置与动态）。双轨制 provider 合并用：
+    /// bridge 启动时逐个询问 `connections(state_root)`。
+    pub fn adapter_factories(&self) -> Vec<Arc<dyn AdapterFactory>> {
+        self.adapters.values().cloned().collect()
+    }
+
     pub fn create_adapter(
         &self,
         connection: &Connection,

@@ -1397,5 +1397,10 @@
   "adapter.qqbot.room_mismatch": "房间 {room} 不属于这条连接",
   "adapter.qqbot.rich_media_unsupported": "QQ 官方机器人出站只支持纯文本（富媒体接口未接）",
   "adapter.qqbot.empty_text": "拼出的出站文本为空",
-  "adapter.qqbot.no_passive_window": "官方机器人只能被动回复：这个房间还没有可用的被动窗口"
+  "adapter.qqbot.no_passive_window": "官方机器人只能被动回复：这个房间还没有可用的被动窗口",
+  "bridge.main.adapter_state_dir_failed": "适配器状态目录创建失败 {dir}：{error}",
+  "adapter.qqbot.state_open_failed": "适配器状态库打开失败：{error}",
+  "bridge.main.duplicate_connection_skipped": "适配器自有库的连接 {id} 与 config 冲突，已跳过（config 优先）",
+  "adapter.qqbot.secret_key_missing": "连接 {id}：存在加密密文但没有可用密钥，跳过该行",
+  "adapter.qqbot.secret_decrypt_failed": "连接 {id}：密文解密失败：{error}；跳过该行"
 }

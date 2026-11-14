@@ -1397,5 +1397,10 @@
   "adapter.qqbot.room_mismatch": "room {room} does not belong to this connection",
   "adapter.qqbot.rich_media_unsupported": "the official QQ bot outbound only supports plain text (rich media API not wired yet)",
   "adapter.qqbot.empty_text": " outgoing text is empty after composing",
-  "adapter.qqbot.no_passive_window": "official bots can only reply to recently received messages; no passive window for this room yet"
+  "adapter.qqbot.no_passive_window": "official bots can only reply to recently received messages; no passive window for this room yet",
+  "bridge.main.adapter_state_dir_failed": "failed to create adapter state dir {dir}: {error}",
+  "adapter.qqbot.state_open_failed": "failed to open adapter state db: {error}",
+  "bridge.main.duplicate_connection_skipped": "duplicate connection id {id} from an adapter library skipped (config wins)",
+  "adapter.qqbot.secret_key_missing": "connection {id}: encrypted secret present but no ACB key; row skipped",
+  "adapter.qqbot.secret_decrypt_failed": "connection {id}: secret decrypt failed: {error}; row skipped"
 }

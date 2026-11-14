@@ -94,6 +94,7 @@ dependencies = [
  "acb-i18n",
  "acb-kernel",
  "acb-proto",
+ "rusqlite",
  "serde_json",
  "thiserror",
  "tungstenite",
