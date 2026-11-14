@@ -653,5 +653,19 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 遗留：密钥删除入口未做（引用检查复杂，先走 acbctl/sqlite 运维流程）；会话表单的 secret 字段仍是文本（铸造会自动生成，无需选择器）。
 
+## 23. harness 全挂根因关闭 + 适配器驱动表单（2026-11-15，rebuild 后全链路验证）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| harness 全挂根因闭环 | cutover 删 config qq 行后，`acbctl sessions` 的加载路径（不同 CWD）里注入按相对 state 根找不到提供者库 → `dsh-qas` 订阅引用的 qq 连接消失 → 驱动循环失败（acbctl.err 40MB）。stopgap：`systemctl --user set-environment ACB_DATA_DIR=…`；durable：用户 rebuild 落 unit env（dcc57cbc）+ 新 acbl | drivers 日志 03:21:53 五个会话驱动全部拉起；依赖面板 codebuddy/dsh/opencode/zcode-acp 全 up（dsh 5 通道）、qq 在线 |
+| 新增连接表单按适配器 schema 生成 | `GET /api/adapters`（kind/platform/transports/docs/options_schema）；connection create patch 支持 transport/options（url 不再硬性必填）；onebot11/process 声明 options_schema；前端适配器下拉 → transport 下拉 → options 字段按 schema 渲染 → url 行按 transport 显隐 | 浏览器实测：onebot11 出 http_listen/async_upload_timeout_ms；切 process → transport=process、平台自动填 external、url 行隐藏、options 换 command/args/env/cwd/startup_timeout_secs（command 标必填） |
+| 密钥「＋ 新建密钥…」置顶 | 用户反馈落实：下拉第一项 | 浏览器实测选项顺序 |
+| 内联创建闭环 | 选「＋ 新建密钥…」→ 同对话框展开 → 创建并选用 → 下拉自动选中 | 浏览器实测：browser-e2e-test 创建成功、提示「hit save」；测试后三处（DB 行/值文件/声明片段）已清理 |
+| 版本徽章上线确认 | 头部显示 `0.1.0+470479b` | 浏览器实测 |
+| 换代 | payload `/nix/store/n86jd8r033b0h497baj6bxv5z7g9al74-acb-payload-0.1.0` → req-1794684529227-4dc3846b | `acbctl status --summary` active/open/200；`/api/adapters` 三适配器、schema 标注正确 |
+
+遗留：edit 连接表单的 options 编辑未做；适配器 schema 未覆盖动态库/进程外置适配器的分发机制（内置三个先行）；密钥删除入口未做。
+
+
 
 
