@@ -641,4 +641,17 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 遗留（需用户）：qqbot 连接要 AppSecret 录入控制台密钥库（qqbot-appsecret）后按 onebot11 同形补回放推送；QQ 官方机器人链路实测（发消息验证）待用户。upgrade status 请求终态停留在 `restarting`（pointer_committed），换代实际完成——状态机命名待查。
 
+## 22. 密钥录入 + 版本显示（2026-11-15，用户裁定：密钥引用一律下拉 + 密钥库管理）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 密钥创建 API | `POST /api/secrets`（名字+值）：值文件 0600 → config.d/60-console-secrets.toml 声明 → AcbKey 密文入库（无 AcbKey 时只留文件，与铸造一致）；重名拒绝（引用它的连接不能被悄悄换值） | `/api/secrets` 名单接口复用；控制台实测见换代后 |
+| 密钥库卡 | 配置页新增「密钥库」卡：名单（名字+id，值不回显）+ 新建对话框 | console.html secretsCard |
+| 引用字段下拉 | 连接表单「密钥来源名」改下拉（空=不设 + 库内全部 + ＋新建密钥…）；选新建在**同一对话框内**展开迷你创建块（已填字段不丢），建完自动选中 | addConnection 重写；插件 x-secret-ref 行加「＋新建密钥…」内联创建（选择器按 id 绑定，创建后重拉名单保持原选择） |
+| 版本显示 | /api/status 加 `version`（`ACB_BUILD_VERSION`，flake 以 `wrapProgram` 注入 `<cargo版本>+<git短哈希>`，非 nix 回落 dev）；控制台头部徽章 | flake.nix buildRev/buildVersion；头部 `#build-version` |
+| 连接表单判定 | 用户晒的表单字段形状正确（id/平台/适配器/地址/账号/密钥名）；qq2 若与 qq 同 URL 同账号会双连同一 bot——第二条连接需要不同账号或不同 WS 端口；「保存后要重启桥才连上」属实（实例生命周期随重启） | 见本轮汇报 |
+
+遗留：密钥删除入口未做（引用检查复杂，先走 acbctl/sqlite 运维流程）；会话表单的 secret 字段仍是文本（铸造会自动生成，无需选择器）。
+
+
 

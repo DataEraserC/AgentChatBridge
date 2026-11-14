@@ -70,8 +70,9 @@ ADR-0029 的热重载成熟，**未实现**。
   运行时创建适配器实例（新增 id 仍要重启才起实例）。
 - C期：控制台 schema 表单生成（JSON Schema → 表单，`x-secret-ref` 密钥
   选择器）：**已落地**（2026-11-15，`PluginManifest.config_schema` +
-  `POST /api/plugins/<id>/secret-bind` + `GET /api/secrets`）。剩余：
-  控制台内新建具名密钥的入口（现走 config `[secrets]` / acbctl 运维流程）。
+  `POST /api/plugins/<id>/secret-bind` + `GET /api/secrets`）。控制台内
+  新建具名密钥也已落地（`POST /api/secrets`：值文件 + config.d 声明 +
+  AcbKey 密文入库，与铸造流程同构；密钥库卡 + 引用处下拉/内联创建）。
 - D期：onebot-snowluma 的 cutover（自有库已就绪，删 config 行待运维窗口）；
   qqbot 的连接注册回放推送（等 AppSecret 录入后按 onebot11 同形补）。
 - 外部数据库形态（非本文件 SQLite）。
