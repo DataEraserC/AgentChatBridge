@@ -673,6 +673,7 @@
   "kernel.engine.task_event_failed": "background task {id} ({handler}) failed: {error}",
   "kernel.engine.task_event_invalid_wake_on": "task wake_on is invalid: {wake_on} (must be never / error / always)",
   "kernel.engine.task_event_not_subscribed": "room {room} had no subscribers when the task finished; synthetic event was not stored",
+  "kernel.engine.ingest_not_subscribed": "room {room} has no subscribed session; the event was dropped — add the room to a session subscription to catch it (logged once per room)",
   "kernel.engine.task_event_dropped": "task synthetic event was dropped by the inbound policy: {room}",
   "kernel.engine.task_event_handled": "task synthetic event unexpectedly reached routing",
   "kernel.engine.task_not_found": "task {id} not found (or it belongs to another session)",

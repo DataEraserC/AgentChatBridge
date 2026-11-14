@@ -12,7 +12,7 @@
 //! 一个 harness 连上来时声明「我是谁、接管哪些会话」。`send_message_to` 的可发目标 =
 //! 当前会话订阅的所有房间；**跨会话发送被砍掉**——一个会话不能替别的人格发言。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
@@ -723,6 +723,10 @@ pub struct Bridge<S: Store> {
     config_version: u64,
     /// 适配器声明的房间结构事实。键是房间；没有条目 = 未知（MultiParty）。
     room_profiles: HashMap<RoomId, RoomProfile>,
+    /// 已打过「无订阅」发现日志的房间。OpenID 类平台（qqbot 官方机器人）的
+    /// 房间串只能从入站事件里学到，而未订阅房间的事件无处落库——每房间
+    /// 首次丢弃时打一条含完整房间串的日志，用户拿它去配订阅。
+    unsubscribed_seen: HashSet<RoomId>,
     /// 连接注册表基线：提供者种类 → 启动时从其自有库读到的连接 id。
     ///
     /// `config.connections` 里命中这些 id 的连接是**提供者注入的**，注册推送
@@ -1000,6 +1004,7 @@ impl<S: Store> Bridge<S> {
             draining: false,
             config_version: 0,
             room_profiles: HashMap::new(),
+            unsubscribed_seen: HashSet::new(),
             provider_connection_ids: BTreeMap::new(),
         };
         // 上一次进程留下的未闭环任务必须先收尾，否则它们永远是 `running`：
@@ -3150,6 +3155,15 @@ impl<S: Store> Bridge<S> {
         let subscribers = Self::subscribers_of(&self.config, &room);
 
         if subscribers.is_empty() {
+            // 未订阅房间的事件无处落库（见 Ingest::NotSubscribed）。OpenID 类
+            // 平台的房间串只能在这里学到：每房间首次丢弃时打一条含完整房间串
+            // 的日志，用户拿它去配订阅；之后不再重复。
+            if self.unsubscribed_seen.insert(room.clone()) {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("kernel.engine.ingest_not_subscribed", room = room)
+                );
+            }
             return Ok(Ingest::NotSubscribed { room });
         }
 
@@ -14107,6 +14121,34 @@ mod connection_registry_tests {
         assert_eq!(skipped.len(), 1, "{summary}");
         assert_eq!(skipped[0]["id"], "bad", "{summary}");
         assert_eq!(connection_ids(&bridge), vec!["qq", "p1"]);
+    }
+
+    #[test]
+    fn unsubscribed_room_logs_once_then_drops() {
+        let mut bridge = bridge();
+        let room = RoomId::new("qq", "group/9999").expect("合法");
+        let draft = RecordDraft::message(
+            room.clone(),
+            Sender {
+                id: "10001".to_owned(),
+                name: "u".to_owned(),
+                role: None,
+            },
+            1,
+            vec![Element::text("@bot 在吗")],
+            false,
+        );
+        // 未知房间：两次 ingest 都丢弃，但发现日志只记一次。
+        assert!(matches!(
+            bridge.ingest(draft.clone()),
+            Ok(Ingest::NotSubscribed { .. })
+        ));
+        assert!(bridge.unsubscribed_seen.contains(&room));
+        assert!(matches!(
+            bridge.ingest(draft),
+            Ok(Ingest::NotSubscribed { .. })
+        ));
+        assert_eq!(bridge.unsubscribed_seen.len(), 1, "同房间不重复记日志");
     }
 
     #[test]

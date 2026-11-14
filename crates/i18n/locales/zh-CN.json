@@ -673,6 +673,7 @@
   "kernel.engine.task_event_failed": "后台任务 {id}（{handler}）失败：{error}",
   "kernel.engine.task_event_invalid_wake_on": "任务 wake_on 不合法：{wake_on}（只能是 never / error / always）",
   "kernel.engine.task_event_not_subscribed": "任务完成时房间 {room} 已没有订阅者，合成事件未入库",
+  "kernel.engine.ingest_not_subscribed": "房间 {room} 没有任何会话订阅，事件已丢弃；把这个房间串加进会话订阅即可接住（本房间只提示一次）",
   "kernel.engine.task_event_dropped": "任务合成事件被入站策略丢弃：{room}",
   "kernel.engine.task_event_handled": "任务合成事件意外进入了路由处理",
   "kernel.engine.task_not_found": "没有任务 {id}（或不属于当前会话）",
