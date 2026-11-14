@@ -4380,26 +4380,39 @@ fn json_to_toml(value: &serde_json::Value) -> toml::Value {
 /// - 语义错误（secret 引用不存在、url 非法等）沿用 fail-closed：启动失败并
 ///   点名连接，由运维修正后重启；
 /// - 库以只读方式打开——core 不写适配器的文件。
-/// 适配器自有连接库的根目录：`<数据根>/state/adapters`。
+/// 适配器自有连接库的根目录。
 ///
-/// 数据根 = `ACB_DATA_DIR`（绝对路径，桥与组件同源继承）→ parent(storage.path)
-/// （相对时按各进程 CWD 解析）。注入（[`inject_adapter_connections`]）与运行时
-/// 注册表（engine 的 `register_provider_connections`）共用这一个解析，保证两边
-/// 看到同一批库。返回 `None` = 连 storage.path 都没有父目录（退化输入），不注入。
-pub(crate) fn adapter_connections_root(storage_path: &str) -> Option<std::path::PathBuf> {
+/// `ACB_DATA_DIR` 设了：`<数据根>/state/adapters`（数据根含 `state/`）。
+/// 没设：`parent(storage.path)/adapters`——库文件与 acb.db 同层，和
+/// bridge main 给 `AdapterHost.state_dir` 的路径同一条解析。两条分支的
+/// 3a613c1 合并版曾把 fallback 也拼上 `state`，导致相对 storage.path 时
+/// 注入/注册表找 `state/state/adapters` 而工厂建在 `state/adapters`
+///（线上实测：注入静默空转）。注入（[`inject_adapter_connections`]）、
+/// 运行时注册表（engine 的 `register_provider_connections`）与 bridge
+/// main 共用这一个解析，保证两边看到同一批库。返回 `None` = storage.path
+/// 没有父目录（退化输入），不注入。
+pub fn adapter_connections_root(storage_path: &str) -> Option<std::path::PathBuf> {
     let data_dir = std::env::var("ACB_DATA_DIR")
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::path::Path::new(storage_path)
-                .parent()
-                .map(|parent| parent.display().to_string())
-        })?;
-    Some(
-        std::path::Path::new(&data_dir)
-            .join("state")
-            .join("adapters"),
-    )
+        .filter(|value| !value.trim().is_empty());
+    adapter_connections_root_with(data_dir.as_deref(), storage_path)
+}
+
+/// 上面这条的纯函数形态（env 读取留在外壳，测试不用碰全局环境）。
+fn adapter_connections_root_with(
+    data_dir_env: Option<&str>,
+    storage_path: &str,
+) -> Option<std::path::PathBuf> {
+    match data_dir_env {
+        Some(data_dir) => Some(
+            std::path::Path::new(data_dir)
+                .join("state")
+                .join("adapters"),
+        ),
+        None => std::path::Path::new(storage_path)
+            .parent()
+            .map(|parent| parent.join("adapters")),
+    }
 }
 
 /// 各提供者当前在自有库里登记的连接 id（kind → ids）。
@@ -7215,5 +7228,26 @@ capability = ["room_write"]
         .expect_err("覆盖层不能声明来源");
         assert!(matches!(error, ConfigError::ConsoleSecretSource), "{error}");
         unsafe { std::env::remove_var(variable) };
+    }
+
+    #[test]
+    fn adapter_connections_root_matches_factory_layout() {
+        // ACB_DATA_DIR：数据根含 state/，库在 <数据根>/state/adapters。
+        let with_env =
+            adapter_connections_root_with(Some("/data/acb"), "state/acb.db").expect("有");
+        assert_eq!(
+            with_env,
+            std::path::PathBuf::from("/data/acb/state/adapters")
+        );
+        // 回落：库与 acb.db 同层（与 AdapterHost.state_dir 的拼法一致）。
+        // 3a613c1 曾把这条分支也拼上 state，注入找 state/state/adapters，
+        // 工厂建在 state/adapters，线上注入静默空转——回归看守。
+        let fallback = adapter_connections_root_with(None, "state/acb.db").expect("有");
+        assert_eq!(fallback, std::path::PathBuf::from("state/adapters"));
+        let absolute = adapter_connections_root_with(None, "/data/acb/state/acb.db").expect("有");
+        assert_eq!(
+            absolute,
+            std::path::PathBuf::from("/data/acb/state/adapters")
+        );
     }
 }

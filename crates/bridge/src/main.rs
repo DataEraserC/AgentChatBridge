@@ -413,10 +413,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         None
     };
 
-    // 适配器自有状态目录的根：与 acb.db 同级（state/adapters/<连接名>/）。
-    let adapters_state_root = std::path::Path::new(&config.storage.path)
-        .parent()
-        .map(|parent| parent.join("adapters"))
+    // 适配器自有状态目录的根：与注入/注册表共用同一个解析（config.rs 的
+    // adapter_connections_root），保证 core 与适配器看到同一批库。
+    let adapters_state_root = acb_kernel::config::adapter_connections_root(&config.storage.path)
         .unwrap_or_else(|| std::path::PathBuf::from("state/adapters"));
     // 连接注册推送（B期，ADR-031）：适配器的 `connections` wire 消息经载体进
     // 这条通道，转发线程在锁内落进 engine 的运行时注册表。注册可能来自多个
