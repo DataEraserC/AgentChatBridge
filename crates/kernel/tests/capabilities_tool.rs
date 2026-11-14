@@ -141,10 +141,10 @@ fn catalog() -> Arc<[MethodSpec]> {
         effect: Effect::Read,
         record: RecordMode::None,
         verification: Verification::unverified(
-        permissions: None,
             "platform self-declared unsupported: 平台自述不支持重启",
             "隔离实例调用并记录 retcode",
         ),
+        permissions: None,
     });
     methods.into()
 }

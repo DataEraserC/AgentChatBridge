@@ -70,10 +70,10 @@ fn destructive_catalog() -> std::sync::Arc<[MethodSpec]> {
             effect: Effect::Write,
             record: RecordMode::None,
             verification: Verification::unverified(
-            permissions: None,
                 "add_type 语义只有单一来源",
                 "按 research §3.1 逐个回读",
             ),
+            permissions: None,
         },
     ])
 }

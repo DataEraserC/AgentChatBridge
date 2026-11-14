@@ -458,8 +458,8 @@ mod tests {
             }],
             effect: "send".into(),
             record: "message".into(),
-            verification: WireVerification::Verified {
             permissions: None,
+            verification: WireVerification::Verified {
                 source: "demo adapter docs".into(),
             },
         }

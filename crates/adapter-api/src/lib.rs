@@ -732,8 +732,8 @@ mod tests {
                 targets: vec![],
                 effect: "read".into(),
                 record: "none".into(),
-                verification: WireVerification::Verified {
                 permissions: None,
+                verification: WireVerification::Verified {
                     source: "fixture docs".into(),
                 },
             }],
