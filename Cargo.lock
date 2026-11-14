@@ -70,6 +70,7 @@ dependencies = [
  "acb-i18n",
  "acb-kernel",
  "acb-proto",
+ "rusqlite",
  "serde_json",
  "sha1",
  "thiserror",

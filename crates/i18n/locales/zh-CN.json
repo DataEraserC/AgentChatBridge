@@ -1402,5 +1402,9 @@
   "adapter.qqbot.state_open_failed": "适配器状态库打开失败：{error}",
   "bridge.main.duplicate_connection_skipped": "适配器自有库的连接 {id} 与 config 冲突，已跳过（config 优先）",
   "adapter.qqbot.secret_key_missing": "连接 {id}：存在加密密文但没有可用密钥，跳过该行",
-  "adapter.qqbot.secret_decrypt_failed": "连接 {id}：密文解密失败：{error}；跳过该行"
+  "adapter.qqbot.secret_decrypt_failed": "连接 {id}：密文解密失败：{error}；跳过该行",
+  "adapter.onebot11.secret_key_missing": "连接 {id}：存在加密令牌但没有可用密钥，跳过该行",
+  "adapter.onebot11.secret_decrypt_failed": "连接 {id}：令牌解密失败：{error}；跳过该行",
+  "adapter.onebot11.state_open_failed": "onebot 连接库打开失败：{error}",
+  "adapter.onebot11.transport_unknown": "连接 {id}：未知传输方式 {transport}；跳过该行"
 }

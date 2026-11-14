@@ -1402,5 +1402,9 @@
   "adapter.qqbot.state_open_failed": "failed to open adapter state db: {error}",
   "bridge.main.duplicate_connection_skipped": "duplicate connection id {id} from an adapter library skipped (config wins)",
   "adapter.qqbot.secret_key_missing": "connection {id}: encrypted secret present but no ACB key; row skipped",
-  "adapter.qqbot.secret_decrypt_failed": "connection {id}: secret decrypt failed: {error}; row skipped"
+  "adapter.qqbot.secret_decrypt_failed": "connection {id}: secret decrypt failed: {error}; row skipped",
+  "adapter.onebot11.secret_key_missing": "connection {id}: encrypted token present but no ACB key; row skipped",
+  "adapter.onebot11.secret_decrypt_failed": "connection {id}: token decrypt failed: {error}; row skipped",
+  "adapter.onebot11.state_open_failed": "onebot connections db open failed: {error}",
+  "adapter.onebot11.transport_unknown": "connection {id}: unknown transport {transport}; row skipped"
 }
