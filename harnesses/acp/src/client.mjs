@@ -311,6 +311,11 @@ export class AcpConnection {
     return result ?? {}
   }
 
+  /** 设置会话配置项（模型/模式/思考等级）；`value` 是选项 id。 */
+  async setConfigOption(sessionId, configId, value) {
+    return this.#request("session/set_config_option", { sessionId, configId, value }, SESSION_TIMEOUT_MS)
+  }
+
   /**
    * 投一轮话。`timeoutMs` = 0 表示不设超时（桥的 `turn_timeout_secs = 0`）。
    * 返回 `{ stopReason, ... }`；被打断时 stopReason 是 `cancelled`。

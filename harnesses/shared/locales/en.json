@@ -227,5 +227,7 @@
   "acp.unknown_response": "response for an unknown request id {id}",
   "acp.unsupported_version": "agent speaks ACP v{theirs}, this adapter speaks v{ours}",
   "acp.update_event": "session update: {kind}",
-  "acp.write_failed": "cannot write to the ACP agent: {error}"
+  "acp.write_failed": "cannot write to the ACP agent: {error}",
+  "acp.model_applied": "model applied to {session}: {model}",
+  "acp.model_apply_failed": "model apply failed ({session} → {model}): {error}"
 }

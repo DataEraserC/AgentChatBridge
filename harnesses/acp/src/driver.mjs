@@ -176,6 +176,8 @@ export class TurnDriver {
     this.personas = new Map()
     /** ACP 会话 id → 已经交代过「怎么用桥」的标记（每条会话只交代一次）。 */
     this.rules = new Set()
+    /** acb 会话 → 已通过 session/set_config_option 应用到 ACP 侧的模型。 */
+    this.models = new Map()
     this.chain = Promise.resolve()
     this.surface = bootstrapSurface()
     this.onDemand = []
@@ -388,6 +390,22 @@ export class TurnDriver {
       await this.#refreshSurface(link, delivery.session)
       const sessionId = await this.#session(delivery.session)
       this.current.set(delivery.session, sessionId)
+      // 聊天侧选的模型（session_info.model）→ session/set_config_option。
+      // 只在变化时发；agent 拒绝（未知的模型 id / 不支持配置项）不阻塞本轮。
+      const wantedModel = delivery.session_info?.model ?? ""
+      if (wantedModel && this.models.get(delivery.session) !== wantedModel) {
+        try {
+          await this.conn.setConfigOption(sessionId, "model", wantedModel)
+          this.models.set(delivery.session, wantedModel)
+          this.log("info", t("acp.model_applied", { session: delivery.session, model: wantedModel }))
+        } catch (error) {
+          this.log("warn", t("acp.model_apply_failed", {
+            session: delivery.session,
+            model: wantedModel,
+            error: error?.message ?? error,
+          }))
+        }
+      }
       const text = this.#composePrompt(delivery, sessionId)
       const timeoutMs = turnTimeout(delivery)
       this.log("info", t("acp.turn_start", {

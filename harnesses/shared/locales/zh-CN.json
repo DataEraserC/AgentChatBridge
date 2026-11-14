@@ -227,5 +227,7 @@
   "acp.unknown_response": "收到未知请求 id {id} 的响应",
   "acp.unsupported_version": "agent 说的是 ACP v{theirs}，本适配器是 v{ours}",
   "acp.update_event": "会话更新：{kind}",
-  "acp.write_failed": "写不进 ACP agent：{error}"
+  "acp.write_failed": "写不进 ACP agent：{error}",
+  "acp.model_applied": "模型已应用到 {session}：{model}",
+  "acp.model_apply_failed": "模型应用失败（{session} → {model}）：{error}"
 }
