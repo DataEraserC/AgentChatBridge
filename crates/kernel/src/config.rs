@@ -4381,14 +4381,14 @@ fn json_to_toml(value: &serde_json::Value) -> toml::Value {
 ///   点名连接，由运维修正后重启；
 /// - 库以只读方式打开——core 不写适配器的文件。
 fn inject_adapter_connections(merged: &mut toml::Value) {
-    let Some(storage_path) = merged
+    // [storage] 缺省时 from_raw 用 DEFAULT_STORAGE_PATH，这里必须用同一个
+    // 默认值——否则注入静默空转。
+    let storage_path = merged
         .get("storage")
         .and_then(|storage| storage.get("path"))
         .and_then(toml::Value::as_str)
         .map(str::to_owned)
-    else {
-        return;
-    };
+        .unwrap_or_else(|| DEFAULT_STORAGE_PATH.to_owned());
     let Some(root) = std::path::Path::new(&storage_path)
         .parent()
         .map(|parent| parent.join("adapters"))
