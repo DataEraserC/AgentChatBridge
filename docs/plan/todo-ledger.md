@@ -614,3 +614,18 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 | 推送 | d6f6c97（权限接线）+ docs 提交 → `origin/dev_20261025` | `git push` ff 成功，`git log origin/dev_20261025 -1` |
 
 遗留：nix-config flake.lock 的 acb input 仍在 3a613c1，换代与部署待运维窗口；onebot cutover（删 config 行）与 QQ 链接确认待用户。
+
+## 20. B/C 期落地（2026-11-15，ADR-031 的连接注册协议 + 控制台 schema 表单）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| B期 wire 注册协议 | `connections` 推送（回放/变更 + `removed` 注销）+ `connections_list` 协议变体；`WireConnection` 补 `token_secret`/`routes` | adapter-api serde 测试 4 例 |
+| B期 core 注册表 | engine 启动基线读提供者自有库 id 集（与注入共用 `adapter_connections_root`）；`register_provider_connections` 按提供者整组替换，config 赢、注销移除、非法行跳过 | engine 单测 5 例（新增/替换/纯注销/config 赢/secret 解析） |
+| B期 接线 | `AdapterHost.connections` 通道；process 载体经共享槽位转发；onebot11 启动直接回放自有库行；bridge main 转发线程落注册表 | `GET /api/connections` 每条连接标 `source` |
+| B期 顺带修复 | `ensure_connections_db` 传目录不传库文件路径——注入扫 `<目录>/connections.db`，原实现建同名无后缀文件或静默失败 | onebot11/qqbot 两个工厂的调用点改为 `<kind>/connections.db` |
+| C期 JSON Schema | `PluginManifest.config_schema`（与 `config` 互斥）；子集校验（type/enum/minimum/maximum/required/default）；`x-secret-ref` 密钥项走 secret_refs | plugin_manifest 测试 5 例 |
+| C期 密钥选择器 | `GET /api/secrets`（id+name 名单，不含值）+ `POST /api/plugins/<id>/secret-bind`；控制台弹窗双轨渲染（schema → JSON Schema 表单 + 选择器，legacy 原样） | console.html JS 语法校验通过；schema 模式手工验证待换代后 |
+| C期 store 面 | `SecretsStore::secrets_index`（sqlite 真实 id；MemoryStore 稳定序号） | workspace 测试 |
+
+遗留：控制台内新建具名密钥入口未做；core 侧 `connections_list` 触发器未接（等外置 provider）；qqbot 回放推送未做；运行时创建适配器实例未做。
+

@@ -2723,6 +2723,27 @@ impl<S: Store> Bridge<S> {
         Ok(written)
     }
 
+    /// 绑定插件密钥引用（控制台的密钥选择器走这里）。
+    pub fn plugin_bind_secret(
+        &mut self,
+        id: &str,
+        name: &str,
+        secret_id: i64,
+    ) -> Result<(), String> {
+        let plugin = self
+            .registry_plugin(id)?
+            .ok_or_else(|| format!("plugin {id} not found"))?;
+        crate::plugin_admin::bind_secret(&mut self.store, &plugin, name, secret_id)
+    }
+
+    /// 密钥名单（id + 名字，不含值）：控制台密钥选择器用。
+    pub fn secrets_index(&self) -> Result<Vec<(i64, String)>, String> {
+        use crate::storage::SecretsStore;
+        self.store
+            .secrets_index()
+            .map_err(|error| error.to_string())
+    }
+
     pub fn plugin_records(
         &self,
         id: &str,

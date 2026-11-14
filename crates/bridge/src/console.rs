@@ -546,6 +546,7 @@ impl<S: Store + Send + 'static> Console<S> {
             }
             ("GET", "/api/status") => (200, self.status()),
             ("GET", "/api/connections") => (200, self.connections_view()),
+            ("GET", "/api/secrets") => (200, self.secrets_view()),
             ("GET", "/api/sessions") => (200, self.sessions()),
             // 记忆管家：最近一次同步时间、结果、冲突文件数与失败原因。
             // 管家线程写 status.json，这里只读，不阻塞任何同步动作。
@@ -633,6 +634,9 @@ impl<S: Store + Send + 'static> Console<S> {
             }
             ("POST", p) if p.starts_with("/api/plugins/") && p.ends_with("/config") => {
                 self.plugin_config_update(p, body)
+            }
+            ("POST", p) if p.starts_with("/api/plugins/") && p.ends_with("/secret-bind") => {
+                self.plugin_secret_bind(p, body)
             }
             ("POST", p) if p.starts_with("/api/plugins/") && p.ends_with("/action") => {
                 self.plugin_run_action(p, body)
@@ -1679,6 +1683,66 @@ impl<S: Store + Send + 'static> Console<S> {
                 Some(error),
             ),
         }
+    }
+
+    /// `POST /api/plugins/<id>/secret-bind`，body `{"name": "...", "secret_id": N}`。
+    /// x-secret-ref / secret 字段的绑定入口；值本体永远只存在密钥库。
+    fn plugin_secret_bind(&self, path: &str, body: &str) -> (u16, String) {
+        let Some((id, parts)) = Self::plugin_path_parts(path) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        if parts != ["secret-bind"] {
+            return error_response(404, acb_i18n::msg!("bridge.console.not_found"), None);
+        }
+        let value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_response(
+                    400,
+                    acb_i18n::msg!("bridge.console.invalid_json"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let Some(name) = value.get("name").and_then(serde_json::Value::as_str) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        let Some(secret_id) = value.get("secret_id").and_then(serde_json::Value::as_i64) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        let mut bridge = lock(&self.bridge);
+        match bridge.plugin_bind_secret(&id, name, secret_id) {
+            Ok(()) => (200, json!({"ok": true}).to_string()),
+            Err(error) => error_response(
+                400,
+                acb_i18n::msg!("bridge.console.bad_request"),
+                Some(error),
+            ),
+        }
+    }
+
+    /// `GET /api/secrets`：密钥名单（id + 名字）。密钥选择器的数据源；
+    /// 值永远不出这个接口。
+    fn secrets_view(&self) -> String {
+        let bridge = lock(&self.bridge);
+        let secrets = match bridge.secrets_index() {
+            Ok(secrets) => secrets,
+            Err(error) => {
+                return error_response(
+                    500,
+                    acb_i18n::msg!("bridge.console.bad_request"),
+                    Some(error),
+                )
+                .1;
+            }
+        };
+        json!({
+            "secrets": secrets
+                .into_iter()
+                .map(|(id, name)| json!({"id": id, "name": name}))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
     }
 
     /// `POST /api/plugins/<id>/action`，body `{"action": "...", "args": {...}}`。

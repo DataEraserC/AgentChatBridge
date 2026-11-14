@@ -157,6 +157,15 @@ pub struct PluginManifest {
     pub description: Option<String>,
     #[serde(default)]
     pub config: Vec<ConfigField>,
+    /// JSON Schema 形式的配置自描述（用户裁定格式，ADR-031 C期）。
+    ///
+    /// 与 `config`（旧字段列表）二选一：声明了 `config_schema` 就以它为准，
+    /// `config` 必须为空（validate 拒绝双源，避免「到底听谁的」歧义）。
+    /// 只消费子集：`properties` / `required` / `default` / `enum` /
+    /// `minimum` / `maximum` / `description`，以及自定义注解
+    /// `x-secret-ref: true`（密钥项，走 plugin_secret_refs）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_schema: Option<Value>,
     #[serde(default)]
     pub resources: Vec<ResourceDecl>,
     #[serde(default)]
@@ -172,6 +181,15 @@ impl PluginManifest {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.config_schema.is_some() && !self.config.is_empty() {
+            return Err(
+                "config_schema 与 config 不能同时声明：JSON Schema 声明后以它为准，旧的字段列表必须留空"
+                    .to_owned(),
+            );
+        }
+        if let Some(schema) = &self.config_schema {
+            Self::validate_config_schema(schema)?;
+        }
         let mut seen = std::collections::BTreeSet::new();
         for field in &self.config {
             if field.key.trim().is_empty() {
@@ -242,13 +260,133 @@ impl PluginManifest {
         self.actions.iter().find(|action| action.name == name)
     }
 
-    /// 控制台表单用的形状（不含任何实际值）。
+    /// 控制台表单用的形状（不含任何实际值）。schema 模式带 `config_schema`。
     pub fn form_schema(&self) -> Value {
         json!({
             "config": self.config,
+            "config_schema": self.config_schema,
             "resources": self.resources,
             "actions": self.actions,
         })
+    }
+
+    /// schema 模式的 `properties` 表。非 schema 模式返回 `None`。
+    pub fn schema_properties(&self) -> Option<&serde_json::Map<String, Value>> {
+        self.config_schema
+            .as_ref()
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+    }
+
+    /// schema 模式：某配置项是不是密钥项（`x-secret-ref: true`）。
+    pub fn schema_is_secret(&self, key: &str) -> bool {
+        self.schema_properties()
+            .and_then(|properties| properties.get(key))
+            .and_then(|property| property.get("x-secret-ref"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// schema 模式：required 且无 default 的 key（`missing_required` 用）。
+    pub fn schema_missing(&self, present: &std::collections::BTreeSet<&str>) -> Vec<String> {
+        let Some(schema) = &self.config_schema else {
+            return Vec::new();
+        };
+        let required: Vec<&str> = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        required
+            .into_iter()
+            .filter(|key| {
+                !self.schema_is_secret(key)
+                    && !present.contains(key)
+                    && self
+                        .schema_properties()
+                        .and_then(|properties| properties.get(*key))
+                        .and_then(|property| property.get("default"))
+                        .is_none()
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// schema 模式：按子集语义校验一个配置值。
+    ///
+    /// 支持的约束与旧字段列表对齐：type（六种基本型）、enum、minimum /
+    /// maximum、字符串形态的 array/object 值原样放行（console 传上来的
+    /// 已经是解析后的 JSON 值）。未知约束不校验——schema 是自描述，core
+    /// 只承诺看懂自己声明支持的部分。
+    pub fn schema_validate_value(&self, key: &str, value: &Value) -> Result<(), String> {
+        let Some(property) = self
+            .schema_properties()
+            .and_then(|properties| properties.get(key))
+            .cloned()
+        else {
+            return Err(format!(
+                "未知配置项：{key}（config_schema.properties 里没有声明）"
+            ));
+        };
+        if let Some(expected) = property.get("type").and_then(Value::as_str) {
+            let ok = match expected {
+                "string" => value.is_string(),
+                "integer" => value.is_i64() || value.is_u64(),
+                "number" => value.is_number(),
+                "boolean" => value.is_boolean(),
+                "array" => value.is_array(),
+                "object" => value.is_object(),
+                _ => true,
+            };
+            if !ok {
+                return Err(format!("{key} 需要 {expected}，实际是 {}", kind_of(value)));
+            }
+        }
+        if let Some(allowed) = property.get("enum").and_then(Value::as_array) {
+            if !allowed.is_empty() && !allowed.iter().any(|item| item == value) {
+                return Err(format!(
+                    "{key} 只能取 {} 之一",
+                    serde_json::to_string(allowed).unwrap_or_else(|_| "[]".to_owned())
+                ));
+            }
+        }
+        if let Some(number) = value.as_f64() {
+            if let Some(min) = property.get("minimum").and_then(Value::as_f64) {
+                if number < min {
+                    return Err(format!("{key} 不能小于 {min}"));
+                }
+            }
+            if let Some(max) = property.get("maximum").and_then(Value::as_f64) {
+                if number > max {
+                    return Err(format!("{key} 不能大于 {max}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 校验 `config_schema` 本身。只看结构（对象、type=object、properties
+    /// 是对象表），约束词表不在这里管——那是渲染/校验子集的事。
+    fn validate_config_schema(schema: &Value) -> Result<(), String> {
+        let Some(object) = schema.as_object() else {
+            return Err("config_schema 必须是 JSON 对象".to_owned());
+        };
+        if let Some(ty) = object.get("type") {
+            if ty != "object" {
+                return Err(format!("config_schema.type 必须是 \"object\"，实际是 {ty}"));
+            }
+        }
+        if let Some(properties) = object.get("properties") {
+            if !properties.is_object() {
+                return Err("config_schema.properties 必须是对象".to_owned());
+            }
+        }
+        if let Some(required) = object.get("required") {
+            if !required.is_array() {
+                return Err("config_schema.required 必须是数组".to_owned());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -408,5 +546,95 @@ mod tests {
         assert!(!looks_like_secret_value("这是普通的一句话，不是密钥"));
         assert!(!looks_like_secret_value("short"));
         assert!(looks_like_secret_value("Zx9Qw7Lk2Mn4Bv6Rt8Yu3Hs5Jd1Fg0Pa"));
+    }
+
+    fn schema_manifest() -> PluginManifest {
+        PluginManifest::parse(
+            r#"{
+              "id": "demo.schema",
+              "title": "Demo Schema",
+              "config_schema": {
+                "type": "object",
+                "required": ["endpoint"],
+                "properties": {
+                  "endpoint": {"type": "string", "description": "服务地址"},
+                  "retries": {"type": "integer", "minimum": 0, "maximum": 5, "default": 2},
+                  "mode": {"type": "string", "enum": ["fast", "safe"], "default": "safe"},
+                  "apiToken": {"type": "string", "x-secret-ref": true}
+                }
+              }
+            }"#,
+        )
+        .expect("schema manifest 合法")
+    }
+
+    #[test]
+    fn schema_manifest_parses_and_form_schema_carries_it() {
+        let manifest = schema_manifest();
+        let form = manifest.form_schema();
+        assert!(form["config_schema"].is_object(), "{form}");
+        assert!(manifest.schema_is_secret("apiToken"));
+        assert!(!manifest.schema_is_secret("endpoint"));
+    }
+
+    #[test]
+    fn schema_and_config_are_mutually_exclusive() {
+        let raw = r#"{
+          "config": [{"key": "a", "type": "string"}],
+          "config_schema": {"type": "object", "properties": {}}
+        }"#;
+        let error = PluginManifest::parse(raw).expect_err("双源必须拒绝");
+        assert!(error.contains("config_schema"), "{error}");
+    }
+
+    #[test]
+    fn schema_shape_is_validated() {
+        assert!(PluginManifest::parse(r#"{"config_schema": {"type": "array"}}"#).is_err());
+        assert!(PluginManifest::parse(r#"{"config_schema": {"properties": []}}"#).is_err());
+        assert!(PluginManifest::parse(r#"{"config_schema": {"required": "endpoint"}}"#).is_err());
+        assert!(PluginManifest::parse(r#"{"config_schema": {"type": "object"}}"#).is_ok());
+    }
+
+    #[test]
+    fn schema_value_validation_matches_field_semantics() {
+        let manifest = schema_manifest();
+        assert!(
+            manifest
+                .schema_validate_value("endpoint", &json!("http://x"))
+                .is_ok()
+        );
+        assert!(
+            manifest
+                .schema_validate_value("endpoint", &json!(42))
+                .is_err()
+        );
+        assert!(manifest.schema_validate_value("retries", &json!(3)).is_ok());
+        assert!(
+            manifest
+                .schema_validate_value("retries", &json!(6))
+                .is_err()
+        );
+        assert!(
+            manifest
+                .schema_validate_value("mode", &json!("fast"))
+                .is_ok()
+        );
+        assert!(
+            manifest
+                .schema_validate_value("mode", &json!("turbo"))
+                .is_err()
+        );
+        assert!(manifest.schema_validate_value("nope", &json!(1)).is_err());
+    }
+
+    #[test]
+    fn schema_missing_respects_required_default_and_secret() {
+        let manifest = schema_manifest();
+        // endpoint 必填且无 default；retries 有 default；apiToken 是密钥项不走票据面。
+        let missing = manifest.schema_missing(&std::collections::BTreeSet::new());
+        assert_eq!(missing, vec!["endpoint".to_owned()]);
+        let mut present = std::collections::BTreeSet::new();
+        present.insert("endpoint");
+        assert!(manifest.schema_missing(&present).is_empty());
     }
 }

@@ -1107,6 +1107,49 @@ function pluginFieldValue(field) {
   return el.value;
 }
 
+// JSON Schema 模式（config_schema）的表单部件：与 pluginFieldInput 同形状，
+// 约束词表取自 property（type/enum/minimum/maximum/default/description）。
+function schemaFieldInput(key, property, value) {
+  const field = {
+    key,
+    type: property.type || "string",
+    enum: property.enum,
+    min: property.minimum,
+    max: property.maximum,
+  };
+  const fallback = property.default === undefined ? undefined : property.default;
+  return pluginFieldInput(field, value === undefined ? fallback : value);
+}
+
+function schemaRequired(schema) {
+  return new Set(schema?.required || []);
+}
+
+function schemaFieldValue(key, property) {
+  const field = {
+    key,
+    type: property.type || "string",
+    enum: property.enum,
+  };
+  return pluginFieldValue(field);
+}
+
+// 密钥选择器：从密钥库里选一个具名密钥绑到插件的 x-secret-ref 字段。
+// 值本体永远只存在密钥库里，表单只见名字与绑定状态。
+async function bindPluginSecret(id, name) {
+  const select = document.getElementById("psel-" + name);
+  const secretId = parseInt(select.value, 10);
+  if (!secretId) { alert("先在密钥库里建一个具名密钥（config [secrets] 声明或 acbctl 运维流程）"); return; }
+  try {
+    await api("/api/plugins/" + encodeURIComponent(id) + "/secret-bind", {
+      method: "POST", body: JSON.stringify({ name, secret_id: secretId }),
+    });
+    openPluginConfig(id);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
 async function openPluginConfig(id) {
   let view;
   try {
@@ -1116,17 +1159,41 @@ async function openPluginConfig(id) {
     return;
   }
   const manifest = view.manifest || {};
-  const fields = (manifest.config || []).filter((field) => !field.secret);
-  const secrets = (manifest.config || []).filter((field) => field.secret);
   const bound = new Set((view.secretRefs || []).map((ref) => ref.name));
-  const configRows = fields.map((field) => `
+  // 双轨：manifest 声明了 config_schema 就按 JSON Schema 渲染（C期），
+  // 否则走旧的字段列表。
+  const schema = manifest.config_schema && manifest.config_schema.properties
+    ? manifest.config_schema : null;
+  const schemaProps = schema ? Object.entries(schema.properties) : null;
+  const fields = schema ? [] : (manifest.config || []).filter((field) => !field.secret);
+  const legacySecrets = schema ? [] : (manifest.config || []).filter((field) => field.secret);
+  const secretKeys = schema
+    ? schemaProps.filter(([, property]) => property["x-secret-ref"]).map(([key]) => key)
+    : legacySecrets.map((field) => field.key);
+  let secretsIndex = [];
+  if (secretKeys.length) {
+    try {
+      const reply = await api("/api/secrets");
+      secretsIndex = reply.secrets || [];
+    } catch (e) { /* 列表拿不到时选择器退化成只有绑定状态 */ }
+  }
+  const configRows = schema
+    ? schemaProps
+        .filter(([, property]) => !property["x-secret-ref"])
+        .map(([key, property]) => `
+    <div class="form-row"><label>${esc(property.title || key)}</label>${schemaFieldInput(key, property, view.config?.[key])}
+      <span class="hint">${esc(property.description || "")}${schemaRequired(schema).has(key) ? "（必填）" : ""}</span></div>`).join("")
+    : fields.map((field) => `
     <div class="form-row"><label>${esc(field.label || field.key)}</label>${pluginFieldInput(field, view.config?.[field.key] ?? field.default)}
       <span class="hint">${esc(field.description || "")}${field.required ? "（必填）" : ""}</span></div>`).join("");
-  const secretRows = secrets.length ? `
+  const secretRows = secretKeys.length ? `
     <div class="card"><h3>密钥字段</h3>
-      <p class="muted">这些字段不接受明文；要用具名密钥绑定，值只存在密钥库里。</p>
-      ${secrets.map((field) => `<div class="form-row"><label>${esc(field.label || field.key)}</label>
-        <span class="pill ${bound.has(field.key) ? "ok" : ""}">${bound.has(field.key) ? "已绑定" : "未绑定"}</span></div>`).join("")}
+      <p class="muted">这些字段不接受明文；用具名密钥绑定，值只存在密钥库里。</p>
+      ${secretKeys.map((key) => `
+      <div class="form-row"><label>${esc(key)}</label>
+        <span class="pill ${bound.has(key) ? "ok" : ""}">${bound.has(key) ? "已绑定" : "未绑定"}</span>
+        <select id="psel-${esc(key)}" style="max-width:220px">${secretsIndex.map((secret) => `<option value="${esc(String(secret.id))}">${esc(secret.name)}</option>`).join("")}</select>
+        <button class="mini" onclick="bindPluginSecret('${esc(id)}','${esc(key)}')">绑定</button></div>`).join("")}
     </div>` : "";
   const resources = (manifest.resources || []).map((resource) => `
     <div class="form-row"><label>${esc(resource.label || resource.name)}</label>
@@ -1143,9 +1210,17 @@ async function openPluginConfig(id) {
     ${actions ? `<div class="card"><h3>动作</h3>${actions}</div>` : ""}`,
     async () => {
       const config = {};
-      for (const field of fields) {
-        const value = pluginFieldValue(field);
-        if (value !== undefined && value !== null) config[field.key] = value;
+      if (schemaProps) {
+        for (const [key, property] of schemaProps) {
+          if (property["x-secret-ref"]) continue;
+          const value = schemaFieldValue(key, property);
+          if (value !== undefined && value !== null) config[key] = value;
+        }
+      } else {
+        for (const field of fields) {
+          const value = pluginFieldValue(field);
+          if (value !== undefined && value !== null) config[field.key] = value;
+        }
       }
       const result = await api("/api/plugins/" + encodeURIComponent(id) + "/config", {
         method: "POST", body: JSON.stringify({ config }),

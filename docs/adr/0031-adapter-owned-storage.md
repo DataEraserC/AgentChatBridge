@@ -64,10 +64,16 @@ ADR-0029 的热重载成熟，**未实现**。
 
 ## 未实现（显式标注）
 
-- B期：wire 注册协议（`connections/list|register|unregister`）与 core 运行时
-  注册表；
-- C期：控制台 schema 表单生成（JSON Schema → 表单，`x-secret-ref`）；
+- B期 wire 注册协议：**已落地**（2026-11-15，`connections` 推送 +
+  `connections_list` 协议变体 + engine 运行时注册表；onebot11 已回放）。
+  剩余：core 侧 `connections_list` 触发器（等第一个外置 provider）；
+  运行时创建适配器实例（新增 id 仍要重启才起实例）。
+- C期：控制台 schema 表单生成（JSON Schema → 表单，`x-secret-ref` 密钥
+  选择器）：**已落地**（2026-11-15，`PluginManifest.config_schema` +
+  `POST /api/plugins/<id>/secret-bind` + `GET /api/secrets`）。剩余：
+  控制台内新建具名密钥的入口（现走 config `[secrets]` / acbctl 运维流程）。
 - D期：onebot-snowluma 的 cutover（自有库已就绪，删 config 行待运维窗口）；
+  qqbot 的连接注册回放推送（等 AppSecret 录入后按 onebot11 同形补）。
 - 外部数据库形态（非本文件 SQLite）。
 
 ## 不这样会怎样

@@ -857,6 +857,9 @@ pub trait SecretsStore {
         at: i64,
     ) -> Result<(), StorageError>;
     fn secret_delete(&mut self, name: &str) -> Result<bool, StorageError>;
+    /// 密钥名单（id + 名字），给控制台的密钥选择器用。不含值——值永不
+    /// 进列表接口。
+    fn secrets_index(&self) -> Result<Vec<(i64, String)>, StorageError>;
 }
 
 /// 运行时可变的全局设置。初始值在代码里，不从配置文件导入。
@@ -1841,6 +1844,16 @@ impl SecretsStore for MemoryStore {
 
     fn secret_delete(&mut self, name: &str) -> Result<bool, StorageError> {
         Ok(self.secrets.remove(name).is_some())
+    }
+
+    fn secrets_index(&self) -> Result<Vec<(i64, String)>, StorageError> {
+        // 内存库里没有持久 id；按 BTreeMap 稳定序号编一个，仅测试用。
+        Ok(self
+            .secrets
+            .values()
+            .enumerate()
+            .map(|(index, secret)| (index as i64 + 1, secret.name.clone()))
+            .collect())
     }
 }
 

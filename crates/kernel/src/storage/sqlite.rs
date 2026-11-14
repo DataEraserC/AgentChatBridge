@@ -3031,6 +3031,19 @@ impl SecretsStore for SqliteStore {
             .map_err(io_error)?;
         Ok(changed > 0)
     }
+
+    fn secrets_index(&self) -> Result<Vec<(i64, String)>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name FROM secrets ORDER BY id")
+            .map_err(io_error)?;
+        let mut rows = stmt.query([]).map_err(io_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(io_error)? {
+            out.push((row.get(0).map_err(io_error)?, row.get(1).map_err(io_error)?));
+        }
+        Ok(out)
+    }
 }
 
 impl SettingsStore for SqliteStore {
