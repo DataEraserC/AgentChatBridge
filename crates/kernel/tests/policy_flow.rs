@@ -138,6 +138,7 @@ fn store_wins_over_config_once_it_has_content() {
         scope: GrantScope::Subscribed,
         target: None,
         capability: vec![GrantCapability::RoomRead],
+        permissions: Vec::new(),
     });
     store.policy_replace(&seeded).expect("能写");
 

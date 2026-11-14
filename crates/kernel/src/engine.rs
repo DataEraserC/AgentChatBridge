@@ -3764,6 +3764,7 @@ impl<S: Store> Bridge<S> {
                 subscriptions: &subscriptions,
                 origin: Some(room),
                 platform_op: None,
+                permissions: &[],
                 policy_version: self.config_version as i64,
                 grants: &config.grants,
             };
@@ -5727,6 +5728,12 @@ impl<S: Store> Bridge<S> {
                     room: Some(&ctx.room),
                     member: ctx.origin_sender.as_deref(),
                 };
+                let platform = ctx
+                    .config
+                    .connection(&room.connection)
+                    .map(|connection| connection.platform.as_str())
+                    .unwrap_or("");
+                let required_permissions = spec.permission_strings(platform);
                 let query = grants::GrantQuery {
                     subject,
                     place,
@@ -5736,6 +5743,7 @@ impl<S: Store> Bridge<S> {
                     subscriptions: &subscriptions,
                     origin: Some(&ctx.room),
                     platform_op: Some(spec.name.as_ref()),
+                    permissions: &required_permissions,
                     policy_version: self.config_version as i64,
                     grants: &ctx.config.grants,
                 };
@@ -6147,6 +6155,18 @@ impl<S: Store> Bridge<S> {
             .config
             .grants
             .subject_for(&ctx.room.connection, ctx.origin_sender.as_deref());
+        // platform_call 的细粒度权限身份：`<平台>:<op>`（如 `qq:group.mute`），
+        // 供否决插件按权限串判定；其余工具没有平台 op，也就没有细粒度身份
+        // （空切片 = 行为不变）。
+        let required_permissions: Vec<String> = if tool == "platform_call" {
+            args.get("op")
+                .and_then(|op| op.as_str())
+                .filter(|op| !op.trim().is_empty())
+                .map(|op| vec![format!("{platform}:{op}")])
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let context = crate::plugin::ToolAccessContext {
             tool,
             args,
@@ -6158,7 +6178,7 @@ impl<S: Store> Bridge<S> {
             origin_sender: ctx.origin_sender.as_deref(),
             is_admin,
             live: ctx.live,
-            required_permissions: &[],
+            required_permissions: &required_permissions,
         };
         // 同一时刻只生效一个实现：配置了外部 ToolAccessProvider 就只用它；
         // 没有外部实现时才跑内置 grants evaluator。
@@ -6226,6 +6246,7 @@ impl<S: Store> Bridge<S> {
             subscriptions: &subscriptions,
             origin: Some(&ctx.room),
             platform_op: None,
+            permissions: &[],
             policy_version: self.config_version as i64,
             grants: &ctx.config.grants,
         };
@@ -6485,6 +6506,7 @@ impl<S: Store> Bridge<S> {
                 subscriptions: &subscriptions,
                 origin: Some(&ctx.room),
                 platform_op: None,
+                permissions: &[],
                 policy_version: self.config_version as i64,
                 grants: &ctx.config.grants,
             };
@@ -8165,6 +8187,7 @@ impl<S: Store> Bridge<S> {
                     subscriptions: &subscriptions,
                     origin: origin_room,
                     platform_op: None,
+                    permissions: &[],
                     policy_version: self.config_version as i64,
                     grants: &config.grants,
                 };
@@ -8437,6 +8460,7 @@ impl<S: Store> Bridge<S> {
             subscriptions: &subscriptions,
             origin: Some(&ctx.room),
             platform_op: None,
+            permissions: &[],
             policy_version: self.config_version as i64,
             grants: &ctx.config.grants,
         };
@@ -12403,6 +12427,13 @@ impl<S: Store> Bridge<S> {
             .map(|subscription| subscription.room.clone())
             .collect();
         let target = access_target_for_spec(config, room, spec);
+        // 展示层与执行层（prepare_platform_call）用同一来源派生权限串，
+        // 否则会出现「展示说要票据、执行却放行」的口径分裂。
+        let platform = config
+            .connection(&room.connection)
+            .map(|connection| connection.platform.as_str())
+            .unwrap_or("");
+        let required_permissions = spec.permission_strings(platform);
         let query = grants::GrantQuery {
             subject,
             place,
@@ -12412,6 +12443,7 @@ impl<S: Store> Bridge<S> {
             subscriptions: &subscriptions,
             origin: Some(room),
             platform_op: Some(spec.name.as_ref()),
+            permissions: &required_permissions,
             policy_version: self.config_version as i64,
             grants: &config.grants,
         };

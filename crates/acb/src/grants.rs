@@ -130,6 +130,7 @@ trait PolicySource {
             origin: None,
             subscriptions: self.subscriptions(),
             platform_op: None,
+            permissions: &[],
             policy_version,
             grants: self.grants(),
         };
@@ -165,6 +166,7 @@ impl ConfigSource {
             origin: None,
             subscriptions: self.subscriptions(),
             platform_op: None,
+            permissions: &[],
             policy_version,
             grants: self.grants(),
         };
@@ -1536,6 +1538,7 @@ room = "group/1"
             scope: acb_kernel::grants::GrantScope::Room,
             target: Some(AccessTarget::room(&room("t:group/1"))),
             capability: vec![GrantCapability::Plugin],
+            permissions: Vec::new(),
         }
     }
 
@@ -1547,6 +1550,7 @@ room = "group/1"
             scope: acb_kernel::grants::GrantScope::Room,
             target: Some(AccessTarget::room(&room("t:group/1"))),
             capability: vec![GrantCapability::RoomRead],
+            permissions: Vec::new(),
         }
     }
 

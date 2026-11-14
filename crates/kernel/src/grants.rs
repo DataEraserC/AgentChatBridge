@@ -512,6 +512,13 @@ pub struct GrantRule {
     #[serde(default)]
     pub target: Option<AccessTarget>,
     pub capability: Vec<GrantCapability>,
+    /// 细粒度权限字符；空 = 不过滤（沿用粗粒度 scope 判定）。
+    ///
+    /// 每项形如 `qq:group.mute`，末段可用 `*` 通配一层（`qq:group.*` 匹配
+    /// `qq:group.mute` 与 `qq:group.file.list`，但不匹配 `qq:app.close`）。
+    /// 裸 `*` 或居中 `*` 无效。
+    #[serde(default)]
+    pub permissions: Vec<String>,
 }
 
 /// 房间级授权政策。结构事实（`RoomScope`）由适配器声明，这里只放政策判断。
@@ -638,6 +645,7 @@ impl GrantsConfig {
                 ));
             }
             let mut seen = std::collections::BTreeSet::new();
+            let mut seen_permissions = std::collections::BTreeSet::new();
             for capability in &rule.capability {
                 if matches!(*capability, GrantCapability::AccountSecret) {
                     return Err(format!(
@@ -649,6 +657,18 @@ impl GrantsConfig {
                 if !seen.insert(*capability) {
                     return Err(format!(
                         "grants.{label}[{index}] capability declared twice: {capability:?}"
+                    ));
+                }
+            }
+            for permission in &rule.permissions {
+                if let Err(reason) = validate_permission_string(permission) {
+                    return Err(format!(
+                        "grants.{label}[{index}] permissions entry {permission:?}: {reason}"
+                    ));
+                }
+                if !seen_permissions.insert(permission.clone()) {
+                    return Err(format!(
+                        "grants.{label}[{index}] permissions entry declared twice: {permission:?}"
                     ));
                 }
             }
@@ -920,6 +940,10 @@ pub struct GrantQuery<'a> {
     pub subscriptions: &'a [RoomId],
     /// 当前评估的平台方法名；只有 `platform_call` 的能力检查会填。
     pub platform_op: Option<&'a str>,
+    /// `platform_call` 细粒度权限字符（形如 `qq:group.mute`）。
+    /// 规则声明了 `permissions` 时按精确匹配 + 末段单层通配判定；
+    /// 未声明 `permissions` 的规则不在此过滤。
+    pub permissions: &'a [String],
     /// 判定所依据的策略版本；Decision 必须带回同一个值。
     pub policy_version: i64,
     /// 这一轮冻结的策略快照；Policy 实现只读它，不读全局可变状态。
@@ -1106,6 +1130,53 @@ fn target_is_reachable(target: &AccessTarget, subscriptions: &[RoomId]) -> bool 
     }
 }
 
+/// 细粒度权限串匹配语义（用户裁定）：精确匹配，或末段单层通配。
+///
+/// `qq:group.mute` 只匹配自身；`qq:group.*` 匹配 `qq:group.mute` 与
+/// `qq:group.file.list`（通配整段结尾），但不匹配 `qq:app.close`。
+/// 裸 `*`、居中 `*`、空段（`qq:`）一律不匹配——配置侧由
+/// [`validate_permission_string`] 拒掉。
+pub(crate) fn permission_matches(pattern: &str, required: &str) -> bool {
+    if pattern == required {
+        return true;
+    }
+    match pattern.strip_suffix('*') {
+        Some(prefix) if !prefix.is_empty() => required.starts_with(prefix),
+        _ => false,
+    }
+}
+
+/// 校验规则里声明的权限串。合法形态：`<平台>:<op>[.<op>...]`，`*` 只允许
+/// 作为最后一段且前面有非空前缀（即 `xxx.*`，不允许裸 `*` / `xxx*`）。
+pub(crate) fn validate_permission_string(permission: &str) -> Result<(), String> {
+    let trimmed = permission.trim();
+    if trimmed.is_empty() || trimmed != permission {
+        return Err("must be a non-empty permission string without surrounding whitespace".into());
+    }
+    let Some((platform, op)) = permission.split_once(':') else {
+        return Err("must be <platform>:<op> (missing ':')".into());
+    };
+    if platform.is_empty() || platform.contains('*') || platform.contains('.') {
+        return Err("platform segment must be non-empty without '*' or '.'".into());
+    }
+    if op.is_empty() {
+        return Err("op segment must not be empty".into());
+    }
+    match op.find('*') {
+        Some(pos) => {
+            if pos != op.len() - 1 || pos == 0 {
+                return Err("'*' is only allowed as the final segment with a non-empty prefix (e.g. group.*)".into());
+            }
+            // `group.*` 合法；`group*.list`（前缀缺段边界）非法。
+            if !op[..pos].ends_with('.') && op[..pos].contains('.') {
+                return Err("'*' must cover a whole trailing segment (e.g. group.*)".into());
+            }
+        }
+        None => {}
+    }
+    Ok(())
+}
+
 pub(crate) fn scope_matches(rule: &GrantRule, query: &GrantQuery<'_>) -> bool {
     let target = query.target;
     let subscriptions = query.subscriptions;
@@ -1129,12 +1200,30 @@ pub(crate) fn scope_matches(rule: &GrantRule, query: &GrantQuery<'_>) -> bool {
         },
         GrantScope::PlatformOp => match rule.target.as_ref() {
             Some(wanted) if wanted.kind == AccessTargetKind::PlatformOp => {
-                query.platform_op == Some(wanted.id.as_str())
+                let method_matches = query.platform_op == Some(wanted.id.as_str())
+                    || (query
+                        .platform_op
+                        .is_some_and(|op| permission_matches(&wanted.id, op)));
+                method_matches
                     && target.connection_ref() == wanted.connection_ref()
+                    && rule_permissions_cover(rule, query.permissions)
             }
             _ => false,
         },
     }
+}
+
+/// 规则声明了 `permissions` 时，至少要覆盖一项本次要求的权限串；
+/// 未声明（空）= 不过滤，粗粒度 method/connection 判定即生效。
+fn rule_permissions_cover(rule: &GrantRule, required: &[String]) -> bool {
+    if rule.permissions.is_empty() {
+        return true;
+    }
+    required.iter().any(|needed| {
+        rule.permissions
+            .iter()
+            .any(|p| permission_matches(p, needed))
+    })
 }
 
 #[cfg(test)]
@@ -1180,6 +1269,7 @@ mod tests {
                 origin,
                 subscriptions,
                 platform_op: None,
+                permissions: &[],
                 policy_version: 7,
                 grants,
             })
@@ -1346,6 +1436,7 @@ mod tests {
             scope,
             target,
             capability: capability.to_vec(),
+            permissions: Vec::new(),
         }
     }
 
@@ -1719,6 +1810,7 @@ mod tests {
             origin: None,
             subscriptions: &[],
             platform_op: None,
+            permissions: &[],
             policy_version: 1,
             grants,
         }
@@ -1865,5 +1957,187 @@ mod tests {
                 .allow,
             "角色扩容不能追认旧指派"
         );
+    }
+
+    fn platform_rule(
+        id: &str,
+        target_id: &str,
+        permissions: &[&str],
+        capability: GrantCapability,
+    ) -> GrantRule {
+        GrantRule {
+            id: id.to_owned(),
+            subject: GrantSubject::User,
+            place: Place::Room(RoomScope::MultiParty),
+            scope: GrantScope::PlatformOp,
+            target: Some(AccessTarget::platform_op("qq", target_id)),
+            capability: vec![capability],
+            permissions: permissions.iter().map(|p| (*p).to_owned()).collect(),
+        }
+    }
+
+    fn platform_query<'a>(
+        grants: &'a GrantsConfig,
+        capability: GrantCapability,
+        target: &'a AccessTarget,
+        op: &'a str,
+        permissions: &'a [String],
+    ) -> GrantQuery<'a> {
+        GrantQuery {
+            subject: GrantSubject::User,
+            place: Place::Room(RoomScope::MultiParty),
+            capability,
+            actor: None,
+            target,
+            origin: None,
+            subscriptions: &[],
+            platform_op: Some(op),
+            permissions,
+            policy_version: 1,
+            grants,
+        }
+    }
+
+    #[test]
+    fn permission_matches_is_exact_or_trailing_wildcard() {
+        // 精确匹配
+        assert!(permission_matches("qq:group.mute", "qq:group.mute"));
+        // 末段通配：覆盖结尾所有层级（用户裁定「精确匹配 + 单层尾通配」）
+        assert!(permission_matches("qq:group.*", "qq:group.mute"));
+        assert!(permission_matches("qq:group.*", "qq:group.file.list"));
+        // 平台/前缀不同不匹配
+        assert!(!permission_matches("qq:group.*", "qq:app.close"));
+        assert!(!permission_matches("qq:group.*", "wecom:group.mute"));
+        // 裸 `*`、居中 `*` 不构成通配（配置侧 validate 也会拒）
+        assert!(!permission_matches("*", "qq:group.mute"));
+        assert!(!permission_matches("qq:*.mute", "qq:group.mute"));
+        assert!(!permission_matches("qq:group.mute", "qq:group.file.list"));
+    }
+
+    #[test]
+    fn validate_permission_string_accepts_only_wellformed() {
+        for ok in ["qq:group.mute", "qq:group.*", "wecom:corp.send"] {
+            assert!(validate_permission_string(ok).is_ok(), "{ok} 应合法");
+        }
+        for bad in [
+            "",               // 空
+            " qq:x ",         // 首尾空白
+            "*",              // 裸 *
+            "qq:",            // 空 op
+            ":group.mute",    // 空平台
+            "qq.group.mute",  // 缺冒号
+            "q*q:x",          // 平台段带 *
+            "qq:*",           // op 整段是 *（等价裸 *）
+            "qq:gr*oup",      // 居中 *
+            "qq:group*.list", // * 不在末段
+            "qq:group.*x",    // * 之后还有内容
+        ] {
+            assert!(validate_permission_string(bad).is_err(), "{bad} 应非法");
+        }
+    }
+
+    #[test]
+    fn rule_permissions_cover_requires_declared_grant() {
+        // 未声明 permissions（空）= 不过滤：required 空与非空都放行。
+        let no_filter = platform_rule("r0", "group.mute", &[], GrantCapability::Destructive);
+        assert!(rule_permissions_cover(&no_filter, &[]));
+        assert!(rule_permissions_cover(
+            &no_filter,
+            &["qq:group.mute".to_owned()]
+        ));
+        // 声明了 permissions：required 里至少要有一项被覆盖。
+        let mute = platform_rule(
+            "r1",
+            "group.mute",
+            &["qq:group.*"],
+            GrantCapability::Destructive,
+        );
+        assert!(rule_permissions_cover(&mute, &["qq:group.mute".to_owned()]));
+        assert!(!rule_permissions_cover(&mute, &["qq:app.close".to_owned()]));
+        // required 为空时，声明过的规则没有可覆盖的对象，不能放行。
+        assert!(!rule_permissions_cover(&mute, &[]));
+    }
+
+    #[test]
+    fn platform_op_rule_grants_by_wildcard_target() {
+        let grants = config(vec![platform_rule(
+            "qq-ops",
+            "group.*",
+            &[],
+            GrantCapability::Destructive,
+        )]);
+        let target = AccessTarget::platform_op("qq", "group.mute");
+        let required = vec!["qq:group.mute".to_owned()];
+        let decision = CorePolicy::new()
+            .decide(&platform_query(
+                &grants,
+                GrantCapability::Destructive,
+                &target,
+                "group.mute",
+                &required,
+            ))
+            .expect("CorePolicy 不应失败");
+        assert!(decision.allow, "{decision:?}");
+        // 目标通配不跨段：app.close 不命中 group.*，落回 deny。
+        let other = AccessTarget::platform_op("qq", "app.close");
+        let other_required = vec!["qq:app.close".to_owned()];
+        let decision = CorePolicy::new()
+            .decide(&platform_query(
+                &grants,
+                GrantCapability::Destructive,
+                &other,
+                "app.close",
+                &other_required,
+            ))
+            .expect("CorePolicy 不应失败");
+        assert!(!decision.allow, "{decision:?}");
+    }
+
+    #[test]
+    fn platform_op_rule_permissions_gate_filters_unrelated_ops() {
+        // 目标 id 命中（group.mute），但规则声明的权限串覆盖不了 required，
+        // 不能放行——permissions 是目标匹配之外的第二道过滤。
+        let grants = config(vec![platform_rule(
+            "qq-mute",
+            "group.mute",
+            &["qq:other.*"],
+            GrantCapability::Destructive,
+        )]);
+        let target = AccessTarget::platform_op("qq", "group.mute");
+        let denied = vec!["qq:group.mute".to_owned()];
+        let decision = CorePolicy::new()
+            .decide(&platform_query(
+                &grants,
+                GrantCapability::Destructive,
+                &target,
+                "group.mute",
+                &denied,
+            ))
+            .expect("CorePolicy 不应失败");
+        assert!(!decision.allow, "{decision:?}");
+        // 换成声明权限串能覆盖的 required 才放行。
+        let allowed = vec!["qq:other.export".to_owned()];
+        let decision = CorePolicy::new()
+            .decide(&platform_query(
+                &grants,
+                GrantCapability::Destructive,
+                &target,
+                "group.mute",
+                &allowed,
+            ))
+            .expect("CorePolicy 不应失败");
+        assert!(decision.allow, "{decision:?}");
+    }
+
+    #[test]
+    fn grants_validate_rejects_malformed_permission_strings() {
+        let grants = config(vec![platform_rule(
+            "bad-perm",
+            "group.mute",
+            &["*"],
+            GrantCapability::Destructive,
+        )]);
+        let error = grants.validate().expect_err("裸 * 必须被配置校验拒绝");
+        assert!(error.contains("permissions entry"), "{error}");
     }
 }
