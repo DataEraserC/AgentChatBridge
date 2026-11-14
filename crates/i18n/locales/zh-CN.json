@@ -1414,6 +1414,7 @@
   "bridge.console.patch_lost_object": "补丁会丢掉 {kind}「{id}」——整单拒绝，没有写入",
   "bridge.console.patch_lost_object_detail": "这不是你删的：补丁在文本层把这条吃掉了。请把这次改动报给维护者，或改用 TOML 原文修改。",
   "adapter.qqbot.connected": "适配器 {id} 已连上网关 {url}",
+  "adapter.qqbot.dispatch": "适配器 {connection}：dispatch {event}",
   "adapter.qqbot.disconnected": "适配器 {id} 掉线：{detail}",
   "adapter.qqbot.backoff": "适配器 {id} {secs} 秒后重连",
   "adapter.qqbot.server_reconnect": "服务端要求重连",

@@ -1414,6 +1414,7 @@
   "bridge.console.patch_lost_object": "the patch would drop {kind} \"{id}\"; rejected without writing",
   "bridge.console.patch_lost_object_detail": "Nothing in your change deleted it: the patch lost the entry while rewriting the document. Report this change to the maintainer or edit the raw TOML instead.",
   "adapter.qqbot.connected": "adapter {id} connected to {url}",
+  "adapter.qqbot.dispatch": "adapter {connection}: dispatch {event}",
   "adapter.qqbot.disconnected": "adapter {id} disconnected: {detail}",
   "adapter.qqbot.backoff": "adapter {id} reconnecting in {secs}s",
   "adapter.qqbot.server_reconnect": "server asked to reconnect",
