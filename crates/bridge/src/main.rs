@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acb_adapter_dynamic::DynamicLoader;
 use acb_adapter_onebot_snowluma::OneBotSnowLumaAdapterFactory;
+use acb_adapter_qqbot_official::QqBotOfficialAdapterFactory;
 use acb_adapter_process::ProcessAdapterFactory;
 use acb_kernel::storage::SettingsStore;
 use acb_kernel::{
@@ -308,6 +309,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     // 平台适配器也登记在 Root 里：内置 OneBot、外置进程、动态库走同一张表。
     plugins.register_adapter(Arc::new(OneBotSnowLumaAdapterFactory))?;
+    plugins.register_adapter(Arc::new(QqBotOfficialAdapterFactory))?;
     plugins.register_adapter(Arc::new(ProcessAdapterFactory))?;
 
     // 入站队列：适配器只往里丢记录，core 的 drain 线程统一 ingest。

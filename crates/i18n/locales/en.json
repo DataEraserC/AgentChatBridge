@@ -1381,5 +1381,21 @@
   "bridge.console.secret_name_invalid": "secret source names allow letters, digits, underscore, dot and dash only: {name}",
   "bridge.console.secret_mint_failed": "could not generate a session token",
   "bridge.console.patch_lost_object": "the patch would drop {kind} \"{id}\"; rejected without writing",
-  "bridge.console.patch_lost_object_detail": "Nothing in your change deleted it: the patch lost the entry while rewriting the document. Report this change to the maintainer or edit the raw TOML instead."
+  "bridge.console.patch_lost_object_detail": "Nothing in your change deleted it: the patch lost the entry while rewriting the document. Report this change to the maintainer or edit the raw TOML instead.",
+  "adapter.qqbot.connected": "adapter {id} connected to {url}",
+  "adapter.qqbot.disconnected": "adapter {id} disconnected: {detail}",
+  "adapter.qqbot.backoff": "adapter {id} reconnecting in {secs}s",
+  "adapter.qqbot.server_reconnect": "server asked to reconnect",
+  "adapter.qqbot.invalid_session": "server invalidated the session; re-identifying",
+  "adapter.qqbot.server_closed": "gateway closed the connection",
+  "adapter.qqbot.frame_parse_failed": "bad gateway frame: {error}",
+  "adapter.qqbot.submit_failed": "event queue rejected the record: {error}",
+  "adapter.qqbot.event_parse_failed": "event parse failed: {detail}",
+  "adapter.qqbot.transport_unsupported": "transport {transport} is not supported (only ws-client)",
+  "adapter.qqbot.appid_required": "connection {id} requires account = the bot AppID",
+  "adapter.qqbot.secret_required": "connection {id} requires token = the bot AppSecret",
+  "adapter.qqbot.room_mismatch": "room {room} does not belong to this connection",
+  "adapter.qqbot.rich_media_unsupported": "the official QQ bot outbound only supports plain text (rich media API not wired yet)",
+  "adapter.qqbot.empty_text": " outgoing text is empty after composing",
+  "adapter.qqbot.no_passive_window": "official bots can only reply to recently received messages; no passive window for this room yet"
 }

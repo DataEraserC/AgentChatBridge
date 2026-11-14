@@ -1381,5 +1381,21 @@
   "bridge.console.secret_name_invalid": "密钥来源名只能用字母、数字、下划线、点、横线：{name}",
   "bridge.console.secret_mint_failed": "自动生成会话令牌失败",
   "bridge.console.patch_lost_object": "补丁会丢掉 {kind}「{id}」——整单拒绝，没有写入",
-  "bridge.console.patch_lost_object_detail": "这不是你删的：补丁在文本层把这条吃掉了。请把这次改动报给维护者，或改用 TOML 原文修改。"
+  "bridge.console.patch_lost_object_detail": "这不是你删的：补丁在文本层把这条吃掉了。请把这次改动报给维护者，或改用 TOML 原文修改。",
+  "adapter.qqbot.connected": "适配器 {id} 已连上网关 {url}",
+  "adapter.qqbot.disconnected": "适配器 {id} 掉线：{detail}",
+  "adapter.qqbot.backoff": "适配器 {id} {secs} 秒后重连",
+  "adapter.qqbot.server_reconnect": "服务端要求重连",
+  "adapter.qqbot.invalid_session": "服务端宣告会话失效；将重新鉴权",
+  "adapter.qqbot.server_closed": "网关关闭了连接",
+  "adapter.qqbot.frame_parse_failed": "网关帧解析失败：{error}",
+  "adapter.qqbot.submit_failed": "入站队列拒收记录：{error}",
+  "adapter.qqbot.event_parse_failed": "事件解析失败：{detail}",
+  "adapter.qqbot.transport_unsupported": "不支持传输方式 {transport}（只支持 ws-client）",
+  "adapter.qqbot.appid_required": "连接 {id} 需要 account = 机器人的 AppID",
+  "adapter.qqbot.secret_required": "连接 {id} 需要 token = 机器人的 AppSecret",
+  "adapter.qqbot.room_mismatch": "房间 {room} 不属于这条连接",
+  "adapter.qqbot.rich_media_unsupported": "QQ 官方机器人出站只支持纯文本（富媒体接口未接）",
+  "adapter.qqbot.empty_text": "拼出的出站文本为空",
+  "adapter.qqbot.no_passive_window": "官方机器人只能被动回复：这个房间还没有可用的被动窗口"
 }

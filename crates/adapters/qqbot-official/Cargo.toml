@@ -1,0 +1,19 @@
+[package]
+name = "acb-adapter-qqbot-official"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "QQ 官方机器人适配器：群 @ 与好友单聊（被动回复）"
+
+[dependencies]
+acb-i18n = { workspace = true }
+acb-proto = { path = "../../proto" }
+acb-kernel = { path = "../../kernel" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+ureq = { version = "2", features = ["json"] }
+
+[dev-dependencies]
+acb-kernel = { path = "../../kernel", features = ["test-fixtures"] }
