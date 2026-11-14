@@ -546,6 +546,10 @@ impl<S: Store + Send + 'static> Console<S> {
             }
             ("GET", "/api/status") => (200, self.status()),
             ("GET", "/api/connections") => (200, self.connections_view()),
+            ("GET", "/api/adapters") => {
+                let bridge = lock(&self.bridge);
+                (200, bridge.adapter_catalog().to_string())
+            }
             ("GET", "/api/secrets") => (200, self.secrets_view()),
             ("POST", "/api/secrets") => self.create_secret(body),
             ("GET", "/api/sessions") => (200, self.sessions()),

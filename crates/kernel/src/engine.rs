@@ -2708,6 +2708,46 @@ impl<S: Store> Bridge<S> {
         crate::plugin_admin::admin_view(&self.store, &plugin)
     }
 
+    /// 已注册平台适配器的清单（控制台「新增连接」表单的数据源）：
+    /// kind / 平台 / 支持的 transport / 文档链接 / 连接 options 的 JSON Schema
+    /// （来自 manifest.metadata.options_schema；没声明的适配器 → null，
+    /// 表单只出公共字段）。
+    pub fn adapter_catalog(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.plugins
+                .adapter_manifests()
+                .iter()
+                .map(|manifest| {
+                    serde_json::json!({
+                        "kind": manifest.kind,
+                        "platform": manifest.platform,
+                        "transports": manifest
+                            .transports
+                            .iter()
+                            .map(|transport| transport.as_ref())
+                            .collect::<Vec<_>>(),
+                        "title": manifest
+                            .metadata
+                            .title
+                            .as_ref()
+                            .map(|title| title.as_ref()),
+                        "summary": manifest
+                            .metadata
+                            .summary
+                            .as_ref()
+                            .map(|summary| summary.as_ref()),
+                        "docs_url": manifest
+                            .metadata
+                            .docs_url
+                            .as_ref()
+                            .map(|docs| docs.as_ref()),
+                        "options_schema": manifest.metadata.options_schema,
+                    })
+                })
+                .collect(),
+        )
+    }
+
     /// 改插件配置。只写提到的键；校验与密钥规则都在 `plugin_admin` 里。
     pub fn plugin_set_config(
         &mut self,

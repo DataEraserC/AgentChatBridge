@@ -59,6 +59,55 @@ fn secret_item(name: &str) -> Item {
     Item::Value(Value::InlineTable(table))
 }
 
+/// JSON 对象 → toml_edit 表（连接 options 的透传转换）。对象进子表，
+/// 数组进 TOML 数组；空对象 = 不插入（调用方判断）。
+fn json_to_edit_table(object: &serde_json::Map<String, serde_json::Value>) -> Item {
+    let mut table = Table::new();
+    for (key, item) in object {
+        table.insert(key, json_to_edit_item(item));
+    }
+    Item::Table(table)
+}
+
+fn json_to_edit_item(item: &serde_json::Value) -> Item {
+    match item {
+        serde_json::Value::Null => Item::None,
+        serde_json::Value::String(text) => value(text.clone()),
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                value(int)
+            } else {
+                value(number.as_f64().unwrap_or_default())
+            }
+        }
+        serde_json::Value::Bool(flag) => value(*flag),
+        serde_json::Value::Array(items) => {
+            let mut array = toml_edit::Array::new();
+            for item in items {
+                match item {
+                    // 数组里的对象进内联表（TOML 数组不支持子表语法）。
+                    serde_json::Value::Object(map) => {
+                        let mut inline = InlineTable::new();
+                        for (key, inner) in map {
+                            if let Item::Value(inner_value) = json_to_edit_item(inner) {
+                                inline.insert(key, inner_value);
+                            }
+                        }
+                        array.push(Value::InlineTable(inline));
+                    }
+                    scalar => {
+                        if let Item::Value(inner_value) = json_to_edit_item(scalar) {
+                            array.push(inner_value);
+                        }
+                    }
+                }
+            }
+            Item::Value(Value::Array(array))
+        }
+        serde_json::Value::Object(map) => json_to_edit_table(map),
+    }
+}
+
 /// 应用一组补丁操作，返回（改完的 TOML 全文，人话改动清单）。
 pub fn apply_patch(
     text: &str,
@@ -434,11 +483,14 @@ fn connection_op(
             .get("kind")
             .and_then(serde_json::Value::as_str)
             .ok_or(msg!("bridge.patch.connection_kind_required"))?;
+        // url 不再硬性必填：process 等外置适配器不需要 url（命令在 options
+        // 里）；ws-client 必须有 url 的校验归 config 解析（build_connection），
+        // 报错会点名连接。
         let url = create
             .get("url")
             .and_then(serde_json::Value::as_str)
-            .filter(|u| !u.is_empty())
-            .ok_or(msg!("bridge.patch.connection_url_required"))?;
+            .map(str::trim)
+            .filter(|u| !u.is_empty());
         let account = create
             .get("account")
             .and_then(serde_json::Value::as_str)
@@ -452,12 +504,27 @@ fn connection_op(
         table.insert("id", value(id.clone()));
         table.insert("platform", value(platform.to_owned()));
         table.insert("kind", value(kind.to_owned()));
-        table.insert("url", value(url.to_owned()));
+        if let Some(url) = url {
+            table.insert("url", value(url.to_owned()));
+        }
+        if let Some(transport) = create
+            .get("transport")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            table.insert("transport", value(transport.to_owned()));
+        }
         table.insert("account", value(account.to_owned()));
         if let Some(secret) = create.get("secret").and_then(serde_json::Value::as_str) {
             if !secret.is_empty() {
                 table.insert("token", secret_item(secret));
             }
+        }
+        // 适配器专属选项（JSON 对象 → TOML 表）。形状由适配器 manifest 的
+        // options_schema 声明，控制台按它渲染；这里只做透传转换。
+        if let Some(options) = create.get("options").and_then(serde_json::Value::as_object) {
+            table.insert("options", json_to_edit_table(options));
         }
         connections.push(table);
         changes.push(msg!("bridge.patch.connection_created", id = &id));

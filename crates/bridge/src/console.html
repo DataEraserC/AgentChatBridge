@@ -2528,14 +2528,47 @@ function editGlobals() {
     });
 }
 
+// 密钥下拉的选项集：「＋ 新建密钥…」置顶（用户裁定），其后是「不设密钥」
+// 与库内全部。
+function secretSelectHtml(secrets, selected) {
+  const options = [`<option value="__create__">${esc(t("console.secrets.pickCreate"))}</option>`];
+  options.push(`<option value=""${selected ? "" : " selected"}>${esc(t("console.secrets.pickOption"))}</option>`);
+  for (const secret of secrets) {
+    const pick = secret.name === selected ? " selected" : "";
+    options.push(`<option value="${esc(secret.name)}"${pick}>${esc(secret.name)}</option>`);
+  }
+  return options.join("");
+}
+
+// 已注册平台适配器清单（GET /api/adapters）。拿不到就返回空——适配器字段
+// 退化成手输。
+async function fetchAdapterList() {
+  try {
+    return (await api("/api/adapters")) || [];
+  } catch (e) {
+    return [];
+  }
+}
+
 async function addConnection() {
-  // 密钥来源做成下拉：不可能敲错名字；没有合适的就现场建一个（内联，不丢已填字段）。
-  const secrets = await fetchSecretsList();
+  const [adapters, secrets] = await Promise.all([fetchAdapterList(), fetchSecretsList()]);
+  window.__ncAdapters = adapters;
+  const defaultAdapter = adapters.find((a) => a.kind === "onebot11") || adapters[0] || null;
+  const adapterOptions = adapters.map((a) => {
+    const label = a.title && a.title !== a.kind ? `${a.title} (${a.kind})` : a.kind;
+    return `<option value="${esc(a.kind)}"${a === defaultAdapter ? " selected" : ""}>${esc(label)}</option>`;
+  }).join("");
+  const initialTransports = defaultAdapter?.transports || ["ws-client"];
   formFrame(esc(t("console.config.connection.addTitle")), `
     <div class="form-row"><label>${esc(t("console.config.field.connectionId"))}</label><input type="text" id="nc-id" placeholder="qq2"></div>
-    <div class="form-row"><label>${esc(t("console.config.field.platform"))}</label><input type="text" id="nc-platform" value="qq"><span class="hint">${esc(t("console.config.field.platformHint"))}</span></div>
-    <div class="form-row"><label>${esc(t("console.config.field.adapter"))}</label><input type="text" id="nc-kind" value="onebot11"></div>
-    <div class="form-row"><label>${esc(t("console.config.field.url"))}</label><input type="text" id="nc-url" placeholder="ws://127.0.0.1:53001/ws" style="max-width:340px"></div>
+    <div class="form-row"><label>${esc(t("console.config.field.adapter"))}</label>
+      <select id="nc-kind" onchange="onConnectionAdapterChange()">${adapterOptions || `<option value="onebot11">onebot11</option>`}</select>
+      <span class="hint">${esc(t("console.config.field.adapterSelectHint"))}</span></div>
+    <div class="form-row"><label>${esc(t("console.config.field.platform"))}</label><input type="text" id="nc-platform" value="${esc(defaultAdapter?.platform || "qq")}" oninput="this.dataset.dirty=1"><span class="hint">${esc(t("console.config.field.platformHint"))}</span></div>
+    <div class="form-row"><label>${esc(t("console.config.field.transport"))}</label>
+      <select id="nc-transport" onchange="onConnectionAdapterChange()">${initialTransports.map((tr) => `<option value="${esc(tr)}">${esc(tr)}</option>`).join("")}</select>
+      <span class="hint">${esc(t("console.config.field.transportHint"))}</span></div>
+    <div class="form-row" id="nc-url-row"><label>${esc(t("console.config.field.url"))}</label><input type="text" id="nc-url" placeholder="ws://127.0.0.1:53001" style="max-width:340px"><span class="hint">${esc(t("console.config.field.urlHint"))}</span></div>
     <div class="form-row"><label>${esc(t("console.config.field.account"))}</label><input type="text" id="nc-account" placeholder="${esc(t("console.config.field.accountPlaceholder"))}"></div>
     <div class="form-row"><label>${esc(t("console.config.field.secretName"))}</label>
       <select id="nc-secret" onchange="toggleInlineSecretCreate('nc')">${secretSelectHtml(secrets, "")}</select>
@@ -2545,21 +2578,67 @@ async function addConnection() {
       <div class="form-row"><label>${esc(t("console.secrets.value"))}</label><input type="password" id="nc-new-secret-value" autocomplete="new-password"></div>
       <div class="actions"><button class="mini" onclick="createSecretInline('nc', 'nc-secret')">${esc(t("console.secrets.createAndUse"))}</button></div>
       <p class="hint" id="nc-secret-note"></p>
-    </div>`,
+    </div>
+    <div id="nc-options"></div>
+    <p class="hint">${esc(t("console.config.field.adapterOptionsHint"))}</p>`,
     () => {
       const g = (id) => document.getElementById(id).value.trim();
       const id = g("nc-id");
       if (!id) { showFormError(t("console.config.errors.connectionIdRequired")); return false; }
-      if (!g("nc-url") || !g("nc-account")) { showFormError(t("console.config.errors.urlAccountRequired")); return false; }
+      const kind = g("nc-kind");
+      const adapter = adapters.find((a) => a.kind === kind);
+      const transport = g("nc-transport");
+      if (transport.startsWith("ws") && !g("nc-url")) { showFormError(t("console.config.errors.urlAccountRequired")); return false; }
+      if (!g("nc-account")) { showFormError(t("console.config.errors.urlAccountRequired")); return false; }
       const create = {
-        platform: g("nc-platform"), kind: g("nc-kind"),
+        platform: g("nc-platform"), kind, transport,
         url: g("nc-url"), account: g("nc-account"),
       };
+      if (!transport.startsWith("ws")) delete create.url;
       const secret = document.getElementById("nc-secret").value;
-      if (secret && secret !== "__create__") create.secret = secret;
       if (secret === "__create__") { showFormError(t("console.secrets.errors.pickFirst")); return false; }
+      if (secret) create.secret = secret;
+      // 适配器专属 options：按 options_schema 收值，全空的 schema 不带 options。
+      const schema = adapter?.options_schema;
+      const properties = schema?.properties ? Object.entries(schema.properties) : [];
+      const options = {};
+      for (const [key, property] of properties) {
+        if (property["x-secret-ref"]) continue;
+        const value = schemaFieldValue(key, property);
+        if (value !== undefined && value !== null) options[key] = value;
+      }
+      if (Object.keys(options).length) create.options = options;
       return submitPatch([{ op: "connection", id, create }]);
     });
+  onConnectionAdapterChange();
+}
+
+// 适配器/transport 变化：平台名跟随 manifest、options 表单按 options_schema
+// 重渲染、url 行按 transport 显隐（ws 系才要地址）。
+function onConnectionAdapterChange() {
+  const adapters = (window.__ncAdapters || []);
+  const kind = document.getElementById("nc-kind")?.value;
+  const adapter = adapters.find((a) => a.kind === kind);
+  const platformInput = document.getElementById("nc-platform");
+  if (adapter && platformInput && !platformInput.dataset.dirty) {
+    platformInput.value = adapter.platform || "";
+  }
+  const transports = adapter?.transports || ["ws-client"];
+  const transportSelect = document.getElementById("nc-transport");
+  const current = transportSelect?.value;
+  if (transportSelect) {
+    transportSelect.innerHTML = transports.map((tr) => `<option value="${esc(tr)}">${esc(tr)}</option>`).join("");
+    if (transports.includes(current)) transportSelect.value = current;
+  }
+  const urlRow = document.getElementById("nc-url-row");
+  if (urlRow) urlRow.style.display = (transportSelect?.value || "").startsWith("ws") ? "" : "none";
+  const container = document.getElementById("nc-options");
+  if (!container) return;
+  const schema = adapter?.options_schema;
+  const properties = schema?.properties ? Object.entries(schema.properties) : [];
+  container.innerHTML = properties.map(([key, property]) => `
+    <div class="form-row"><label>${esc(key)}</label>${schemaFieldInput(key, property, property.default)}
+      <span class="hint">${esc(property.description || "")}${(schema.required || []).includes(key) ? "（必填）" : ""}</span></div>`).join("");
 }
 
 function addSession() {

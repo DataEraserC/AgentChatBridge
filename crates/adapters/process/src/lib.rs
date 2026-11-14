@@ -62,6 +62,42 @@ const WRITE_QUEUE_LINES: usize = 64;
 /// 单行写入排队的最长等待。超过就认为子进程停止读取：标记连接不可用并杀掉重启。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 连接 options 的形状声明（JSON Schema 子集，与插件 config_schema 同一
+/// 渲染器）。keys 必须与 parse_options 实际读取的一致：command 必填。
+/// static 里不能调 json!（非 const），manifest() 运行时注入。
+fn process_options_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["command"],
+        "properties": {
+            "command": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "启动命令；第一个元素是程序，其余是参数"
+            },
+            "args": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "追加参数（与 command 拼接）"
+            },
+            "env": {
+                "type": "object",
+                "description": "子进程环境变量（值必须是字符串）"
+            },
+            "cwd": {
+                "type": "string",
+                "description": "子进程工作目录"
+            },
+            "startup_timeout_secs": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 10,
+                "description": "等子进程说 hello 的时限（秒）"
+            }
+        }
+    })
+}
+
 static TRANSPORTS: &[Cow<'static, str>] = &[Cow::Borrowed("process")];
 static CAPABILITIES: &[AdapterCapability] = &[
     AdapterCapability::ReceiveEvents,
@@ -105,7 +141,9 @@ pub struct ProcessAdapterFactory;
 
 impl AdapterFactory for ProcessAdapterFactory {
     fn manifest(&self) -> AdapterManifest {
-        MANIFEST.clone()
+        let mut manifest = MANIFEST.clone();
+        manifest.metadata.options_schema = Some(process_options_schema());
+        manifest
     }
 
     fn create(

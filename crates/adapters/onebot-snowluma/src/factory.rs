@@ -192,9 +192,32 @@ fn async_upload_timeout(connection: &Connection) -> Result<Duration, AdapterErro
 #[derive(Debug, Default)]
 pub struct OneBotSnowLumaAdapterFactory;
 
+/// 连接 options 的形状声明（JSON Schema 子集，与插件 config_schema 同一渲染器）。
+/// keys 必须与 factory/link 里实际读取的一致。static 里不能调 json!（非 const），
+/// manifest() 运行时注入。
+fn onebot11_options_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "http_listen": {
+                "type": "string",
+                "description": "HTTP 上报监听地址（如 127.0.0.1:53000）；配置了就必须给这条连接配 token"
+            },
+            "async_upload_timeout_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 30000,
+                "description": "大文件上传走后台任务时的时限（毫秒）"
+            }
+        }
+    })
+}
+
 impl AdapterFactory for OneBotSnowLumaAdapterFactory {
     fn manifest(&self) -> AdapterManifest {
-        MANIFEST.clone()
+        let mut manifest = MANIFEST.clone();
+        manifest.metadata.options_schema = Some(onebot11_options_schema());
+        manifest
     }
 
     fn create(
