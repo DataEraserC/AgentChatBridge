@@ -677,6 +677,18 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 遗留：url 的显隐/必填性仍靠 transport 名前缀推断（声明式 x-url 留待后续）；edit 表单 options 编辑；密钥删除入口。
 
+## 27. C2C 消息不到——READY 控制帧修复 + dispatch 诊断日志（2026-11-15）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 现象 | 用户私聊发了消息，没有任何 C2C 事件进来（发现日志只有 group/READY 假事件）；客户端 intents 无误（1<<25 群+单聊都在） | adapter/link.rs:29 |
+| READY 控制帧修复 | READY dispatch 只抓会话 id 后 continue——之前落到 unknown 分支被包成 notice（room group/READY），产生伪事件 | 换代重启后无新 group/READY 行 |
+| dispatch 诊断日志 | 每条 dispatch 打 event 类型——官方平台场景开关没开时消息根本不推，这是最便宜的判定点 | `grep dispatch ~/.local/state/acb/bridge.log`（注意：unit stdout/stderr 是 append 重定向到该文件，不在 journal） |
+| 换代 | `/nix/store/yir4d1189cnpms1xkzg9jjlbp3krf4ir-acb-payload-0.1.0`（6e96164）→ req-1794689371071-be622dc9 | version 徽章 `0.1.0+6e96164`；网关重连成功 |
+
+用户侧排查清单（C2C 平台侧）：①开放平台后台确认「消息单聊场景」已开通（沙箱环境只有沙箱成员可触发）；②323622242 需先添加 bot 为好友/联系人；③发消息后 `grep dispatch`——有 C2C_MESSAGE_CREATE 就是管道通了，没有就是平台没推。
+
+
 ## 25. patch 缺段自动建段 + 端到端验证（2026-11-15，用户重试保存被段缺失拦截）
 
 | 项 | 结果 | 验收 |
