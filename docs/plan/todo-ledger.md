@@ -604,3 +604,13 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 | 线上换代 | payload `/nix/store/zlr6wi8knwy4aq7z3bss2d24fd3cfaji-acb-payload-0.1.0` → `gen-1794559430805-819f243a`，acp 组件 healthy | `acbctl upgrade status req-1794559430732-c1092372`；`profile/current/harnesses/.../acb-wire.mjs` 含 `eventSubject` |
 
 遗留：issue 服务的 UI/新字段要重建系统配置并重启 `acb-issue-service.service`（system unit，需 root）。
+
+## 19. 本轮收尾（2026-11-15，接续 sess_9a2c607b 中断的 B期切片 2）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| grants 细粒度权限字符接线 | GrantRule/GrantQuery.permissions + `permission_matches`（精确/末段单层通配）+ `validate_permission_string` + `rule_permissions_cover`；PlatformOp 分支加第二道过滤；空 = 行为不变。补齐 f42f93c 提交信息声称但未落地的 `check_tool_access` platform_call 派生；`prepare_platform_call` 与 `high_risk_grant`（展示层）同源派生 `spec.permission_strings` | `cargo test --workspace` 1245 通过 / 0 失败（基线 1239 + 新增 6）；构造点 14 处全部补字段 |
+| ADR 031/032 | 031 适配器自有存储与连接注入（含 7d587b5 返工事故）；032 权限字符。未实现部分显式标注（B期 wire 注册协议、C期表单、D期 cutover、外部库形态） | `docs/adr/0031-adapter-owned-storage.md`、`docs/adr/0032-permission-strings.md` |
+| 推送 | d6f6c97（权限接线）+ docs 提交 → `origin/dev_20261025` | `git push` ff 成功，`git log origin/dev_20261025 -1` |
+
+遗留：nix-config flake.lock 的 acb input 仍在 3a613c1，换代与部署待运维窗口；onebot cutover（删 config 行）与 QQ 链接确认待用户。
