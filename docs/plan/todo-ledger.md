@@ -666,6 +666,18 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 遗留：edit 连接表单的 options 编辑未做；适配器 schema 未覆盖动态库/进程外置适配器的分发机制（内置三个先行）；密钥删除入口未做。
 
+## 24. qqbot 表单修正（2026-11-15，用户实测反馈：url/账号语义错位）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| qqbot 专用 transport | `ws-client` → `qq-gateway`：适配器直连官方网关（wss://api.sgroup.qq.com），url 字段无效，而通用 ws-client 语义在 config 解析层强制 ws:// url——假约束。改名后 url 天然可选，表单 url 行自动隐藏 | 浏览器实测：选 qqbot → transport=qq-gateway、url 行隐藏、平台自动填 qq |
+| 账号语义适配器声明 | 三适配器 options_schema 加 `x-account` 注解（placeholder/说明），前端「账号」字段跟随；qqbot = AppID（不是 QQ 号）+ 端点覆盖项 api_base/token_url（与 factory 实际读取键一致） | 浏览器实测：placeholder「机器人的 AppID」、说明完整、api_base/token_url 渲染 |
+| nix-config 提交信息重写 | 用户授权；备份分支 `backup/pre-message-rewrite-c762055b` + `--force-with-lease`，`<new>` 占位符 → 实际哈希 706af4a | `git log -1` = b3cc1c32 |
+| 换代 | payload `/nix/store/ngv4hfn3r38lxh8y5bwngpdn6dzxj3hr-acb-payload-0.1.0`（f0b1d18）→ req-1794685629973-1f0fdd0b | version 徽章 `0.1.0+f0b1d18`（浏览器实测）；`/api/adapters` 三适配器 x-account/properties 全对 |
+
+遗留：url 的显隐/必填性仍靠 transport 名前缀推断（声明式 x-url 留待后续）；edit 表单 options 编辑；密钥删除入口。
+
+
 
 
 
