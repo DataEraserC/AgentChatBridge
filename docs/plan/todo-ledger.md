@@ -677,6 +677,19 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 遗留：url 的显隐/必填性仍靠 transport 名前缀推断（声明式 x-url 留待后续）；edit 表单 options 编辑；密钥删除入口。
 
+## 25. patch 缺段自动建段 + 端到端验证（2026-11-15，用户重试保存被段缺失拦截）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 根因 | 用户保存 qqbot 连接报『配置里没有 [[connections]] 段』：cutover 后库内连接对象为零，生成的文档无 `[[connections]]` 段，而 connection/session/persona/memory/harness 的 create 分支只改已有段 | 用户截图错误原文 |
+| 修复 | config_patch 统一走 `array_of_tables_mut_or_create`：create 语义 = 没有 → 建（connection/session 直改 + upsert_named_table 三个 op）；守卫抓到 expect 中文串改英文 | 回归测试 `create_first_entry_without_existing_section`（空文档建 qqbot 连接 + transport/options 透传 + Config::parse 校验） |
+| 端到端 | 浏览器重放用户流程（e2e-qqbot-check / AppID / qq-bot-app-secret / api_base+token_url 留空）：保存成功、对象落库（qq-gateway + secret 引用 + options 表）、连接视图可见；测试行已删 | `/api/connections` 两行：e2e 行（已删）+ qq（provider:onebot11） |
+| 顺带修 | 连接 options 空字符串不入库（适配器侧 option_str 本会过滤，配置存空键是噪音）；插件表单保持 legacy 语义（显式空串 = 清空） | c23bcee 已部署 |
+| 换代 | `/nix/store/mnicyvzc0d55w2xx9h7hjzfxqyj2rhwh-acb-payload-0.1.0`（c23bcee）→ req-1794687157665-74275bc8 | version 徽章 `0.1.0+c23bcee` |
+
+插曲：验证删除时 evaluate 里的 confirm 弹窗挂在页面上被用户 Esc 掉——测试行实际由 API 删除，无副作用。教训：浏览器脚本不要在可见 tab 上触发阻塞式 confirm。
+
+
 
 
 
