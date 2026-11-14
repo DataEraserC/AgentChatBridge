@@ -204,6 +204,7 @@ mod tests {
             "房间串拿去配订阅"
         );
         assert_eq!(draft.sender.id, "author-id");
+        assert!(draft.at_self, "私聊消息天然冲我来（at_mention 唤醒依赖它）");
         assert_eq!(draft.platform_id.as_deref(), Some("msg-1"));
     }
 
