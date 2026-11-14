@@ -208,6 +208,7 @@ fn decision_providers_use_the_shared_wire() {
             room: &room,
             records: &records,
             context: &[],
+            read_ids: &[],
             trigger_id: None,
             context_before: 3,
             context_after: 3,

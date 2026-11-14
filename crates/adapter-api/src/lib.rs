@@ -292,6 +292,10 @@ pub struct WireDeliveryRequest {
     /// 触发消息之前的上下文（可能已确认过）。
     #[serde(default)]
     pub context: Vec<Record>,
+    /// 已读编号快照（水位以下 + 乱序 ack），只读数据。composer 据此实现
+    /// 自己的排除策略（如 options 里的 \`exclude_read\`）；core 不解释。
+    #[serde(default)]
+    pub read_ids: Vec<u64>,
     /// 触发这一轮的消息编号；时钟/攒批唤醒为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_id: Option<u64>,

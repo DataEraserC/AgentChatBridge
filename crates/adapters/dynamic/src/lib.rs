@@ -1593,6 +1593,7 @@ impl DeliveryComposer for DylibDeliveryComposer {
             limit: request.limit,
             records: request.records.to_vec(),
             context: request.context.to_vec(),
+            read_ids: request.read_ids.to_vec(),
             trigger_id: request.trigger_id,
             context_before: request.context_before,
             context_after: request.context_after,

@@ -9323,18 +9323,12 @@ impl<S: Store> Bridge<S> {
             .subscription(&pending.session, &pending.room)
             .map(|subscription| subscription.window)
             .unwrap_or_default();
-        // 投递策略选项（core 认读的键）：exclude_read = 上下文窗口排除已读
-        // （acked）记录。默认 false = 现状（上下文保留已读，给模型连续的
-        // 对话背景）。只过滤上下文：正文来自未读集合，天然不含已读。
+        // 投递策略 provider 与选项都在会话的 DeliveryPolicy 里；「排除已读」
+        // 之类的过滤是 composer 自己的事，core 只把 read_ids 快照交给它。
         let delivery_policy = turn_config
             .session(&pending.session)
             .map(|session| session.delivery.clone())
             .unwrap_or_default();
-        let exclude_read = delivery_policy
-            .options
-            .get("exclude_read")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
         // 触发消息之前的上下文可能早就确认过（在水位之下），所以单独从流水里取，
         // 不能指望 `pending_records`。被抑制的记录只进流水，不进上下文。
         let context: Vec<Record> = match pending.trigger_id {
@@ -9346,23 +9340,28 @@ impl<S: Store> Bridge<S> {
                 .collect(),
             None => Vec::new(),
         };
-        let context = if exclude_read {
-            let cursor = Cursor::new(&pending.session, pending.room.clone());
-            // 已读的两种形态：水位以下（连续前沿推进过）+ 乱序 ack 集合。
-            let watermark = self.store.watermark(&cursor).unwrap_or_default();
-            let acked: std::collections::BTreeSet<u64> = self
-                .store
-                .acked(&cursor)
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            context
-                .into_iter()
-                .filter(|record| record.id > watermark && !acked.contains(&record.id))
-                .collect()
-        } else {
-            context
-        };
+        // 已读编号快照（水位以下 + 乱序 ack），只读数据交给 composer——
+        // 「排除已读」是投递策略自己的事（用户裁定：策略归插件），core 只供
+        // 数据、不解释任何 options 键。records 来自未读集合，天然不含已读。
+        let cursor = Cursor::new(&pending.session, pending.room.clone());
+        let watermark = self.store.watermark(&cursor).unwrap_or_default();
+        let acked: std::collections::BTreeSet<u64> = self
+            .store
+            .acked(&cursor)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let mut read_ids: Vec<u64> = context
+            .iter()
+            .map(|record| record.id)
+            .filter(|id| *id <= watermark || acked.contains(id))
+            .collect();
+        for id in acked {
+            if !read_ids.contains(&id) {
+                read_ids.push(id);
+            }
+        }
+        read_ids.sort_unstable();
 
         // 先选本轮真正要投的批次，再计数、再进 delivered：
         // 没投出去的记录不能算「投过」，否则 ack_messages 会放行没见过的编号，
@@ -9406,6 +9405,7 @@ impl<S: Store> Bridge<S> {
             let own_room = pending.room.clone();
             let own_records = records.clone();
             let own_context = context.clone();
+            let own_read_ids = read_ids.clone();
             let composer = Arc::clone(&composer);
             match self
                 .plugins
@@ -9417,6 +9417,7 @@ impl<S: Store> Bridge<S> {
                             room: &own_room,
                             records: &own_records,
                             context: &own_context,
+                            read_ids: &own_read_ids,
                             trigger_id,
                             context_before: window.context_before,
                             context_after: window.context_after,
@@ -9433,6 +9434,7 @@ impl<S: Store> Bridge<S> {
                         room: &pending.room,
                         records: &records,
                         context: &context,
+                        read_ids: &read_ids,
                         trigger_id,
                         context_before: window.context_before,
                         context_after: window.context_after,
@@ -9449,6 +9451,7 @@ impl<S: Store> Bridge<S> {
                     room: &pending.room,
                     records: &records,
                     context: &context,
+                    read_ids: &read_ids,
                     trigger_id,
                     context_before: window.context_before,
                     context_after: window.context_after,

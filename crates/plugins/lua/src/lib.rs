@@ -1116,6 +1116,12 @@ fn delivery_request_table(lua: &Lua, request: &DeliveryRequest<'_>) -> mlua::Res
         context.set(index + 1, record_table(lua, record)?)?;
     }
     table.set("context", context)?;
+    // 已读编号快照（只读数据）：Lua 投递策略据此实现自己的排除策略。
+    let read_ids = lua.create_table()?;
+    for (index, id) in request.read_ids.iter().enumerate() {
+        read_ids.set(index + 1, *id)?;
+    }
+    table.set("read_ids", read_ids)?;
     Ok(table)
 }
 
