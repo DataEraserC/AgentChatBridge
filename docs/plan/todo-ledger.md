@@ -688,6 +688,20 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 用户侧排查清单（C2C 平台侧）：①开放平台后台确认「消息单聊场景」已开通（沙箱环境只有沙箱成员可触发）；②323622242 需先添加 bot 为好友/联系人；③发消息后 `grep dispatch`——有 C2C_MESSAGE_CREATE 就是管道通了，没有就是平台没推。
 
+### C2C 真凶找到并修复（同一轮，8fdc416 已部署）
+
+`grep dispatch` 出了 `C2C_MESSAGE_CREATE`——平台在推。但随后
+`event parse failed: missing field: user_openid`：**C2C 载荷的 openid 在
+`author.user_openid`（嵌套），不在顶层**，旧代码顶层读不到就丢弃，私聊
+消息全部无声消失。修复：openid 提取链「顶层 → author.<field> → author.id」
+三种形态都读（author.id 同时是 sender），读不到时错误带 payload/author
+真实键名自诊断。回归测试四形态；workspace 1266 通过 0 失败；
+换代 req-1794690087627-1c75605d，version `0.1.0+8fdc416`。
+
+用户侧下一步：再发一条私聊 → `grep "qqbot-official:private" ~/.local/state/acb/bridge.log`
+拿 openid 房间串 → dsh-qas 加订阅 → 私聊即可唤醒 agent（qqbot 被动回复窗口由适配器处理）。
+
+
 
 ## 25. patch 缺段自动建段 + 端到端验证（2026-11-15，用户重试保存被段缺失拦截）
 
