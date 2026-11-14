@@ -6158,6 +6158,7 @@ impl<S: Store> Bridge<S> {
             origin_sender: ctx.origin_sender.as_deref(),
             is_admin,
             live: ctx.live,
+            required_permissions: &[],
         };
         // 同一时刻只生效一个实现：配置了外部 ToolAccessProvider 就只用它；
         // 没有外部实现时才跑内置 grants evaluator。

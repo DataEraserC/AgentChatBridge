@@ -627,6 +627,9 @@ pub struct ToolAccessContext<'a> {
     pub is_admin: bool,
     /// `true` = 轮次在跑；`false` = 轮次结束后的宽限窗口。
     pub live: bool,
+    /// 本次调用要求的权限字符（provider 声明或派生）。空 = 无细粒度身份，
+    /// 否决插件按需消费；core 只携带不解释。
+    pub required_permissions: &'a [String],
 }
 
 /// 插件只能否决，不能放行。`Allow` 只是「我不拦」，core 的判定仍然优先。
@@ -2982,6 +2985,7 @@ impl PluginManager {
                 let live = context.live;
                 let subject = context.subject;
                 let place = context.place;
+                let owned_permissions = context.required_permissions.to_vec();
                 let provider = Arc::clone(&provider);
                 match self.call_timed(id, "tool_access.check", timeout, move || {
                     let context = ToolAccessContext {
@@ -2995,6 +2999,7 @@ impl PluginManager {
                         origin_sender: owned_origin.as_deref(),
                         is_admin,
                         live,
+                        required_permissions: &owned_permissions,
                     };
                     provider.check(&context)
                 }) {
@@ -4345,6 +4350,7 @@ mod tests {
             origin_sender: None,
             is_admin: false,
             live: true,
+            required_permissions: &[],
         };
         assert!(
             manager.check_tool_access(&context).is_some(),
