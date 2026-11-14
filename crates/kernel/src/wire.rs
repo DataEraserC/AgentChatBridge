@@ -120,6 +120,11 @@ impl From<&Connection> for WireConnection {
             account: connection.account.clone(),
             admin_qqs: connection.admin_qqs.clone(),
             options: connection.options.clone(),
+            token_secret: None,
+            // RoutePolicy 没有 Serialize（配置侧走 RawRoute 手工构建）；这个转换
+            // 只喂动态库实例化，routes 是 core 侧概念不跨这条边界，置 Null
+            // （序列化时整个字段缺席）。
+            routes: serde_json::Value::Null,
         }
     }
 }

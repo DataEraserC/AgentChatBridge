@@ -159,7 +159,7 @@ pub struct WirePluginMetadata {
     pub options_schema: Option<Value>,
 }
 
-/// 一条连接的 wire 形状（动态库接管适配器实例化时用）。
+/// 一条连接的 wire 形状（动态库接管适配器实例化时用；连接注册协议同形）。
 #[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
 pub struct WireConnection {
     pub id: String,
@@ -175,6 +175,13 @@ pub struct WireConnection {
     pub admin_qqs: Vec<String>,
     #[serde(default)]
     pub options: Value,
+    /// secrets 体系的引用名（连接注册用）。适配器库不存明文凭据时填这个，
+    /// core 在应用注册时解析；`token` 与 `token_secret` 都缺 = 无凭据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret: Option<String>,
+    /// 消息路由声明（JSON 数组，`RoutePolicy` 形）。缺省 = 全部交给 AI。
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub routes: Value,
 }
 
 /// 动态库 `create` 收到的实例配置。
@@ -529,6 +536,11 @@ pub enum CoreMessage {
         #[serde(default)]
         elements: Vec<Element>,
     },
+    /// 让适配器枚举它当前提供的连接（连接注册协议的 list）。
+    /// 适配器用 [`WireResult::Connections`] 回。
+    ConnectionsList {
+        id: u64,
+    },
     Call {
         id: u64,
         room: RoomId,
@@ -585,6 +597,12 @@ pub enum WireResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         record: Option<WireOutgoingRecord>,
     },
+    /// 连接枚举的回执（对 [`CoreMessage::ConnectionsList`]）。
+    /// 全量集合 = 注册语义；缺了的 id 由 core 按注销处理。
+    Connections {
+        #[serde(default)]
+        connections: Vec<WireConnection>,
+    },
     Error {
         error: WireError,
     },
@@ -634,6 +652,15 @@ pub enum AdapterMessage {
         #[serde(default)]
         level: String,
         message: String,
+    },
+    /// 连接注册推送：提供者宣布「我现在提供这些连接」。重启后连上即全量回放
+    ///（提供者库是唯一事实来源）；运行时库变更可以再推增量（`removed` 点名
+    /// 注销的 id）。两个列表都空 = 无操作。
+    Connections {
+        #[serde(default)]
+        connections: Vec<WireConnection>,
+        #[serde(default)]
+        removed: Vec<String>,
     },
 }
 
@@ -791,5 +818,78 @@ mod tests {
         assert!(line.contains("\"kind\":\"bad_params\""), "{line}");
         let back: AdapterMessage = decode_line(&line).expect("能解码");
         assert_eq!(back, reply);
+    }
+
+    fn wire_connection(id: &str) -> WireConnection {
+        WireConnection {
+            id: id.into(),
+            platform: "qq".into(),
+            kind: "onebot11".into(),
+            transport: "ws-client".into(),
+            url: Some("ws://127.0.0.1:3001".into()),
+            token: None,
+            account: "42".into(),
+            admin_qqs: vec!["10001".into()],
+            options: serde_json::json!({}),
+            token_secret: Some("onebot-token".into()),
+            routes: serde_json::json!([]),
+        }
+    }
+
+    #[test]
+    fn connections_push_round_trip() {
+        let push = AdapterMessage::Connections {
+            connections: vec![wire_connection("qq2")],
+            removed: vec!["qq3".into()],
+        };
+        let line = encode_line(&push).expect("能编码");
+        assert!(line.contains("\"type\":\"connections\""), "{line}");
+        assert!(line.contains("\"token_secret\":\"onebot-token\""), "{line}");
+        let back: AdapterMessage = decode_line(&line).expect("能解码");
+        assert_eq!(back, push);
+    }
+
+    #[test]
+    fn connections_push_defaults_are_empty() {
+        // 老实现不认识这两个字段也不该炸：缺省 = 空集合，配合双方都空就是无操作。
+        let line = r#"{"type":"connections"}"#;
+        let back: AdapterMessage = decode_line(line).expect("能解码");
+        assert_eq!(
+            back,
+            AdapterMessage::Connections {
+                connections: Vec::new(),
+                removed: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn connections_list_round_trip() {
+        let request = CoreMessage::ConnectionsList { id: 9 };
+        let line = encode_line(&request).expect("能编码");
+        assert!(line.contains("\"type\":\"connections_list\""), "{line}");
+        let back: CoreMessage = decode_line(&line).expect("能解码");
+        assert_eq!(back, request);
+
+        let reply = AdapterMessage::Reply {
+            id: 9,
+            result: WireResult::Connections {
+                connections: vec![wire_connection("qq2")],
+            },
+        };
+        let line = encode_line(&reply).expect("能编码");
+        assert!(line.contains("\"outcome\":\"connections\""), "{line}");
+        let back: AdapterMessage = decode_line(&line).expect("能解码");
+        assert_eq!(back, reply);
+    }
+
+    #[test]
+    fn wire_connection_routes_and_secret_ref_round_trip() {
+        let line = encode_line(&wire_connection("qq2")).expect("能编码");
+        // token 是 None：序列化时整个字段缺席，明文凭据不渗到线上。
+        assert!(!line.contains("\"token\":"), "{line}");
+        let back: WireConnection = decode_line(&line).expect("能解码");
+        assert_eq!(back.token, None);
+        assert_eq!(back.token_secret.as_deref(), Some("onebot-token"));
     }
 }

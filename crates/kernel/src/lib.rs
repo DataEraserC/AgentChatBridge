@@ -37,19 +37,18 @@ pub mod wire;
 
 pub use adapter::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
-    AdapterInstance, AdapterManifest, AdapterStatus, carrier_create_failed, create_instance,
-    manifest_supports_transport, run_adapter, validate_manifest,
+    AdapterInstance, AdapterManifest, AdapterStatus, ProviderConnections, carrier_create_failed,
+    create_instance, manifest_supports_transport, run_adapter, validate_manifest,
 };
 pub use config::{
-    ADAPTER_CONNECTIONS_SCHEMA_SQL,
-    AccessPolicy, CONSOLE_CONFIG_FILENAME, ClockPolicy, Config, ConfigSource, Connection,
-    ConsoleConfig, DEFAULT_MAX_AGE_DAYS, DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH,
-    DEFAULT_WORKTREES_ROOT, DeliveryPolicy, EndpointConfig, Harness, InBandNoticeConfig,
-    KNOWN_MEMORY_KINDS, LkgConfig, LoadedConfig, Memory, NotificationsConfig, OutboundPolicy,
-    Persona, PluginConfig, ProviderCallsConfig, QueueConfig, ReceivePolicy, RetentionConfig,
-    RoutePolicy, SecretEntry, SecretStore, Session, StorageConfig, Subscription, ToolPluginConfig,
-    Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput,
-    WakePolicy, WakeVerdict,
+    ADAPTER_CONNECTIONS_SCHEMA_SQL, AccessPolicy, CONSOLE_CONFIG_FILENAME, ClockPolicy, Config,
+    ConfigSource, Connection, ConsoleConfig, DEFAULT_MAX_AGE_DAYS, DEFAULT_MAX_RECORDS_PER_ROOM,
+    DEFAULT_STORAGE_PATH, DEFAULT_WORKTREES_ROOT, DeliveryPolicy, EndpointConfig, Harness,
+    InBandNoticeConfig, KNOWN_MEMORY_KINDS, LkgConfig, LoadedConfig, Memory, NotificationsConfig,
+    OutboundPolicy, Persona, PluginConfig, ProviderCallsConfig, QueueConfig, ReceivePolicy,
+    RetentionConfig, RoutePolicy, SecretEntry, SecretStore, Session, StorageConfig, Subscription,
+    ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision,
+    WakeInput, WakePolicy, WakeVerdict,
 };
 pub use config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 pub use deps::{DependencyKind, DependencyRegistry, PlatformVersionInfo};

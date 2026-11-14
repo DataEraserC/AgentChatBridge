@@ -266,7 +266,8 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
         }
         CoreMessage::Describe { id }
         | CoreMessage::Send { id, .. }
-        | CoreMessage::Call { id, .. } => AdapterMessage::Reply {
+        | CoreMessage::Call { id, .. }
+        | CoreMessage::ConnectionsList { id } => AdapterMessage::Reply {
             id,
             result: WireResult::Error {
                 error: WireError::Unsupported {

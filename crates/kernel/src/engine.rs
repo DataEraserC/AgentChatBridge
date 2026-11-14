@@ -12,7 +12,7 @@
 //! 一个 harness 连上来时声明「我是谁、接管哪些会话」。`send_message_to` 的可发目标 =
 //! 当前会话订阅的所有房间；**跨会话发送被砍掉**——一个会话不能替别的人格发言。
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
@@ -30,8 +30,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::adapter::ProviderConnections;
 use crate::config::{
-    ClockPolicy, Config, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy, WakeVerdict,
+    ClockPolicy, Config, Connection, InBandNoticeConfig, TurnErrorAction, WakeDecision, WakePolicy,
+    WakeVerdict,
 };
 use crate::config_objects::ConfigObjects;
 use crate::deps::{DependencyKind, DependencyRegistry};
@@ -721,6 +723,12 @@ pub struct Bridge<S: Store> {
     config_version: u64,
     /// 适配器声明的房间结构事实。键是房间；没有条目 = 未知（MultiParty）。
     room_profiles: HashMap<RoomId, RoomProfile>,
+    /// 连接注册表基线：提供者种类 → 启动时从其自有库读到的连接 id。
+    ///
+    /// `config.connections` 里命中这些 id 的连接是**提供者注入的**，注册推送
+    /// 可以整组替换它们；不在任何集合里的 id 是 config.toml 声明的，注册永远
+    /// 不碰（config 赢）。见 `register_provider_connections`。
+    provider_connection_ids: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// 适配器对房间的结构声明；core 只消费，不再从房间路径猜。
@@ -992,10 +1000,17 @@ impl<S: Store> Bridge<S> {
             draining: false,
             config_version: 0,
             room_profiles: HashMap::new(),
+            provider_connection_ids: BTreeMap::new(),
         };
         // 上一次进程留下的未闭环任务必须先收尾，否则它们永远是 `running`：
         // `tasks op=wait` 等到死，`drain_snapshot` 还会把它算作在跑，排空永远不完成。
         bridge.reclaim_orphan_tasks();
+        // 连接注册基线：启动时提供者自有库里登记了哪些连接。这些 id 之后可以
+        // 被注册推送整组替换；config.toml 声明的连接不在其中。
+        bridge.provider_connection_ids = crate::config::provider_connection_ids(
+            &crate::config::adapter_connections_root(&bridge.config.storage.path)
+                .unwrap_or_default(),
+        );
         // 策略以库为准（schema 13）。启动时对齐一次：库里没有就导入 `config.toml`
         // 的这份，库里有就以库为准。审计跟着一起落。
         bridge.sync_policy_from_store();
@@ -2344,6 +2359,14 @@ impl<S: Store> Bridge<S> {
         self.config_version
     }
 
+    /// 连接注册基线：提供者种类 → 该提供者登记的连接 id。
+    ///
+    /// 控制台用它标注每条连接的来源（config.toml 声明 vs 提供者注入）——
+    /// 改错地方会在下次注入/注册时被覆盖回来。
+    pub fn provider_connection_ids(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        &self.provider_connection_ids
+    }
+
     /// 轮次边界：把暂存的配置换上来。开轮前必调。
     ///
     /// 顺带重建从配置派生的两样东西：记忆仓库（worktrees_root 可能改了）、
@@ -2372,9 +2395,170 @@ impl<S: Store> Bridge<S> {
             self.policy = Arc::new(CorePolicy::new());
             audit_grants_config(Some(&previous), &self.config.grants);
             self.config_version += 1;
+            // 暂存配置同样走过注入：提供者库在这期间可能变过，基线跟着重算。
+            self.provider_connection_ids = crate::config::provider_connection_ids(
+                &crate::config::adapter_connections_root(&self.config.storage.path)
+                    .unwrap_or_default(),
+            );
         }
         self.adopt_store_policy();
         self.reload_model_fallbacks();
+    }
+
+    /// 连接注册（B期，ADR-031）：适配器推来的连接集合落到运行时视图。
+    ///
+    /// 语义：提供者库是唯一事实来源；`connections` 是该提供者当前的全量集合
+    /// （重启回放与运行时变更都走这里），`removed` 点名注销的 id。规则：
+    /// - config.toml 声明的连接（不在任何提供者基线里）永远保留，注册行与
+    ///   其冲突的 id 跳过（config 赢，与注入一致）；
+    /// - 本提供者的旧集合被新集合整组替换：定义原地更新（token 轮换、url
+    ///   变更不需要重启），缺席/注销的 id 从视图移除；
+    /// - 结构不合法的行（缺 id/platform/kind/account、未知 transport）跳过并
+    ///   记日志，单行故障不拖垮整批——与注入的容错一致；
+    /// - 新增 id 只进配置视图与寻址，适配器实例仍要重启才会创建（实例生命
+    ///   周期与 config 连接的 reload 语义一致，见 ADR-031 D5）。
+    ///
+    /// 返回摘要（registered/removed/skipped/active），给日志与控制台用。
+    pub fn register_provider_connections(&mut self, update: ProviderConnections) -> Value {
+        let provider = update.provider;
+        // secrets 解析表：注册行带 token_secret 引用时查这里。库读不了 = 没有可
+        // 解析的引用，带引用的行会逐行报错跳过（fail-closed），不影响其它行。
+        let secret_values: BTreeMap<String, String> = self
+            .store
+            .secrets_load()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|secret| (secret.name, secret.value))
+            .collect();
+        let mut incoming: Vec<Connection> = Vec::new();
+        let mut skipped: Vec<(String, String)> = Vec::new();
+        for wire in &update.connections {
+            match crate::config::build_connection_from_wire(wire, &secret_values) {
+                Ok(connection) => incoming.push(connection),
+                Err(reason) => skipped.push((wire.id.clone(), reason)),
+            }
+        }
+        let removed: BTreeSet<String> = update.removed.iter().cloned().collect();
+        let old_union: BTreeSet<String> = self
+            .provider_connection_ids
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let old_provider_ids = self
+            .provider_connection_ids
+            .get(&provider)
+            .cloned()
+            .unwrap_or_default();
+        // config.toml 声明的连接（不在任何提供者基线里）：提供者不能认领，
+        // 否则后续注销会把 config 连接误删。冲突行按「config 赢」跳过。
+        let config_owned: BTreeSet<String> = self
+            .config
+            .connections
+            .iter()
+            .map(|connection| connection.id.clone())
+            .filter(|id| !old_union.contains(id))
+            .collect();
+        for wire in &update.connections {
+            if config_owned.contains(&wire.id) {
+                skipped.push((
+                    wire.id.clone(),
+                    acb_i18n::t!("kernel.engine.connection_config_wins").to_string(),
+                ));
+            }
+        }
+        // 本提供者接下来的集合：有 payload 就以 payload 为准（全量回放/更新）；
+        // 只有 removed 就是纯注销，保留未注销的旧行。
+        let kept_ids: BTreeSet<String> = if update.connections.is_empty() && !removed.is_empty() {
+            old_provider_ids.difference(&removed).cloned().collect()
+        } else {
+            incoming
+                .iter()
+                .map(|connection| connection.id.clone())
+                .filter(|id| !removed.contains(id) && !config_owned.contains(id))
+                .collect()
+        };
+        let removed_count = old_provider_ids.difference(&kept_ids).count();
+
+        // 重拼 config.connections：config.toml 声明的 + 其他提供者的 + 本提供者新集合。
+        let payload_by_id: HashMap<&str, &Connection> = incoming
+            .iter()
+            .filter(|connection| kept_ids.contains(&connection.id))
+            .map(|connection| (connection.id.as_str(), connection))
+            .collect();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut connections: Vec<Connection> = Vec::new();
+        for connection in std::mem::take(&mut self.config.connections) {
+            let id = connection.id.clone();
+            if !old_union.contains(&id) {
+                // config.toml 声明的：永远保留（config 赢）。
+                seen.insert(id);
+                connections.push(connection);
+                continue;
+            }
+            if old_provider_ids.contains(&id) {
+                // 本提供者的旧行：payload 有新定义就用新定义（token 轮换、
+                // url 变更不需要重启）；纯注销保留的行沿用旧定义；其余丢弃。
+                if let Some(updated) = payload_by_id.get(id.as_str()) {
+                    if !seen.contains(&id) {
+                        seen.insert(id);
+                        connections.push((*updated).clone());
+                    }
+                } else if kept_ids.contains(&id) && !seen.contains(&id) {
+                    seen.insert(id);
+                    connections.push(connection);
+                }
+                continue;
+            }
+            // 其他提供者的行：保留。跨提供者认领（payload 声明了别人的 id）
+            // 也在这里先到先得——payload 定义在末尾的去重里被丢弃。
+            if !seen.contains(&id) {
+                seen.insert(id);
+                connections.push(connection);
+            }
+        }
+        for connection in incoming {
+            if !seen.contains(&connection.id) {
+                // payload 里既不在旧视图、也没被上面占位的行：新增连接。
+                seen.insert(connection.id.clone());
+                connections.push(connection);
+            }
+        }
+        self.config.connections = connections;
+
+        let registered_count = kept_ids.len();
+        self.provider_connection_ids
+            .insert(provider.clone(), kept_ids);
+        self.config_version += 1;
+        let active = self.config.connections.len();
+        for (id, reason) in &skipped {
+            eprintln!(
+                "{}",
+                acb_i18n::t!(
+                    "kernel.engine.connection_row_skipped",
+                    provider = provider,
+                    id = id,
+                    reason = reason
+                )
+            );
+        }
+        eprintln!(
+            "{}",
+            acb_i18n::t!(
+                "kernel.engine.connections_registered",
+                provider = provider,
+                registered = registered_count,
+                removed = removed_count,
+                active = active
+            )
+        );
+        serde_json::json!({
+            "provider": provider,
+            "registered": registered_count,
+            "removed": removed_count,
+            "skipped": skipped.iter().map(|(id, reason)| json!({"id": id, "reason": reason})).collect::<Vec<_>>(),
+            "active": active,
+        })
     }
 
     /// 把库里的策略读进来。变了就落审计、配置版本 +1；没变什么都不做。
@@ -13648,5 +13832,261 @@ mod target_param_tests {
             check_target_params(&spec, &room, &json!({"stream_id": "abc"})).is_err(),
             "只给第一段应判为换目标"
         );
+    }
+}
+
+#[cfg(test)]
+mod connection_registry_tests {
+    use super::*;
+    use crate::adapter::ProviderConnections;
+    use crate::storage::{MemoryStore, SecretsStore};
+
+    fn config_text() -> String {
+        r#"
+        [[connections]]
+        id = "qq"
+        platform = "qq"
+        kind = "onebot11"
+        url = "ws://127.0.0.1:3001"
+        account = "bot"
+
+        [[personas]]
+        id = "p"
+        name = "人格"
+        text = "你是桥。"
+
+        [[harnesses]]
+        id = "dsh"
+        name = "DSH"
+
+        [[sessions]]
+        id = "main"
+        harness = "dsh"
+        persona = "p"
+        token = { secret = "t-main" }
+
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/1"
+
+        [sessions.subscriptions.wake]
+        provider = "acb.wake.default"
+        at_mention = false
+        reply = false
+        name_mention = false
+        accumulate = 1000
+        "#
+        .to_owned()
+    }
+
+    fn bridge() -> Bridge<MemoryStore> {
+        Bridge::with_plugins(
+            Config::parse_fixture(&config_text()).expect("配置合法"),
+            MemoryStore::new(),
+            Box::new(NoopOutboundForRegistry),
+            PluginManager::with_native_builtins(),
+        )
+    }
+
+    fn wire(id: &str, url: &str) -> acb_adapter_api::WireConnection {
+        acb_adapter_api::WireConnection {
+            id: id.to_owned(),
+            platform: "qq".to_owned(),
+            kind: "onebot11".to_owned(),
+            transport: "ws-client".to_owned(),
+            url: Some(url.to_owned()),
+            token: None,
+            account: "42".to_owned(),
+            admin_qqs: Vec::new(),
+            options: serde_json::json!({}),
+            token_secret: None,
+            routes: serde_json::json!([]),
+        }
+    }
+
+    fn push(
+        provider: &str,
+        connections: Vec<acb_adapter_api::WireConnection>,
+        removed: Vec<String>,
+    ) -> ProviderConnections {
+        ProviderConnections {
+            provider: provider.to_owned(),
+            connections,
+            removed,
+        }
+    }
+
+    fn connection_ids(bridge: &Bridge<MemoryStore>) -> Vec<String> {
+        bridge
+            .config
+            .connections
+            .iter()
+            .map(|connection| connection.id.clone())
+            .collect()
+    }
+
+    fn connection_url(bridge: &Bridge<MemoryStore>, id: &str) -> Option<String> {
+        bridge
+            .config
+            .connections
+            .iter()
+            .find(|connection| connection.id == id)
+            .and_then(|connection| connection.url.clone())
+    }
+
+    #[test]
+    fn register_adds_and_replaces_provider_connections() {
+        let mut bridge = bridge();
+        let version_before = bridge.config_version;
+        let summary = bridge.register_provider_connections(push(
+            "onebot11",
+            vec![
+                wire("p1", "ws://127.0.0.1:4001"),
+                wire("p2", "ws://127.0.0.1:4002"),
+            ],
+            Vec::new(),
+        ));
+        assert_eq!(summary["registered"], 2, "{summary}");
+        // config.toml 声明的 qq 原样保留，提供者的两条进视图。
+        assert_eq!(connection_ids(&bridge), vec!["qq", "p1", "p2"]);
+        assert!(bridge.config_version > version_before);
+
+        // 全量回放：定义原地替换，不产生重复。
+        let summary = bridge.register_provider_connections(push(
+            "onebot11",
+            vec![
+                wire("p1", "ws://127.0.0.1:5001"),
+                wire("p2", "ws://127.0.0.1:4002"),
+            ],
+            Vec::new(),
+        ));
+        assert_eq!(summary["registered"], 2, "{summary}");
+        assert_eq!(connection_ids(&bridge), vec!["qq", "p1", "p2"]);
+        assert_eq!(
+            connection_url(&bridge, "p1").as_deref(),
+            Some("ws://127.0.0.1:5001"),
+            "回放要顶掉旧定义"
+        );
+    }
+
+    #[test]
+    fn register_pure_unregister_removes_only_named_ids() {
+        let mut bridge = bridge();
+        bridge.register_provider_connections(push(
+            "onebot11",
+            vec![
+                wire("p1", "ws://127.0.0.1:4001"),
+                wire("p2", "ws://127.0.0.1:4002"),
+            ],
+            Vec::new(),
+        ));
+        let version_before = bridge.config_version;
+        let summary = bridge.register_provider_connections(push(
+            "onebot11",
+            Vec::new(),
+            vec!["p2".to_owned()],
+        ));
+        assert_eq!(summary["registered"], 1, "{summary}");
+        assert_eq!(summary["removed"], 1, "{summary}");
+        assert_eq!(connection_ids(&bridge), vec!["qq", "p1"]);
+        assert!(bridge.config_version > version_before);
+    }
+
+    #[test]
+    fn register_never_claims_config_declared_ids() {
+        let mut bridge = bridge();
+        let summary = bridge.register_provider_connections(push(
+            "onebot11",
+            vec![
+                wire("qq", "ws://127.0.0.1:6666"),
+                wire("p1", "ws://127.0.0.1:4001"),
+            ],
+            Vec::new(),
+        ));
+        // config 赢：qq 的定义不动，payload 里那条被跳过。
+        assert_eq!(
+            connection_url(&bridge, "qq").as_deref(),
+            Some("ws://127.0.0.1:3001"),
+            "config.toml 的定义不能被注册顶掉"
+        );
+        assert_eq!(connection_ids(&bridge), vec!["qq", "p1"]);
+        let skipped = summary["skipped"].as_array().expect("skipped 是数组");
+        assert!(skipped.iter().any(|row| row["id"] == "qq"), "{summary}");
+        // 关键回归：提供者基线里不能混进 config 声明的 id，否则一次纯注销
+        // 会把 config 连接误删。
+        assert!(
+            !bridge
+                .provider_connection_ids
+                .get("onebot11")
+                .expect("提供者已登记")
+                .contains("qq"),
+            "config 声明的 id 不得进提供者基线"
+        );
+        bridge.register_provider_connections(push("onebot11", Vec::new(), vec!["p1".to_owned()]));
+        assert_eq!(
+            connection_url(&bridge, "qq").as_deref(),
+            Some("ws://127.0.0.1:3001"),
+            "纯注销之后 config 连接必须还在"
+        );
+    }
+
+    #[test]
+    fn register_skips_invalid_rows_without_killing_the_batch() {
+        let mut bridge = bridge();
+        // transport 有 Other 兜底（任意串都合法），真正非法的是空账号。
+        let mut bad = wire("bad", "ws://127.0.0.1:4003");
+        bad.account = "  ".to_owned();
+        let summary = bridge.register_provider_connections(push(
+            "onebot11",
+            vec![wire("p1", "ws://127.0.0.1:4001"), bad],
+            Vec::new(),
+        ));
+        assert_eq!(summary["registered"], 1, "{summary}");
+        let skipped = summary["skipped"].as_array().expect("skipped 是数组");
+        assert_eq!(skipped.len(), 1, "{summary}");
+        assert_eq!(skipped[0]["id"], "bad", "{summary}");
+        assert_eq!(connection_ids(&bridge), vec!["qq", "p1"]);
+    }
+
+    #[test]
+    fn register_resolves_token_secret_from_store() {
+        let mut bridge = bridge();
+        bridge
+            .store
+            .secret_put("onebot-token", "real-token", false, None, None, 0)
+            .expect("能存");
+        let mut with_ref = wire("p1", "ws://127.0.0.1:4001");
+        with_ref.token_secret = Some("onebot-token".to_owned());
+        bridge.register_provider_connections(push("onebot11", vec![with_ref], Vec::new()));
+        let token = bridge
+            .config
+            .connections
+            .iter()
+            .find(|connection| connection.id == "p1")
+            .and_then(|connection| connection.token.clone());
+        assert_eq!(token.as_deref(), Some("real-token"));
+
+        // 引用不存在：fail-closed，该行跳过。
+        let mut dangling = wire("p2", "ws://127.0.0.1:4002");
+        dangling.token_secret = Some("no-such-secret".to_owned());
+        let summary =
+            bridge.register_provider_connections(push("onebot11", vec![dangling], Vec::new()));
+        let skipped = summary["skipped"].as_array().expect("skipped 是数组");
+        assert!(skipped.iter().any(|row| row["id"] == "p2"), "{summary}");
+        assert!(
+            !connection_ids(&bridge).contains(&"p2".to_owned()),
+            "解不开引用的行不能进视图"
+        );
+    }
+}
+
+struct NoopOutboundForRegistry;
+
+impl crate::outbound::Outbound for NoopOutboundForRegistry {
+    fn send(&mut self, _room: &RoomId, _elements: &[Element]) -> Result<Sent, OutboundError> {
+        Ok(Sent {
+            platform_id: "test".to_owned(),
+            at: 1,
+        })
     }
 }

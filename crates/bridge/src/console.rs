@@ -545,6 +545,7 @@ impl<S: Store + Send + 'static> Console<S> {
                 (200, self.deps.snapshot(since).to_string())
             }
             ("GET", "/api/status") => (200, self.status()),
+            ("GET", "/api/connections") => (200, self.connections_view()),
             ("GET", "/api/sessions") => (200, self.sessions()),
             // 记忆管家：最近一次同步时间、结果、冲突文件数与失败原因。
             // 管家线程写 status.json，这里只读，不阻塞任何同步动作。
@@ -686,6 +687,44 @@ impl<S: Store + Send + 'static> Console<S> {
             ("POST", "/api/model-fallbacks") => self.save_model_fallbacks(body),
             _ => error_response(404, acb_i18n::msg!("bridge.console.no_endpoint"), None),
         }
+    }
+
+    /// 连接视图（带来源标注）。
+    ///
+    /// config.toml 声明的与提供者注入的并存时，`source` 说明这条连接归谁管：
+    /// 改错地方会在下次注入/注册时被覆盖回来。token 与 url 查询串沿用
+    /// config_view 的遮蔽规则。
+    fn connections_view(&self) -> String {
+        let bridge = lock(&self.bridge);
+        let config = bridge.config();
+        let providers = bridge.provider_connection_ids();
+        let connections = config
+            .connections
+            .iter()
+            .map(|c| {
+                let source = providers
+                    .iter()
+                    .find(|(_, ids)| ids.contains(&c.id))
+                    .map(|(kind, _)| format!("provider:{kind}"))
+                    .unwrap_or_else(|| "config".to_owned());
+                json!({
+                    "id": c.id,
+                    "platform": c.platform,
+                    "kind": c.kind,
+                    "transport": c.transport.as_str(),
+                    "url": c.url.as_deref().map(mask_url_query).unwrap_or_default(),
+                    "token": c.token.as_deref().map(mask_secret),
+                    "account": c.account,
+                    "admin_qqs": c.admin_qqs,
+                    "source": source,
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "config_version": bridge.config_version(),
+            "connections": connections,
+        })
+        .to_string()
     }
 
     /// 记忆管家状态。读的是管家自己原子替换的 status.json；读不到就如实报错。

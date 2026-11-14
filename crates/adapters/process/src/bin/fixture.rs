@@ -149,6 +149,17 @@ fn main() -> std::io::Result<()> {
                 };
                 write_message(&mut stdout, &AdapterMessage::Reply { id, result })?;
             }
+            CoreMessage::ConnectionsList { id } => {
+                write_message(
+                    &mut stdout,
+                    &AdapterMessage::Reply {
+                        id,
+                        result: WireResult::Connections {
+                            connections: Vec::new(),
+                        },
+                    },
+                )?;
+            }
             CoreMessage::Shutdown => break,
         }
     }

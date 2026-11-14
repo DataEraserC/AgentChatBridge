@@ -104,6 +104,21 @@ pub struct AdapterHost {
     /// ADR-0014 的四样东西（流水/水位/投递/笔记）仍在 core 的库里，不在这里。
     /// 适配器要持久状态就用自己的库（真 schema），不动 core 的 schema。
     pub state_dir: std::path::PathBuf,
+    /// 连接注册推送口（B期协议）。载体把适配器的 `connections` wire 消息
+    /// 转成这里；core 的运行时注册表消费。`None` = 这个载体不参与注册
+    /// （动态库等），消息照旧不会丢——载体侧会打日志。
+    pub connections: Option<std::sync::mpsc::Sender<ProviderConnections>>,
+}
+
+/// 适配器推来的一批连接注册（`AdapterMessage::Connections` 的载体侧形状）。
+///
+/// `provider` 是发起推送的适配器实例种类（connection.kind），注册表按它归组；
+/// `connections` 是全量或增量集合，`removed` 点名注销的 id。
+#[derive(Debug, Clone)]
+pub struct ProviderConnections {
+    pub provider: String,
+    pub connections: Vec<acb_adapter_api::WireConnection>,
+    pub removed: Vec<String>,
 }
 
 /// 一条适配器连接的状态上报口。
@@ -260,7 +275,6 @@ pub trait AdapterFactory: Send + Sync {
         connection: &Connection,
         events: EventQueue,
     ) -> Result<AdapterInstance, AdapterError>;
-
 
     /// 工厂级健康状态。默认 Unknown：平台连接状态由 `/api/dependencies` 维护，
     /// 不能在这里假装 Healthy；动态适配器可覆盖为句柄级健康。
@@ -562,6 +576,7 @@ mod tests {
             shutdown,
             status: AdapterStatus::new(id, deps),
             state_dir: std::path::PathBuf::from("/tmp/acb-test-state"),
+            connections: None,
         }
     }
 

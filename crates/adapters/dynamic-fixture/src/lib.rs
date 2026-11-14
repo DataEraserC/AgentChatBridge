@@ -225,6 +225,12 @@ unsafe extern "C" fn fixture_invoke(
                 },
             },
         },
+        CoreMessage::ConnectionsList { id } => AdapterMessage::Reply {
+            id,
+            result: WireResult::Connections {
+                connections: Vec::new(),
+            },
+        },
         CoreMessage::Shutdown => {
             fixture.stop.store(true, Ordering::Relaxed);
             if let Some(log) = fixture.host.log {

@@ -10,12 +10,12 @@
 //!   （AppSecret 值存控制台/agenix，适配器库不存明文）；
 //! - `options_json` 可带 `api_base` / `token_url` 覆盖默认端点。
 
-use std::borrow::Cow;
 use acb_kernel::{
     ADAPTER_API_VERSION, ADAPTER_CONNECTIONS_SCHEMA_SQL, AdapterCapability, AdapterError,
     AdapterFactory, AdapterHost, AdapterInstance, AdapterManifest, Connection, EventQueue,
     PluginEffect, PluginMetadata,
 };
+use std::borrow::Cow;
 
 use crate::{QqBotOfficialOutbound, TokenManager, supervise};
 
@@ -88,7 +88,10 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
         if connection.transport.as_str() != "ws-client" {
             return Err(AdapterError::Create(
                 connection.id.clone(),
-                acb_i18n::t!("adapter.qqbot.transport_unsupported", transport = connection.transport.as_str()),
+                acb_i18n::t!(
+                    "adapter.qqbot.transport_unsupported",
+                    transport = connection.transport.as_str()
+                ),
             ));
         }
         if connection.account.trim().is_empty() {
@@ -97,21 +100,31 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
                 acb_i18n::t!("adapter.qqbot.appid_required", id = connection.id),
             ));
         }
-        if connection.token.as_deref().unwrap_or_default().trim().is_empty() {
+        if connection
+            .token
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
             return Err(AdapterError::Create(
                 connection.id.clone(),
                 acb_i18n::t!("adapter.qqbot.secret_required", id = connection.id),
             ));
         }
-        let secret = connection.token.as_deref().unwrap_or_default().trim().to_owned();
+        let secret = connection
+            .token
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
         let token_url = option_str(connection, "token_url");
         let token_manager = match token_url {
             Some(url) => TokenManager::with_token_url(url, connection.account.trim(), secret),
             None => TokenManager::new(connection.account.trim(), secret),
         };
-        let api_base = option_str(connection, "api_base").unwrap_or_else(|| {
-            crate::outbound::default_api_base().to_owned()
-        });
+        let api_base = option_str(connection, "api_base")
+            .unwrap_or_else(|| crate::outbound::default_api_base().to_owned());
         // 出站与入站共享一份被动回复状态：入站记 msg_id 锚点，出站取用。
         let reply_state = crate::outbound::ReplyState::new();
         let outbound = Box::new(QqBotOfficialOutbound::new(
@@ -132,13 +145,15 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
             // 被动窗口锚点进自有库：重启后仍能回复（桥重启不丢 msg_id）。
             reply_state.bind(&host.state_dir.join("adapter.db"));
             // provider 侧连接库（标准 schema，core 定义）：确保存在，运维在此
-            // 维护连接行；core 配置构建时注入。
+            // 维护连接行。ensure 要拿库文件路径（与注入扫描的
+            // `state/adapters/<目录>/connections.db` 同形），传目录会建错位置。
             ensure_connections_db(
                 &host
                     .state_dir
                     .parent()
                     .expect("state_dir 有父目录")
-                    .join("qqbot"),
+                    .join("qqbot")
+                    .join("connections.db"),
             );
             supervise(
                 connection,
@@ -194,8 +209,18 @@ mod tests {
         assert_eq!(MANIFEST.platform.as_ref(), "qq");
         assert_eq!(MANIFEST.metadata.title.as_deref(), Some("QQ 官方机器人"));
         assert!(MANIFEST.transports.iter().any(|item| item == "ws-client"));
-        assert!(MANIFEST.capabilities.iter().any(|c| matches!(c, AdapterCapability::Send)));
-        assert!(MANIFEST.capabilities.iter().any(|c| matches!(c, AdapterCapability::ReceiveEvents)));
+        assert!(
+            MANIFEST
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, AdapterCapability::Send))
+        );
+        assert!(
+            MANIFEST
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, AdapterCapability::ReceiveEvents))
+        );
     }
 
     #[test]

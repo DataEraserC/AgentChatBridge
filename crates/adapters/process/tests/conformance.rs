@@ -92,6 +92,7 @@ fn process_adapter_speaks_the_wire_protocol() {
         shutdown: Arc::clone(&shutdown),
         status: acb_kernel::AdapterStatus::new("proc", acb_kernel::DependencyRegistry::new()),
         state_dir: std::path::PathBuf::from("/tmp/acb-conformance-state"),
+        connections: None,
     };
     thread::spawn(move || launch(host));
 
@@ -164,6 +165,7 @@ fn process_adapter_restarts_after_child_exits() {
         shutdown: Arc::clone(&shutdown),
         status: acb_kernel::AdapterStatus::new("proc", acb_kernel::DependencyRegistry::new()),
         state_dir: std::path::PathBuf::from("/tmp/acb-conformance-state"),
+        connections: None,
     };
     thread::spawn(move || launch(host));
 
