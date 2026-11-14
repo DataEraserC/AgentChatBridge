@@ -4381,20 +4381,30 @@ fn json_to_toml(value: &serde_json::Value) -> toml::Value {
 ///   点名连接，由运维修正后重启；
 /// - 库以只读方式打开——core 不写适配器的文件。
 fn inject_adapter_connections(merged: &mut toml::Value) {
-    // [storage] 缺省时 from_raw 用 DEFAULT_STORAGE_PATH，这里必须用同一个
-    // 默认值——否则注入静默空转。
-    let storage_path = merged
-        .get("storage")
-        .and_then(|storage| storage.get("path"))
-        .and_then(toml::Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| DEFAULT_STORAGE_PATH.to_owned());
-    let Some(root) = std::path::Path::new(&storage_path)
-        .parent()
-        .map(|parent| parent.join("adapters"))
-    else {
+    // 状态根的解析顺序：ACB_DATA_DIR 环境变量（桥与组件同源继承，绝对路径，
+    // 不依赖各进程的 CWD）→ [storage].path → DEFAULT_STORAGE_PATH。相对路径
+    // 按 CWD 解析——桥的 WorkingDirectory 是数据目录，组件进程必须同源，
+    // 否则注入只在桥进程里生效、预设的 acbctl 全部落空。
+    let data_dir = std::env::var("ACB_DATA_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            merged
+                .get("storage")
+                .and_then(|storage| storage.get("path"))
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| Some(DEFAULT_STORAGE_PATH.to_owned()))
+                .and_then(|path| {
+                    std::path::Path::new(&path)
+                        .parent()
+                        .map(|parent| parent.display().to_string())
+                })
+        });
+    let Some(data_dir) = data_dir else {
         return;
     };
+    let root = std::path::Path::new(&data_dir).join("state").join("adapters");
     let Ok(entries) = std::fs::read_dir(&root) else {
         return;
     };
