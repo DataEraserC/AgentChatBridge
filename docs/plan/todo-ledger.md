@@ -698,6 +698,10 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 流程（用户侧）：重启桥（qqbot-official 实例建立）→ 用 323622442 私聊/群 @ 机器人一句 → `journalctl --user -u acb-bridge | grep 房间` 拿 openid 房间串 → 控制台会话页 dsh-qas「+ Subscribe」填该串 → 下一轮自动生效。
 
+勘误与排查结论：
+- 用户指正：bridge.log 里 `qq:private/323622442` 的反复 access 审计是 **snowluma（qq 连接）的正常私聊流量**（onebot 世界房间串用 QQ 号是对的），放行 basis 是内置规则 `base-system-admin-private`，与 qqbot 订阅无关——上一轮的误读收回（核实：config_objects 九个会话的 payload 都不含该串）。
+- exit 75 ×2（04:13 / 04:29）= 我当轮两次换代（57b5c18 / c23bcee）的**设计内机制**：launcher「停旧 → 提交指针 → 退出 75 → systemd 重拉进新代」（launcher/src/main.rs:475）。不是崩溃。注：unit 的 stdout/stderr 是 `append` 重定向（落 state/acb/bridge.log），journal 里看不到 launcher 原文。
+
 
 
 
