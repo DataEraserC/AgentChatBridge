@@ -1223,6 +1223,7 @@ async function openPluginConfig(id) {
         for (const [key, property] of schemaProps) {
           if (property["x-secret-ref"]) continue;
           const value = schemaFieldValue(key, property);
+          // 与 legacy 字段列表同语义：显式提交空串 = 清空该键。
           if (value !== undefined && value !== null) config[key] = value;
         }
       } else {
@@ -2606,13 +2607,14 @@ async function addConnection() {
       if (secret === "__create__") { showFormError(t("console.secrets.errors.pickFirst")); return false; }
       if (secret) create.secret = secret;
       // 适配器专属 options：按 options_schema 收值，全空的 schema 不带 options。
+      // 空字符串不入库（适配器侧 option_str 会过滤，但配置里存空键是噪音）。
       const schema = adapter?.options_schema;
       const properties = schema?.properties ? Object.entries(schema.properties) : [];
       const options = {};
       for (const [key, property] of properties) {
         if (property["x-secret-ref"]) continue;
         const value = schemaFieldValue(key, property);
-        if (value !== undefined && value !== null) options[key] = value;
+        if (value !== undefined && value !== null && value !== "") options[key] = value;
       }
       if (Object.keys(options).length) create.options = options;
       return submitPatch([{ op: "connection", id, create }]);
