@@ -1005,7 +1005,10 @@ impl Default for AccessPolicy {
 pub struct DeliveryPolicy {
     /// composer 的 provider id。不写就用内置「从旧到新连续投一段」。
     pub provider: ProviderId,
-    /// 插件专属配置；内置 composer 忽略它。
+    /// composer 专属配置。core 为内置投递路径认读一个键：`exclude_read`（布
+    /// 尔，默认 false）——取触发消息前后的上下文窗口时排除已读（acked）记
+    /// 录，避免把 agent 已经看过的消息再投一遍；上下文变短但不影响未读正文。
+    /// 外置 composer 也受益：引擎在把上下文交给 composer 之前统一过滤。
     pub options: serde_json::Value,
 }
 

@@ -9323,6 +9323,18 @@ impl<S: Store> Bridge<S> {
             .subscription(&pending.session, &pending.room)
             .map(|subscription| subscription.window)
             .unwrap_or_default();
+        // 投递策略选项（core 认读的键）：exclude_read = 上下文窗口排除已读
+        // （acked）记录。默认 false = 现状（上下文保留已读，给模型连续的
+        // 对话背景）。只过滤上下文：正文来自未读集合，天然不含已读。
+        let delivery_policy = turn_config
+            .session(&pending.session)
+            .map(|session| session.delivery.clone())
+            .unwrap_or_default();
+        let exclude_read = delivery_policy
+            .options
+            .get("exclude_read")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         // 触发消息之前的上下文可能早就确认过（在水位之下），所以单独从流水里取，
         // 不能指望 `pending_records`。被抑制的记录只进流水，不进上下文。
         let context: Vec<Record> = match pending.trigger_id {
@@ -9333,6 +9345,23 @@ impl<S: Store> Bridge<S> {
                 .filter(|record| !record.suppressed)
                 .collect(),
             None => Vec::new(),
+        };
+        let context = if exclude_read {
+            let cursor = Cursor::new(&pending.session, pending.room.clone());
+            // 已读的两种形态：水位以下（连续前沿推进过）+ 乱序 ack 集合。
+            let watermark = self.store.watermark(&cursor).unwrap_or_default();
+            let acked: std::collections::BTreeSet<u64> = self
+                .store
+                .acked(&cursor)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            context
+                .into_iter()
+                .filter(|record| record.id > watermark && !acked.contains(&record.id))
+                .collect()
+        } else {
+            context
         };
 
         // 先选本轮真正要投的批次，再计数、再进 delivered：
@@ -9350,10 +9379,6 @@ impl<S: Store> Bridge<S> {
         let trigger_id = pending.trigger_id;
         // composer 只决定「投哪些编号」；它看不到 store、票和水位，选出来的编号
         // 还要在这里过一遍真实记录集合——未知编号、重复编号都不会凭空进 delivered。
-        let delivery_policy = turn_config
-            .session(&pending.session)
-            .map(|session| session.delivery.clone())
-            .unwrap_or_default();
         let composer = match self
             .plugins
             .resolve_delivery(&delivery_policy.provider, &delivery_policy)
@@ -14149,6 +14174,111 @@ mod connection_registry_tests {
             Ok(Ingest::NotSubscribed { .. })
         ));
         assert_eq!(bridge.unsubscribed_seen.len(), 1, "同房间不重复记日志");
+    }
+
+    #[test]
+    fn delivery_exclude_read_option_skips_acked_context() {
+        // 两份配置仅 exclude_read 不同；窗口带 3 条前置上下文。
+        // 时间线：消息 1（普通）→ agent 已读（store.ack）→ 消息 2（@ 唤醒）。
+        // exclude_read=true：上下文里的消息 1 被排除，只投消息 2；
+        // exclude_read=false（现状）：上下文保留已读，1 和 2 都投。
+        let make = |exclude_read: bool| {
+            let flag = if exclude_read { "true" } else { "false" };
+            let config_text = format!(
+                r#"
+        [[connections]]
+        id = "qq"
+        platform = "qq"
+        kind = "onebot11"
+        url = "ws://127.0.0.1:3001"
+        account = "bot"
+
+        [[personas]]
+        id = "p"
+        name = "人格"
+        text = "你是桥。"
+
+        [[harnesses]]
+        id = "dsh"
+        name = "DSH"
+
+        [[sessions]]
+        id = "main"
+        harness = "dsh"
+        persona = "p"
+        token = {{ secret = "t-main" }}
+
+        [sessions.delivery.options]
+        exclude_read = {flag}
+
+        [[sessions.subscriptions]]
+        connection = "qq"
+        room = "group/1"
+
+        [sessions.subscriptions.window]
+        context_before = 3
+        context_after = 0
+
+        [sessions.subscriptions.wake]
+        provider = "acb.wake.default"
+        at_mention = true
+        reply = false
+        name_mention = false
+        accumulate = 1000
+        "#
+            );
+            Bridge::with_plugins(
+                Config::parse_fixture(&config_text).expect("配置合法"),
+                MemoryStore::new(),
+                Box::new(NoopOutboundForRegistry),
+                PluginManager::with_native_builtins(),
+            )
+        };
+        let run = |bridge: &mut Bridge<MemoryStore>| {
+            let room = RoomId::new("qq", "group/1").expect("合法");
+            let sender = |id: u64| Sender {
+                id: id.to_string(),
+                name: "u".to_owned(),
+                role: None,
+            };
+            // 消息 1：普通消息（不唤醒）。
+            bridge
+                .ingest(RecordDraft::message(
+                    room.clone(),
+                    sender(1),
+                    1,
+                    vec![Element::text("第一条")],
+                    false,
+                ))
+                .expect("入库");
+            // agent 已读过消息 1（store 层 ack，等价于 ack_messages 的效果）。
+            use crate::storage::Watermarks;
+            bridge
+                .store
+                .ack(&Cursor::new("main", room.clone()), &[1])
+                .expect("ack");
+            // 消息 2：@ 唤醒。
+            bridge
+                .ingest(RecordDraft::message(
+                    room.clone(),
+                    sender(2),
+                    2,
+                    vec![Element::text("@bot 在吗")],
+                    true,
+                ))
+                .expect("入库");
+            let delivery = bridge.poll_turn().expect("能查询").expect("开轮");
+            delivery
+                .records
+                .iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>()
+        };
+
+        let with_option = run(&mut make(true));
+        assert_eq!(with_option, vec![2], "已读的上下文被排除，只投未读正文");
+        let without = run(&mut make(false));
+        assert_eq!(without, vec![1, 2], "默认现状：上下文保留已读记录");
     }
 
     #[test]
