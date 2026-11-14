@@ -691,6 +691,20 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
   exclude_read = true
 默认 false = 现状（上下文保留已读，给模型连续对话背景）。
 
+### 二次纠偏（8f37107）：过滤逻辑归 composer，core 只供数据
+
+用户追问「修改是否在投递策略插件里完成的」后定稿：exclude_read 的
+过滤不在 acb 里嵌——core 从 options 解释键并过滤是越界。改为：
+DeliveryRequest 增加 read_ids（已读编号快照：水位以下 + 乱序 ack，
+只读数据），内置 composer 自己读 options.exclude_read 过滤上下文；
+Dylib 的 WireDeliveryRequest / Lua 的 request table 同步带 read_ids
+（JSON 加字段向后兼容），外置策略据此自行实现。core 回到中立：
+只供数据，不解释 options。ADR-0026 约束不变（composer 仍不写状态）。
+
+遗留：composer 的 options_schema 声明面（参考适配器 x-account 做法，
+让 exclude_read 之类选项在控制台可见可编辑，后续轮）。
+
+
 
 ## 27. C2C 消息不到——READY 控制帧修复 + dispatch 诊断日志（2026-11-15）
 
