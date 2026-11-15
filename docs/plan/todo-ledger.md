@@ -704,6 +704,20 @@ Dylib 的 WireDeliveryRequest / Lua 的 request table 同步带 read_ids
 遗留：composer 的 options_schema 声明面（参考适配器 x-account 做法，
 让 exclude_read 之类选项在控制台可见可编辑，后续轮）。
 
+## 29. qqbot 媒体能力补齐（2026-11-15，a5e4966 已部署）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 切片 1：群聊端点修正 | message_url/files_url 按 scope 分支（group → /v2/groups/，其余 → /v2/users/）——此前群房间一律打 users 端点，群回复必拒 | `message_url_is_scope_aware` 单测 |
+| 切片 2：富媒体出站 | Image/Video/Audio/File 元素 → 抓取元素 url 字节 → multipart POST files 端点（srv_send_msg=false）→ file_info → msg_type 7 发送（content 文本随行）；上限 图10MB/视音频文件100MB 提前拦截；重复媒体元素报错；旧测试改判（媒体路径错误形态由平台/网络决定，不再走纯文本通道） | `multipart_carries_file_type_and_content`、`media_limits_cover_all_types`、`non_text_elements_go_through_media_upload_path` |
+| 切片 3：收侧附件可见化 | attachments 数组 → 正文追加 [类型 附件：文件名] 标记（平台下载 URL 需鉴权，完整媒体落地留后续轮） | `c2c_attachments_become_visible_markers` |
+| 切片 4：FRIEND_VERIFY 可见化 | 好友验证申请改记非 suppressed 事件（正文 openid + 待接入说明）；审批 platform_call 待官方接口核实后补 | 代码事实（event.rs match 臂） |
+| 换代 | `/nix/store/1fbwspdfd2b0i9jvgcg1l5nsn9rhb9xi-acb-payload-0.1.0`（a5e4966）→ req-1794724986122-92433ee5 | version `0.1.0+a5e4966`；依赖面板七项全 up |
+
+遗留：富媒体出站的真机发送验证（agent 发视频 → qqbot 房间送达）；审批
+platform_call；媒体落地（收侧下载→file_relay）。
+
+
 ### 三次纠偏（e42eee6）：exclude_read 落订阅级投递窗口
 
 用户问「exclude_read 也是订阅级的吧？和投递上下多少条那个配置一致？」
