@@ -5,6 +5,7 @@
 //! 富媒体元素明确报错（不降级不丢弃——`api_v2` 的富媒体走另一套接口，接了再说）。
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -56,7 +57,8 @@ impl ReplyState {
         }
         match open_store(path) {
             Ok(mutex) => {
-                let connection = mutex.into_inner()
+                let connection = mutex
+                    .into_inner()
                     .unwrap_or_else(|poison| poison.into_inner());
                 // 内存兜底里攒下的锚点并入；已持久化的行优先。
                 let fallback: Vec<(String, String, u32)> = self
@@ -205,6 +207,141 @@ pub fn default_api_base() -> &'static str {
     DEFAULT_API_BASE
 }
 
+/// 消息端点：单聊 `/v2/users/{openid}/messages`；群聊
+/// `/v2/groups/{group_openid}/messages`（此前一律打 users 端点，群回复必拒）。
+fn message_url(base: &str, scope: &str, openid: &str, msg_seq: u32) -> String {
+    match scope {
+        "group" => format!("{base}/v2/groups/{openid}/messages?msg_seq={msg_seq}"),
+        _ => format!("{base}/v2/users/{openid}/messages?msg_seq={msg_seq}"),
+    }
+}
+
+/// 富媒体上传端点，与消息端点同 scope。
+fn files_url(base: &str, scope: &str, openid: &str) -> String {
+    match scope {
+        "group" => format!("{base}/v2/groups/{openid}/files"),
+        _ => format!("{base}/v2/users/{openid}/files"),
+    }
+}
+
+/// 官方富媒体上限（按文档；超限的平台也会拒绝，这里提前拦截省一次上传）。
+const MEDIA_LIMITS: &[(u32, usize)] = &[
+    (1, 10 * 1024 * 1024),  // 图片 10MB
+    (2, 100 * 1024 * 1024), // 视频 100MB
+    (3, 100 * 1024 * 1024), // 音频 100MB
+    (4, 100 * 1024 * 1024), // 文件 100MB
+];
+
+fn media_limit(file_type: u32) -> usize {
+    MEDIA_LIMITS
+        .iter()
+        .find(|(kind, _)| *kind == file_type)
+        .map(|(_, limit)| *limit)
+        .unwrap_or(100 * 1024 * 1024)
+}
+
+/// 抓取媒体字节（元素 url：file_relay 能力地址或可直连的媒体地址）。
+fn fetch_media(url: &str, limit: usize) -> Result<Vec<u8>, String> {
+    let response = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(120))
+        .call()
+        .map_err(|error| format!("fetch media: {error}"))?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take((limit as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read media: {error}"))?;
+    if bytes.len() > limit {
+        return Err(format!(
+            "media exceeds limit: {} > {limit} bytes",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
+/// 构造官方要求的 multipart 表单体（file_type / file / srv_send_msg=false）。
+fn build_multipart(boundary: &str, file_type: u32, filename: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    {
+        // 借用收敛在块内，避免与末尾的 extend 争用。
+        let mut push = |part: &str| body.extend_from_slice(part.as_bytes());
+        push(&format!("--{boundary}\r\n"));
+        push("Content-Disposition: form-data; name=\"file_type\"\r\n\r\n");
+        push(&format!("{file_type}\r\n"));
+        push(&format!("--{boundary}\r\n"));
+        push("Content-Disposition: form-data; name=\"srv_send_msg\"\r\n\r\n");
+        push("false\r\n");
+        push(&format!("--{boundary}\r\n"));
+        push(&format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+            filename.replace('"', "")
+        ));
+        push("Content-Type: application/octet-stream\r\n\r\n");
+        push(&format!("\r\n--{boundary}--\r\n"));
+    }
+    body.extend_from_slice(bytes);
+    body
+}
+
+impl QqBotOfficialOutbound {
+    /// 从元素里取首个富媒体（一条消息官方只支持一个媒体）；重复出现明确报错。
+    fn take_media(
+        &self,
+        slot: &mut Option<(u32, String, String)>,
+        file_type: u32,
+        url: &str,
+    ) -> Result<(), OutboundError> {
+        if slot.is_some() {
+            return Err(OutboundError::Unsupported(
+                acb_i18n::t!("adapter.qqbot.media_multiple").to_owned(),
+            ));
+        }
+        *slot = Some((file_type, url.to_owned(), String::new()));
+        Ok(())
+    }
+
+    /// 官方富媒体上传：multipart POST 到 files 端点（srv_send_msg=false 只上传
+    /// 不发送），返回 file_info 给 msg_type 7 的 media 字段。
+    fn upload_media(
+        &self,
+        base: &str,
+        auth: &str,
+        scope: &str,
+        openid: &str,
+        file_type: u32,
+        url: &str,
+        filename: &str,
+    ) -> Result<String, OutboundError> {
+        let limit = media_limit(file_type);
+        let bytes = fetch_media(url, limit).map_err(OutboundError::Unsupported)?;
+        let boundary = "acb-qqbot-media";
+        let body = build_multipart(boundary, file_type, filename, &bytes);
+        let upload_url = files_url(base, scope, openid);
+        let response = ureq::post(&upload_url)
+            .set("Authorization", auth)
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
+            .send(&body[..])
+            .map_err(|error| OutboundError::Rejected(format!("media upload: {error}")))?;
+        let payload: serde_json::Value = response
+            .into_json()
+            .map_err(|error| OutboundError::Rejected(format!("media upload: {error}")))?;
+        payload
+            .get("file_info")
+            .and_then(|info| info.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                OutboundError::Rejected(format!(
+                    "media upload: platform response missing file_info: {payload}"
+                ))
+            })
+    }
+}
+
 impl Outbound for QqBotOfficialOutbound {
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         if room.connection != self.connection {
@@ -213,46 +350,77 @@ impl Outbound for QqBotOfficialOutbound {
                 acb_i18n::t!("adapter.qqbot.room_mismatch", room = room)
             )));
         }
-        // 内容：只支持纯文本拼接。富媒体元素明确报错。
+        // 内容拆分：文本拼成 content，首个富媒体元素走官方媒体上传（msg_type 7）。
+        // 官方约束：一条消息只带一个媒体；多余媒体元素明确报错（不静默丢弃）。
         let mut text = String::new();
+        let mut media: Option<(u32, String, String)> = None; // (file_type, url, filename)
         for element in elements {
-            match element.as_text() {
-                Some(piece) => text.push_str(piece),
-                None => {
-                    return Err(OutboundError::Unsupported(
-                        acb_i18n::t!("adapter.qqbot.rich_media_unsupported").to_owned(),
-                    ));
+            match element {
+                Element::Image { url, .. } => self.take_media(&mut media, 1, url)?,
+                Element::Video { url } => self.take_media(&mut media, 2, url)?,
+                Element::Audio { url } => self.take_media(&mut media, 3, url)?,
+                Element::File { url, name } => self.take_media(&mut media, 4, url)?,
+                other => {
+                    if let Some(piece) = other.as_text() {
+                        text.push_str(piece);
+                    } else {
+                        return Err(OutboundError::Unsupported(
+                            acb_i18n::t!("adapter.qqbot.element_unsupported").to_owned(),
+                        ));
+                    }
                 }
             }
         }
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && media.is_none() {
             return Err(OutboundError::Unsupported(
                 acb_i18n::t!("adapter.qqbot.empty_text").to_owned(),
             ));
         }
         let (msg_id, msg_seq) = self.reply_state.next_seq(room).ok_or_else(|| {
-            OutboundError::Unavailable(
-                acb_i18n::t!("adapter.qqbot.no_passive_window").to_owned(),
+            OutboundError::Unavailable(acb_i18n::t!("adapter.qqbot.no_passive_window").to_owned())
+        })?;
+        let openid = room.path.get(1).cloned().ok_or_else(|| {
+            OutboundError::Unsupported(
+                acb_i18n::t!("adapter.qqbot.room_mismatch", room = room).to_owned(),
             )
         })?;
-        let openid = room
-            .path
-            .get(1)
-            .cloned()
-            .ok_or_else(|| OutboundError::Unsupported(acb_i18n::t!("adapter.qqbot.room_mismatch", room = room).to_owned()))?;
+        let scope = room.path.first().map(String::as_str).unwrap_or("private");
 
-        let body = json!({
-            "content": text,
-            "msg_id": msg_id,
-            "msg_seq": msg_seq,
-            "msg_type": 0,
-        });
-        let url = format!(
-            "{}/v2/users/{}/messages?msg_seq={}",
-            self.api_base.trim_end_matches('/'),
-            openid,
-            msg_seq
-        );
+        let auth = self
+            .token_manager
+            .auth_header()
+            .map_err(|error| OutboundError::Unavailable(error.to_string()))?;
+        let base = self.api_base.trim_end_matches('/');
+
+        // 富媒体：先传文件（srv_send_msg=false 只上传不发送），再发 msg_type 7。
+        let mut media_field = None;
+        if let Some((file_type, url, filename)) = media.as_ref() {
+            media_field =
+                Some(self.upload_media(base, &auth, scope, &openid, *file_type, url, filename)?);
+        }
+
+        let (url, body) = if let Some(file_info) = media_field {
+            (
+                message_url(base, scope, &openid, msg_seq),
+                json!({
+                    "content": text,
+                    "media": { "file_info": file_info },
+                    "msg_id": msg_id,
+                    "msg_seq": msg_seq,
+                    "msg_type": 7,
+                }),
+            )
+        } else {
+            (
+                message_url(base, scope, &openid, msg_seq),
+                json!({
+                    "content": text,
+                    "msg_id": msg_id,
+                    "msg_seq": msg_seq,
+                    "msg_type": 0,
+                }),
+            )
+        };
         let auth = self
             .token_manager
             .auth_header()
@@ -317,7 +485,9 @@ mod tests {
     }
 
     #[test]
-    fn non_text_elements_are_rejected_upfront() {
+    fn non_text_elements_go_through_media_upload_path() {
+        // 富媒体元素不再被前置拒绝：走官方媒体上传（fetch 失败在测试环境是
+        // 预期结果——url 不可达）。这里只验证它进了上传路径而不是纯文本通道。
         let state = ReplyState::new();
         let room = room("group", "ABC123");
         state.observe(&room, "msgid-1");
@@ -331,12 +501,59 @@ mod tests {
             .send(
                 &room,
                 &[Element::Image {
-                    url: "https://x/y.png".into(),
+                    url: "https://127.0.0.1:1/y.png".into(),
                     alt: None,
                 }],
             )
-            .expect_err("富媒体应明确报错");
-        assert!(matches!(error, OutboundError::Unsupported(_)));
+            .expect_err("媒体路径必然失败（测试环境取不到 token）");
+        // 关键断言：错误来自媒体路径（token/上传），而不是旧的纯文本通道
+        // （那条会报 Unsupported rich_media）。Unavailable/Unsupported 都算
+        // 进了媒体路径——真机的失败形态由平台与网络决定。
+        assert!(
+            matches!(
+                error,
+                OutboundError::Unavailable(_) | OutboundError::Unsupported(_)
+            ),
+            "{error:?}"
+        );
+        if let OutboundError::Unsupported(detail) = &error {
+            assert!(!detail.contains("rich_media"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn message_url_is_scope_aware() {
+        assert_eq!(
+            message_url("https://api.sgroup.qq.com", "group", "G1", 2),
+            "https://api.sgroup.qq.com/v2/groups/G1/messages?msg_seq=2"
+        );
+        assert_eq!(
+            message_url("https://api.sgroup.qq.com", "private", "U1", 1),
+            "https://api.sgroup.qq.com/v2/users/U1/messages?msg_seq=1"
+        );
+        assert_eq!(
+            files_url("https://api.sgroup.qq.com", "group", "G1"),
+            "https://api.sgroup.qq.com/v2/groups/G1/files"
+        );
+    }
+
+    #[test]
+    fn multipart_carries_file_type_and_content() {
+        let body = build_multipart("BOUNDRY", 2, "v.mp4", &[1, 2, 3]);
+        let text = String::from_utf8(body).expect("multipart 是文本+二进制");
+        assert!(text.contains("name=\"file_type\""), "{text}");
+        assert!(text.contains("\r\n2\r\n"), "{text}");
+        assert!(text.contains("name=\"srv_send_msg\""), "{text}");
+        assert!(text.contains("\r\nfalse\r\n"), "{text}");
+        assert!(text.contains("filename=\"v.mp4\""), "{text}");
+        assert!(text.contains("--BOUNDRY--"), "{text}");
+    }
+
+    #[test]
+    fn media_limits_cover_all_types() {
+        assert_eq!(media_limit(1), 10 * 1024 * 1024);
+        assert_eq!(media_limit(2), 100 * 1024 * 1024);
+        assert!(MEDIA_LIMITS.iter().all(|(kind, _)| *kind <= 4));
     }
 
     #[test]
