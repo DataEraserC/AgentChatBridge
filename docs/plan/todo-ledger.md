@@ -728,6 +728,21 @@ window 嵌套表，整个子表被 serde 静默忽略，回归测试三易其稿
 换代 req-1794696628775-51acfb17，version `0.1.0+e42eee6`；依赖面板
 六项全 up。
 
+### 补充结论（同日）
+
+- **换代确认**：req-1794696628775-51acfb17 状态已转 `stable`（stable window
+  通过并成为 LKG，gen-1794696628824-06bcc8da）——此前「停留在 restarting
+  命名待查」的疑问闭环：状态机正常，只是 stable 窗口有延迟。
+- **合并转发平台差异**：OneBot（snowluma）目录含完整转发族
+  （msg.forward 读 / msg.send_forward / 单发群·私聊 / forward_upload）；
+  QQ 官方机器人 API 消息类型只有 0 文本 / 2 markdown / 3 ark / 4 embed /
+  7 富媒体，**无合并转发接口**（发与读都没有）——平台能力边界，非实现缺口。
+- qqbot-official 网关重连 16 次 = 官方服务端定期要求重连（op 7）的常规行为，
+  适配器按 Resume 流程处理，依赖面板保持 up。
+- 视频经 OneBot 私聊发送成功（message_id 777205831）——OneBot 侧 RichMedia
+  能力验证通过。
+
+
 
 
 ## 27. C2C 消息不到——READY 控制帧修复 + dispatch 诊断日志（2026-11-15）
