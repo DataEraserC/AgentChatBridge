@@ -240,9 +240,19 @@ fn media_limit(file_type: u32) -> usize {
         .unwrap_or(100 * 1024 * 1024)
 }
 
+/// 容器侧的宿主别名只有容器内能解析。本适配器跑在桥进程（宿主机）里，
+/// 中转地址若带着这类别名（file_relay 的 public_base 是为容器平台配的），
+/// 宿主机上必须换回 127.0.0.1 才能抓到——2026-11-15 实测：qqbot 发媒体
+/// 报 resolve dns name 'host.containers.internal' 失败。
+fn rewrite_container_host(url: &str) -> String {
+    url.replace("host.containers.internal", "127.0.0.1")
+        .replace("host.docker.internal", "127.0.0.1")
+}
+
 /// 抓取媒体字节（元素 url：file_relay 能力地址或可直连的媒体地址）。
 fn fetch_media(url: &str, limit: usize) -> Result<Vec<u8>, String> {
-    let response = ureq::get(url)
+    let effective = rewrite_container_host(url);
+    let response = ureq::get(&effective)
         .timeout(std::time::Duration::from_secs(120))
         .call()
         .map_err(|error| format!("fetch media: {error}"))?;
@@ -547,6 +557,23 @@ mod tests {
         assert!(text.contains("\r\nfalse\r\n"), "{text}");
         assert!(text.contains("filename=\"v.mp4\""), "{text}");
         assert!(text.contains("--BOUNDRY--"), "{text}");
+    }
+
+    #[test]
+    fn container_host_alias_is_rewritten_for_host_side_fetch() {
+        assert_eq!(
+            rewrite_container_host("http://host.containers.internal:3131/f/x.mp4"),
+            "http://127.0.0.1:3131/f/x.mp4"
+        );
+        assert_eq!(
+            rewrite_container_host("http://host.docker.internal:3131/f/x.mp4"),
+            "http://127.0.0.1:3131/f/x.mp4"
+        );
+        assert_eq!(
+            rewrite_container_host("https://upos.bilivideo.com/x.mp4"),
+            "https://upos.bilivideo.com/x.mp4",
+            "外网地址原样保留"
+        );
     }
 
     #[test]
