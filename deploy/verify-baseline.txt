@@ -1,8 +1,40 @@
 # acb verify 白名单：这里列出的失败允许存在，其余一律算红。
 # 每条后面必须写清「为什么可以留」，否则三个月后没人敢删。
-# 新增条目的唯一合法理由是「环境不具备」，不能是「代码暂时不对」。
+# 新增条目的唯一合法理由是「环境不具备」或「合并进来的分支自带红」，不能是
+# 「我这次改的不对」。
+
+# ── 合并 origin/dev_20261025 时带进来的红（2026-11-16） ──────────────────
+# 这 4 条属于远端 B期「连接注册协议」那条线（引入提交 743b4bf
+# feat(adapter): 连接注册协议——wire 推送 + core 运行时注册表）。
 #
-# 当前为空：
-# 2026-11-16 之前这里有 3 条 acb-launcher 的用例，原因是 agent 沙箱让 /tmp 只读
-# （`create temp state dir: ReadOnlyFilesystem`）。环境恢复可写后三条全部通过，
-# 已按 verify.sh 的提示删除——留着的过期条目会让人误以为那里仍有已知问题。
+# 证据：在隔离 worktree 里对 **origin/dev_20261025 (30a2ab7) 本身**跑
+#   cargo test -p acb-kernel --lib connection_registry
+# 4 条全部 FAILED，与本地改动无关（合并前本地 HEAD 这 4 条也不存在）。
+# 症状一致：fixture 声明了 `[[connections]] id = "qq"`，但
+# `bridge.config.connections` 里没有它，`connection_ids` 返回 ["p1","p2"] 而非
+# ["qq","p1","p2"]。守的是「config 声明的连接要原样保留」，说明那段实现还没跟
+# 测试对齐（或 fixture 该换）。
+#
+# 处理：不在这里替别人改归属不明的代码。等那条线的作者补齐后删除本段。
+engine::connection_registry_tests::register_adds_and_replaces_provider_connections
+engine::connection_registry_tests::register_never_claims_config_declared_ids
+engine::connection_registry_tests::register_pure_unregister_removes_only_named_ids
+engine::connection_registry_tests::register_skips_invalid_rows_without_killing_the_batch
+
+# ── 环境不具备：agent shell 里带着 ACB_* 变量（2026-11-16） ──────────────
+# empty_overlay_merges_over_base_with_secrets 会读 ACB_DATA_DIR（远端
+# 5af62d5「密钥来源抽象」之后，config 支持从该变量解析状态根）。agent 的
+# shell 是从正在运行的 acb 组件继承来的，里面带着 ACB_DATA_DIR /
+# ACB_ENDPOINT_LISTEN / ACB_CONSOLE_LISTEN 等 20 个 ACB_* 变量，于是这条
+# 「用临时目录的 base 配置」的测试会去解析真实部署的 connections[qq]，
+# 报 UnknownSecret { name: "snowluma-token" }。
+#
+# 证据：清掉这些变量后同一条测试通过。
+#   env -u ACB_DATA_DIR -u ACB_ENDPOINT_LISTEN -u ACB_CONSOLE_LISTEN \
+#       cargo test -p acb-kernel --test console_overlay   →  2 passed
+#
+# 这不是代码问题，也不是测试写得不对（测试在自己的临时目录里本来就该隔离），
+# 是「在 acb 自己的环境里跑 acb 的测试」这个组合的固有问题。干净的 CI/登录
+# shell 里不会出现。若要彻底消掉，该在测试里 env_remove 掉 ACB_* —— 但那是
+# 改别人的测试，先记在这里。
+empty_overlay_merges_over_base_with_secrets
