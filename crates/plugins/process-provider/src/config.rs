@@ -41,7 +41,7 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
 ///
 /// 曾经只有 `access`——`channel.decide` 的 `point` 被写死，所以载体物理上只能
 /// 做一件事。现在按 ADR-0033 逐个补齐，每补一个往这里加一项。
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["access", "wake"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["access", "wake", "clock"];
 
 fn default_startup_timeout() -> u64 {
     DEFAULT_STARTUP_TIMEOUT_SECS
@@ -172,9 +172,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_extension_and_acb_namespace() {
-        // 用真正没实现的扩展点当反例：`clock` 还没补（ADR-0033 里列在矩阵里）。
-        let error = ProcessProviderConfig::from_toml(
+    fn accepts_clock_extension() {
+        let configs = ProcessProviderConfig::from_toml(
             r#"
             [[process_providers]]
             id = "demo.clock"
@@ -182,10 +181,25 @@ mod tests {
             command = ["echo"]
             "#,
         )
+        .expect("clock 是支持的扩展点");
+        assert_eq!(configs[0].extension, "clock");
+    }
+
+    #[test]
+    fn rejects_unknown_extension_and_acb_namespace() {
+        // 用真正没实现的扩展点当反例：`route` 还没补（ADR-0033 矩阵里列着）。
+        let error = ProcessProviderConfig::from_toml(
+            r#"
+            [[process_providers]]
+            id = "demo.route"
+            extension = "route"
+            command = ["echo"]
+            "#,
+        )
         .expect_err("unsupported extension");
         assert!(error.contains("unsupported extension"), "{error}");
         assert!(
-            error.contains("access") && error.contains("wake"),
+            error.contains("access") && error.contains("wake") && error.contains("clock"),
             "报错要列出当前支持哪些：{error}"
         );
 

@@ -2,12 +2,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use acb_adapter_api::{WireAccessRequest, WireResult, WireWakeRequest};
+use acb_adapter_api::{WireAccessRequest, WireClockRequest, WireResult, WireWakeRequest};
 use acb_kernel::{
-    AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Capability, ExtensionPoint,
-    Health, ManagerManifest, ManagerPlugin, PLUGIN_API_VERSION, PluginError, PluginMetadata,
-    PluginSource, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, WakeContext,
-    WakeDecision, WakePolicy, WakeProvider, WakeVerdict,
+    AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Capability, ClockContext,
+    ClockPolicy, ClockProvider, ExtensionPoint, Health, ManagerManifest, ManagerPlugin,
+    PLUGIN_API_VERSION, PluginError, PluginMetadata, PluginSource, ProviderDescriptor, ProviderId,
+    ProviderInstance, ProviderOptions, WakeContext, WakeDecision, WakePolicy, WakeProvider,
+    WakeVerdict,
 };
 use serde_json::json;
 
@@ -307,6 +308,137 @@ impl WakeProvider for ProcessWakeProvider {
                 delay_ms: 0,
                 batch: false,
             },
+        }
+    }
+}
+
+/// Clock 扩展点的进程实现（ADR-0033 第二层）。
+///
+/// `ClockProvider::is_due` 只回一个 bool，wire 上仍复用 `WireResult::Decision`：
+/// `due` / `wake` 为真，`skip` / `stay` 为假。与 Lua 载体接受的那两个词一致，
+/// 免得同一个策略在两种载体里要说不同的词。
+pub(crate) struct ProcessClockManager {
+    provider: ProviderId,
+    metadata: PluginMetadata,
+    channel: Arc<ProcessChannel>,
+    cached: Mutex<Option<Arc<ProcessClockProvider>>>,
+}
+
+impl ProcessClockManager {
+    pub(crate) fn new(
+        provider: ProviderId,
+        metadata: PluginMetadata,
+        channel: Arc<ProcessChannel>,
+    ) -> Self {
+        Self {
+            provider,
+            metadata,
+            channel,
+            cached: Mutex::new(None),
+        }
+    }
+}
+
+impl ManagerPlugin for ProcessClockManager {
+    fn manifest(&self) -> ManagerManifest {
+        ManagerManifest::new(
+            self.provider.namespace(),
+            PLUGIN_API_VERSION,
+            vec![Capability::ClockDecision],
+        )
+        .with_metadata(self.metadata.clone())
+    }
+
+    fn descriptors(&self) -> Vec<ProviderDescriptor> {
+        vec![
+            ProviderDescriptor::new(
+                self.provider.clone(),
+                ExtensionPoint::Clock,
+                PLUGIN_API_VERSION,
+                vec![Capability::ClockDecision],
+            )
+            .with_metadata(self.metadata.clone())
+            .with_source(PluginSource::Dynamic),
+        ]
+    }
+
+    fn instantiate(
+        &self,
+        id: &ProviderId,
+        options: ProviderOptions<'_>,
+    ) -> Result<ProviderInstance, PluginError> {
+        if id != &self.provider {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        }
+        if !matches!(options, ProviderOptions::Clock(_)) {
+            return Err(PluginError::Provider {
+                id: id.to_string(),
+                detail: "process clock provider requires Clock options".to_owned(),
+            });
+        }
+        let mut cached = self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let provider = cached
+            .get_or_insert_with(|| {
+                Arc::new(ProcessClockProvider {
+                    channel: Arc::clone(&self.channel),
+                })
+            })
+            .clone();
+        Ok(ProviderInstance::Clock(provider))
+    }
+
+    fn health(&self) -> Health {
+        self.channel.health()
+    }
+
+    fn shutdown(&self) {
+        self.channel.shutdown();
+    }
+}
+
+struct ProcessClockProvider {
+    channel: Arc<ProcessChannel>,
+}
+
+impl ClockProvider for ProcessClockProvider {
+    fn is_due(&self, options: &ClockPolicy, context: &ClockContext<'_>) -> bool {
+        // 子进程挂了就当「不该醒」：时钟轮是主动行为，载体不可用时静默跳过
+        // 比凭空开一轮安全。
+        if !matches!(self.channel.health(), Health::Healthy) {
+            return false;
+        }
+        let wire = WireClockRequest {
+            session: context.session.to_owned(),
+            room: context.room.to_string(),
+            now: context.now,
+            last_clock_at: context.last_clock_at,
+            last_wake_at: context.last_wake_at,
+            last_record_at: context.last_record_at,
+        };
+        let request = serde_json::to_value(wire).unwrap_or(serde_json::Value::Null);
+        let options_json = json!({
+            "provider": options.provider.to_string(),
+            "extra": options.options,
+        });
+        match self.channel.decide("clock", options_json, request) {
+            Ok(WireResult::Decision { decision, .. }) => match decision.as_str() {
+                "due" | "wake" => true,
+                "skip" | "stay" => false,
+                other => {
+                    self.channel
+                        .note_invalid_reply(&format!("unknown clock decision `{other}`"));
+                    false
+                }
+            },
+            Ok(other) => {
+                self.channel
+                    .note_invalid_reply(&format!("expected decision reply, got {other:?}"));
+                false
+            }
+            Err(_) => false,
         }
     }
 }

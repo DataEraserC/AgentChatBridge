@@ -12,7 +12,7 @@ use acb_kernel::{
 
 use crate::channel::ProcessChannel;
 use crate::config::ProcessProviderConfig;
-use crate::provider::{ProcessAccessManager, ProcessWakeManager};
+use crate::provider::{ProcessAccessManager, ProcessClockManager, ProcessWakeManager};
 
 pub struct ProcessProviderLoader {
     configs: Vec<ProcessProviderConfig>,
@@ -35,6 +35,7 @@ impl PluginLoader for ProcessProviderLoader {
         for config in &self.configs {
             let point = match config.extension.as_str() {
                 "wake" => ExtensionPoint::Wake,
+                "clock" => ExtensionPoint::Clock,
                 _ => ExtensionPoint::Access,
             };
             if !points.contains(&point) {
@@ -89,6 +90,7 @@ impl PluginLoader for ProcessProviderLoader {
             // 这也是 `ProcessProviderConfig` 里 `extension` 是单值而非列表的原因。
             let installed: Arc<dyn ManagerPlugin> = match config.extension.as_str() {
                 "wake" => Arc::new(ProcessWakeManager::new(id.clone(), metadata, channel)),
+                "clock" => Arc::new(ProcessClockManager::new(id.clone(), metadata, channel)),
                 _ => Arc::new(ProcessAccessManager::new(id.clone(), metadata, channel)),
             };
             manager
