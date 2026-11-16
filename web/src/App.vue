@@ -74,6 +74,20 @@ watch(
   { immediate: true },
 );
 
+/**
+ * 跳到旧版控制台（`GET /`）。
+ *
+ * 为什么可以无缝跳：两套前端用**同一个** localStorage key
+ * （`acb-console-token`）和**同一个** cookie（`acb_console`，`Path=/`），
+ * 所以跳过去不用重新登录。这一点在改动任何一边的 token 逻辑时要同步核对，
+ * 否则跳转就会变成"跳过去还要输一次令牌"。
+ *
+ * 用 `location.href` 而不是 router：旧版是另一个页面，不是本 SPA 的路由。
+ */
+function openLegacyConsole(): void {
+  location.href = "/";
+}
+
 function signOut(): void {
   clearToken();
   authed.value = false;
@@ -141,6 +155,15 @@ const vLocale = computed(() => vuetifyLocale(locale.value));
         :aria-label="t('console.ui.locale.label')"
         @update:model-value="onLocale($event as Locale)"
       />
+      <v-btn
+        variant="text"
+        size="small"
+        prepend-icon="mdi-swap-horizontal"
+        :title="t('console.ui.toLegacyTip')"
+        @click="openLegacyConsole"
+      >
+        {{ t("console.ui.toLegacy") }}
+      </v-btn>
       <v-btn variant="text" size="small" @click="signOut">
         {{ t("console.ui.logout") }}
       </v-btn>

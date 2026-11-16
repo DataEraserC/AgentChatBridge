@@ -233,7 +233,9 @@
   @media (pointer: coarse) {
     button, select, input, textarea, .info { min-height: var(--touch); }
     .info { min-width: var(--touch); }
-    .mini, .btn.sm { min-height: var(--touch); }
+    .mini, /* 「新版」是 <a>：视觉上与 .btn 一致，但别带下划线。 */
+a.btn { text-decoration: none; }
+.btn.sm { min-height: var(--touch); }
   }
 </style>
 <script>
@@ -266,6 +268,7 @@
     <option value="zh-CN" data-i18n="console.ui.locale.zh"></option>
     <option value="en" data-i18n="console.ui.locale.en"></option>
   </select>
+  <a id="to-next" class="btn ghost" href="/next" data-i18n="console.ui.toNext">New console</a>
   <button id="logout" class="btn ghost" data-i18n="console.ui.logout">Sign out</button>
 </header>
 
