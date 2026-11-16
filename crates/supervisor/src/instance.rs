@@ -354,7 +354,38 @@ fn same_program(left: &str, right: &str) -> bool {
             .canonicalize()
             .unwrap_or_else(|_| PathBuf::from(value))
     };
-    canonical(left) == canonical(right)
+    let left = canonical(left);
+    let right = canonical(right);
+    if left == right {
+        return true;
+    }
+    // nix 的 `makeWrapper`（以及 wrapProgram）会把本体放成同目录的
+    // `.<name>-wrapped`，外层 `name` 只是个 set env 的 bash 脚本。
+    // 这种布局下 `/proc/<pid>/exe` 读到的是 `.<name>-wrapped`，而实例记录
+    // 里写的是用户启动的那个 `name`——直接比永不相等，于是 launcher 会
+    // 拒绝采纳自己刚拉起的进程，systemd 重拉后同样冲突，形成死循环
+    // （2026-11-16 换代踩到：连两代 upgrade 都被判 rolled_back）。
+    //
+    // 认这个约定：把两侧各自规约成「去掉 `.` 前缀与 `-wrapped` 后缀」的形状再比。
+    // 只在这一个方向上放宽：别的文件名不改，免得把真冲突放过。
+    unwrap_nix_wrapper(&left) == unwrap_nix_wrapper(&right)
+}
+
+/// 把 `<dir>/.<name>-wrapped` 规约成 `<dir>/<name>`；其余路径原样返回。
+fn unwrap_nix_wrapper(path: &Path) -> PathBuf {
+    let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
+        return path.to_path_buf();
+    };
+    let Some(stem) = file.strip_prefix('.') else {
+        return path.to_path_buf();
+    };
+    let Some(name) = stem.strip_suffix("-wrapped") else {
+        return path.to_path_buf();
+    };
+    if name.is_empty() {
+        return path.to_path_buf();
+    }
+    path.with_file_name(name)
 }
 
 fn new_instance_id(pid: u32) -> String {
@@ -430,6 +461,43 @@ mod tests {
             DetectOutcome::Vacant => {}
             _ => panic!("expected Vacant"),
         }
+    }
+
+    /// nix wrapper 布局：记录写 `name`，`/proc/<pid>/exe` 读 `.<name>-wrapped`。
+    /// 这两个必须是"同一个程序"，否则 launcher 拒绝采纳自己刚拉起的进程，
+    /// systemd 重拉后同样冲突 → 死循环（2026-11-16 换代踩到）。
+    #[test]
+    fn nix_wrapped_binary_matches_its_wrapper_name() {
+        assert!(
+            same_program(
+                "/home/u/.local/share/acb/profile/generations/gen-1/root/bin/acb-bridge",
+                "/nix/store/abc-acb-payload-0.1.0/bin/.acb-bridge-wrapped"
+            ) == false,
+            "不同目录不是同一个文件"
+        );
+        // 同一目录下的 wrapper 与本体：这才是要认出的情况。
+        assert!(same_program(
+            "/nix/store/abc-acb-payload-0.1.0/bin/acb-bridge",
+            "/nix/store/abc-acb-payload-0.1.0/bin/.acb-bridge-wrapped"
+        ));
+        // 规约只认 `.<name>-wrapped` 这一种形状。
+        assert_eq!(
+            unwrap_nix_wrapper(Path::new("/x/bin/.acb-bridge-wrapped")),
+            PathBuf::from("/x/bin/acb-bridge")
+        );
+        assert_eq!(
+            unwrap_nix_wrapper(Path::new("/x/bin/acb-bridge")),
+            PathBuf::from("/x/bin/acb-bridge")
+        );
+        // 别的名字不许被误规约。
+        assert_eq!(
+            unwrap_nix_wrapper(Path::new("/x/bin/.other")),
+            PathBuf::from("/x/bin/.other")
+        );
+        assert_eq!(
+            unwrap_nix_wrapper(Path::new("/x/bin/not-wrapped")),
+            PathBuf::from("/x/bin/not-wrapped")
+        );
     }
 
     #[test]
