@@ -604,3 +604,96 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 | 线上换代 | payload `/nix/store/zlr6wi8knwy4aq7z3bss2d24fd3cfaji-acb-payload-0.1.0` → `gen-1794559430805-819f243a`，acp 组件 healthy | `acbctl upgrade status req-1794559430732-c1092372`；`profile/current/harnesses/.../acb-wire.mjs` 含 `eventSubject` |
 
 遗留：issue 服务的 UI/新字段要重建系统配置并重启 `acb-issue-service.service`（system unit，需 root）。
+
+### 2026-11-13 17:20 ACP 组件换回 acbl 预设
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 在线配置 | `state/supervisor/supervisor.toml` 的 acp 组件由内联 `command = [bash, <worktree>/deploy/presets/acp/acp_driver_acb.sh]` 改为 `preset = "acp_driver_acb"`，其余 `env` 原样保留 | 改前备份 `state/supervisor/supervisor.toml.bak-20261113-preset-swap`（sha256 `e7c6df5d…`） |
+| 预设来源 | acbl 0.1.0 的 `share/acb/presets/presets.toml` 已注册 `id = "acp_driver_acb"`，`component = "acp"`；预设脚本与本仓库 `deploy/presets/acp/acp_driver_acb.sh` 逐行一致（仅 shebang 不同） | `diff -u` 只剩首行 shebang |
+| 加载与健康 | 重启 `systemctl --user restart acb-bridge` 后：`acbctl component status acp` → `source: acb (preset acp_driver_acb)`、`process: healthy`；组件进程改为 `/nix/store/mi0j7…-acbl-0.1.0/share/acb/presets/acp/acp_driver_acb.sh`；`acbctl status --summary` → `unit=active endpoint=open console=200` | 驱动日志 `bound sessions codebuddy-test`；重启会中断在途投递 |
+
+### 2026-11-16 12:20 ACB 不得改 dsh 的默认模型 / 默认 preset
+
+用户诉求原话：「对于 dsh，acb 会经常修改其默认模型、默认工作模式（preset），我不希望它这样做，
+我希望它不要影响其他人的工作」。下面是取证结论与已落地的修复。
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 写入方（`agent-default-model`） | 已核实。`@deepseek-ai/dsh-api-session-controller` 的 `selectModel` 在**装好会话级选择之后，无条件**把同一选择存成全局默认：`/nix/store/izr1pmb4riprjdaxszch60b9ij81zjds-dsh-kernel-0.2.1-rc.2-kernel/lib/deepseek-harness/node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js:809`（`this.ctx.agentDefaultModel.saveSelection(selected)`，注释原文「save the default in the background」）。落盘经 `dsh-agent-default-model/lib/index.js:53` `saveSelection` → `configEditor.edit()` → profile patch → `dsh-settings-persist` adopt 成 `auto.json` | 三处文件行号可复核；`grep -rn saveSelection` 在该 kernel 下只有 4 个调用点（另 3 个是 `initializeDefaultModel`、commands 镜像、无调用） |
+| 写入方（`selectedDefault`） | 已核实，且**不是 ACB 写的**。全 store `grep -rl selectedDefault` 只有 3 个 JS 命中，唯一的**写入点**是 Web 客户端设置页：`@deepseek-ai/dsh-client-ui-agent-preset/lib/client.js:1095`（`ctx.remote.settings.update("agent-preset-registry", { selectedDefault: id })`），由 `client.js:1771` 的卡片 `onClick → makeDefault(row.id)` 触发；`agent-preset-registry/lib/index.js:750 select()` 只 `session.append("agent-preset/selected")`，不写配置 | 该结论推翻了「ACB 通过 `session/selectModel` 改 preset」的猜测：`selectModel` 的请求结构 `SessionSelectModelRequest` 只有 `sessionId` + provider/model，没有 preset 字段 |
+| ACB 的触发点 | 已核实。`harnesses/dsh/src/driver.mjs:713` 的 `#pinModel` 每会话/每换模型各调一次 `dsh.selectModel(...)`（`#session` 建会话时也显式传 `agentPreset`，见 `driver.mjs:794`，那是会话级的、正确）。`selectModel` 的默认值保存是**异步后台**的，所以旧代码连「想还原」都来不及 | 新增测试 `钉模型不改全局默认模型：钉完要还原` 在移除修复后失败（`AssertionError: 钉会话模型不得改动 agent-default-model`） |
+| 未核实项 | `selectedDefault: acb-dsh-snowluma-test` 的具体来源：磁盘上能证明它出现在 `~/.dsh/settings-persist/nix-web-acb/snapshots/` 的 2026-11-15 三份快照里（2026-11-04 及更早没有该字段），但**没有日志或代码证据**能证明是哪次人工点击/哪个进程写的。已排除的路径：ACB driver（不调 settings 写接口）、`agent-preset-registry.select()`（只 append 事件）、`crates/acb/src/sessions.rs` 的 `migrate-preset`（只改会话投影里的 `agentPreset`） | 需要用户在 Settings → 通用 → agent preset 页确认当时是否手点过；或提供当时的 dsh 控制台/浏览器操作记录。**没有这条证据，本条目不能判为「ACB 造成」** |
+| 修复 1：钉模型不再改默认值 | `#pinModel` 改为「快照 `agent-default-model` → `selectModel` → 读回确认被改再 `settings/replace` 还原」，见 `driver.mjs:707` 的 `#captureDefaultModel`。还原失败只 warn、不挡本轮（会话级选择已生效，坏的只是别人的默认值）；读不到 settings（headless 组合）时 no-op。用 `replace` 而非 `update` 是为了能删掉 `selectModel` 新增的字段；带 `expectedRevision` 做乐观锁，期间用户改过就让这次写失败 | `harnesses/dsh/test/driver.test.mjs` 新增 3 条：还原成功、还原失败不挡轮、无 settings 面不写。`node --test test/driver.test.mjs` → 30 passed |
+| 修复 2：默认值漂移守卫 | 新增 `deploy/presets/dsh-presets/dsh_defaults_guard.mjs`：只把**能归因**的当缺陷——`selectedDefault` 指向 `acb-*`（ACB 会话专用 preset，绝不可能是别人的默认）判 `defect`，`--apply` 时按 profile 快照恢复（快照没这字段就删掉 = 回落 schema 默认）；用户自己选的其它 preset 判 `info`（不能每次启动都报警，否则守卫会被关掉）；`agent-default-model` 的漂移**只报告**（人也可能自己改过，磁盘上无法归因）。默认只报告，`--apply` 才落盘并留 `.bak-时间戳`  | `cargo test -p acb --test dsh_presets` → 15 passed（新增 5 条）；守卫在 `dsh_nix.sh` 启动前与 `dsh_presets_acb.sh` 安装前各挂一次，均**只报告不挡启动/安装** |
+| 未做 / 回滚 | 没改 dsh 源码（无补丁、无 fork）。回滚：`git checkout -- harnesses/dsh/src/driver.mjs harnesses/dsh/src/dsh-client.mjs deploy/presets/` 并删守卫文件即可；`auto.json` 的还原有 `.bak-时间戳`  可退。**没有**修改 `~/.dsh` 下任何文件、没有重启任何服务。遗留：`selectedDefault` 的历史来源未核实；守卫的 `agent-default-model` 一项只报告不修 | `git diff --stat` 见下；守卫在临时 DSH_HOME 上验证，未碰现场 |
+
+### 2026-11-16 12:30 后备链失败惩罚规则（P1）
+
+用户诉求：「需要能配置失败惩罚规则、时间等」+「需要每个会话可以单独配置（目前添加后会成功
+但显示仍为全局的那一份）」。前者是本轮新增，后者是上一提交 `b781162` 修好的读库问题，
+本轮补了守卫防止回归。
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 会话级链「保存成功但显示全局」 | 根因是读接口读**内存快照**（轮次边界才换），而控制台保存完立刻回读。上一提交已改为读库（`Bridge::stored_fallback_scope`）；本轮补一条回归用例钉住 | `console_scope_shows_saved_chain_before_turn_boundary`（`crates/kernel/tests/model_fallbacks.rs`） |
+| 失败惩罚：策略形状 | 四字段 `enabled` / `failure_threshold` / `failure_window_secs` / `penalty_secs`。语义：同一模型在窗口内失败达阈值 → 从下一轮起被跳过 `penalty_secs` 秒。阈值 0 = 关闭。新表 `model_fallback_policy` **随启动建、不抬 SCHEMA_VERSION**（沿用 schema 18 `session_model_fallbacks` 的先例） | `crates/kernel/src/model_penalty.rs` 的 `FallbackPolicy` + `validate`；5 种非法组合被拒且**一个字节都不落库** |
+| 失败惩罚：两级配置 | 全局默认 + 每会话覆盖（`None` = 删覆盖回落全局）。惩罚记到哪一层由「这个会话有没有自己的策略」决定；**查询时会话两层都看**，所以全局层的惩罚不会被会话策略挡住 | `session_policy_overrides_the_global_one` |
+| 失败惩罚：状态是内存态 | `ModelPenalty`（`Arc<Mutex<Inner>>`），桥重启即清空，不落盘。`&self` 可调，控制台只读路径不必先拿 Bridge 大锁 | `penalty_expires_on_its_own_without_a_sweep`（到期自动回归，无外部清扫） |
+| 失败惩罚：与 deps 解耦 | 惩罚**不复用** `deps.rs` 的 `model_down` / `errorClass` 状态机。那是依赖面板的状态，阈值与窗口不同，混用会让「一次抖动整条依赖标红」的老问题复发。两套各记各的，共享的只有同一次失败事件 | `note_structured_failure` 里两行相邻调用，注释写明为什么不合并 |
+| 下发过滤 | `Bridge::fallback_plan(session, now)` 在 `session_fallbacks()` 的结果上**只做过滤**：链顺序、去重、会话级覆盖全局、「本轮已调过桥工具就不重放」全部不变 | `penalised_model_disappears_from_the_delivered_chain`（走真实 `poll_turn()` 投递路径，断言库里链不被改写） |
+| HTTP 接口 | `GET /api/model-penalty[?session=]` 读**库**（保存后立刻可见，与链同一个坑）；`POST` 写库。响应含 `policy` / `inherited` / `penalties`（当前被罚的模型 + 剩余秒数） | e2e：默认 `enabled=false`；写 `{enabled,3,600,300}` 回读一致；非法值回 400 + 可读原因（原文：`启用了失败惩罚，但统计窗口是 0 秒：窗口为 0 永远累计不到阈值…`） |
+| 前端 | 模型页新增「失败惩罚」卡：启用 / 阈值 / 窗口 / 时长四个字段 + 「正在被惩罚的模型」表。策略与链共用同一个「配置范围」下拉，切范围时两者一起重取 | 浏览器实测：读库值回填（启用 ✓ / 3 / 600 / 300），点「保存规则」→ `规则已保存。` |
+| 遗留 | ① `note_model_failure` 的接线（`engine.rs` 约 5053 行）只有编译验证，没有「真实 harness 上报 `TurnFailure` → 链被过滤」的端到端用例；② `ModelPenalty` 的失败流水只在记录时按窗口出队，**没有全局条目上限**，长期运行按「层×模型」数量增长；③ clippy 有 11 条既有 lint（`-D warnings` 下红），全在 HEAD 上的无关函数里，未清理 | ①在接上真 harness 后补；②③记在这里不假装做完 |
+
+### 2026-11-16 13:00 控制台前端重写（Vite + Vue 3，产物内嵌）
+
+用户诉求两条：①「前端很多文字应该收缩到 info 那个圆形的按钮而不是直接塞在页面上」；
+②「目前我们的前端是内嵌的手写前端，很多东西不完善，希望你能使用一些前端框架完成，
+可以构建后内嵌，前后端分离（注意因为我们后续的任务有一个 acb 插件上报自描述接口等
+（类似 odata），所以这一块需要预留）」。框架选型交给我，附条件「大小不是我们要考虑的内容」。
+
+决策与理由见 [ADR-0031](../adr/0031-console-frontend.md)（含六个候选的实测 gzip 与
+schema 表单生态对比）。要点：**Vue 3 + Vite + TypeScript**，否决 Svelte 5 的三条理由
+（体积不是约束 / `@jsonforms/vue` 比 `@sjsf/form` 成熟一档而这是唯一被点名预留的能力 /
+runes 语法对多 agent 接手有真实成本）。
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 源码与产物 | 源码 `web/`（Vite + Vue 3 + TS）；产物 `crates/bridge/src/console_web/`（`index.html` / `app.js` / `app.css`，**固定文件名无哈希**，Rust 编译期知道嵌谁）。gzip：JS 40.86 kB、CSS 3.12 kB | `include_bytes!` 内嵌，`cargo test -p acb-bridge` 4 条形状守卫 |
+| 服务路径 | `/next`，与旧 `console.html` **并存**；旧页面一字未动，仍是 `GET /`。切换点只有 `console_web.rs` 的 `NEXT_UI_PREFIX` 一个常量 | e2e：旧页 200/134364B；`/next` 200/959B；`/next/app.js` 200 `text/javascript`；`/next/models` 回落入口页；未授权 401 |
+| 「文字进 ⓘ」怎么落地 | `CardShell` 只接受 `tipKey`/`tip`（交给 `<InfoTip>`），正文只放数据——想让段落铺在页面上得先绕过这个 API。`InfoTip` 三态（悬停/聚焦/点按钉住），触屏可点（只做 hover 等于手机永远看不到解释） | 浏览器实测：点 ⓘ 弹层出现在锚点下方，文本正确，视口内钳制 |
+| 前后端分离 + 自描述预留 | 服务端 `plugin_manifest.rs::form_schema()` 已产出 `{config, resources, actions}`（含 type/enum/min/max/required/secret）；客户端 `web/src/components/SchemaForm.vue` 是**唯一按字段名分支**的地方，依据是 `SchemaField.type` 而非任何插件 key；`web/src/types.ts` 直译服务端结构并标注出处。将来扩 OData 式模型改渲染器，不动七个 tab | 插件页按 schema 渲染表单（实测 5 个插件条目的「无 schema」正确降级） |
+| 文案纪律 | 词条全部走 `/api/i18n`（1514→1523 条），前端不另存一份。新增守卫：扫 `app.js` 产物里出现的每个 `console.*` 字面量，断言中英两份 locale 都有 | `every_console_key_used_by_the_ui_exists_in_both_locales`（新）；少了会在页面上显示 `console.models.title` 这种点号串 |
+| 硬编码中文守卫 | 既有 `rust_console_copy_has_no_hardcoded_cjk` 扩展到 `console_web.rs`。这条本轮真的抓到我一次（`policy_from_json` 的中文错误串），已改成英文（主文案走 i18n） | 该测试 4 个文件全过 |
+| 产物与源码一致性守卫 | `deploy/verify-console-web.sh`：临时目录真跑一次 `vite build`，逐字节比对三个产物；接入 `deploy/verify.sh` 的新 `web` 阶段（`--no-web` 可跳）。缺 `node_modules` 时 SKIP 而非 FAIL（环境不具备 ≠ 代码不对） | **正反双向验过**：加一条会进产物的 CSS 规则不重建 → `FAIL` 并报字节差（13493 vs 13461）；还原重建 → `OK` |
+| 缓存策略 | 文件名无哈希，所以入口 `no-store`、资源 `no-cache`（回源校验）。**改前端→重建→刷新即最新**，不需要清缓存 | `curl -D -` 实测头：`Cache-Control: no-store` / `no-cache` 分别落在入口与资源 |
+| 修掉的真实 bug（浏览器里发现，不是测试发现） | ① 入口引用 `/app.js`（Vite `base` 默认根路径）→ 浏览器请求到旧页面路由，页面白屏。改 `base: "/next/"`，并把守卫收紧成断言 `/next/app.js`；② `busy_sessions` 是数组不是数字，页面显示 `[]`；③ 配置页只挑非空数组，刚起的桥显示「暂无数据」（实际有 `delivery_limit` 等生效值）；④ ⓘ 弹层 `v-if` 渲染后立刻量尺寸拿到 0×0，位置算成左上角（改 `nextTick` + `rAF` 双校）；⑤ tab 被 flex 压缩成两行/裁字 | 每一条都在浏览器 `ego_js` 里量过修复前后的几何/文本 |
+| 遗留 | ① 两套并存期间，**会话/权限的结构化编辑仍在旧页面**（`GET /`）；② 只验了 1236px 宽 + CSS 断点定义，没有真机窄屏矩阵；③ `feedback` 页只读，回复入口未做（回复会通知原会话，写错话代价更大） | 切换 `/next` 前需要把 ① 补完 |
+
+### 2026-11-16 14:00 前端改为「最佳实践栈」：Vuetify + JSONForms
+
+用户第二条裁定原话：「我希望能一个最佳实践，而不是我们自己手写以减少依赖等（这样做会导致
+很多问题，对 agent 和人都是很大的负担）」。这一条推翻了同日更早的第一版实现。
+
+**第一版错在哪**：装是装了 Vue，但表格、表单、弹层、状态块、分页、校验、断点降级全是自己
+写的——765 行手写 CSS + 11 个自造组件。那不是「用框架」，是「把 HTML 换成 Vue 继续手写」。
+决策与实测数据见 [ADR-0031](../adr/0031-console-frontend.md)。
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 栈 | Vue 3.5.45 + **Vuetify 3.13.7** + **@jsonforms/vue(-vuetify) 3.8.0** + **@tanstack/vue-query 5.107.1** + vue-router 4.6.5 | `web/package.json`；ADR-0031「最终选型」表 |
+| 选 Vuetify 的决定性理由 | 它是**唯一**有官方 JSONForms 渲染器的 Vue 组件库（`@jsonforms/vue-vuetify`，peer 要求 vuetify ^3.11）。Naive UI / Element Plus / Ant Design Vue / PrimeVue 实测都没有——要么手写渲染器，要么样式与组件库打架 | 临时目录安装探针 + 构建探针：三字段（string / integer+range / enum）真实渲染出 Vuetify 控件 |
+| 手写量 | 手写 CSS **765 行 → 17 行**（只留一个等宽字体、两个下拉宽度）；自造组件 **11 → 3**（PageCard / QueryState / PluginConfigForm） | `wc -l web/src/**/*.vue` 的 `<style>` 段；见 ADR 对比表 |
+| 三个保留的自造组件不是重造轮子 | PageCard 固定「标题 + ⓘ + 操作区」这个七页必须一致的形状，并**强制解释走 ⓘ**；QueryState 把查询三态映射到 Vuetify 进度条/告警；PluginConfigForm 把扁平 `SchemaField[]` 翻译成 JSON Schema + UI Schema（没有库能做这件事，也不该由库做） | 各 62 / 67 / 129 行，无 CSS |
+| 动态表单实测 | 插件页展开行 → JSONForms 按 schema 渲染出：必填 `*`、数字输入（`3.0` 带上下器）、enum 下拉（选中 `fast`）、checkbox（勾选）、密钥框（留空） | 浏览器实测（mock 一个带 5 字段 schema 的插件），控件类型/默认值/选中态全部正确 |
+| i18n 分工 | Vuetify 组件文案走它自己的 locale 包（实测分页显示「每页数目：20」「0-0 共 0」）；业务词条走服务端 `/api/i18n` | 浏览器实测两套同时生效 |
+| 踩到并修掉的坑（都是实测，不是推测） | ① `vite-plugin-vuetify` 的 `autoImport: true` 漏了 `<v-app-bar-title>` 的 CSS → 页面布局塌成一列（字体变 Times New Roman）。改全量注册 `vuetify/components` + `vuetify/styles`；② `maska` 必须 2.x（3.x 删了 `vMaska` 导出，构建直接报错）；③ `@jsonforms/vue-vuetify` 没有 default export，渲染器集合叫 `vuetifyRenderers`；④ `@jsonforms/core` 的 `JsonSchema` 是 4\|7 联合，写 schema 要用它的 `JsonSchema7`，别从 `json-schema` 包另引一份；⑤ `v-tabs` 必须放进 `v-main` 内（`v-app-bar` 是 fixed，放外面会被盖住） | 每一条都有「修之前的现象 → 修之后的现象」；见 ADR「依赖清单里几个必须锁版本的坑」 |
+| 产物 | `app.js` 346.58 kB gzip、`app.css` 66.71 kB gzip。用户明说体积不是约束；二进制本身 170 MB 量级 | `vite build` 输出 |
+| 七个页面 | 全部用 `v-data-table` / `v-select` / `v-switch` / `v-text-field` / `v-tooltip` 重写；浏览器逐页切换，0 个错误态 | 逐页实测：hash 路由正确、内容渲染、无 `.v-alert--type-error` |
+| 遗留 | ① `web/src/query.ts` 里 `refetchInterval` 只在概览页用，其余页面靠窗口聚焦刷新；如果要"长期挂着自动更新"，改成全局 interval 需再权衡请求量；② feedback 页仍只读（回复入口未做）；③ 两套前端仍并存于 `/next` 与 `/`，会话/权限的结构化编辑还在旧页面 | 切换 `/next` 接管根路径前需补 ③ |
+
+**为什么第一版会被写成那样（供后续 agent 参考）**：当时的约束是「体积不是问题」，于是把
+"少一个依赖"当成了优点。但用户真正要的是**维护负担小**——手写的表格要自己管响应式、手写的
+表单要自己管校验、手写的弹层要自己管定位，每加一个页面就重付一次。依赖多 99 个包换掉 748 行
+需要人维护的 UI 代码，这笔账是划算的。
