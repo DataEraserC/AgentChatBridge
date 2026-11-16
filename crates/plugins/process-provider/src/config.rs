@@ -11,7 +11,8 @@ use serde::Deserialize;
 pub struct ProcessProviderConfig {
     /// provider id，如 `demo.access_allowlist`。namespace 不能是 `acb`。
     pub id: String,
-    /// 扩展点。当前参考实现只支持 `access`。
+    /// 扩展点：`access` 或 `wake`（ADR-0033 第二层扩的）。
+    /// 再加扩展点时同步改 [`SUPPORTED_EXTENSIONS`] 与 loader 里的安装分支。
     #[serde(default = "default_extension")]
     pub extension: String,
     /// 启动命令：第一个元素是程序，其余是参数。
@@ -36,7 +37,11 @@ fn default_extension() -> String {
 
 pub const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
-pub const SUPPORTED_EXTENSION: &str = "access";
+/// 这个载体当前支持的扩展点。
+///
+/// 曾经只有 `access`——`channel.decide` 的 `point` 被写死，所以载体物理上只能
+/// 做一件事。现在按 ADR-0033 逐个补齐，每补一个往这里加一项。
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["access", "wake"];
 
 fn default_startup_timeout() -> u64 {
     DEFAULT_STARTUP_TIMEOUT_SECS
@@ -79,10 +84,12 @@ impl ProcessProviderConfig {
                 self.id
             ));
         }
-        if self.extension != SUPPORTED_EXTENSION {
+        if !SUPPORTED_EXTENSIONS.contains(&self.extension.as_str()) {
             return Err(format!(
-                "process provider {}: unsupported extension {} (only {SUPPORTED_EXTENSION})",
-                self.id, self.extension
+                "process provider {}: unsupported extension {} (supported: {})",
+                self.id,
+                self.extension,
+                SUPPORTED_EXTENSIONS.join(", ")
             ));
         }
         let id = ProviderId::parse(&self.id)
@@ -150,8 +157,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_extension_and_acb_namespace() {
-        let error = ProcessProviderConfig::from_toml(
+    fn accepts_wake_extension() {
+        // ADR-0033 第二层：wake 从「不支持」变成支持。这条钉住它别再被收回去。
+        let configs = ProcessProviderConfig::from_toml(
             r#"
             [[process_providers]]
             id = "demo.wake"
@@ -159,8 +167,27 @@ mod tests {
             command = ["echo"]
             "#,
         )
+        .expect("wake 是支持的扩展点");
+        assert_eq!(configs[0].extension, "wake");
+    }
+
+    #[test]
+    fn rejects_unknown_extension_and_acb_namespace() {
+        // 用真正没实现的扩展点当反例：`clock` 还没补（ADR-0033 里列在矩阵里）。
+        let error = ProcessProviderConfig::from_toml(
+            r#"
+            [[process_providers]]
+            id = "demo.clock"
+            extension = "clock"
+            command = ["echo"]
+            "#,
+        )
         .expect_err("unsupported extension");
         assert!(error.contains("unsupported extension"), "{error}");
+        assert!(
+            error.contains("access") && error.contains("wake"),
+            "报错要列出当前支持哪些：{error}"
+        );
 
         let error = ProcessProviderConfig::from_toml(
             r#"

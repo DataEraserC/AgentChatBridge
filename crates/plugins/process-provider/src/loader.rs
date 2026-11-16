@@ -6,13 +6,13 @@
 use std::sync::Arc;
 
 use acb_kernel::{
-    ExtensionPoint, LoaderKind, LoaderManifest, PLUGIN_API_VERSION, PluginError, PluginLoader,
-    PluginManager, PluginMetadata, ProviderId,
+    ExtensionPoint, LoaderKind, LoaderManifest, ManagerPlugin, PLUGIN_API_VERSION, PluginError,
+    PluginLoader, PluginManager, PluginMetadata, ProviderId,
 };
 
 use crate::channel::ProcessChannel;
 use crate::config::ProcessProviderConfig;
-use crate::provider::ProcessAccessManager;
+use crate::provider::{ProcessAccessManager, ProcessWakeManager};
 
 pub struct ProcessProviderLoader {
     configs: Vec<ProcessProviderConfig>,
@@ -28,11 +28,23 @@ impl ProcessProviderLoader {
 
 impl PluginLoader for ProcessProviderLoader {
     fn manifest(&self) -> LoaderManifest {
-        LoaderManifest::new(
-            LoaderKind::Process,
-            PLUGIN_API_VERSION,
-            vec![ExtensionPoint::Access],
-        )
+        // 声明本 loader 能提供的扩展点：按配置里出现过的去重。
+        // 写死成 `vec![Access]` 会让 describe_plugins 永远显示「只有 access」，
+        // 与实际能装的东西不符（ADR-0033）。
+        let mut points: Vec<ExtensionPoint> = Vec::new();
+        for config in &self.configs {
+            let point = match config.extension.as_str() {
+                "wake" => ExtensionPoint::Wake,
+                _ => ExtensionPoint::Access,
+            };
+            if !points.contains(&point) {
+                points.push(point);
+            }
+        }
+        if points.is_empty() {
+            points.push(ExtensionPoint::Access);
+        }
+        LoaderManifest::new(LoaderKind::Process, PLUGIN_API_VERSION, points)
     }
 
     fn install(&self, manager: &mut PluginManager) -> Result<(), PluginError> {
@@ -73,9 +85,14 @@ impl PluginLoader for ProcessProviderLoader {
                     config.id
                 )));
             }
-            let access = Arc::new(ProcessAccessManager::new(id.clone(), metadata, channel));
+            // 按配置的扩展点选 manager。同一个子进程承载一种策略，
+            // 这也是 `ProcessProviderConfig` 里 `extension` 是单值而非列表的原因。
+            let installed: Arc<dyn ManagerPlugin> = match config.extension.as_str() {
+                "wake" => Arc::new(ProcessWakeManager::new(id.clone(), metadata, channel)),
+                _ => Arc::new(ProcessAccessManager::new(id.clone(), metadata, channel)),
+            };
             manager
-                .install_manager(access)
+                .install_manager(installed)
                 .map_err(|error| PluginError::Loader(error.to_string()))?;
         }
         Ok(())

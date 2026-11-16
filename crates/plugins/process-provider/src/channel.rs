@@ -157,14 +157,20 @@ impl ProcessChannel {
         Health::Unhealthy(detail)
     }
 
+    /// 问一次策略决策。`point` 决定是哪个扩展点（`wake` / `access` / `clock` /
+    /// `route` / `turn_error`），与 `CoreMessage::Decide` 的语义一致。
+    ///
+    /// 以前 `point` 写死成 `"access"`，于是这个载体只能做 access——那是
+    /// 「Process 载体只支持一个扩展点」的直接原因（ADR-0033）。
     pub fn decide(
         &self,
+        point: &str,
         options: serde_json::Value,
         request: serde_json::Value,
     ) -> Result<WireResult, String> {
         self.request(CoreMessage::Decide {
             id: self.seq.fetch_add(1, Ordering::Relaxed),
-            point: "access".to_owned(),
+            point: point.to_owned(),
             options,
             request,
         })
