@@ -269,6 +269,43 @@ fn session_chain_must_come_from_its_harness_model_list() {
 }
 
 #[test]
+fn console_scope_shows_saved_chain_before_turn_boundary() {
+    // 现场：会话级链保存成功，控制台回读还是全局那份。根因是读的是「本轮生效」
+    // 的内存快照，边界没到就不换。控制台读库才对。
+    let mut bridge = bridge();
+    let before = bridge.stored_fallback_scope(Some("main"));
+    assert!(before.inherited, "没配过会话链时如实标「继承全局」");
+    assert!(before.models.is_empty(), "内存里还没有任何链");
+
+    bridge
+        .replace_model_fallbacks(None, &["trae/b".into()])
+        .expect("全局链");
+    bridge
+        .replace_model_fallbacks(Some("main"), &["trae/c".into()])
+        .expect("会话链");
+
+    let global = bridge.stored_fallback_scope(None);
+    assert_eq!(global.models, ["trae/b".to_owned()], "全局保存后立刻可见");
+    assert!(!global.inherited, "全局范围不存在继承");
+
+    let scoped = bridge.stored_fallback_scope(Some("main"));
+    assert_eq!(
+        scoped.models,
+        ["trae/c".to_owned()],
+        "会话保存后立刻回读要看到自己那份，而不是全局链"
+    );
+    assert!(!scoped.inherited, "保存过就不该再标「继承全局」");
+    assert!(scoped.from_store, "库读成功要标明来源");
+
+    // 边界语义不能被读接口改掉：本轮生效的链仍然是旧的那份。
+    assert_eq!(
+        bridge.session_fallbacks("main"),
+        bridge.model_fallbacks(),
+        "轮次边界没到，投递用的还是全局链"
+    );
+}
+
+#[test]
 fn sqlite_persists_session_chain_across_reopen() {
     let dir = std::env::temp_dir().join(format!(
         "acb-session-fallbacks-{}-{}",

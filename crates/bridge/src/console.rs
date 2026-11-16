@@ -920,10 +920,8 @@ impl<S: Store + Send + 'static> Console<S> {
     fn model_fallbacks_view(&self, session: Option<&str>) -> (u16, String) {
         let bridge = lock(&self.bridge);
         let config = bridge.config();
-        let models = match session {
-            Some(id) => bridge.session_fallbacks(id),
-            None => bridge.model_fallbacks(),
-        };
+        // 读库而不是读内存：保存完控制台会立刻回读，而内存快照要等轮次边界。
+        let scope = bridge.stored_fallback_scope(session);
         let (harness, available) = match session {
             Some(id) => (
                 config.session(id).map(|session| session.harness.clone()),
@@ -934,10 +932,10 @@ impl<S: Store + Send + 'static> Console<S> {
         (
             200,
             json!({
-                "source": "database",
+                "source": if scope.from_store { "database" } else { "memory" },
                 "session": session,
-                "models": models,
-                "inherited": session.is_some_and(|id| !bridge.has_session_fallbacks(id)),
+                "models": scope.models,
+                "inherited": scope.inherited,
                 "harness": harness,
                 "available": available,
                 "pending_reload": bridge.has_pending_policy_reload(),

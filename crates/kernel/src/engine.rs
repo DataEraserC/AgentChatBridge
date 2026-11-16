@@ -628,6 +628,17 @@ struct Subscriber {
     wake: WakePolicy,
 }
 
+/// 控制台读取的某个范围的后备链（见 [`Bridge::stored_fallback_scope`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackScope {
+    /// 这个范围实际会用的链；会话没单独配置时就是全局链。
+    pub models: Vec<String>,
+    /// 仅会话范围可能为 `true`：没有自己的链，回落全局。
+    pub inherited: bool,
+    /// 数据直接来自库（`true`），还是读库失败后的内存快照（`false`）。
+    pub from_store: bool,
+}
+
 /// 桥的核心：配置 + 存储 + 出站，加上调度状态。
 pub struct Bridge<S: Store> {
     config: Config,
@@ -2446,6 +2457,67 @@ impl<S: Store> Bridge<S> {
     /// 当前生效的后备模型链（控制台展示用）。
     pub fn model_fallbacks(&self) -> &[String] {
         &self.model_fallbacks
+    }
+
+    /// 控制台读取的链快照：直接读库，不看内存。
+    ///
+    /// 为什么不复用 [`Self::session_fallbacks`]：那是**本轮生效**的链，轮次边界才换。
+    /// 控制台保存完立刻回读，用内存快照会读到保存前的那份——现场表现就是
+    /// 「会话级链保存成功，页面还是全局那份」。库是唯一来源，读接口应该读库。
+    ///
+    /// 读库失败时退回内存快照并打一行日志（`from_store = false` 标明来源）：
+    /// 控制台是只读页，一次库抖动不该让整页 500。
+    pub fn stored_fallback_scope(&self, session: Option<&str>) -> FallbackScope {
+        match self.read_stored_fallback_scope(session) {
+            Ok(scope) => scope,
+            Err(error) => {
+                eprintln!("[model] 控制台读后备链失败，退回本轮生效的快照：{error}");
+                self.memory_fallback_scope(session)
+            }
+        }
+    }
+
+    fn read_stored_fallback_scope(
+        &self,
+        session: Option<&str>,
+    ) -> Result<FallbackScope, crate::storage::StorageError> {
+        let global = self.store.model_fallbacks()?;
+        let Some(id) = session else {
+            return Ok(FallbackScope {
+                models: global,
+                inherited: false,
+                from_store: true,
+            });
+        };
+        let own = self.store.session_model_fallbacks(id)?;
+        if own.is_empty() {
+            Ok(FallbackScope {
+                models: global,
+                inherited: true,
+                from_store: true,
+            })
+        } else {
+            Ok(FallbackScope {
+                models: own,
+                inherited: false,
+                from_store: true,
+            })
+        }
+    }
+
+    fn memory_fallback_scope(&self, session: Option<&str>) -> FallbackScope {
+        match session {
+            Some(id) => FallbackScope {
+                models: self.session_fallbacks(id).to_vec(),
+                inherited: !self.has_session_fallbacks(id),
+                from_store: false,
+            },
+            None => FallbackScope {
+                models: self.model_fallbacks.clone(),
+                inherited: false,
+                from_store: false,
+            },
+        }
     }
 
     /// 某个会话实际生效的后备链：自己配了用自己那份，否则回落全局。

@@ -41,21 +41,21 @@ pub use adapter::{
     manifest_supports_transport, run_adapter, validate_manifest,
 };
 pub use config::{
-    ADAPTER_CONNECTIONS_SCHEMA_SQL,
-    AccessPolicy, CONSOLE_CONFIG_FILENAME, ClockPolicy, Config, ConfigSource, Connection,
-    ConsoleConfig, DEFAULT_MAX_AGE_DAYS, DEFAULT_MAX_RECORDS_PER_ROOM, DEFAULT_STORAGE_PATH,
-    DEFAULT_WORKTREES_ROOT, DeliveryPolicy, EndpointConfig, Harness, InBandNoticeConfig,
-    KNOWN_MEMORY_KINDS, LkgConfig, LoadedConfig, Memory, NotificationsConfig, OutboundPolicy,
-    Persona, PluginConfig, ProviderCallsConfig, QueueConfig, ReceivePolicy, RetentionConfig,
-    RoutePolicy, SecretEntry, SecretStore, Session, StorageConfig, Subscription, ToolPluginConfig,
-    Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision, WakeInput,
-    WakePolicy, WakeVerdict,
+    ADAPTER_CONNECTIONS_SCHEMA_SQL, AccessPolicy, CONSOLE_CONFIG_FILENAME, ClockPolicy, Config,
+    ConfigSource, Connection, ConsoleConfig, DEFAULT_MAX_AGE_DAYS, DEFAULT_MAX_RECORDS_PER_ROOM,
+    DEFAULT_STORAGE_PATH, DEFAULT_WORKTREES_ROOT, DeliveryPolicy, EndpointConfig, Harness,
+    InBandNoticeConfig, KNOWN_MEMORY_KINDS, LkgConfig, LoadedConfig, Memory, NotificationsConfig,
+    OutboundPolicy, Persona, PluginConfig, ProviderCallsConfig, QueueConfig, ReceivePolicy,
+    RetentionConfig, RoutePolicy, SecretEntry, SecretStore, Session, StorageConfig, Subscription,
+    ToolPluginConfig, Transport, TurnErrorAction, TurnErrorActions, TurnErrorPolicy, WakeDecision,
+    WakeInput, WakePolicy, WakeVerdict,
 };
 pub use config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 pub use deps::{DependencyKind, DependencyRegistry, PlatformVersionInfo};
 pub use endpoint::{Conn, ControlRegistry, EndpointError, handshake, run_connection, serve};
 pub use engine::{
-    Bridge, BridgeError, Ingest, MAX_DELIVERY, Pruned, RoomFailureStat, TaskRecord, TaskStatus,
+    Bridge, BridgeError, FallbackScope, Ingest, MAX_DELIVERY, Pruned, RoomFailureStat, TaskRecord,
+    TaskStatus,
 };
 pub use event_queue::{
     EventQueue, EventReceiver, QueueSnapshot, QueueStats, SubmitError, drain_events,
