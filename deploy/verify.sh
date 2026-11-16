@@ -20,6 +20,7 @@
 #   ACB_VERIFY_BASE=<git ref>     fmt 的对比基线（默认取上游分支，没有则全仓检查）
 #   ACB_VERIFY_TIMEOUT=<秒>       单个 cargo test 的超时（默认 2400）
 #   ACB_VERIFY_ONLINE=1          允许 cargo 联网（默认 --offline）
+#   ACB_VERIFY_WEB=0             跳过前端产物一致性检查（离线且缺 node_modules 时用）
 #
 # 退出码：0 全绿；1 有红；2 用法错误。
 set -uo pipefail
@@ -61,6 +62,7 @@ run_fmt=1
 run_test=1
 run_node=1
 run_guards=1
+run_web=1
 run_clippy=0
 update_baseline=0
 
@@ -71,6 +73,7 @@ while [ $# -gt 0 ]; do
     --no-fmt) run_fmt=0 ;;
     --no-node) run_node=0 ;;
     --no-guards) run_guards=0 ;;
+    --no-web) run_web=0 ;;
     --clippy) run_clippy=1 ;;
     --update-baseline) update_baseline=1 ;;
     -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -339,6 +342,32 @@ stage_guards() {
   fi
 }
 
+
+# ---------------------------------------------------------------- 前端产物（守卫）
+#
+# `crates/bridge/src/console_web/` 是 `web/` 的构建产物，提交进仓库换取
+# `nix build` 的纯 Rust + --offline。代价是可能「改了源码没重建」，
+# 那种漂移只有真机点一遍才发现。这里真跑一次构建再逐字节比对。
+stage_web() {
+  stage_begin "前端产物（console_web 与 web/ 一致）"
+  if [ ! -x deploy/verify-console-web.sh ]; then
+    record web SKIP "没有 deploy/verify-console-web.sh"
+    return
+  fi
+  local log="$artifact_dir/console-web.log"
+  if ./deploy/verify-console-web.sh >"$log" 2>&1; then
+    record web OK "产物与源码一致"
+  else
+    local status=$?
+    if grep -q "SKIP" "$log"; then
+      record web SKIP "$(tail -1 "$log")"
+    else
+      record web FAIL "$(tail -3 "$log" | tr '\n' ' ')"
+    fi
+    return "$status"
+  fi
+}
+
 # ---------------------------------------------------------------- clippy（可选，不阻断）
 stage_clippy() {
   stage_begin "clippy（仅记数，不阻断）"
@@ -355,6 +384,7 @@ printf '%sacb verify%s  %s\n' "$c_dim" "$c_off" "$repo_root"
 [ $run_fmt -eq 1 ] && stage_fmt
 [ $run_test -eq 1 ] && stage_test
 [ $run_node -eq 1 ] && stage_node
+[ $run_web -eq 1 ] && stage_web
 [ $run_guards -eq 1 ] && stage_guards
 [ $run_clippy -eq 1 ] && stage_clippy
 

@@ -17,8 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acb_adapter_dynamic::DynamicLoader;
 use acb_adapter_onebot_snowluma::OneBotSnowLumaAdapterFactory;
-use acb_adapter_qqbot_official::QqBotOfficialAdapterFactory;
 use acb_adapter_process::ProcessAdapterFactory;
+use acb_adapter_qqbot_official::QqBotOfficialAdapterFactory;
 use acb_kernel::storage::SettingsStore;
 use acb_kernel::{
     AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ConfigSource, ControlRegistry,
@@ -37,6 +37,7 @@ use acb_plugin_trusted::TrustedLoader;
 mod config_objects;
 mod config_patch;
 mod console;
+mod console_web;
 mod plugins;
 use console::Console;
 

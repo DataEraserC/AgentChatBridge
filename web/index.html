@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>acb-bridge console</title>
+    <!-- 首屏前定主题，避免明暗闪一下。与旧 console.html 的做法一致。 -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("acb-console-theme");
+          var dark = !window.matchMedia || window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var theme = saved === "light" || saved === "dark" ? saved : dark ? "dark" : "light";
+          document.documentElement.dataset.theme = theme;
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

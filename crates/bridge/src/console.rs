@@ -504,6 +504,26 @@ impl<S: Store + Send + 'static> Console<S> {
                 );
             }
 
+            // 新版前端（`web/` 构建产物）：与旧页面并行提供，路径前缀 `/next`。
+            // 为什么并存而不是直接替换：旧页面还有一批静态契约测试与已在用的
+            // 运维习惯，切换应该是一次单独的行动，而不是混在重写里一起发生。
+            // 切换方法：把下面这个分支改成根路径，或直接让 `GET /` 返回
+            // `console_web::index_html()`。
+            if method == "GET" && crate::console_web::is_next_ui_path(path) {
+                let set_cookie = if query_ok {
+                    format!(
+                        "Set-Cookie: acb_console={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000\r\n",
+                        self.token
+                    )
+                } else {
+                    String::new()
+                };
+                let headers: Vec<&str> = std::iter::once(set_cookie.as_str())
+                    .filter(|value| !value.is_empty())
+                    .collect();
+                return crate::console_web::serve(&mut stream, path, &headers);
+            }
+
             let (status, body) = self.route(&method, path, &body, peer);
             write_response(&mut stream, status, "application/json", &body, &[])
         })
@@ -684,6 +704,9 @@ impl<S: Store + Send + 'static> Console<S> {
                 self.model_fallbacks_view(query_param(query, "session"))
             }
             ("POST", "/api/model-fallbacks") => self.save_model_fallbacks(body),
+            // 失败惩罚策略：读库（保存后立刻可见），写库（下一轮生效）。
+            ("GET", "/api/model-penalty") => self.model_penalty_view(query_param(query, "session")),
+            ("POST", "/api/model-penalty") => self.save_model_penalty(body),
             _ => error_response(404, acb_i18n::msg!("bridge.console.no_endpoint"), None),
         }
     }
@@ -1001,6 +1024,107 @@ impl<S: Store + Send + 'static> Console<S> {
             Err(error) => config_error(
                 400,
                 acb_i18n::msg!("bridge.console.model_fallbacks_save_failed"),
+                Some(error),
+            ),
+        }
+    }
+
+    /// `GET /api/model-penalty[?session=]`：惩罚策略 + 当前正在被罚的模型。
+    ///
+    /// 策略读**库**而不是内存：控制台保存完会立刻回读，读内存会看到保存前那份
+    /// （与 `/api/model-fallbacks` 同一个坑，见 `stored_fallback_scope` 的注释）。
+    /// `penalties` 是内存态，桥重启即空——那是它的语义，不是缺陷。
+    fn model_penalty_view(&self, session: Option<&str>) -> (u16, String) {
+        let bridge = lock(&self.bridge);
+        let (policy, inherited) = bridge.stored_fallback_policy_scope(session);
+        let now = now_millis();
+        let penalties: Vec<serde_json::Value> = bridge
+            .active_model_penalties(now)
+            .into_iter()
+            .filter(|(owner, _, _, _)| match session {
+                // 会话范围：这个会话自己的惩罚，加上全局层的。
+                Some(id) => owner.as_deref().is_none_or(|owner| owner == id),
+                // 全局范围：只看全局层。
+                None => owner.is_none(),
+            })
+            .map(|(owner, model, class, remaining_secs)| {
+                json!({
+                    "session": owner,
+                    "model": model,
+                    "class": class,
+                    "remaining_secs": remaining_secs,
+                })
+            })
+            .collect();
+        (
+            200,
+            json!({
+                "session": session,
+                "policy": policy_json(policy),
+                "inherited": inherited,
+                "penalties": penalties,
+                "pending_reload": bridge.has_pending_policy_reload(),
+                "config_version": bridge.config_version(),
+            })
+            .to_string(),
+        )
+    }
+
+    /// `POST /api/model-penalty`：`{"session": "id"?, "policy": {...} | null}`。
+    ///
+    /// 会话侧传 `null` = 删掉覆盖、回落全局；全局侧传 `null` 由内核拒绝
+    /// （要停用请传一份 `enabled = false` 的策略——那比「没有策略」更好排查）。
+    fn save_model_penalty(&self, body: &str) -> (u16, String) {
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.model_penalty_body_invalid"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let session = parsed
+            .get("session")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let policy = match parsed.get("policy") {
+            None => {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.model_penalty_body_invalid"),
+                    None,
+                );
+            }
+            Some(serde_json::Value::Null) => None,
+            Some(raw) => match policy_from_json(raw) {
+                Ok(policy) => Some(policy),
+                Err(error) => {
+                    return config_error(
+                        400,
+                        acb_i18n::msg!("bridge.console.model_penalty_body_invalid"),
+                        Some(error),
+                    );
+                }
+            },
+        };
+        let mut bridge = lock(&self.bridge);
+        match bridge.replace_fallback_policy(session, policy.as_ref()) {
+            Ok(()) => (
+                200,
+                json!({
+                    "ok": true,
+                    "session": session,
+                    "policy": policy_json(policy.unwrap_or_default()),
+                })
+                .to_string(),
+            ),
+            // 校验失败是用户输入问题：回 400 并带上可读原因（哪个字段、为什么）。
+            Err(error) => config_error(
+                400,
+                acb_i18n::msg!("bridge.console.model_penalty_rejected"),
                 Some(error),
             ),
         }
@@ -2183,6 +2307,39 @@ fn write_response(
     stream.flush()
 }
 
+/// 惩罚策略 → JSON。字段名与前端 TS 类型一一对应（`PenaltyPolicy`）。
+fn policy_json(policy: acb_kernel::FallbackPolicy) -> serde_json::Value {
+    json!({
+        "enabled": policy.enabled,
+        "failure_threshold": policy.failure_threshold,
+        "failure_window_secs": policy.failure_window_secs,
+        "penalty_secs": policy.penalty_secs,
+    })
+}
+
+/// JSON → 惩罚策略。缺字段按「不启用」补齐，多余的字段忽略。
+///
+/// 校验不在这里做：`replace_fallback_policy` 是唯一校验点（和后备链同一个理由，
+/// 规则只放一处）。这里只做形状转换，越界值原样带过去让它拒。
+fn policy_from_json(raw: &serde_json::Value) -> Result<acb_kernel::FallbackPolicy, String> {
+    let object = raw.as_object().ok_or("policy must be an object")?;
+    let number = |key: &str| -> u64 {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    Ok(acb_kernel::FallbackPolicy {
+        enabled: object
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        failure_threshold: number("failure_threshold"),
+        failure_window_secs: number("failure_window_secs"),
+        penalty_secs: number("penalty_secs"),
+    })
+}
+
 /// 常量时间字符串比较。
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
@@ -2450,6 +2607,9 @@ mod tests {
         for (name, source) in [
             ("console.rs", include_str!("console.rs")),
             ("config_patch.rs", include_str!("config_patch.rs")),
+            // 新前端的服务端部分同样不该出现硬编码中文：文案全走
+            // `/api/i18n` 与 `acb_i18n::msg!`，回来的是浏览器直接显示的东西。
+            ("console_web.rs", include_str!("console_web.rs")),
         ] {
             let code = source
                 .split("#[cfg(test)]")
