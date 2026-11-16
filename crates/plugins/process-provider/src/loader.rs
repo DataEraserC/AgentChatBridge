@@ -13,8 +13,8 @@ use acb_kernel::{
 use crate::channel::ProcessChannel;
 use crate::config::ProcessProviderConfig;
 use crate::provider::{
-    ProcessAccessManager, ProcessClockManager, ProcessRouteManager, ProcessTurnErrorManager,
-    ProcessWakeManager,
+    ProcessAccessManager, ProcessClockManager, ProcessRouteManager, ProcessToolAccessManager,
+    ProcessTurnErrorManager, ProcessWakeManager,
 };
 
 pub struct ProcessProviderLoader {
@@ -41,6 +41,7 @@ impl PluginLoader for ProcessProviderLoader {
                 "clock" => ExtensionPoint::Clock,
                 "route" => ExtensionPoint::Route,
                 "turn_error" => ExtensionPoint::TurnError,
+                "tool_access" => ExtensionPoint::ToolAccess,
                 _ => ExtensionPoint::Access,
             };
             if !points.contains(&point) {
@@ -99,6 +100,9 @@ impl PluginLoader for ProcessProviderLoader {
                 "route" => Arc::new(ProcessRouteManager::new(id.clone(), metadata, channel)),
                 "turn_error" => {
                     Arc::new(ProcessTurnErrorManager::new(id.clone(), metadata, channel))
+                }
+                "tool_access" => {
+                    Arc::new(ProcessToolAccessManager::new(id.clone(), metadata, channel))
                 }
                 _ => Arc::new(ProcessAccessManager::new(id.clone(), metadata, channel)),
             };

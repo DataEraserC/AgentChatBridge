@@ -4,16 +4,17 @@ use std::sync::{Arc, Mutex};
 
 use acb_adapter_api::{
     WireAccessRequest, WireClockRequest, WireResult, WireRouteAction, WireRouteDecision,
-    WireRouteRequest, WireTurnErrorAction, WireTurnErrorRequest, WireWakeRequest,
+    WireRouteRequest, WireToolAccessRequest, WireTurnErrorAction, WireTurnErrorRequest,
+    WireWakeRequest,
 };
 use acb_kernel::{
     AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Capability, ClockContext,
     ClockPolicy, ClockProvider, ExtensionPoint, Health, InterruptScope, ManagerManifest,
     ManagerPlugin, PLUGIN_API_VERSION, PluginError, PluginMetadata, PluginSource,
     ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, RoomId, RouteAction,
-    RouteContext, RouteDecision, RoutePolicy, RouteProvider, TurnErrorAction, TurnErrorPolicy,
-    TurnErrorProvider, TurnErrorRequest, WakeContext, WakeDecision, WakePolicy, WakeProvider,
-    WakeVerdict,
+    RouteContext, RouteDecision, RoutePolicy, RouteProvider, ToolAccessContext, ToolAccessProvider,
+    ToolAccessVerdict, TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest,
+    WakeContext, WakeDecision, WakePolicy, WakeProvider, WakeVerdict,
 };
 use serde_json::json;
 
@@ -983,5 +984,207 @@ mod turn_error_tests {
             default_actions: &defaults,
         };
         assert_eq!(fallback_turn_error_actions(&without_session), defaults);
+    }
+}
+
+/// ToolAccess 扩展点的进程实现（ADR-0033）。
+///
+/// 这个扩展点**只能否决**：`ToolAccessVerdict::Deny` 会让 core 拒绝这次调用，
+/// `Allow` 只是「我不否决」——不会绕过 core 自己的判定。所以外部插件参与它
+/// 天然不构成「给自己开权限」的风险面。
+pub(crate) struct ProcessToolAccessManager {
+    provider: ProviderId,
+    metadata: PluginMetadata,
+    channel: Arc<ProcessChannel>,
+    cached: Mutex<Option<Arc<ProcessToolAccessProvider>>>,
+}
+
+impl ProcessToolAccessManager {
+    pub(crate) fn new(
+        provider: ProviderId,
+        metadata: PluginMetadata,
+        channel: Arc<ProcessChannel>,
+    ) -> Self {
+        Self {
+            provider,
+            metadata,
+            channel,
+            cached: Mutex::new(None),
+        }
+    }
+}
+
+impl ManagerPlugin for ProcessToolAccessManager {
+    fn manifest(&self) -> ManagerManifest {
+        ManagerManifest::new(
+            self.provider.namespace(),
+            PLUGIN_API_VERSION,
+            vec![Capability::ToolAccessDecision],
+        )
+        .with_metadata(self.metadata.clone())
+    }
+
+    fn descriptors(&self) -> Vec<ProviderDescriptor> {
+        vec![
+            ProviderDescriptor::new(
+                self.provider.clone(),
+                ExtensionPoint::ToolAccess,
+                PLUGIN_API_VERSION,
+                vec![Capability::ToolAccessDecision],
+            )
+            .with_metadata(self.metadata.clone())
+            .with_source(PluginSource::Dynamic),
+        ]
+    }
+
+    fn instantiate(
+        &self,
+        id: &ProviderId,
+        options: ProviderOptions<'_>,
+    ) -> Result<ProviderInstance, PluginError> {
+        if id != &self.provider {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        }
+        // ToolAccess 在 ProviderOptions 里没有专属变体（它不需要策略配置），
+        // 用 Observer 这一档表达「不需要配置」。
+        if !matches!(options, ProviderOptions::Observer) {
+            return Err(PluginError::Provider {
+                id: id.to_string(),
+                detail: "process tool_access provider takes no options".to_owned(),
+            });
+        }
+        let mut cached = self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let provider = cached
+            .get_or_insert_with(|| {
+                Arc::new(ProcessToolAccessProvider {
+                    channel: Arc::clone(&self.channel),
+                })
+            })
+            .clone();
+        Ok(ProviderInstance::ToolAccess(provider))
+    }
+
+    fn health(&self) -> Health {
+        self.channel.health()
+    }
+
+    fn shutdown(&self) {
+        self.channel.shutdown();
+    }
+}
+
+struct ProcessToolAccessProvider {
+    channel: Arc<ProcessChannel>,
+}
+
+impl ToolAccessProvider for ProcessToolAccessProvider {
+    fn check(&self, context: &ToolAccessContext<'_>) -> Result<ToolAccessVerdict, String> {
+        // 载体不可用时返回 Ok(Allow)：这是「否决点」，不是「允许点」。
+        // 它挂了不该把全部工具调用一起挡死——core 自己的判定仍在前面把关。
+        if !matches!(self.channel.health(), Health::Healthy) {
+            return Ok(ToolAccessVerdict::Allow);
+        }
+        let wire = wire_tool_access_request(context);
+        let request = serde_json::to_value(&wire).map_err(|error| error.to_string())?;
+        match self.channel.decide("tool_access", json!({}), request) {
+            Ok(WireResult::ToolAccess { deny: true, reason }) => Ok(ToolAccessVerdict::Deny {
+                reason: reason.unwrap_or_else(|| "denied by process provider".to_owned()),
+            }),
+            Ok(WireResult::ToolAccess { deny: false, .. }) => Ok(ToolAccessVerdict::Allow),
+            // 回了别的东西：按「不否决」处理并记一笔——拒绝全部工具调用是更大的
+            // 故障面，而这一层本来就只是附加检查。
+            Ok(other) => {
+                self.channel
+                    .note_invalid_reply(&format!("expected tool_access reply, got {other:?}"));
+                Ok(ToolAccessVerdict::Allow)
+            }
+            Err(_) => Ok(ToolAccessVerdict::Allow),
+        }
+    }
+}
+
+/// `ToolAccessContext` → wire 形状。
+///
+/// 身份与场所用 core 的 `as_str()` 转词，不自己拼：那两个函数是这些词唯一的
+/// 出处，抄一份必然漂移。
+fn wire_tool_access_request(context: &ToolAccessContext<'_>) -> WireToolAccessRequest {
+    let room_scope = match context.place {
+        acb_kernel::Place::Room(scope) => scope.as_str().to_owned(),
+        _ => String::new(),
+    };
+    WireToolAccessRequest {
+        tool: context.tool.to_owned(),
+        args: context.args.clone(),
+        session: context.session.to_owned(),
+        room: context.room.to_string(),
+        subject: context.subject.as_str().to_owned(),
+        place: context.place.as_str().to_owned(),
+        room_scope,
+        platform: context.platform.to_owned(),
+        origin_sender: context.origin_sender.map(str::to_owned),
+        is_admin: context.is_admin,
+        live: context.live,
+        required_permissions: context.required_permissions.to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod tool_access_tests {
+    use super::*;
+
+    /// 身份与场所用 core 的 `as_str()` 转词，不自己拼。
+    #[test]
+    fn request_uses_core_vocabulary_for_subject_and_place() {
+        let room = RoomId::new("qq", "group/7").expect("合法房间");
+        let required = vec!["room_write".to_owned()];
+        let context = ToolAccessContext {
+            tool: "send_message",
+            args: &json!({"text": "hi"}),
+            session: "main",
+            room: &room,
+            subject: acb_kernel::GrantSubject::SystemAdmin,
+            place: acb_kernel::Place::Room(acb_kernel::RoomScope::MultiParty),
+            platform: "qq",
+            origin_sender: Some("42"),
+            is_admin: true,
+            live: true,
+            required_permissions: &required,
+        };
+        let wire = wire_tool_access_request(&context);
+
+        assert_eq!(wire.tool, "send_message");
+        assert_eq!(wire.subject, "system_admin");
+        // `Place::as_str()` 对多人房间回 "group"，这一层不再自己造词。
+        assert_eq!(wire.place, "group");
+        assert_eq!(wire.room_scope, "multi_party");
+        assert_eq!(wire.required_permissions, vec!["room_write".to_owned()]);
+        assert!(wire.is_admin);
+        assert!(wire.live);
+    }
+
+    /// 非房间场所的 `room_scope` 是空串，不是硬塞一个值。
+    #[test]
+    fn console_place_has_empty_room_scope() {
+        let room = RoomId::new("qq", "private/1").expect("合法房间");
+        let context = ToolAccessContext {
+            tool: "x",
+            args: &serde_json::Value::Null,
+            session: "s",
+            room: &room,
+            subject: acb_kernel::GrantSubject::User,
+            place: acb_kernel::Place::Console,
+            platform: "qq",
+            origin_sender: None,
+            is_admin: false,
+            live: false,
+            required_permissions: &[],
+        };
+        let wire = wire_tool_access_request(&context);
+        assert_eq!(wire.place, "console");
+        assert_eq!(wire.room_scope, "");
+        assert_eq!(wire.origin_sender, None);
     }
 }

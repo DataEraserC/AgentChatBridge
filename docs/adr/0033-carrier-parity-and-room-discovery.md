@@ -16,15 +16,15 @@
 
 判据是 `grep -rn "impl .*Provider for" crates/ | grep -v test`，按 crate 归组：
 
-| 载体 / crate | Wake | Access | Clock | Receive | Route | TurnError | Tool | ToolAccess | Prompt | 平台适配器 |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| `kernel`（内置） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| `plugins/lua`（Script） | ✅ | ✅ | — | ✅ | ✅ | ✅ | — | — | — | ❌ |
-| `adapters/dynamic`（.so） | ✅ | ✅ | ✅ | ✅ | — | ✅ | — | — | — | ✅ |
-| `plugins/process-provider`（Process） | **✅** | ✅ | **✅** | — | **✅** | **✅** | — | — | — | — |
-| `plugins/process-tools` | — | — | — | — | — | — | ✅ | — | — | — |
-| `plugins/trusted` | ✅ | — | — | — | — | — | — | — | — | — |
-| `wasm-host` | — | — | — | — | — | — | — | — | — | ❌ |
+| 载体 / crate | Wake | Access | Clock | Receive | Route | TurnError | Delivery | Send | Tool | ToolAccess | Prompt | 平台适配器 |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `kernel`（内置） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| `plugins/lua`（Script） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — | — | ❌ |
+| `adapters/dynamic`（.so） | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | — | — | — | ✅ |
+| `plugins/process-provider`（Process） | ✅ | ✅ | ✅ | — | ✅ | ✅ | — | — | — | — | — | — |
+| `plugins/process-tools` | — | — | — | — | — | — | — | — | ✅ | — | — | — |
+| `plugins/trusted` | ✅ | — | — | — | — | — | — | — | — | — | — | — |
+| `wasm-host` | — | — | — | — | — | — | — | — | — | — | — | ❌ |
 
 加粗 = 本 ADR 落地后新补的（Process 载体原来只有 Access）。矩阵仍是**现状快照**，
 不是承诺；未实现的那几格写在下面的「已知不对等」里，带原因。
@@ -159,12 +159,30 @@ core 认识「有查询这回事」，不认识查询的内容。
 
 ## 已知不对等（本 ADR 未解决，带原因）
 
-| 缺口 | 为什么本轮不做 |
-|---|---|
-| `wasm-host` 零扩展点 | 需要 wasm ABI 设计（导入表、内存约定、错误传播），是一次独立的大设计，混进来会拖住房间发现 |
-| `PromptProvider` 只有内置 | 适合外部化（人格提示、上下文注入），但没有真实用例；等有人真的要从外部注入提示词再做 |
-| `Tool` / `ToolAccess` 外部化 | `Tool` 目前只能通过 `process-tools` 这个专用 crate；`ToolAccess` 只有 kernel 实现。外部插件无法参与工具授权判定 |
-| Lua 缺 Clock | Lua 载体的 `ClockProvider` 没实现，而 dynamic 与 process 都有 |
+判据是**有没有 wire 形状**：`adapter-api` 里存在 `Wire<X>Request` 才能外部化，
+否则只能内置。现状：
+
+| 扩展点 | 有 wire 形状 | 谁能外部实现 | 缺什么 |
+|---|:-:|---|---|
+| Wake / Access / Clock / Receive / Route / TurnError / Delivery / Send | ✅ | Lua、dynamic、process（后两者按各自覆盖） | — |
+| **ToolAccess** | ❌ | **只有 kernel** | wire 形状 + 载体接线 |
+| **Prompt** | ❌ | **只有 kernel** | wire 形状 + 优先级规则 |
+| **Tool** | ❌（只有 `process-tools` 这个专用 crate） | 只能走 `process-tools` | wire 形状 + 「外部工具怎么被调用」的协议 |
+
+**ToolAccess 不在安全边界上**。核实过：`ProviderInstance::ToolAccess` 早就存在，
+`ToolAccessProvider::check` 是普通 trait（无 sealed、无 unsafe），而且它**只能否决、
+不能放行**——trait 注释原文「只能拒绝，不能放行 core 的判定」。外部实现参与的是
+「加一道否决」，不是「给自己开权限」。所以缺的是纯工程（wire 形状 + 接线），
+不是策略限制。
+
+其余两格的难点不在于「做不了」，而在于要**先定一件事**：
+
+- **Prompt**：外部提示词与人格卡谁优先、冲突时怎么办。不定清楚会造出第三个真相源。
+- **Tool**：外部工具的调用协议（参数、超时、取消、结果信封）。`ToolProvider` 的签名
+  里带运行期对象，不是纯 JSON 能表达，需要像 route 那样单独设计 wire。
+
+**wasm-host** 是唯一真的「大设计」：需要 wasm ABI（导入表、内存约定、错误传播、
+宿主函数），与上面三个不是一个量级。
 
 ## 已知代价
 

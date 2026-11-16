@@ -41,7 +41,14 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
 ///
 /// 曾经只有 `access`——`channel.decide` 的 `point` 被写死，所以载体物理上只能
 /// 做一件事。现在按 ADR-0033 逐个补齐，每补一个往这里加一项。
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["access", "wake", "clock", "route", "turn_error"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "access",
+    "wake",
+    "clock",
+    "route",
+    "turn_error",
+    "tool_access",
+];
 
 fn default_startup_timeout() -> u64 {
     DEFAULT_STARTUP_TIMEOUT_SECS
@@ -214,10 +221,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_extension_and_acb_namespace() {
-        // 反例用真正不存在的扩展点名：`tool_access` 是 core 的只读否决点，
-        // 本载体不提供（ADR-0033 矩阵里它仍标未实现）。
-        let error = ProcessProviderConfig::from_toml(
+    fn accepts_tool_access_extension() {
+        let configs = ProcessProviderConfig::from_toml(
             r#"
             [[process_providers]]
             id = "demo.tool_access"
@@ -225,9 +230,32 @@ mod tests {
             command = ["echo"]
             "#,
         )
+        .expect("tool_access 是支持的扩展点");
+        assert_eq!(configs[0].extension, "tool_access");
+    }
+
+    #[test]
+    fn rejects_unknown_extension_and_acb_namespace() {
+        // 反例用真正不存在的扩展点名。`delivery` / `send` 是 Lua 与 dynamic
+        // 有的，本载体没实现（ADR-0033 矩阵里标着）。
+        let error = ProcessProviderConfig::from_toml(
+            r#"
+            [[process_providers]]
+            id = "demo.delivery"
+            extension = "delivery"
+            command = ["echo"]
+            "#,
+        )
         .expect_err("unsupported extension");
         assert!(error.contains("unsupported extension"), "{error}");
-        for supported in ["access", "wake", "clock", "route", "turn_error"] {
+        for supported in [
+            "access",
+            "wake",
+            "clock",
+            "route",
+            "turn_error",
+            "tool_access",
+        ] {
             assert!(
                 error.contains(supported),
                 "报错要列出当前支持的全部扩展点（缺 {supported}）：{error}"

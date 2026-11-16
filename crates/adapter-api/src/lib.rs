@@ -295,6 +295,39 @@ pub struct WireClockRequest {
     pub last_record_at: Option<i64>,
 }
 
+/// 工具调用的授权判定请求（ToolAccess 扩展点）。
+///
+/// 这个扩展点**只能否决**：回 `deny` 会被采纳，回 `allow` 不会绕过 core 自己的
+/// 判定（core 的结论是「这次调用本来就被允许」，插件只是多一道检查）。
+/// 所以它天然不构成「插件给自己开权限」的风险面。
+#[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
+pub struct WireToolAccessRequest {
+    pub tool: String,
+    #[serde(default)]
+    pub args: Value,
+    pub session: String,
+    pub room: String,
+    /// 触发者身份：`system` / `system_admin` / `bot_admin` / `user`。
+    pub subject: String,
+    /// 场所：`console` / `room` / `none`。
+    pub place: String,
+    /// 场所细分（`place = "room"` 时是 `direct` / `multi_party`，否则空串）。
+    #[serde(default)]
+    pub room_scope: String,
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_sender: Option<String>,
+    #[serde(default)]
+    pub is_admin: bool,
+    /// `true` = 轮次在跑；`false` = 轮次结束后的宽限窗口。
+    #[serde(default)]
+    pub live: bool,
+    /// 本次调用要求的权限字符。空 = 无细粒度身份。
+    #[serde(default)]
+    pub required_permissions: Vec<String>,
+}
+
 /// route 策略判定的 wire 形状。
 ///
 /// 与其它策略的请求同构：只给「这次消息长什么样」，判定由适配器/插件做。
@@ -738,6 +771,13 @@ pub enum WireResult {
     Connections {
         #[serde(default)]
         connections: Vec<WireConnection>,
+    },
+    /// 工具授权判定的回执。`deny` 生效，`allow` 只是「不否决」。
+    ToolAccess {
+        #[serde(default)]
+        deny: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// route 策略判定的回执。
     Route {
