@@ -27,6 +27,7 @@ use crate::engine::{TaskRecord, TaskStatus};
 use crate::grants::{
     AccountGrant, BotAdminGrant, GrantRule, GrantsConfig, RoomGrant, SystemAdminGrant,
 };
+use crate::model_penalty::FallbackPolicy;
 
 /// 存储层错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -796,6 +797,37 @@ pub trait ModelFallbacks {
     ) -> Result<std::collections::BTreeMap<String, Vec<String>>, StorageError>;
 }
 
+/// 模型失败惩罚策略。全局一份默认，每个会话可以覆盖一份。
+///
+/// 为什么和后备链分两个 trait：链说的是「按什么顺序换」，策略说的是「什么时候跳过
+/// 某一项」。两者的写入时机、校验规则、读者都不同（链给驱动，策略给内核的惩罚判定），
+/// 合在一起会让「只想改一个阈值」也要重整条链。
+pub trait ModelFallbackPolicy {
+    /// 全局默认策略。库里没有记录时返回 [`FallbackPolicy::default`]（= 不启用）。
+    fn fallback_policy(&self) -> Result<FallbackPolicy, StorageError>;
+
+    /// 整份替换全局默认策略。
+    fn replace_fallback_policy(&mut self, policy: &FallbackPolicy) -> Result<(), StorageError>;
+
+    /// 某个会话自己的策略；`None` = 没单独配，调用方回落到全局。
+    fn session_fallback_policy(
+        &self,
+        session: &str,
+    ) -> Result<Option<FallbackPolicy>, StorageError>;
+
+    /// 写/清某个会话的策略。`None` = 删掉该会话的覆盖，回落全局。
+    fn replace_session_fallback_policy(
+        &mut self,
+        session: &str,
+        policy: Option<&FallbackPolicy>,
+    ) -> Result<(), StorageError>;
+
+    /// 所有单独配置过策略的会话。启动/轮次边界一次读进来，别按会话逐条查。
+    fn session_fallback_policies(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, FallbackPolicy>, StorageError>;
+}
+
 /// 业务对象的落库接口：`connections` / `sessions` / `personas` / `memories` /
 /// `harnesses` 五类数组。
 ///
@@ -1010,6 +1042,7 @@ pub trait Store:
     + Tasks
     + Policies
     + ModelFallbacks
+    + ModelFallbackPolicy
     + ConfigObjectsStore
     + SecretsStore
     + SettingsStore
@@ -1029,6 +1062,7 @@ impl<T> Store for T where
         + Tasks
         + Policies
         + ModelFallbacks
+        + ModelFallbackPolicy
         + ConfigObjectsStore
         + SecretsStore
         + SettingsStore
@@ -1064,6 +1098,10 @@ pub struct MemoryStore {
     model_fallbacks: Vec<String>,
     /// 会话自己的后备链。没有条目 = 回落上面那条全局链。
     session_model_fallbacks: BTreeMap<String, Vec<String>>,
+    /// 模型失败惩罚策略：全局默认一份。
+    fallback_policy: FallbackPolicy,
+    /// 每个会话自己的惩罚策略。没有条目 = 回落全局那份。
+    session_fallback_policies: BTreeMap<String, FallbackPolicy>,
     /// 有没有被写过。和 sqlite 的 `policy_initialized` 标记同一个意思：
     /// 「导入过一份空的」和「从没导入过」必须分得开，否则重启会把清空当成首次导入。
     policy_initialized: bool,
@@ -1755,6 +1793,45 @@ impl ModelFallbacks for MemoryStore {
 
     fn session_model_fallbacks_map(&self) -> Result<BTreeMap<String, Vec<String>>, StorageError> {
         Ok(self.session_model_fallbacks.clone())
+    }
+}
+
+impl ModelFallbackPolicy for MemoryStore {
+    fn fallback_policy(&self) -> Result<FallbackPolicy, StorageError> {
+        Ok(self.fallback_policy)
+    }
+
+    fn replace_fallback_policy(&mut self, policy: &FallbackPolicy) -> Result<(), StorageError> {
+        self.fallback_policy = *policy;
+        Ok(())
+    }
+
+    fn session_fallback_policy(
+        &self,
+        session: &str,
+    ) -> Result<Option<FallbackPolicy>, StorageError> {
+        Ok(self.session_fallback_policies.get(session).copied())
+    }
+
+    fn replace_session_fallback_policy(
+        &mut self,
+        session: &str,
+        policy: Option<&FallbackPolicy>,
+    ) -> Result<(), StorageError> {
+        match policy {
+            Some(policy) => {
+                self.session_fallback_policies
+                    .insert(session.to_owned(), *policy);
+            }
+            None => {
+                self.session_fallback_policies.remove(session);
+            }
+        }
+        Ok(())
+    }
+
+    fn session_fallback_policies(&self) -> Result<BTreeMap<String, FallbackPolicy>, StorageError> {
+        Ok(self.session_fallback_policies.clone())
     }
 }
 

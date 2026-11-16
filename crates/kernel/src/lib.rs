@@ -14,6 +14,7 @@ pub mod event_queue;
 pub mod grants;
 pub mod lkg;
 pub mod memory;
+pub mod model_penalty;
 pub mod notice;
 pub mod outbound;
 pub mod plugin;
@@ -66,6 +67,10 @@ pub use grants::{
     SystemAdminGrant, Trust,
 };
 pub use lkg::{LkgEntry, LkgInfo, LkgState, PluginLkg};
+pub use model_penalty::{
+    FallbackPlan, FallbackPolicy, MAX_FAILURE_THRESHOLD, MAX_FAILURE_WINDOW_SECS, MAX_PENALTY_SECS,
+    ModelPenalty, SkippedModel,
+};
 pub use notice::{NoticeEvent, NoticeSink};
 pub use outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, Outbounds, OutgoingKind,
@@ -104,9 +109,10 @@ pub use relay::{FileRelay, RelayError};
 pub use route_worker::RouteWorker;
 pub use storage::{
     Counts, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks,
-    MIN_KEPT, MemoryStore, ModelFallbacks, Note, NoteKey, NoteKind, Notes, Policies, PolicyEffect,
-    PrunePlan, RecordDraft, Recorded, SCHEMA_VERSION, SessionMap, SessionMaps, SqliteStore,
-    StorageError, Store, StuckUnread, Tasks, TopicStatus, Transcript, Watermarks, unread,
+    MIN_KEPT, MemoryStore, ModelFallbackPolicy, ModelFallbacks, Note, NoteKey, NoteKind, Notes,
+    Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded, SCHEMA_VERSION, SessionMap,
+    SessionMaps, SqliteStore, StorageError, Store, StuckUnread, Tasks, TopicStatus, Transcript,
+    Watermarks, unread,
 };
 pub use task::{TaskHandler, TaskOutcome};
 pub use tools::{

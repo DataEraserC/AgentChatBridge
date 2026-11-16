@@ -5,8 +5,8 @@
 //! 存在库里（schema 14），桥每轮随 `session_info` 下发给驱动，驱动负责真换模型重放。
 
 use acb_kernel::{
-    Bridge, Config, Element, MemoryStore, ModelFallbacks, Outbound, OutboundError, RecordDraft,
-    RoomId, Sender, Sent, SqliteStore,
+    Bridge, Config, Element, FallbackPolicy, MemoryStore, ModelFallbackPolicy, ModelFallbacks,
+    Outbound, OutboundError, RecordDraft, RoomId, Sender, Sent, SqliteStore,
 };
 
 const AT: i64 = 1_793_000_000_000;
@@ -348,6 +348,268 @@ fn sqlite_persists_session_chain_across_reopen() {
                 .expect("读")
                 .is_empty(),
             "清空后不再有单独配置，回落全局"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------- 失败惩罚
+//
+// 语义：某个模型在窗口内同一 class 累计到阈值，就进惩罚期；惩罚期内它从下发的链里
+// 被摘掉；到期自动回归。惩罚是内存态，策略落库。
+
+fn policy(enabled: bool, threshold: u64, window_secs: u64, penalty_secs: u64) -> FallbackPolicy {
+    FallbackPolicy {
+        enabled,
+        failure_threshold: threshold,
+        failure_window_secs: window_secs,
+        penalty_secs,
+    }
+}
+
+/// 读一遍真实墙钟：投递里没有 `now` 参数，惩罚判定用的是 `now_millis()`。
+fn wall_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("时间")
+        .as_millis() as i64
+}
+
+#[test]
+fn penalty_starts_only_after_the_threshold_within_the_window() {
+    let mut bridge = bridge();
+    bridge
+        .replace_fallback_policy(None, Some(&policy(true, 2, 60, 300)))
+        .expect("全局策略能写");
+    bridge
+        .replace_model_fallbacks(None, &["trae/b".into()])
+        .expect("链");
+    // 收一条消息 = 轮次边界：策略和链一起换进内存。
+    bridge.ingest(message()).expect("边界");
+    assert_eq!(
+        bridge.fallback_policy().failure_threshold,
+        2,
+        "策略要在轮次边界换进内存"
+    );
+
+    let now = 1_000_000i64;
+    bridge.note_model_failure(Some("main"), "trae/b", "rate_limited", now);
+    let plan = bridge.fallback_plan(Some("main"), now + 1_000);
+    assert_eq!(
+        plan.models,
+        ["trae/b".to_owned()],
+        "第一次失败不够阈值，不该罚"
+    );
+    assert!(plan.skipped.is_empty());
+
+    bridge.note_model_failure(Some("main"), "trae/b", "rate_limited", now + 2_000);
+    let plan = bridge.fallback_plan(Some("main"), now + 2_000);
+    assert!(plan.models.is_empty(), "到阈值就该从链里摘掉");
+    assert_eq!(plan.skipped.len(), 1);
+    assert_eq!(plan.skipped[0].model, "trae/b");
+    assert_eq!(plan.skipped[0].class, "rate_limited");
+    assert_eq!(plan.skipped[0].remaining_secs, 300);
+}
+
+#[test]
+fn failures_outside_the_window_do_not_add_up() {
+    let mut bridge = bridge();
+    bridge
+        .replace_fallback_policy(None, Some(&policy(true, 2, 10, 300)))
+        .expect("策略");
+    bridge
+        .replace_model_fallbacks(None, &["trae/b".into()])
+        .expect("链");
+    bridge.ingest(message()).expect("边界");
+
+    let now = 1_000_000i64;
+    bridge.note_model_failure(Some("main"), "trae/b", "overloaded", now);
+    // 20 秒后再失败一次：10 秒窗口里那次已经过期，凑不成 2 次。
+    bridge.note_model_failure(Some("main"), "trae/b", "overloaded", now + 20_000);
+    assert!(
+        bridge
+            .fallback_plan(Some("main"), now + 20_000)
+            .models
+            .contains(&"trae/b".to_owned()),
+        "窗口外的失败不能计入阈值"
+    );
+}
+
+#[test]
+fn penalised_model_disappears_from_the_delivered_chain() {
+    let mut bridge = bridge();
+    bridge
+        .replace_fallback_policy(None, Some(&policy(true, 1, 60, 300)))
+        .expect("策略");
+    bridge
+        .replace_model_fallbacks(None, &["trae/b".into(), "trae/c".into()])
+        .expect("链");
+    bridge.ingest(message()).expect("边界");
+
+    bridge.note_model_failure(Some("main"), "trae/b", "content_blocked", wall_now());
+
+    let delivery = bridge.poll_turn().expect("能开轮").expect("有活");
+    let info = delivery.session_info.expect("会话信息");
+    assert_eq!(
+        info.model_fallbacks,
+        vec!["trae/c".to_owned()],
+        "惩罚中的模型不能下发；链里其余项的顺序不变"
+    );
+    assert_eq!(
+        bridge.session_fallbacks("main"),
+        ["trae/b".to_owned(), "trae/c".to_owned()],
+        "库里的链本身不能被惩罚改写：惩罚只是这一刻的过滤"
+    );
+}
+
+#[test]
+fn penalty_expires_on_its_own_without_a_sweep() {
+    let mut bridge = bridge();
+    bridge
+        .replace_fallback_policy(None, Some(&policy(true, 1, 60, 5)))
+        .expect("策略");
+    bridge
+        .replace_model_fallbacks(None, &["trae/b".into()])
+        .expect("链");
+    bridge.ingest(message()).expect("边界");
+
+    let now = 1_000_000i64;
+    bridge.note_model_failure(Some("main"), "trae/b", "rate_limited", now);
+    assert!(
+        bridge.fallback_plan(Some("main"), now).models.is_empty(),
+        "刚进惩罚期要罚"
+    );
+    assert_eq!(
+        bridge.fallback_plan(Some("main"), now + 5_000).models,
+        ["trae/b".to_owned()],
+        "到期那一刻自动回归，不需要外部清扫"
+    );
+    assert!(
+        bridge.active_model_penalties(now + 5_000).is_empty(),
+        "过期的惩罚在查询时被顺手丢掉"
+    );
+}
+
+#[test]
+fn session_policy_overrides_the_global_one() {
+    let mut bridge = bridge();
+    // 全局：阈值高到不会罚；会话：一次就罚。
+    bridge
+        .replace_fallback_policy(None, Some(&policy(true, 99, 60, 300)))
+        .expect("全局策略");
+    bridge
+        .replace_fallback_policy(Some("main"), Some(&policy(true, 1, 60, 300)))
+        .expect("会话策略");
+    bridge
+        .replace_model_fallbacks(None, &["trae/b".into()])
+        .expect("链");
+    bridge.ingest(message()).expect("边界");
+
+    assert_eq!(
+        bridge.session_fallback_policy("main").failure_threshold,
+        1,
+        "会话自己配了就用自己那份"
+    );
+    assert_eq!(
+        bridge.fallback_policy().failure_threshold,
+        99,
+        "全局那份不能被会话策略改掉"
+    );
+
+    let now = 1_000_000i64;
+    bridge.note_model_failure(Some("main"), "trae/b", "model_unavailable", now);
+    assert!(
+        bridge.fallback_plan(Some("main"), now).models.is_empty(),
+        "会话层当天就罚"
+    );
+    assert_eq!(
+        bridge.fallback_plan(None, now).models,
+        ["trae/b".to_owned()],
+        "全局范围没有这条惩罚：会话策略只在那个会话里生效"
+    );
+}
+
+#[test]
+fn invalid_penalty_policy_is_rejected_before_it_reaches_the_store() {
+    let mut bridge = bridge();
+    let bad = [
+        policy(true, 3, 0, 300),          // 窗口 0：永远累计不到阈值
+        policy(true, 3, 60, 0),           // 惩罚时长 0：等于不罚
+        policy(true, 10_000, 60, 300),    // 阈值过大
+        policy(true, 3, 10_000_000, 300), // 窗口过大
+        policy(true, 3, 60, 10_000_000),  // 时长过大
+    ];
+    for item in bad {
+        let error = bridge
+            .replace_fallback_policy(None, Some(&item))
+            .expect_err("非法策略必须拒绝");
+        assert!(
+            error.contains("失败阈值") || error.contains("统计窗口") || error.contains("惩罚时长"),
+            "拒绝原因要能看出哪个字段不对，实际：{error}"
+        );
+    }
+    assert_eq!(
+        bridge.store().fallback_policy().expect("读"),
+        FallbackPolicy::default(),
+        "被拒的写入一个字节都不能落库"
+    );
+
+    // 负数在类型层就被 from_parts 挡掉（控制台原来传的是 i64）。
+    let error = FallbackPolicy::from_parts(true, -1, 60, 300).expect_err("负数要拒绝");
+    assert!(error.contains("负数"), "实际：{error}");
+}
+
+/// 惩罚策略落库：MemoryStore 与 SqliteStore 两个实现都要对得上。
+#[test]
+fn sqlite_persists_penalty_policy_across_reopen() {
+    let dir = std::env::temp_dir().join(format!(
+        "acb-fallback-policy-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("时间")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("建目录");
+    let path = dir.join("acb.db");
+
+    {
+        let mut store = SqliteStore::open(&path).expect("开库");
+        store
+            .replace_fallback_policy(&policy(true, 3, 120, 600))
+            .expect("写全局");
+        store
+            .replace_session_fallback_policy("main", Some(&policy(false, 1, 60, 60)))
+            .expect("写会话");
+    }
+    {
+        let store = SqliteStore::open(&path).expect("重开");
+        let global = store.fallback_policy().expect("读全局");
+        assert!(global.enabled);
+        assert_eq!(global.failure_threshold, 3);
+        assert_eq!(global.failure_window_secs, 120);
+        assert_eq!(global.penalty_secs, 600);
+        let session = store
+            .session_fallback_policy("main")
+            .expect("读会话")
+            .expect("有这个会话的策略");
+        assert!(!session.enabled, "会话自己那份原样读回");
+        assert_eq!(store.session_fallback_policies().expect("读全部").len(), 1);
+    }
+    {
+        // 会话侧写 None = 删掉覆盖，回落全局；全局那份不受影响。
+        let mut store = SqliteStore::open(&path).expect("再开");
+        store
+            .replace_session_fallback_policy("main", None)
+            .expect("删会话策略");
+        assert!(
+            store.session_fallback_policy("main").expect("读").is_none(),
+            "删掉之后没有覆盖了"
+        );
+        assert_eq!(
+            store.fallback_policy().expect("读全局").failure_threshold,
+            3
         );
     }
 

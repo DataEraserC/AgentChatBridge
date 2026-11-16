@@ -44,6 +44,7 @@ use crate::memory::{
     MemoryRepo, git_add, git_blame, git_branch, git_commit, git_diff, git_log, git_push,
     git_status, list_dir, read_file, search, write_file,
 };
+use crate::model_penalty::{FallbackPlan, FallbackPolicy, ModelPenalty};
 use crate::outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, OutboundHandle, Outbounds,
     OutgoingKind, OutgoingRecord, PlatformTag, RecordMode, Risk, Scope, Sent, TargetRole,
@@ -709,6 +710,14 @@ pub struct Bridge<S: Store> {
     /// 为什么按会话分：模型目录在 harness 侧，dsh 认识的模型 opencode 未必认识。
     /// 一条全局链会把别的 harness 的模型钉进来，会话直接起不来。
     session_model_fallbacks: std::collections::BTreeMap<String, Vec<String>>,
+    /// 模型失败惩罚策略：全局默认 + 每会话覆盖（库表 `model_fallback_policy`）。
+    ///
+    /// 和链同一个时机读进来：链决定「按什么顺序换」，策略决定「什么时候跳过某项」，
+    /// 两者不一致的话，一轮里会出现「链里有它、策略要跳过它」的半新半旧状态。
+    fallback_policy: FallbackPolicy,
+    session_fallback_policies: std::collections::BTreeMap<String, FallbackPolicy>,
+    /// 惩罚状态（内存态，重启即清）。自带小锁，控制台只读路径不必先拿 `Bridge` 的大锁。
+    model_penalty: ModelPenalty,
     /// 等待在轮次边界执行的动态插件卸载。
     pending_unloads: Vec<ProviderId>,
     /// 等待在轮次边界执行的动态插件重新加载。
@@ -992,6 +1001,9 @@ impl<S: Store> Bridge<S> {
             pending_policy_reload: false,
             model_fallbacks: Vec::new(),
             session_model_fallbacks: std::collections::BTreeMap::new(),
+            fallback_policy: FallbackPolicy::default(),
+            session_fallback_policies: std::collections::BTreeMap::new(),
+            model_penalty: ModelPenalty::new(),
             pending_unloads: Vec::new(),
             pending_reloads: Vec::new(),
             plugin_errors: HashMap::new(),
@@ -1011,6 +1023,7 @@ impl<S: Store> Bridge<S> {
         // 的这份，库里有就以库为准。审计跟着一起落。
         bridge.sync_policy_from_store();
         bridge.reload_model_fallbacks();
+        bridge.reload_fallback_policies();
         bridge
     }
 
@@ -2386,6 +2399,7 @@ impl<S: Store> Bridge<S> {
         }
         self.adopt_store_policy();
         self.reload_model_fallbacks();
+        self.reload_fallback_policies();
     }
 
     /// 把库里的策略读进来。变了就落审计、配置版本 +1；没变什么都不做。
@@ -2536,6 +2550,180 @@ impl<S: Store> Bridge<S> {
     /// 所有单独配置过的会话链（控制台一次性展示）。
     pub fn session_model_fallbacks(&self) -> &std::collections::BTreeMap<String, Vec<String>> {
         &self.session_model_fallbacks
+    }
+
+    /// 把库里的惩罚策略读进来（全局 + 每会话）。变了就把配置版本 +1。
+    ///
+    /// 读失败**不清空**：一次库抖动不该让已生效的惩罚策略瞬间变成「不罚」。
+    fn reload_fallback_policies(&mut self) {
+        let global = match self.store.fallback_policy() {
+            Ok(policy) => Some(policy),
+            Err(error) => {
+                eprintln!("[model] 读惩罚策略失败，继续用当前这一份：{error}");
+                None
+            }
+        };
+        let per_session = match self.store.session_fallback_policies() {
+            Ok(map) => Some(map),
+            Err(error) => {
+                eprintln!("[model] 读会话惩罚策略失败，继续用当前这一份：{error}");
+                None
+            }
+        };
+        let mut changed = false;
+        if let Some(policy) = global {
+            if policy != self.fallback_policy {
+                self.fallback_policy = policy;
+                changed = true;
+            }
+        }
+        if let Some(map) = per_session {
+            if map != self.session_fallback_policies {
+                self.session_fallback_policies = map;
+                changed = true;
+            }
+        }
+        if changed {
+            self.config_version += 1;
+        }
+    }
+
+    /// 全局默认惩罚策略（本轮生效的那一份）。
+    pub fn fallback_policy(&self) -> FallbackPolicy {
+        self.fallback_policy
+    }
+
+    /// 所有单独配置过惩罚策略的会话。
+    pub fn session_fallback_policies(&self) -> &std::collections::BTreeMap<String, FallbackPolicy> {
+        &self.session_fallback_policies
+    }
+
+    /// 某个会话**本轮生效**的惩罚策略：自己配了用自己那份，否则回落全局。
+    ///
+    /// 和 [`Self::session_fallbacks`] 同一个语义：内存快照、轮次边界才换。
+    /// 控制台要「保存后立刻可见」请读 [`Self::stored_fallback_policy_scope`]。
+    pub fn session_fallback_policy(&self, session: &str) -> FallbackPolicy {
+        self.session_fallback_policies
+            .get(session)
+            .copied()
+            .unwrap_or(self.fallback_policy)
+    }
+
+    /// 控制台读的策略快照：直接读库，不看内存（理由同 [`Self::stored_fallback_scope`]）。
+    ///
+    /// 返回 `(策略, 是不是继承全局)`。会话没单独配 → 回落全局并标 `true`。
+    /// 读库失败时退回内存快照，不返回错误：控制台是只读页，一次库抖动不该让整页 500。
+    pub fn stored_fallback_policy_scope(&self, session: Option<&str>) -> (FallbackPolicy, bool) {
+        match self.read_stored_fallback_policy(session) {
+            Ok(found) => found,
+            Err(error) => {
+                eprintln!("[model] 控制台读惩罚策略失败，退回本轮生效的快照：{error}");
+                match session {
+                    Some(id) => (
+                        self.session_fallback_policy(id),
+                        !self.has_session_fallback_policy(id),
+                    ),
+                    None => (self.fallback_policy, false),
+                }
+            }
+        }
+    }
+
+    fn read_stored_fallback_policy(
+        &self,
+        session: Option<&str>,
+    ) -> Result<(FallbackPolicy, bool), crate::storage::StorageError> {
+        let global = self.store.fallback_policy()?;
+        let Some(id) = session else {
+            return Ok((global, false));
+        };
+        Ok(match self.store.session_fallback_policy(id)? {
+            Some(own) => (own, false),
+            None => (global, true),
+        })
+    }
+
+    /// 某个会话在库里有没有单独配过惩罚策略（控制台区分「继承全局」与「有一份自己的」）。
+    pub fn has_session_fallback_policy(&self, session: &str) -> bool {
+        self.session_fallback_policies.contains_key(session)
+    }
+
+    /// 整份替换惩罚策略。`session = Some(id)` 改那个会话的覆盖，`None` 改全局默认；
+    /// 会话侧传 `None` 表示删掉覆盖、回落全局。
+    ///
+    /// 校验在这里做（同 [`Self::replace_model_fallbacks`]）：坏值一个字节都不落库。
+    pub fn replace_fallback_policy(
+        &mut self,
+        session: Option<&str>,
+        policy: Option<&FallbackPolicy>,
+    ) -> Result<(), String> {
+        if let Some(policy) = policy {
+            policy.validate()?;
+        }
+        match session {
+            Some(id) => {
+                // 会话级也要像链那样对一遍会话是否存在：给一个不存在的会话写策略，
+                // 控制台上会永远看不到它生效，属于配置错误。
+                if self.config.session(id).is_none() {
+                    return Err(format!("没有这个会话：{id:?}"));
+                }
+                self.store
+                    .replace_session_fallback_policy(id, policy)
+                    .map_err(|error| error.to_string())?;
+            }
+            None => {
+                // 全局策略不能删：删掉等于「所有人都不罚」，那应该显式传一份 disabled 的。
+                let Some(policy) = policy else {
+                    return Err(
+                        "全局惩罚策略不能删除；要停用请传一份 enabled = false 的策略".to_owned(),
+                    );
+                };
+                self.store
+                    .replace_fallback_policy(policy)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        self.pending_policy_reload = true;
+        Ok(())
+    }
+
+    /// 记一次模型失败（带 class 的那种）。到阈值就进入惩罚期。
+    ///
+    /// 记到哪一层：这个会话有自己的惩罚策略 → 记到会话层（它按自己的阈值罚自己）；
+    /// 否则记到全局层。查询时会话两层都看，所以全局层的惩罚不会被会话策略挡住。
+    pub fn note_model_failure(&self, session: Option<&str>, model: &str, class: &str, now: i64) {
+        let Some(model) = failure_model_id(model) else {
+            // 空 id 不当模型记：它不是链里的一项。
+            return;
+        };
+        match session {
+            Some(id) if self.session_fallback_policies.contains_key(id) => {
+                let policy = self.session_fallback_policy(id);
+                self.model_penalty
+                    .record(Some(id), &model, class, &policy, now);
+            }
+            _ => {
+                self.model_penalty
+                    .record(None, &model, class, &self.fallback_policy, now);
+            }
+        }
+    }
+
+    /// 给一轮算下发的链：在 [`Self::session_fallbacks`] 的基础上跳过仍在惩罚期的模型。
+    ///
+    /// **不改链的其余语义**：顺序、去重、会话级覆盖全局都由 [`Self::session_fallbacks`]
+    /// 决定，这里只做过滤。`session = None` = 全局范围（只看全局层惩罚）。
+    pub fn fallback_plan(&self, session: Option<&str>, now: i64) -> FallbackPlan {
+        let chain = match session {
+            Some(id) => self.session_fallbacks(id),
+            None => self.model_fallbacks.as_slice(),
+        };
+        self.model_penalty.plan(session, chain, now)
+    }
+
+    /// 惩罚状态快照（控制台/诊断用）：(会话, 模型, class, 剩余秒数)，全局层会话为 `None`。
+    pub fn active_model_penalties(&self, now: i64) -> Vec<(Option<String>, String, String, u64)> {
+        self.model_penalty.active_penalties(now)
     }
 
     /// 库里的业务对象快照（连接/会话/人格/记忆/harness）。
@@ -4858,7 +5046,12 @@ impl<S: Store> Bridge<S> {
             return;
         };
         match failure.component.as_str() {
-            "model" => self.deps.model_down(&id, &failure.class, detail, now),
+            "model" => {
+                self.deps.model_down(&id, &failure.class, detail, now);
+                // 惩罚与依赖表各记各的：依赖表是面板状态，惩罚是「这一轮链里跳过谁」。
+                // 阈值和窗口来自各自的策略，混用会让一次抖动整条链被跳过。
+                self.note_model_failure(Some(session), &id, &failure.class, now);
+            }
             "backend" => self
                 .deps
                 .harness_turn_down(&id, &failure.class, detail, now),
@@ -9333,8 +9526,12 @@ impl<S: Store> Bridge<S> {
                 name: session.name.clone(),
                 harness: session.harness.clone(),
                 model: session.model.clone(),
-                // 后备链是全局的：会话自己的 model 优先，被拒了才按这条链往下走。
-                model_fallbacks: self.session_fallbacks(&pending.session).to_vec(),
+                // 后备链：会话自己的 model 优先，被拒了才按这条链往下走。
+                // 惩罚期内的模型在这里就被摘掉——驱动不该看见「已知此刻不能用」的项，
+                // 否则它会再白试一次，把一轮的时间又拖长一遍。
+                model_fallbacks: self
+                    .fallback_plan(Some(&pending.session), now_millis())
+                    .models,
             });
         // 人格卡：桥原样下发，怎么塞进模型上下文由 harness 适配器决定。
         let persona = turn_config
@@ -12815,6 +13012,20 @@ fn truncate_error(error: &str) -> String {
     let mut out: String = flat.chars().take(LIMIT).collect();
     out.push('…');
     out
+}
+
+/// 失败上报里的模型 id 去空白；空的返回 `None`（它不是链里的一项，不该被罚）。
+///
+/// **按原样比对，不做名字归一**：链里存的就是 `provider/model` 原文，harness 上报的
+/// `failure.id` 也应该是同一个串（驱动填的就是链里那一项）。旧驱动不填 id 时内核按
+/// 会话配置补的是裸模型名或 `model:<harness>/default`——那种 id 本来就不在链里，
+/// 记了也罚不中任何一项，没有副作用，所以这里不猜、不补 provider。
+fn failure_model_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_owned())
 }
 
 fn now_millis() -> i64 {

@@ -16,16 +16,17 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AuditEntry, AuditStore, ConfigObjectsStore, Cursor, Deliveries, FEEDBACK_CAP, Feedback,
-    FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT, ModelFallbacks, Note, NoteKey, NoteKind,
-    Notes, PluginDataStore, PluginsStore, Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded,
-    SecretsStore, SessionMap, SessionMaps, SettingsStore, StorageError, StoredPluginConfig,
-    StoredPluginRecord, StoredSecret, StuckUnread, TaskRecord, TaskStatus, Tasks, TopicStatus,
-    Transcript, Watermarks,
+    FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT, ModelFallbackPolicy, ModelFallbacks, Note,
+    NoteKey, NoteKind, Notes, PluginDataStore, PluginsStore, Policies, PolicyEffect, PrunePlan,
+    RecordDraft, Recorded, SecretsStore, SessionMap, SessionMaps, SettingsStore, StorageError,
+    StoredPluginConfig, StoredPluginRecord, StoredSecret, StuckUnread, TaskRecord, TaskStatus,
+    Tasks, TopicStatus, Transcript, Watermarks,
 };
 use crate::config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 use crate::grants::{
     AccountGrant, BotAdminGrant, GrantRule, GrantsConfig, RoomGrant, SystemAdminGrant,
 };
+use crate::model_penalty::FallbackPolicy;
 use crate::plugin_registry::{
     CommandKind, DataClass, Lifecycle, LocationKind, PluginCapabilityDecl, PluginKind,
     PluginPolicyConfig, PluginStorageConfig, RegistryPlugin, ScopeKind, StorageKind,
@@ -63,6 +64,9 @@ use crate::plugin_registry::{
 /// 18（**未单独抬版本号**）：加 `session_model_fallbacks` 表——后备模型链按会话存。
 ///          模型是 harness 侧的（每个 harness 有自己的目录），一条全局链会互相打架。
 ///          全局表保留：没有单独配置的会话继续沿用它。
+/// 18（同样**未单独抬版本号**）：加 `model_fallback_policy` 表——模型失败惩罚策略，
+///          全局默认 + 每会话覆盖。同上一张表的先例：只新增一张旧程序根本不碰的表，
+///          不抬版本是安全的；等 acbl 跟着换代时再一起抬。
 ///
 /// 为什么不把 `SCHEMA_VERSION` 抬到 18：版本号是一道硬门，装着的旧
 /// acbl（acbctl）会拒绝打开「比自己新」的库。这次只新增一张旧程序
@@ -294,6 +298,21 @@ CREATE TABLE IF NOT EXISTS session_model_fallbacks (
     position   INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (session, model_ref)
+);
+
+-- 模型失败惩罚策略（**未单独抬 schema 版本号**，同 session_model_fallbacks 的先例）。
+-- 全局默认一行（session 为 NULL），每个会话可以覆盖一行。
+--
+-- 为什么只有一份策略表、惩罚本身不落库：惩罚是「此刻别用它」的短期判断，重启后
+-- 重新累计；能跨重启的是「什么时候该罚」，那才是业务对象。
+CREATE TABLE IF NOT EXISTS model_fallback_policy (
+    session              TEXT,        -- NULL = 全局默认
+    enabled              INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
+    failure_threshold    INTEGER NOT NULL DEFAULT 0 CHECK (failure_threshold >= 0),
+    failure_window_secs  INTEGER NOT NULL DEFAULT 0 CHECK (failure_window_secs >= 0),
+    penalty_secs         INTEGER NOT NULL DEFAULT 0 CHECK (penalty_secs >= 0),
+    updated_at           INTEGER NOT NULL,
+    PRIMARY KEY (session)
 );
 
 -- 业务对象（schema 15）。连接/会话/人格/记忆/harness 从配置文件搬进库。
@@ -2861,6 +2880,134 @@ impl ModelFallbacks for SqliteStore {
         }
         Ok(out)
     }
+}
+
+impl ModelFallbackPolicy for SqliteStore {
+    fn fallback_policy(&self) -> Result<FallbackPolicy, StorageError> {
+        Ok(self.load_fallback_policy(None)?.unwrap_or_default())
+    }
+
+    fn replace_fallback_policy(&mut self, policy: &FallbackPolicy) -> Result<(), StorageError> {
+        self.store_fallback_policy(None, Some(policy))
+    }
+
+    fn session_fallback_policy(
+        &self,
+        session: &str,
+    ) -> Result<Option<FallbackPolicy>, StorageError> {
+        self.load_fallback_policy(Some(session))
+    }
+
+    fn replace_session_fallback_policy(
+        &mut self,
+        session: &str,
+        policy: Option<&FallbackPolicy>,
+    ) -> Result<(), StorageError> {
+        self.store_fallback_policy(Some(session), policy)
+    }
+
+    fn session_fallback_policies(&self) -> Result<BTreeMap<String, FallbackPolicy>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session, enabled, failure_threshold, failure_window_secs, penalty_secs
+                 FROM model_fallback_policy WHERE session IS NOT NULL ORDER BY session",
+            )
+            .map_err(io_error)?;
+        let rows = stmt.query_map([], policy_columns).map_err(io_error)?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (session, policy) = row.map_err(io_error)?;
+            // `WHERE session IS NOT NULL` 已经排除了全局行；这里再兜一层，
+            // 免得以后放宽查询时把全局那份错当成某个会话的覆盖。
+            if let Some(session) = session {
+                out.insert(session, policy);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl SqliteStore {
+    /// 读一份策略。`None` = 全局默认；`Some(id)` 只读该会话**自己的**那条，不回落。
+    fn load_fallback_policy(
+        &self,
+        session: Option<&str>,
+    ) -> Result<Option<FallbackPolicy>, StorageError> {
+        // `session IS ?1` 同时覆盖 `IS NULL` 与 `IS 'x'`：SQLite 的 `IS` 对 NULL 也成立，
+        // 这样全局行与会话行共用一个查询，不用写两次 SQL。
+        let found = self
+            .conn
+            .query_row(
+                "SELECT session, enabled, failure_threshold, failure_window_secs, penalty_secs
+                 FROM model_fallback_policy WHERE session IS ?1",
+                params![session],
+                policy_columns,
+            )
+            .optional()
+            .map_err(io_error)?;
+        Ok(found.map(|(_, policy)| policy))
+    }
+
+    /// 写一份策略；`policy = None` 删除该行（会话覆盖用它回落全局）。
+    fn store_fallback_policy(
+        &mut self,
+        session: Option<&str>,
+        policy: Option<&FallbackPolicy>,
+    ) -> Result<(), StorageError> {
+        let Some(policy) = policy else {
+            self.conn
+                .execute(
+                    "DELETE FROM model_fallback_policy WHERE session IS ?1",
+                    params![session],
+                )
+                .map_err(io_error)?;
+            return Ok(());
+        };
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO model_fallback_policy
+                     (session, enabled, failure_threshold, failure_window_secs, penalty_secs, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (session) DO UPDATE SET
+                     enabled = excluded.enabled,
+                     failure_threshold = excluded.failure_threshold,
+                     failure_window_secs = excluded.failure_window_secs,
+                     penalty_secs = excluded.penalty_secs,
+                     updated_at = excluded.updated_at",
+                params![
+                    session,
+                    policy.enabled as i64,
+                    policy.failure_threshold as i64,
+                    policy.failure_window_secs as i64,
+                    policy.penalty_secs as i64,
+                    at
+                ],
+            )
+            .map_err(io_error)?;
+        Ok(())
+    }
+}
+
+/// 策略表的列读取：`session` + 四个策略字段。两个查询共用一份，免得列顺序漂移。
+///
+/// `session` 是 `Option`：全局默认那一行的这一列是 NULL，按 `String` 读会直接报
+/// 「Invalid column type Null」。
+fn policy_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Option<String>, FallbackPolicy)> {
+    let session: Option<String> = row.get(0)?;
+    Ok((
+        session,
+        FallbackPolicy {
+            enabled: row.get::<_, i64>(1)? != 0,
+            failure_threshold: row.get::<_, i64>(2)?.max(0) as u64,
+            failure_window_secs: row.get::<_, i64>(3)?.max(0) as u64,
+            penalty_secs: row.get::<_, i64>(4)?.max(0) as u64,
+        },
+    ))
 }
 
 impl ConfigObjectsStore for SqliteStore {
