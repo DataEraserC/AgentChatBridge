@@ -21,10 +21,13 @@
 | `kernel`（内置） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | `plugins/lua`（Script） | ✅ | ✅ | — | ✅ | ✅ | ✅ | — | — | — | ❌ |
 | `adapters/dynamic`（.so） | ✅ | ✅ | ✅ | ✅ | — | ✅ | — | — | — | ✅ |
-| `plugins/process-provider`（Process） | — | ✅ | — | — | — | — | — | — | — | — |
+| `plugins/process-provider`（Process） | **✅** | ✅ | **✅** | — | **✅** | **✅** | — | — | — | — |
 | `plugins/process-tools` | — | — | — | — | — | — | ✅ | — | — | — |
 | `plugins/trusted` | ✅ | — | — | — | — | — | — | — | — | — |
 | `wasm-host` | — | — | — | — | — | — | — | — | — | ❌ |
+
+加粗 = 本 ADR 落地后新补的（Process 载体原来只有 Access）。矩阵仍是**现状快照**，
+不是承诺；未实现的那几格写在下面的「已知不对等」里，带原因。
 
 三处最刺眼：
 
@@ -130,6 +133,38 @@ core 认识「有查询这回事」，不认识查询的内容。
 4. 控制台 `GET /api/rooms?connection=X` 返回 `{supported, rooms}`，缓存 N 分钟
    （N=0 不缓存，**用户裁定**），前端有列表给下拉、没有保留手输。
 5. `deploy/verify.sh` 全绿。
+
+## 落地记录（2026-11-16）
+
+分五个提交，一格一提交（便于单独回滚与 review）：
+
+| 提交 | 内容 |
+|---|---|
+| `7527879` | 第一层：房间发现打通 wire / `Outbound::list_rooms` / 内置 adapter |
+| `888ab28` | Process: wake（关键：`channel.decide` 的 `point` 不再写死） |
+| `7f56f05` | Process: clock |
+| `acb1027` | Process: route（这一格真的扩了 wire：`WireRouteDecision` / `WireRouteAction`） |
+| `62db559` | Process: turn_error（wire 早就有，缺的只是载体侧的接线） |
+
+三条实测出来的判断，写下来省下一次：
+
+1. **补扩展点大多不需要新协议**。`CoreMessage::Decide { point, options, request }`
+   的 `point` 本来就是字符串，换个值就是换扩展点。wake / clock / turn_error
+   三格协议零改动。
+2. **只有 route 需要真扩协议**，因为它的判定带**动作**（发什么、跑哪个 handler、
+   打断谁）。把它压成 `decision: String` 会把协议变成解析题，那种形状没法给
+   第三方插件用。
+3. **「不对等」的形态常常是「缺接线」而不是「缺设计」**。turn_error 的 wire
+   形状齐全，但没有任何载体实现它——只看设计文档会以为这个能力已经有了。
+
+## 已知不对等（本 ADR 未解决，带原因）
+
+| 缺口 | 为什么本轮不做 |
+|---|---|
+| `wasm-host` 零扩展点 | 需要 wasm ABI 设计（导入表、内存约定、错误传播），是一次独立的大设计，混进来会拖住房间发现 |
+| `PromptProvider` 只有内置 | 适合外部化（人格提示、上下文注入），但没有真实用例；等有人真的要从外部注入提示词再做 |
+| `Tool` / `ToolAccess` 外部化 | `Tool` 目前只能通过 `process-tools` 这个专用 crate；`ToolAccess` 只有 kernel 实现。外部插件无法参与工具授权判定 |
+| Lua 缺 Clock | Lua 载体的 `ClockProvider` 没实现，而 dynamic 与 process 都有 |
 
 ## 已知代价
 
