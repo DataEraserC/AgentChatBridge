@@ -355,15 +355,18 @@ stage_web() {
     return
   fi
   local log="$artifact_dir/console-web.log"
-  if ./deploy/verify-console-web.sh >"$log" 2>&1; then
+  ./deploy/verify-console-web.sh >"$log" 2>&1
+  local status=$?
+  # SKIP 必须先判：跳过的退出码也是 0，若先判 `if 成功` 会把「没检查」记成
+  # 「检查通过」——全新克隆没有 web/node_modules 时正是这种情况，那条 OK 是假的。
+  if grep -q "SKIP" "$log"; then
+    record web SKIP "$(tail -1 "$log")"
+    return 0
+  fi
+  if [ "$status" -eq 0 ]; then
     record web OK "产物与源码一致"
   else
-    local status=$?
-    if grep -q "SKIP" "$log"; then
-      record web SKIP "$(tail -1 "$log")"
-    else
-      record web FAIL "$(tail -3 "$log" | tr '\n' ' ')"
-    fi
+    record web FAIL "$(tail -3 "$log" | tr '\n' ' ')"
     return "$status"
   fi
 }
