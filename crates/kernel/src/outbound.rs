@@ -911,6 +911,17 @@ pub enum CallError {
     Timeout(String),
 }
 
+/// 一条可选的房间（[`Outbound::list_rooms`] 的元素）。
+///
+/// `label` 只给人看（群名/昵称），**不参与路由**；路由只认 `room`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomChoice {
+    pub room: RoomId,
+    pub label: String,
+    /// 平台侧分类提示（`group` / `private`），core 只透传不解释。
+    pub kind: String,
+}
+
 /// 出站通道。一条连接一个实现，由适配器提供。
 pub trait Outbound: Send {
     /// 发一条到 `room` 指向的连接与位置。
@@ -924,6 +935,18 @@ pub trait Outbound: Send {
     fn catalog(&self, connection: &str) -> Arc<[MethodSpec]> {
         let _ = connection;
         Arc::from(Vec::<MethodSpec>::new())
+    }
+
+    /// 这条连接上可选的房间（控制台订阅编辑用，ADR-0033）。
+    ///
+    /// 返回 `Ok(None)` = 这个适配器不提供枚举，调用方据此退化为手输。
+    /// **不能**用空列表表达「不支持」：某个号真的一个群都没有，与这个平台
+    /// 压根不实现枚举，在界面上是两种不同的空。
+    ///
+    /// 默认 `Ok(None)`，所以没实现的内置适配器与外部载体都照常工作。
+    fn list_rooms(&mut self, connection: &str) -> Result<Option<Vec<RoomChoice>>, OutboundError> {
+        let _ = connection;
+        Ok(None)
     }
 
     /// 调一个平台方法，返回平台原始结果，以及这次调用顺带产生的流水记录。
@@ -1052,6 +1075,17 @@ impl Outbound for Outbounds {
         }
     }
 
+    fn list_rooms(&mut self, connection: &str) -> Result<Option<Vec<RoomChoice>>, OutboundError> {
+        match self.handle_for(connection) {
+            Some(outbound) => outbound.list_rooms(connection),
+            // 没有这条连接就是「问错了对象」，与「这条连接不支持枚举」不同。
+            None => Err(OutboundError::Unavailable(acb_i18n::t!(
+                "kernel.outbound.no_connection_rooms",
+                connection = connection
+            ))),
+        }
+    }
+
     fn catalog(&self, connection: &str) -> Arc<[MethodSpec]> {
         match self.handle_for(connection) {
             Some(outbound) => outbound.catalog(connection),
@@ -1117,6 +1151,14 @@ impl OutboundHandle {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .send(room, elements)
+    }
+
+    /// 房间枚举。见 [`Outbound::list_rooms`]。
+    pub fn list_rooms(&self, connection: &str) -> Result<Option<Vec<RoomChoice>>, OutboundError> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .list_rooms(connection)
     }
 
     pub fn catalog(&self, connection: &str) -> Arc<[MethodSpec]> {

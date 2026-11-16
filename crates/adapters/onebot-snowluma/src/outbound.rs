@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use acb_kernel::{
     CallError, CallOutcome, Element, MethodSpec, Outbound, OutboundError, OutgoingKind,
-    OutgoingRecord, RoomId, Sent,
+    OutgoingRecord, RoomChoice, RoomId, Sent,
 };
 use serde_json::{Value, json};
 
@@ -243,6 +243,104 @@ impl Outbound for OneBotSnowLumaOutbound {
         Ok(CallOutcome { value, record })
     }
 
+    /// 房间枚举（ADR-0033）：把平台自己的两个列表方法拼成统一的房间选项。
+    ///
+    /// 为什么放在适配器里：`group.list` / `friend.list` 这两个名字是**平台语义**，
+    /// core 不该认识它们（§4 中立性）。控制台问 core，core 问这里。
+    ///
+    /// 两件事分开处理：
+    /// - 任何一个列表失败都**不整体失败**：群列表拿到了、好友列表超时，仍然返回
+    ///   群列表，把失败记进日志。宁可少一个分组，也不要让整个下拉变空。
+    /// - 结果为空返回 `Some(vec![])`（支持但确实没有），不是 `None`（不支持）。
+    fn list_rooms(&mut self, connection: &str) -> Result<Option<Vec<RoomChoice>>, OutboundError> {
+        if connection != self.connection {
+            return Err(OutboundError::Unavailable(acb_i18n::t!(
+                "adapter.onebot11.call_connection_mismatch",
+                connection = self.connection,
+                room = connection
+            )));
+        }
+
+        let mut choices = Vec::new();
+        // `group.list`：群号 + 群名。返回 `[{ group_id, group_name }]`。
+        match self.room_source("group.list") {
+            Ok(items) => {
+                for item in items {
+                    let Some(id) = item
+                        .get("group_id")
+                        .and_then(|value| value.as_i64().map(|n| n.to_string()))
+                        .or_else(|| {
+                            item.get("group_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                    else {
+                        continue;
+                    };
+                    let label = item
+                        .get("group_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    if let Ok(room) = RoomId::new(&self.connection, &format!("group/{id}")) {
+                        choices.push(RoomChoice {
+                            room,
+                            label,
+                            kind: "group".to_owned(),
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("adapter.onebot11.rooms_group_failed", error = error)
+                );
+            }
+        }
+        // `friend.list`：QQ 号 + 昵称/备注。返回 `[{ user_id, nickname, remark }]`。
+        match self.room_source("friend.list") {
+            Ok(items) => {
+                for item in items {
+                    let Some(id) = item
+                        .get("user_id")
+                        .and_then(|value| value.as_i64().map(|n| n.to_string()))
+                        .or_else(|| {
+                            item.get("user_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                    else {
+                        continue;
+                    };
+                    // 备注优先：运维认备注比认昵称准。
+                    let label = item
+                        .get("remark")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                        .or_else(|| item.get("nickname").and_then(Value::as_str))
+                        .unwrap_or("")
+                        .to_owned();
+                    if let Ok(room) = RoomId::new(&self.connection, &format!("private/{id}")) {
+                        choices.push(RoomChoice {
+                            room,
+                            label,
+                            kind: "private".to_owned(),
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("adapter.onebot11.rooms_friend_failed", error = error)
+                );
+            }
+        }
+
+        Ok(Some(choices))
+    }
+
     fn call_async(
         &mut self,
         room: &RoomId,
@@ -259,6 +357,36 @@ impl Outbound for OneBotSnowLumaOutbound {
 }
 
 impl OneBotSnowLumaOutbound {
+    /// 取一个「列表类」平台方法的结果数组。
+    ///
+    /// `group.list` / `friend.list` 都返回裸数组（OneBot 惯例）；个别实现套一层
+    /// `{ data: [...] }`，这里都认。拿不到数组就当空表——上层已经按「某一路失败
+    /// 不影响另一路」处理，这里不再抛错。
+    fn room_source(&mut self, method: &str) -> Result<Vec<Value>, CallError> {
+        let route = ROUTES
+            .iter()
+            .find(|route| route.method == method)
+            .ok_or_else(|| CallError::UnknownMethod {
+                method: method.to_owned(),
+                suggestion: None,
+            })?;
+        // 这两个列表方法不带房间参数；`group/0` 只是满足 `Route` 解析需要的占位，
+        // 不会真的发到那个群（`call_payload` 对无参方法不带 room 字段）。
+        let placeholder = RoomId::new(&self.connection, "group/0")
+            .expect("占位房间 id 固定合法：连接名已验证、路径是常量");
+        let action = action_of_route(route, &placeholder)?;
+        let payload = call_payload(route, &placeholder, &json!({}))?;
+        let response = self.dispatch(action, payload, self.upload_timeout)?;
+        Ok(match response {
+            Value::Array(items) => items,
+            Value::Object(mut map) => match map.remove("data") {
+                Some(Value::Array(items)) => items,
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        })
+    }
+
     /// 展开一条合并转发：按 `depth` / `max_nodes` 递归取，摊平成带路径的节点表。
     ///
     /// 递归放在适配器里，是因为「一次只给一层」是平台的规矩，不该让模型替我们跑循环。

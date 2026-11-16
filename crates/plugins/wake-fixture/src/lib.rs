@@ -275,6 +275,17 @@ unsafe extern "C" fn wake_invoke(handle: *mut c_void, request_json: *const c_cha
                 },
             },
         },
+        // 策略 provider 不提供房间枚举。按 ADR-0033 的约定回 Error，
+        // core 会把 Error 当作 `supported = false`——「不支持」与「支持但为空」
+        // 必须能分开，所以不能回一个空 Rooms。
+        CoreMessage::RoomsList { id, .. } => AdapterMessage::Reply {
+            id,
+            result: WireResult::Error {
+                error: WireError::NotImplemented {
+                    detail: "wake fixture does not enumerate rooms".to_owned(),
+                },
+            },
+        },
         CoreMessage::Shutdown => {
             fixture.stop.store(true, Ordering::Relaxed);
             return std::ptr::null_mut();

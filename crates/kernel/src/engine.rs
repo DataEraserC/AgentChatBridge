@@ -49,8 +49,8 @@ use crate::memory::{
 use crate::model_penalty::{FallbackPlan, FallbackPolicy, ModelPenalty};
 use crate::outbound::{
     CallError, CallOutcome, Effect, MethodSpec, Outbound, OutboundError, OutboundHandle, Outbounds,
-    OutgoingKind, OutgoingRecord, PlatformTag, RecordMode, Risk, Scope, Sent, TargetRole,
-    expand_query,
+    OutgoingKind, OutgoingRecord, PlatformTag, RecordMode, Risk, RoomChoice, Scope, Sent,
+    TargetRole, expand_query,
 };
 use crate::plugin::{
     AccessAction, AccessDecision, AccessRequest, Capability, ClockContext, DEFAULT_ACCESS_PROVIDER,
@@ -2655,6 +2655,20 @@ impl<S: Store> Bridge<S> {
                 self.session_model_fallbacks.len()
             );
         }
+    }
+
+    /// 某条连接上可选的房间（控制台订阅编辑用，ADR-0033）。
+    ///
+    /// `Ok(None)` = 该适配器不提供枚举，调用方退化为手输；`Ok(Some(vec![]))`
+    /// = 支持枚举但确实没有可选房间。**这两种空必须能分开**。
+    ///
+    /// 每次调用都会真的问适配器一次（QQ 那边就是打两次平台 API），所以调用方
+    /// 要自己决定缓存多久——core 不在这里私自缓存：缓存时长是部署策略
+    /// （用户裁定「N 可设为 0，即不缓存」），core 无法替部署猜 N。
+    pub fn room_choices(&mut self, connection: &str) -> Result<Option<Vec<RoomChoice>>, String> {
+        self.outbound
+            .list_rooms(connection)
+            .map_err(|error| error.to_string())
     }
 
     /// 当前生效的后备模型链（控制台展示用）。

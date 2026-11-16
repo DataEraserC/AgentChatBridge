@@ -184,6 +184,20 @@ pub struct WireConnection {
     pub routes: Value,
 }
 
+/// 一条可选的房间（[`WireResult::Rooms`] 的元素）。
+///
+/// `label` 只给人看（群名 / 昵称），**不参与路由**；路由只认 `room`。
+/// `kind` 是平台侧的分类提示（`group` / `private` 等），core 只透传给界面，
+/// 不解释它的取值——那属于平台语义（ADR-0020）。
+#[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
+pub struct WireRoom {
+    pub room: RoomId,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub kind: String,
+}
+
 /// 动态库 `create` 收到的实例配置。
 ///
 /// 适配器和策略 provider 共用同一个入口，用 `kind` 区分：
@@ -548,6 +562,18 @@ pub enum CoreMessage {
     ConnectionsList {
         id: u64,
     },
+    /// 让适配器枚举这条连接上可选的房间。
+    ///
+    /// `query` 原样透传、core 不解释：不同平台的过滤维度不同（QQ 分群/好友），
+    /// 由适配器自己理解。适配器用 [`WireResult::Rooms`] 回。
+    ///
+    /// 旧适配器不认识这个变体，按既有约定回 [`WireResult::Error`]；
+    /// core 把 Error 当作「不支持枚举」处理，不让桥崩。
+    RoomsList {
+        id: u64,
+        #[serde(default)]
+        query: Value,
+    },
     Call {
         id: u64,
         room: RoomId,
@@ -609,6 +635,15 @@ pub enum WireResult {
     Connections {
         #[serde(default)]
         connections: Vec<WireConnection>,
+    },
+    /// 房间枚举的回执（对 [`CoreMessage::RoomsList`]）。
+    ///
+    /// `supported = false` 表示这个适配器不提供枚举；这与「支持但一个房间都没有」
+    /// 是两件事，不能合并——否则控制台会把「这个平台不支持」显示成「你没有群」。
+    Rooms {
+        supported: bool,
+        #[serde(default)]
+        rooms: Vec<WireRoom>,
     },
     Error {
         error: WireError,

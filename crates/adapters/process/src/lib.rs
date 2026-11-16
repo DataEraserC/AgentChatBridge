@@ -45,7 +45,7 @@ use acb_kernel::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
     AdapterInstance, AdapterManifest, AdapterStatus, CallError, CallOutcome, Connection, Element,
     EventQueue, MethodSpec, Outbound, OutboundError, OutgoingRecord, PluginEffect, PluginMetadata,
-    ProviderConnections, RoomId, Sent,
+    ProviderConnections, RoomChoice, RoomId, Sent,
 };
 
 /// 等子进程回一条动作结果的上限。
@@ -984,7 +984,74 @@ impl ProcessOutbound {
     }
 }
 
+/// `ListRooms` 回执 → `Outbound::list_rooms` 的结果（ADR-0033）。
+///
+/// 抽成纯函数是为了能直接测三个分支——走真进程测这几行要靠时序，
+/// 测出来的更多是进程行为而不是这段判定。
+fn rooms_outcome(result: WireResult) -> Result<Option<Vec<RoomChoice>>, OutboundError> {
+    match result {
+        // `supported = false` 是「这个适配器不实现枚举」。
+        WireResult::Rooms {
+            supported: false, ..
+        } => Ok(None),
+        // `supported = true` 时**空数组也要返回 Some(vec![])**：那是「支持，但确实
+        // 一个房间都没有」，与上面「不支持」在界面上是两种不同的空。
+        WireResult::Rooms {
+            supported: true,
+            rooms,
+        } => Ok(Some(
+            rooms
+                .into_iter()
+                .map(|room| RoomChoice {
+                    room: room.room,
+                    label: room.label,
+                    kind: room.kind,
+                })
+                .collect(),
+        )),
+        // 旧适配器不认识 RoomsList：回 Error 是它的**正确**行为，当作不支持。
+        // 不能判失败——一个没实现枚举的适配器不是坏适配器。
+        WireResult::Error { .. } => Ok(None),
+        _ => Err(OutboundError::Unavailable(acb_i18n::t!(
+            "adapter.process.not_rooms_result"
+        ))),
+    }
+}
+
 impl Outbound for ProcessOutbound {
+    /// 房间枚举：把 `CoreMessage::RoomsList` 转给子进程，按回执解析（ADR-0033）。
+    ///
+    /// 三种结果要分开：
+    /// - 子进程回 `Rooms { supported: false }` → `Ok(None)`（不支持枚举）
+    /// - 子进程回 `Rooms { supported: true, rooms }` → `Ok(Some(rooms))`（**空数组也算**）
+    /// - 子进程回 `Error`（旧适配器不认识这个变体） → `Ok(None)`，不判失败：
+    ///   一个没实现枚举的适配器不是坏适配器。
+    ///
+    /// 只有「通道本身不可用」才返回 Err。
+    fn list_rooms(&mut self, connection: &str) -> Result<Option<Vec<RoomChoice>>, OutboundError> {
+        if connection != self.connection {
+            return Err(OutboundError::Unavailable(acb_i18n::t!(
+                "adapter.process.connection_mismatch",
+                connection = self.connection,
+                room = connection
+            )));
+        }
+
+        self.seq += 1;
+        let id = self.seq;
+        let result = self
+            .request(
+                CoreMessage::RoomsList {
+                    id,
+                    query: serde_json::Value::Null,
+                },
+                id,
+            )
+            .map_err(OutboundError::Unavailable)?;
+
+        rooms_outcome(result)
+    }
+
     fn send(&mut self, room: &RoomId, elements: &[Element]) -> Result<Sent, OutboundError> {
         if room.connection != self.connection {
             return Err(OutboundError::Unavailable(acb_i18n::t!(
@@ -1073,6 +1140,78 @@ impl Outbound for ProcessOutbound {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0033 的三条判定：`supported` 是显式的，「不支持」与「支持但为空」
+    /// 必须能分开；旧适配器回 Error 当作不支持，不判失败。
+    #[test]
+    fn rooms_outcome_separates_unsupported_from_empty() {
+        // 不支持 → None
+        assert_eq!(
+            rooms_outcome(WireResult::Rooms {
+                supported: false,
+                rooms: Vec::new(),
+            })
+            .expect("不支持不是错误"),
+            None
+        );
+
+        // 支持但没有房间 → Some(空)。这一条与上一条的**区别就是这个测试的意义**。
+        assert_eq!(
+            rooms_outcome(WireResult::Rooms {
+                supported: true,
+                rooms: Vec::new(),
+            })
+            .expect("支持但为空不是错误"),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn rooms_outcome_maps_wire_room_fields_verbatim() {
+        let room = RoomId::new("conn", "group/42").expect("合法房间");
+        let got = rooms_outcome(WireResult::Rooms {
+            supported: true,
+            rooms: vec![acb_adapter_api::WireRoom {
+                room: room.clone(),
+                label: "群名".to_owned(),
+                kind: "group".to_owned(),
+            }],
+        })
+        .expect("正常结果")
+        .expect("Some");
+
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].room, room);
+        assert_eq!(got[0].label, "群名");
+        assert_eq!(got[0].kind, "group");
+    }
+
+    #[test]
+    fn old_adapter_error_means_unsupported() {
+        // 旧适配器收到不认识的 RoomsList 会回 Error——这是它的正确行为。
+        assert_eq!(
+            rooms_outcome(WireResult::Error {
+                error: acb_adapter_api::WireError::NotImplemented {
+                    detail: "unknown message".to_owned(),
+                },
+            })
+            .expect("Error 不该让桥失败"),
+            None
+        );
+    }
+
+    #[test]
+    fn unexpected_reply_kind_is_an_error() {
+        // 回了完全不相干的东西（例如 Sent）：这是真的协议错，要报错。
+        assert!(
+            rooms_outcome(WireResult::Sent {
+                platform_id: "x".to_owned(),
+                at: 0,
+            })
+            .is_err(),
+            "非预期回执应当是错误"
+        );
+    }
 
     #[test]
     fn write_timeout_marks_connection_failed_and_supervisor_kills_child() {

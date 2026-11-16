@@ -81,6 +81,31 @@ fn main() -> std::io::Result<()> {
                     },
                 )?;
             }
+            // 房间枚举：这个 fixture 真的实现它（ADR-0033 要求 process 载体能提供
+            // 房间列表，不能只回 Error）。两个房间够验协议形状：一个群、一个私聊。
+            CoreMessage::RoomsList { id, .. } => {
+                write_message(
+                    &mut stdout,
+                    &AdapterMessage::Reply {
+                        id,
+                        result: WireResult::Rooms {
+                            supported: true,
+                            rooms: vec![
+                                acb_adapter_api::WireRoom {
+                                    room: RoomId::new("fx", "group/1001").expect("房间 id 合法"),
+                                    label: "测试群".to_owned(),
+                                    kind: "group".to_owned(),
+                                },
+                                acb_adapter_api::WireRoom {
+                                    room: RoomId::new("fx", "private/2002").expect("房间 id 合法"),
+                                    label: "测试好友".to_owned(),
+                                    kind: "private".to_owned(),
+                                },
+                            ],
+                        },
+                    },
+                )?;
+            }
             CoreMessage::Decide { id, .. } => {
                 write_message(
                     &mut stdout,

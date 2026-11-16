@@ -34,6 +34,19 @@ fn connection(command: Option<&str>) -> Connection {
     }
 }
 
+/// 带额外参数的连接（`command` 传数组形式）。
+fn connection_args(program: Option<&str>, args: &[&str]) -> Connection {
+    let mut base = connection(program);
+    if let Some(command) = program {
+        base.options = json!({
+            "command": std::iter::once(command)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>(),
+        });
+    }
+    base
+}
+
 #[test]
 fn process_adapter_speaks_the_wire_protocol() {
     let (events, receiver) = EventQueue::channel();
@@ -217,4 +230,74 @@ fn missing_command_is_a_startup_error() {
         }
         other => panic!("应当是启动失败，收到 {other:?}"),
     }
+}
+
+/// 房间枚举：`Outbound::list_rooms` → `CoreMessage::RoomsList` → 子进程回
+/// `WireResult::Rooms`（ADR-0033）。
+///
+/// 这条同时钉住三件事：真的走 wire、`supported` 与空数组是两回事、
+/// `label`/`kind` 原样透传。
+#[test]
+fn process_adapter_enumerates_rooms_over_the_wire() {
+    let (events, _receiver) = EventQueue::channel();
+    let mut plugins = PluginManager::with_native_builtins();
+    plugins
+        .register_adapter(Arc::new(ProcessAdapterFactory))
+        .expect("能注册 process 适配器");
+
+    let instance = plugins
+        .create_adapter(
+            &connection(Some(env!("CARGO_BIN_EXE_acb-adapter-process-fixture"))),
+            events,
+        )
+        .expect("能启动子进程");
+
+    let AdapterInstance {
+        mut outbound,
+        launch,
+        ..
+    } = instance;
+    let stop = Arc::new(AtomicBool::new(false));
+    let launch_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        launch(AdapterHost {
+            events: EventQueue::channel().0,
+            shutdown: launch_stop,
+            status: acb_kernel::AdapterStatus::new(
+                "fixture",
+                acb_kernel::DependencyRegistry::new(),
+            ),
+            state_dir: std::env::temp_dir(),
+            connections: None,
+        })
+    });
+    thread::sleep(Duration::from_millis(120));
+
+    let rooms = outbound
+        .list_rooms("fixture")
+        .expect("房间枚举不该失败")
+        .expect("fixture 声明了 supported=true，所以是 Some");
+
+    assert_eq!(rooms.len(), 2, "fixture 回了两个房间：{rooms:?}");
+    let group = rooms
+        .iter()
+        .find(|room| room.kind == "group")
+        .expect("有群那一条");
+    // fixture 里房间的连接名是固定的 "fx"（它不读外层连接名）。
+    assert_eq!(group.room.connection, "fx");
+    assert_eq!(group.room.path, vec!["group".to_owned(), "1001".to_owned()]);
+    assert_eq!(group.label, "测试群");
+
+    let private = rooms
+        .iter()
+        .find(|room| room.kind == "private")
+        .expect("有私聊那一条");
+    assert_eq!(
+        private.room.path,
+        vec!["private".to_owned(), "2002".to_owned()]
+    );
+    assert_eq!(private.label, "测试好友");
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = handle.join();
 }

@@ -231,6 +231,15 @@ unsafe extern "C" fn fixture_invoke(
                 connections: Vec::new(),
             },
         },
+        // 见 ADR-0033：不实现房间枚举的适配器回 Error，core 记为 supported=false。
+        CoreMessage::RoomsList { id, .. } => AdapterMessage::Reply {
+            id,
+            result: WireResult::Error {
+                error: WireError::NotImplemented {
+                    detail: "fixture does not enumerate rooms".to_owned(),
+                },
+            },
+        },
         CoreMessage::Shutdown => {
             fixture.stop.store(true, Ordering::Relaxed);
             if let Some(log) = fixture.host.log {
