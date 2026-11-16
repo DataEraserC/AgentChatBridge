@@ -7,10 +7,10 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-
 use acb_kernel::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
     AdapterInstance, AdapterManifest, Connection, EventQueue, PluginEffect, PluginMetadata,
+    ProviderConnections,
 };
 
 use crate::{LinkSlot, OneBotSnowLumaOutbound, supervise};
@@ -89,6 +89,88 @@ fn ensure_connections_db(path: &std::path::Path) {
     let _ = connection.execute(acb_kernel::ADAPTER_CONNECTIONS_SCHEMA_SQL, []);
 }
 
+/// 把提供者库里的连接行读成 wire 注册载荷（重启回放，B期协议 ADR-031）。
+///
+/// 只做形态转换，不做语义校验——core 侧注册表有自己的校验与 config 赢规则。
+/// `token_secret` 引用名原样透传（core 在应用时查 secrets 解析）；库打不开
+/// /表不存在/行不合法的行跳过，返回空 = 注册表保持启动注入的基线不动。
+fn read_provider_connections(db_path: &std::path::Path) -> Vec<acb_adapter_api::WireConnection> {
+    let Ok(connection) =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return Vec::new();
+    };
+    let Ok(mut statement) = connection.prepare(
+        "SELECT id, platform, kind, transport, url, account, token_secret,
+                admin_json, routes_json, options_json
+         FROM connections ORDER BY created_at, id",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.flatten()
+        .filter_map(
+            |(
+                id,
+                platform,
+                kind,
+                transport,
+                url,
+                account,
+                token_secret,
+                admin_json,
+                routes_json,
+                options_json,
+            )| {
+                if id.trim().is_empty()
+                    || platform.trim().is_empty()
+                    || kind.trim().is_empty()
+                    || account.trim().is_empty()
+                {
+                    return None;
+                }
+                let parse_or = |text: &str, default: serde_json::Value| {
+                    serde_json::from_str::<serde_json::Value>(text).unwrap_or(default)
+                };
+                Some(acb_adapter_api::WireConnection {
+                    id,
+                    platform,
+                    kind,
+                    transport,
+                    url: url.filter(|url| !url.trim().is_empty()),
+                    token: None,
+                    account,
+                    admin_qqs: parse_or(&admin_json, serde_json::json!([]))
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|value| value.as_str().map(str::to_owned))
+                        .collect(),
+                    options: parse_or(&options_json, serde_json::json!({})),
+                    token_secret: token_secret.filter(|name| !name.trim().is_empty()),
+                    routes: parse_or(&routes_json, serde_json::json!([])),
+                })
+            },
+        )
+        .collect()
+}
+
 /// 异步路径的上传时限：同步路径仍用 45 秒，后台任务给大文件留足时间。
 fn async_upload_timeout(connection: &Connection) -> Result<Duration, AdapterError> {
     match connection.options.get("async_upload_timeout_ms") {
@@ -110,11 +192,35 @@ fn async_upload_timeout(connection: &Connection) -> Result<Duration, AdapterErro
 #[derive(Debug, Default)]
 pub struct OneBotSnowLumaAdapterFactory;
 
+/// 连接 options 的形状声明（JSON Schema 子集，与插件 config_schema 同一渲染器）。
+/// keys 必须与 factory/link 里实际读取的一致。static 里不能调 json!（非 const），
+/// manifest() 运行时注入。
+fn onebot11_options_schema() -> serde_json::Value {
+    serde_json::json!({
+        // x-account：连接表单「账号」字段的适配器自定义提示。
+        "x-account": {"placeholder": "机器人 QQ 号"},
+        "type": "object",
+        "properties": {
+            "http_listen": {
+                "type": "string",
+                "description": "HTTP 上报监听地址（如 127.0.0.1:53000）；配置了就必须给这条连接配 token"
+            },
+            "async_upload_timeout_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 30000,
+                "description": "大文件上传走后台任务时的时限（毫秒）"
+            }
+        }
+    })
+}
+
 impl AdapterFactory for OneBotSnowLumaAdapterFactory {
     fn manifest(&self) -> AdapterManifest {
-        MANIFEST.clone()
+        let mut manifest = MANIFEST.clone();
+        manifest.metadata.options_schema = Some(onebot11_options_schema());
+        manifest
     }
-
 
     fn create(
         &self,
@@ -172,14 +278,32 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
         let connection = connection.clone();
         let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
             // provider 侧连接库（标准 schema，core 定义）：确保存在，运维在此
-            // 维护连接行；core 配置构建时注入。
-            ensure_connections_db(
-                &host
-                    .state_dir
-                    .parent()
-                    .expect("state_dir 有父目录")
-                    .join("onebot11"),
-            );
+            // 维护连接行。ensure 要拿库文件路径——注入扫描的是
+            // `state/adapters/<目录>/connections.db`，传目录会让 SQLite
+            // 打不开目录（存在时）或建出一个同名无后缀文件（不存在时），
+            // 两种情况 core 都看不到。
+            let connections_db = host
+                .state_dir
+                .parent()
+                .expect("state_dir 有父目录")
+                .join("onebot11")
+                .join("connections.db");
+            ensure_connections_db(&connections_db);
+            // 重启回放（B期）：把库里的连接集合推给 core 的运行时注册表。
+            // 空库推空集合 = 「本提供者现在没有连接」，与注入基线一致。
+            if let Some(sender) = host.connections.as_ref() {
+                let connections = read_provider_connections(&connections_db);
+                if let Err(error) = sender.send(ProviderConnections {
+                    provider: "onebot11".to_owned(),
+                    connections,
+                    removed: Vec::new(),
+                }) {
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("adapter.onebot11.connections_forward_failed", error = error)
+                    );
+                }
+            }
             supervise(slot, connection, host.shutdown, host.events, host.status);
         });
 
@@ -256,4 +380,3 @@ mod tests {
         assert!(MANIFEST.transports.iter().any(|item| item == "ws-client"));
     }
 }
-

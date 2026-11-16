@@ -627,6 +627,9 @@ pub struct ToolAccessContext<'a> {
     pub is_admin: bool,
     /// `true` = 轮次在跑；`false` = 轮次结束后的宽限窗口。
     pub live: bool,
+    /// 本次调用要求的权限字符（provider 声明或派生）。空 = 无细粒度身份，
+    /// 否决插件按需消费；core 只携带不解释。
+    pub required_permissions: &'a [String],
 }
 
 /// 插件只能否决，不能放行。`Allow` 只是「我不拦」，core 的判定仍然优先。
@@ -793,6 +796,11 @@ pub struct DeliveryRequest<'a> {
     /// 触发消息之前的几条记录（可能已经确认过），按编号从旧到新。
     /// 默认计划挑最后 `context_before` 条当上下文。
     pub context: &'a [Record],
+    /// 已读编号快照（水位以下 + 乱序 ack），只读数据。composer 据此实现
+    /// 自己的排除策略（如内置的 \`exclude_read\`）；core 不解释、不过滤。
+    pub read_ids: &'a [u64],
+    /// 是否排除上下文里的已读记录（订阅级投递窗口字段，core 原样透传）。
+    pub exclude_read: bool,
     /// 触发这一轮的那条记录；时钟/攒批唤醒为空。
     pub trigger_id: Option<u64>,
     /// 触发消息之前带几条正文。
@@ -827,7 +835,25 @@ pub trait DeliveryComposer: Send + Sync {
 pub struct DefaultDeliveryComposer;
 
 impl DeliveryComposer for DefaultDeliveryComposer {
-    fn compose(&self, _options: &DeliveryPolicy, request: &DeliveryRequest<'_>) -> DeliveryPlan {
+    fn compose(&self, options: &DeliveryPolicy, request: &DeliveryRequest<'_>) -> DeliveryPlan {
+        // 选项 exclude_read（订阅级投递窗口字段，默认 false）：上下文窗口
+        // 排除已读（read_ids 里的）记录——避免把 agent 已经看过的消息再投
+        // 一遍。未读正文不受影响。这是内置 composer 自己的策略；外置
+        // composer 对 read_ids 自行解释。
+        if request.exclude_read && !request.read_ids.is_empty() {
+            let read: std::collections::BTreeSet<u64> = request.read_ids.iter().copied().collect();
+            let filtered_context: Vec<Record> = request
+                .context
+                .iter()
+                .filter(|record| !read.contains(&record.id))
+                .cloned()
+                .collect();
+            let filtered = DeliveryRequest {
+                context: &filtered_context,
+                ..*request
+            };
+            return default_delivery_plan(&filtered);
+        }
         default_delivery_plan(request)
     }
 }
@@ -2982,6 +3008,7 @@ impl PluginManager {
                 let live = context.live;
                 let subject = context.subject;
                 let place = context.place;
+                let owned_permissions = context.required_permissions.to_vec();
                 let provider = Arc::clone(&provider);
                 match self.call_timed(id, "tool_access.check", timeout, move || {
                     let context = ToolAccessContext {
@@ -2995,6 +3022,7 @@ impl PluginManager {
                         origin_sender: owned_origin.as_deref(),
                         is_admin,
                         live,
+                        required_permissions: &owned_permissions,
                     };
                     provider.check(&context)
                 }) {
@@ -4345,6 +4373,7 @@ mod tests {
             origin_sender: None,
             is_admin: false,
             live: true,
+            required_permissions: &[],
         };
         assert!(
             manager.check_tool_access(&context).is_some(),

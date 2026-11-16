@@ -13,12 +13,13 @@ use crate::outbound::ReplyState;
 #[derive(Debug, thiserror::Error)]
 pub enum EventError {
     #[error("missing field: {0}")]
-    Missing(&'static str),
+    Missing(String),
     #[error("bad room: {0}")]
     BadRoom(String),
 }
 
 /// 解析结果：要么一条记录，要么「这类型不产生记录」。
+#[derive(Debug)]
 pub enum Parsed {
     Record(RecordDraft),
     /// 心跳/确认类：直接丢弃。
@@ -50,9 +51,27 @@ pub fn parse(
             at,
             "private",
             "user_openid",
-            false,
+            // 私聊消息天然「冲我来」：唤醒策略的 at_mention 才能在单聊里工作。
+            true,
         ),
-        // 其余类型（FRIEND_ADD、interaction、audit…）记 suppressed 事件流水。
+        // FRIEND_VERIFY：有人申请加好友。记一条**非 suppressed** 事件——
+        // 审批动作（官方接口形态待文档核实）未实现前，至少让流水与会话
+        // 看得见申请的存在。其余类型（interaction、audit…）仍记 suppressed。
+        "FRIEND_VERIFY" => {
+            let openid = text_of(payload.get("openid"))
+                .or_else(|| {
+                    payload
+                        .get("author")
+                        .and_then(|value| text_of(value.get("openid")))
+                })
+                .unwrap_or_default();
+            let summary = format!("好友验证申请（openid={openid}）——审批接口待接入");
+            let mut record = notice(connection, event_type, payload, at)?;
+            record.suppressed = false;
+            record.elements = vec![Element::Text { text: summary }];
+            Ok(Parsed::Record(record))
+        }
+        // 其余类型（interaction、audit…）记 suppressed 事件流水。
         _ => Ok(Parsed::Record(notice(connection, event_type, payload, at)?)),
     }
 }
@@ -66,20 +85,53 @@ fn message(
     openid_field: &'static str,
     at_self: bool,
 ) -> Result<Parsed, EventError> {
-    let openid = text_of(payload.get(openid_field)).ok_or(EventError::Missing(openid_field))?;
-    if openid.is_empty() {
-        return Err(EventError::Missing(openid_field));
-    }
+    // OpenID 的位置文档内外的形态都有：GROUP 在顶层（group_openid），C2C 在
+    // author.user_openid / author.id。三种都试，读不到就把真实键名留在错误里
+    // （2026-11-15 实测：C2C 载荷顶层没有 user_openid，一直 Missing 被丢弃）。
+    let author = payload.get("author");
+    let openid = text_of(payload.get(openid_field))
+        .or_else(|| author.and_then(|value| text_of(value.get(openid_field))))
+        .or_else(|| author.and_then(|value| text_of(value.get("id"))))
+        .filter(|openid| !openid.is_empty())
+        .ok_or_else(|| {
+            let mut keys: Vec<String> = payload
+                .as_object()
+                .map(|map| map.keys().cloned().collect())
+                .unwrap_or_default();
+            if let Some(map) = author.and_then(Value::as_object) {
+                keys.extend(map.keys().map(|key| format!("author.{key}")));
+            }
+            EventError::Missing(format!("{openid_field} (payload keys: {keys:?})"))
+        })?;
     let room = RoomId::new(connection, format!("{scope}/{openid}"))
         .map_err(|error| EventError::BadRoom(error.to_string()))?;
     let content = text_of(payload.get("content")).unwrap_or_default();
+    // attachments：用户随消息发的图片/视频等。平台的下载 URL 需要鉴权头，
+    // agent/harness 拿不到——本轮只把附件标记进正文让 agent 知道有媒体，
+    // 完整的下载落地设计（走 file_relay 之类的通道）留后续轮。
+    let mut attachment_notes = String::new();
+    if let Some(list) = payload.get("attachments").and_then(Value::as_array) {
+        for item in list {
+            let kind = text_of(item.get("content_type")).unwrap_or_default();
+            let filename = text_of(item.get("filename")).unwrap_or_default();
+            let label = if filename.is_empty() {
+                format!("[{kind} 附件]")
+            } else {
+                format!("[{kind} 附件：{filename}]")
+            };
+            attachment_notes.push_str(&format!("\n{label}"));
+        }
+    }
     let msg_id = text_of(payload.get("id")).unwrap_or_default();
     // 被动回复的窗口按 msg_id 计：收到的每条消息都记下，出站才有的回复。
     if !msg_id.is_empty() {
         reply_state.observe(&room, &msg_id);
     }
-    let sender_id = text_of(payload.get("author"))
+    // author 是对象时 id 即发送者 openid；是字符串时直接当发送者。
+    let sender_id = author
+        .and_then(|value| text_of(value.get("id")))
         .unwrap_or_else(|| openid.clone());
+    let content_with_notes = format!("{content}{attachment_notes}");
     let draft = RecordDraft::message(
         room.clone(),
         Sender {
@@ -88,7 +140,9 @@ fn message(
             role: None,
         },
         at,
-        vec![Element::Text { text: content }],
+        vec![Element::Text {
+            text: content_with_notes,
+        }],
         at_self,
     )
     .with_room_scope(if scope == "private" {
@@ -144,5 +198,111 @@ fn text_of(value: Option<&Value>) -> Option<String> {
             .and_then(|inner| inner.as_str())
             .map(str::to_owned),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parse_c2c(payload: Value) -> Result<Parsed, EventError> {
+        let reply = ReplyState::new();
+        parse("qqbot-official", "C2C_MESSAGE_CREATE", &payload, &reply, 1)
+    }
+
+    fn parse_group(payload: Value) -> Result<Parsed, EventError> {
+        let reply = ReplyState::new();
+        parse(
+            "qqbot-official",
+            "GROUP_AT_MESSAGE_CREATE",
+            &payload,
+            &reply,
+            1,
+        )
+    }
+
+    #[test]
+    fn c2c_openid_nested_in_author_is_found() {
+        // 线上实测形态：顶层没有 user_openid，它在 author 里。
+        let parsed = parse_c2c(json!({
+            "author": {"id": "author-id", "user_openid": "OPENID_1"},
+            "content": "在吗",
+            "id": "msg-1"
+        }))
+        .expect("author 形态应能解析");
+        let Parsed::Record(draft) = parsed else {
+            panic!("应产生记录");
+        };
+        assert_eq!(
+            draft.room.to_string(),
+            "qqbot-official:private/OPENID_1",
+            "房间串拿去配订阅"
+        );
+        assert_eq!(draft.sender.id, "author-id");
+        assert!(draft.at_self, "私聊消息天然冲我来（at_mention 唤醒依赖它）");
+        assert_eq!(draft.platform_id.as_deref(), Some("msg-1"));
+    }
+
+    #[test]
+    fn c2c_openid_top_level_still_works() {
+        let parsed = parse_c2c(json!({
+            "user_openid": "OPENID_2",
+            "content": "hi",
+            "id": "msg-2"
+        }))
+        .expect("顶层形态应能解析");
+        let Parsed::Record(draft) = parsed else {
+            panic!("应产生记录");
+        };
+        assert_eq!(draft.room.to_string(), "qqbot-official:private/OPENID_2");
+    }
+
+    #[test]
+    fn group_openid_stays_top_level() {
+        let parsed = parse_group(json!({
+            "group_openid": "GROUP_OPENID",
+            "author": {"id": "member-openid"},
+            "content": "@bot 你好",
+            "id": "msg-3"
+        }))
+        .expect("群形态应能解析");
+        let Parsed::Record(draft) = parsed else {
+            panic!("应产生记录");
+        };
+        assert_eq!(draft.room.to_string(), "qqbot-official:group/GROUP_OPENID");
+        assert_eq!(draft.sender.id, "member-openid");
+        assert!(draft.at_self, "群消息标 at_self");
+    }
+
+    #[test]
+    fn c2c_attachments_become_visible_markers() {
+        let parsed = parse_c2c(json!({
+            "author": {"id": "author-id", "user_openid": "OPENID_9"},
+            "content": "看看这个",
+            "id": "msg-9",
+            "attachments": [
+                {"content_type": "video", "filename": "demo.mp4"},
+                {"content_type": "image"}
+            ]
+        }))
+        .expect("带附件应能解析");
+        let Parsed::Record(draft) = parsed else {
+            panic!("应产生记录");
+        };
+        let text = acb_proto::element::flatten_text(&draft.elements);
+        assert!(text.contains("看看这个"), "{text}");
+        assert!(text.contains("[video 附件：demo.mp4]"), "{text}");
+        assert!(text.contains("[image 附件]"), "{text}");
+    }
+
+    #[test]
+    fn missing_openid_error_lists_payload_keys() {
+        let error = parse_c2c(json!({"content": "没有 openid 的怪载荷"}))
+            .expect_err("读不到 openid 必须报错");
+        let message = error.to_string();
+        assert!(message.contains("user_openid"), "{message}");
+        assert!(message.contains("payload keys"), "{message}");
+        assert!(message.contains("content"), "{message}");
     }
 }

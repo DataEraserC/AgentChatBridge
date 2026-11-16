@@ -251,6 +251,7 @@
 <header>
   <div class="brand">
     <h1 data-i18n="console.ui.page.title">acb-bridge console</h1>
+    <span id="build-version" class="pill" style="display:none" title="运行中的构建版本"></span>
     <button type="button" class="info" data-tip-key="console.ui.header.tip" data-i18n-aria="console.ui.info.more" aria-label="More information">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>
     </button>
@@ -703,6 +704,7 @@ async function loadStatus() {
     ]);
     statusCache = s;
     renderStatus(s);
+    applyBuildVersion(s.version);
     renderRecentFailures(s.recent_failures || []);
     if (note) {
       note.innerHTML = s.staged_config
@@ -1107,6 +1109,49 @@ function pluginFieldValue(field) {
   return el.value;
 }
 
+// JSON Schema 模式（config_schema）的表单部件：与 pluginFieldInput 同形状，
+// 约束词表取自 property（type/enum/minimum/maximum/default/description）。
+function schemaFieldInput(key, property, value) {
+  const field = {
+    key,
+    type: property.type || "string",
+    enum: property.enum,
+    min: property.minimum,
+    max: property.maximum,
+  };
+  const fallback = property.default === undefined ? undefined : property.default;
+  return pluginFieldInput(field, value === undefined ? fallback : value);
+}
+
+function schemaRequired(schema) {
+  return new Set(schema?.required || []);
+}
+
+function schemaFieldValue(key, property) {
+  const field = {
+    key,
+    type: property.type || "string",
+    enum: property.enum,
+  };
+  return pluginFieldValue(field);
+}
+
+// 密钥选择器：从密钥库里选一个具名密钥绑到插件的 x-secret-ref 字段。
+// 值本体永远只存在密钥库里，表单只见名字与绑定状态。
+async function bindPluginSecret(id, name) {
+  const select = document.getElementById("psel-" + name);
+  const secretId = parseInt(select.value, 10);
+  if (!secretId) { alert("先在密钥库里建一个具名密钥（config [secrets] 声明或 acbctl 运维流程）"); return; }
+  try {
+    await api("/api/plugins/" + encodeURIComponent(id) + "/secret-bind", {
+      method: "POST", body: JSON.stringify({ name, secret_id: secretId }),
+    });
+    openPluginConfig(id);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
 async function openPluginConfig(id) {
   let view;
   try {
@@ -1116,17 +1161,48 @@ async function openPluginConfig(id) {
     return;
   }
   const manifest = view.manifest || {};
-  const fields = (manifest.config || []).filter((field) => !field.secret);
-  const secrets = (manifest.config || []).filter((field) => field.secret);
   const bound = new Set((view.secretRefs || []).map((ref) => ref.name));
-  const configRows = fields.map((field) => `
+  // 双轨：manifest 声明了 config_schema 就按 JSON Schema 渲染（C期），
+  // 否则走旧的字段列表。
+  const schema = manifest.config_schema && manifest.config_schema.properties
+    ? manifest.config_schema : null;
+  const schemaProps = schema ? Object.entries(schema.properties) : null;
+  const fields = schema ? [] : (manifest.config || []).filter((field) => !field.secret);
+  const legacySecrets = schema ? [] : (manifest.config || []).filter((field) => field.secret);
+  const secretKeys = schema
+    ? schemaProps.filter(([, property]) => property["x-secret-ref"]).map(([key]) => key)
+    : legacySecrets.map((field) => field.key);
+  let secretsIndex = [];
+  if (secretKeys.length) {
+    try {
+      const reply = await api("/api/secrets");
+      secretsIndex = reply.secrets || [];
+    } catch (e) { /* 列表拿不到时选择器退化成只有绑定状态 */ }
+  }
+  const configRows = schema
+    ? schemaProps
+        .filter(([, property]) => !property["x-secret-ref"])
+        .map(([key, property]) => `
+    <div class="form-row"><label>${esc(property.title || key)}</label>${schemaFieldInput(key, property, view.config?.[key])}
+      <span class="hint">${esc(property.description || "")}${schemaRequired(schema).has(key) ? "（必填）" : ""}</span></div>`).join("")
+    : fields.map((field) => `
     <div class="form-row"><label>${esc(field.label || field.key)}</label>${pluginFieldInput(field, view.config?.[field.key] ?? field.default)}
       <span class="hint">${esc(field.description || "")}${field.required ? "（必填）" : ""}</span></div>`).join("");
-  const secretRows = secrets.length ? `
+  const secretRows = secretKeys.length ? `
     <div class="card"><h3>密钥字段</h3>
-      <p class="muted">这些字段不接受明文；要用具名密钥绑定，值只存在密钥库里。</p>
-      ${secrets.map((field) => `<div class="form-row"><label>${esc(field.label || field.key)}</label>
-        <span class="pill ${bound.has(field.key) ? "ok" : ""}">${bound.has(field.key) ? "已绑定" : "未绑定"}</span></div>`).join("")}
+      <p class="muted">这些字段不接受明文；用具名密钥绑定，值只存在密钥库里。</p>
+      <div class="actions"><button class="mini" onclick="toggleBox('pl-secret-create')">${esc(t("console.secrets.pickCreate"))}</button></div>
+      <div id="pl-secret-create" style="display:none">
+        <div class="form-row"><label>${esc(t("console.secrets.name"))}</label><input type="text" id="pl-new-secret-name"></div>
+        <div class="form-row"><label>${esc(t("console.secrets.value"))}</label><input type="password" id="pl-new-secret-value" autocomplete="new-password"></div>
+        <div class="actions"><button class="mini" onclick="createPluginSecretInline('${esc(id)}')">${esc(t("console.secrets.createAndBind"))}</button></div>
+        <p class="hint" id="pl-secret-note"></p>
+      </div>
+      ${secretKeys.map((key) => `
+      <div class="form-row"><label>${esc(key)}</label>
+        <span class="pill ${bound.has(key) ? "ok" : ""}">${bound.has(key) ? "已绑定" : "未绑定"}</span>
+        <select id="psel-${esc(key)}" style="max-width:220px">${secretsIndex.map((secret) => `<option value="${esc(String(secret.id))}">${esc(secret.name)}</option>`).join("")}</select>
+        <button class="mini" onclick="bindPluginSecret('${esc(id)}','${esc(key)}')">绑定</button></div>`).join("")}
     </div>` : "";
   const resources = (manifest.resources || []).map((resource) => `
     <div class="form-row"><label>${esc(resource.label || resource.name)}</label>
@@ -1143,9 +1219,18 @@ async function openPluginConfig(id) {
     ${actions ? `<div class="card"><h3>动作</h3>${actions}</div>` : ""}`,
     async () => {
       const config = {};
-      for (const field of fields) {
-        const value = pluginFieldValue(field);
-        if (value !== undefined && value !== null) config[field.key] = value;
+      if (schemaProps) {
+        for (const [key, property] of schemaProps) {
+          if (property["x-secret-ref"]) continue;
+          const value = schemaFieldValue(key, property);
+          // 与 legacy 字段列表同语义：显式提交空串 = 清空该键。
+          if (value !== undefined && value !== null) config[key] = value;
+        }
+      } else {
+        for (const field of fields) {
+          const value = pluginFieldValue(field);
+          if (value !== undefined && value !== null) config[field.key] = value;
+        }
       }
       const result = await api("/api/plugins/" + encodeURIComponent(id) + "/config", {
         method: "POST", body: JSON.stringify({ config }),
@@ -1876,15 +1961,112 @@ let tomlEditorText = null;
 let tomlResult = null;
 let cfgCache = null;
 
+// 头部的构建身份徽章：分辨「这台桥跑的是哪次构建」（flake 注入
+// ACB_BUILD_VERSION；非 nix 构建回落 dev）。空值不显示。
+function applyBuildVersion(version) {
+  const el = document.getElementById("build-version");
+  if (!el) return;
+  if (version && version !== "dev") {
+    el.textContent = version;
+    el.style.display = "";
+  } else if (version === "dev") {
+    el.textContent = "dev";
+    el.style.display = "";
+  }
+}
+
+// 密钥库名单（id + 名字）。拿不到就返回空——选择器退化成手输模式。
+async function fetchSecretsList() {
+  try {
+    return (await api("/api/secrets")).secrets || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// 密钥下拉的选项集：可选「不设密钥」+ 库里全部 + 末尾的「＋ 新建密钥…」。
+function secretSelectHtml(secrets, selected) {
+  const options = [`<option value=""${selected ? "" : " selected"}>${esc(t("console.secrets.pickOption"))}</option>`];
+  for (const secret of secrets) {
+    const pick = secret.name === selected ? " selected" : "";
+    options.push(`<option value="${esc(secret.name)}"${pick}>${esc(secret.name)}</option>`);
+  }
+  options.push(`<option value="__create__">${esc(t("console.secrets.pickCreate"))}</option>`);
+  return options.join("");
+}
+
+// 选了「＋ 新建密钥…」时在表单内展开迷你创建块（不换对话框，已填的字段不丢）。
+function toggleInlineSecretCreate(prefix) {
+  const box = document.getElementById(`${prefix}-secret-create`);
+  if (!box) return;
+  const select = document.getElementById(`${prefix}-secret`);
+  box.style.display = select && select.value === "__create__" ? "" : "none";
+}
+
+// 折叠块开关（插件弹窗的密钥创建块没有触发下拉，直接开关）。
+function toggleBox(id) {
+  const box = document.getElementById(id);
+  if (box) box.style.display = box.style.display === "none" ? "" : "none";
+}
+
+// 插件弹窗里的密钥创建：选择器按 secret id 绑定，创建成功后重拉名单刷新
+// 全部选择器，原有选择保持，用户接着点「绑定」。
+async function createPluginSecretInline(pluginId) {
+  const name = document.getElementById("pl-new-secret-name").value.trim();
+  const value = document.getElementById("pl-new-secret-value").value;
+  if (!name || !value) { showFormError(t("console.secrets.errors.required")); return; }
+  try {
+    await api("/api/secrets", { method: "POST", body: JSON.stringify({ name, value }) });
+  } catch (e) { showFormError(e.message); return; }
+  const secrets = await fetchSecretsList();
+  for (const select of document.querySelectorAll("select[id^='psel-']")) {
+    const previous = select.value;
+    select.innerHTML = secrets
+      .map((secret) => `<option value="${esc(String(secret.id))}">${esc(secret.name)}</option>`)
+      .join("");
+    if (previous) select.value = previous;
+  }
+  const box = document.getElementById("pl-secret-create");
+  if (box) box.style.display = "none";
+  const note = document.getElementById("pl-secret-note");
+  if (note) note.textContent = t("console.secrets.createdPickAndBind");
+}
+
+// 迷你创建块提交：POST /api/secrets → 成功后把新名字加进下拉并选中。
+// `apply` 是建完之后的收尾（比如提示用户点保存）。
+async function createSecretInline(prefix, selectId) {
+  const name = document.getElementById(`${prefix}-new-secret-name`).value.trim();
+  const value = document.getElementById(`${prefix}-new-secret-value`).value;
+  if (!name || !value) { showFormError(t("console.secrets.errors.required")); return; }
+  try {
+    await api("/api/secrets", { method: "POST", body: JSON.stringify({ name, value }) });
+  } catch (e) { showFormError(e.message); return; }
+  const select = document.getElementById(selectId);
+  if (select) {
+    const created = document.createElement("option");
+    created.value = name;
+    created.textContent = name;
+    created.selected = true;
+    const existing = Array.from(select.options).find((option) => option.value === name);
+    if (existing) existing.selected = true; else select.appendChild(created);
+    select.value = name;
+  }
+  const box = document.getElementById(`${prefix}-secret-create`);
+  if (box) box.style.display = "none";
+  const note = document.getElementById(`${prefix}-secret-note`);
+  if (note) note.textContent = t("console.secrets.createdInline");
+}
+
 async function loadConfig() {
   const box = $("#config");
   const note = $("#config-note");
   note.innerHTML = "";
   box.innerHTML = loadingBox();
-  let s, c;
+  let s, c, secrets;
   try {
     s = await api("/api/status");
     if (tomlEditorText === null) c = await api("/api/config");
+    secrets = await fetchSecretsList();
   } catch (e) {
     box.innerHTML = "";
     note.innerHTML = errorBox(e, "console.config.loadFailed");
@@ -1910,8 +2092,37 @@ async function loadConfig() {
     renderTomlResult();
     return;
   }
+  applyBuildVersion(s.version);
   cfgCache = c;
-  box.innerHTML = banner + connectionsCard(c) + sessionsCard(c) + personasCard(c) + memoriesCard(c) + relayCard(c) + runtimeCard(c) + otherCard();
+  box.innerHTML = banner + connectionsCard(c) + secretsCard(secrets) + sessionsCard(c) + personasCard(c) + memoriesCard(c) + relayCard(c) + runtimeCard(c) + otherCard();
+}
+
+// 密钥库卡：具名密钥的浏览与创建。值永不回显；引用（连接/插件）一律下拉选择。
+function secretsCard(secrets) {
+  const rows = (secrets || []).map((secret) => `<tr>
+    <td><code>${esc(secret.name)}</code></td><td class="muted">${esc(secret.id)}</td></tr>`).join("");
+  return `<div class="card">
+    ${configHead("console.secrets.title", "console.secrets.intro", addButton("console.secrets.add", "openSecretCreateDialog()"))}
+    ${(secrets || []).length ? `<div class="table-wrap"><table class="table-responsive">
+      <thead><tr><th>${esc(t("console.secrets.name"))}</th><th>#</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : emptyBox("console.secrets.empty")}
+  </div>`;
+}
+
+// 独立的创建对话框（密钥库卡入口）；连接表单里走的是内联迷你块。
+function openSecretCreateDialog() {
+  formFrame(esc(t("console.secrets.addTitle")), `
+    <div class="form-row"><label>${esc(t("console.secrets.name"))}</label><input type="text" id="sc-name" placeholder="onebot-token-2"></div>
+    <div class="form-row"><label>${esc(t("console.secrets.value"))}</label><input type="password" id="sc-value" autocomplete="new-password"></div>
+    <p class="hint">${esc(t("console.secrets.hint"))}</p>`,
+    async () => {
+      const name = document.getElementById("sc-name").value.trim();
+      const value = document.getElementById("sc-value").value;
+      if (!name || !value) { showFormError(t("console.secrets.errors.required")); return false; }
+      const result = await api("/api/secrets", { method: "POST", body: JSON.stringify({ name, value }) });
+      loadConfig();
+      return result;
+    });
 }
 
 function configHead(titleKey, tipKey, actions = "") {
@@ -2318,26 +2529,131 @@ function editGlobals() {
     });
 }
 
-function addConnection() {
+// 密钥下拉的选项集：「＋ 新建密钥…」置顶（用户裁定），其后是「不设密钥」
+// 与库内全部。
+function secretSelectHtml(secrets, selected) {
+  const options = [`<option value="__create__">${esc(t("console.secrets.pickCreate"))}</option>`];
+  options.push(`<option value=""${selected ? "" : " selected"}>${esc(t("console.secrets.pickOption"))}</option>`);
+  for (const secret of secrets) {
+    const pick = secret.name === selected ? " selected" : "";
+    options.push(`<option value="${esc(secret.name)}"${pick}>${esc(secret.name)}</option>`);
+  }
+  return options.join("");
+}
+
+// 已注册平台适配器清单（GET /api/adapters）。拿不到就返回空——适配器字段
+// 退化成手输。
+async function fetchAdapterList() {
+  try {
+    return (await api("/api/adapters")) || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// 适配器对「账号」字段的自定义提示（manifest.options_schema.x-account）。
+function accountMeta(adapter) {
+  const meta = adapter?.options_schema?.["x-account"] || {};
+  return { placeholder: meta.placeholder || "", description: meta.description || "" };
+}
+
+async function addConnection() {
+  const [adapters, secrets] = await Promise.all([fetchAdapterList(), fetchSecretsList()]);
+  window.__ncAdapters = adapters;
+  const defaultAdapter = adapters.find((a) => a.kind === "onebot11") || adapters[0] || null;
+  const defaultAccount = accountMeta(defaultAdapter);
+  const adapterOptions = adapters.map((a) => {
+    const label = a.title && a.title !== a.kind ? `${a.title} (${a.kind})` : a.kind;
+    return `<option value="${esc(a.kind)}"${a === defaultAdapter ? " selected" : ""}>${esc(label)}</option>`;
+  }).join("");
+  const initialTransports = defaultAdapter?.transports || ["ws-client"];
   formFrame(esc(t("console.config.connection.addTitle")), `
     <div class="form-row"><label>${esc(t("console.config.field.connectionId"))}</label><input type="text" id="nc-id" placeholder="qq2"></div>
-    <div class="form-row"><label>${esc(t("console.config.field.platform"))}</label><input type="text" id="nc-platform" value="qq"><span class="hint">${esc(t("console.config.field.platformHint"))}</span></div>
-    <div class="form-row"><label>${esc(t("console.config.field.adapter"))}</label><input type="text" id="nc-kind" value="onebot11"></div>
-    <div class="form-row"><label>${esc(t("console.config.field.url"))}</label><input type="text" id="nc-url" placeholder="ws://127.0.0.1:53001/ws" style="max-width:340px"></div>
-    <div class="form-row"><label>${esc(t("console.config.field.account"))}</label><input type="text" id="nc-account" placeholder="${esc(t("console.config.field.accountPlaceholder"))}"></div>
-    <div class="form-row"><label>${esc(t("console.config.field.secretName"))}</label><input type="text" id="nc-secret" placeholder="${esc(t("console.config.field.secretAddHint"))}"></div>`,
+    <div class="form-row"><label>${esc(t("console.config.field.adapter"))}</label>
+      <select id="nc-kind" onchange="onConnectionAdapterChange()">${adapterOptions || `<option value="onebot11">onebot11</option>`}</select>
+      <span class="hint">${esc(t("console.config.field.adapterSelectHint"))}</span></div>
+    <div class="form-row"><label>${esc(t("console.config.field.platform"))}</label><input type="text" id="nc-platform" value="${esc(defaultAdapter?.platform || "qq")}" oninput="this.dataset.dirty=1"><span class="hint">${esc(t("console.config.field.platformHint"))}</span></div>
+    <div class="form-row"><label>${esc(t("console.config.field.transport"))}</label>
+      <select id="nc-transport" onchange="onConnectionAdapterChange()">${initialTransports.map((tr) => `<option value="${esc(tr)}">${esc(tr)}</option>`).join("")}</select>
+      <span class="hint">${esc(t("console.config.field.transportHint"))}</span></div>
+    <div class="form-row" id="nc-url-row"><label>${esc(t("console.config.field.url"))}</label><input type="text" id="nc-url" placeholder="ws://127.0.0.1:53001" style="max-width:340px"><span class="hint">${esc(t("console.config.field.urlHint"))}</span></div>
+    <div class="form-row"><label>${esc(t("console.config.field.account"))}</label><input type="text" id="nc-account" placeholder="${esc(defaultAccount.placeholder || t("console.config.field.accountPlaceholder"))}"><span class="hint" id="nc-account-hint">${esc(defaultAccount.description)}</span></div>
+    <div class="form-row"><label>${esc(t("console.config.field.secretName"))}</label>
+      <select id="nc-secret" onchange="toggleInlineSecretCreate('nc')">${secretSelectHtml(secrets, "")}</select>
+      <span class="hint">${esc(t("console.config.field.secretNameSelectHint"))}</span></div>
+    <div id="nc-secret-create" style="display:none">
+      <div class="form-row"><label>${esc(t("console.secrets.name"))}</label><input type="text" id="nc-new-secret-name"></div>
+      <div class="form-row"><label>${esc(t("console.secrets.value"))}</label><input type="password" id="nc-new-secret-value" autocomplete="new-password"></div>
+      <div class="actions"><button class="mini" onclick="createSecretInline('nc', 'nc-secret')">${esc(t("console.secrets.createAndUse"))}</button></div>
+      <p class="hint" id="nc-secret-note"></p>
+    </div>
+    <div id="nc-options"></div>
+    <p class="hint">${esc(t("console.config.field.adapterOptionsHint"))}</p>`,
     () => {
       const g = (id) => document.getElementById(id).value.trim();
       const id = g("nc-id");
       if (!id) { showFormError(t("console.config.errors.connectionIdRequired")); return false; }
-      if (!g("nc-url") || !g("nc-account")) { showFormError(t("console.config.errors.urlAccountRequired")); return false; }
+      const kind = g("nc-kind");
+      const adapter = adapters.find((a) => a.kind === kind);
+      const transport = g("nc-transport");
+      if (transport.startsWith("ws") && !g("nc-url")) { showFormError(t("console.config.errors.urlAccountRequired")); return false; }
+      if (!g("nc-account")) { showFormError(t("console.config.errors.urlAccountRequired")); return false; }
       const create = {
-        platform: g("nc-platform"), kind: g("nc-kind"),
+        platform: g("nc-platform"), kind, transport,
         url: g("nc-url"), account: g("nc-account"),
       };
-      if (g("nc-secret")) create.secret = g("nc-secret");
+      if (!transport.startsWith("ws")) delete create.url;
+      const secret = document.getElementById("nc-secret").value;
+      if (secret === "__create__") { showFormError(t("console.secrets.errors.pickFirst")); return false; }
+      if (secret) create.secret = secret;
+      // 适配器专属 options：按 options_schema 收值，全空的 schema 不带 options。
+      // 空字符串不入库（适配器侧 option_str 会过滤，但配置里存空键是噪音）。
+      const schema = adapter?.options_schema;
+      const properties = schema?.properties ? Object.entries(schema.properties) : [];
+      const options = {};
+      for (const [key, property] of properties) {
+        if (property["x-secret-ref"]) continue;
+        const value = schemaFieldValue(key, property);
+        if (value !== undefined && value !== null && value !== "") options[key] = value;
+      }
+      if (Object.keys(options).length) create.options = options;
       return submitPatch([{ op: "connection", id, create }]);
     });
+  onConnectionAdapterChange();
+}
+
+// 适配器/transport 变化：平台名跟随 manifest、options 表单按 options_schema
+// 重渲染、url 行按 transport 显隐（ws 系才要地址）。
+function onConnectionAdapterChange() {
+  const adapters = (window.__ncAdapters || []);
+  const kind = document.getElementById("nc-kind")?.value;
+  const adapter = adapters.find((a) => a.kind === kind);
+  const platformInput = document.getElementById("nc-platform");
+  if (adapter && platformInput && !platformInput.dataset.dirty) {
+    platformInput.value = adapter.platform || "";
+  }
+  const transports = adapter?.transports || ["ws-client"];
+  const transportSelect = document.getElementById("nc-transport");
+  const current = transportSelect?.value;
+  if (transportSelect) {
+    transportSelect.innerHTML = transports.map((tr) => `<option value="${esc(tr)}">${esc(tr)}</option>`).join("");
+    if (transports.includes(current)) transportSelect.value = current;
+  }
+  const urlRow = document.getElementById("nc-url-row");
+  if (urlRow) urlRow.style.display = (transportSelect?.value || "").startsWith("ws") ? "" : "none";
+  // 账号提示跟随适配器（如 qqbot 填 AppID 而非 QQ 号）。
+  const account = document.getElementById("nc-account");
+  const meta = accountMeta(adapter);
+  if (account && meta.placeholder) account.placeholder = meta.placeholder;
+  const hint = document.getElementById("nc-account-hint");
+  if (hint) hint.textContent = meta.description || "";
+  const container = document.getElementById("nc-options");
+  if (!container) return;
+  const schema = adapter?.options_schema;
+  const properties = schema?.properties ? Object.entries(schema.properties) : [];
+  container.innerHTML = properties.map(([key, property]) => `
+    <div class="form-row"><label>${esc(key)}</label>${schemaFieldInput(key, property, property.default)}
+      <span class="hint">${esc(property.description || "")}${(schema.required || []).includes(key) ? "（必填）" : ""}</span></div>`).join("");
 }
 
 function addSession() {

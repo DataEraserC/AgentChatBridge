@@ -335,6 +335,7 @@ fn unused_spec() -> MethodSpec {
         effect: Effect::Write,
         record: RecordMode::None,
         verification: Verification::verified("test"),
+        permissions: None,
     }
 }
 

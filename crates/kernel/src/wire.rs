@@ -120,6 +120,11 @@ impl From<&Connection> for WireConnection {
             account: connection.account.clone(),
             admin_qqs: connection.admin_qqs.clone(),
             options: connection.options.clone(),
+            token_secret: None,
+            // RoutePolicy 没有 Serialize（配置侧走 RawRoute 手工构建）；这个转换
+            // 只喂动态库实例化，routes 是 core 侧概念不跨这条边界，置 Null
+            // （序列化时整个字段缺席）。
+            routes: serde_json::Value::Null,
         }
     }
 }
@@ -220,6 +225,28 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
         };
 
         let aliases = spec.aliases.into_iter().map(Cow::Owned).collect::<Vec<_>>();
+        let permissions = spec
+            .permissions
+            .map(|specs| {
+                specs
+                    .into_iter()
+                    .map(|spec| {
+                        Ok(crate::outbound::PermissionSpec {
+                            grant: spec.grant,
+                            title: spec.title,
+                            description: spec.description,
+                            default: crate::outbound::PermissionDefault::parse(&spec.default)
+                                .ok_or_else(|| {
+                                    acb_i18n::t!(
+                                        "kernel.wire.unknown_permission_default",
+                                        default = spec.default
+                                    )
+                                })?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .transpose()?;
         Ok(MethodSpec {
             name: Cow::Owned(name.to_owned()),
             aliases: aliases.into(),
@@ -232,6 +259,7 @@ impl TryFrom<WireMethodSpec> for MethodSpec {
             effect,
             record,
             verification,
+            permissions,
         })
     }
 }
@@ -435,6 +463,7 @@ mod tests {
             }],
             effect: "send".into(),
             record: "message".into(),
+            permissions: None,
             verification: WireVerification::Verified {
                 source: "demo adapter docs".into(),
             },

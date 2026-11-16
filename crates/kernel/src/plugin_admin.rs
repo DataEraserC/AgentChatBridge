@@ -37,14 +37,31 @@ pub fn config_view<S: PluginDataStore>(
         stored.insert(row.key, row.value);
     }
     let mut effective = BTreeMap::new();
-    for field in &manifest.config {
-        if field.secret {
-            continue;
+    if manifest.config_schema.is_some() {
+        // JSON Schema 模式：effective 来自 properties（密钥项走 secret_refs，
+        // 不进明文视图）。
+        if let Some(properties) = manifest.schema_properties() {
+            for (key, property) in properties {
+                if manifest.schema_is_secret(key) {
+                    continue;
+                }
+                if let Some(value) = stored.get(key) {
+                    effective.insert(key.clone(), value.clone());
+                } else if let Some(default) = property.get("default") {
+                    effective.insert(key.clone(), default.clone());
+                }
+            }
         }
-        if let Some(value) = stored.get(&field.key) {
-            effective.insert(field.key.clone(), value.clone());
-        } else if let Some(default) = &field.default {
-            effective.insert(field.key.clone(), default.clone());
+    } else {
+        for field in &manifest.config {
+            if field.secret {
+                continue;
+            }
+            if let Some(value) = stored.get(&field.key) {
+                effective.insert(field.key.clone(), value.clone());
+            } else if let Some(default) = &field.default {
+                effective.insert(field.key.clone(), default.clone());
+            }
         }
     }
     Ok(PluginConfigView {
@@ -67,6 +84,28 @@ pub fn set_config<S: PluginDataStore>(
     let manifest = PluginManifest::parse(&plugin.manifest_json)?;
     let mut written = Vec::new();
     for (key, value) in assignments {
+        if manifest.config_schema.is_some() {
+            // JSON Schema 模式：密钥项与旧字段列表一样只能走 bind_secret。
+            if manifest.schema_is_secret(key) {
+                return Err(format!(
+                    "{key} 是密钥项（x-secret-ref）：请用 plugin_secret_refs 绑定具名密钥，不要写明文"
+                ));
+            }
+            manifest.schema_validate_value(key, value)?;
+            // 形态启发式照旧：密钥长相的键/值不接受明文。
+            check_config_assignment(None, key, value)?;
+            let ty = manifest
+                .schema_properties()
+                .and_then(|properties| properties.get(key))
+                .and_then(|property| property.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("string");
+            store
+                .plugin_config_put(&plugin.id, key, value, ty, false, at)
+                .map_err(|error| error.to_string())?;
+            written.push(key.clone());
+            continue;
+        }
         let field = manifest.config_field(key);
         if field.is_none() {
             return Err(format!("未知配置项：{key}（manifest 里没有声明）"));
@@ -97,6 +136,9 @@ pub fn missing_required<S: PluginDataStore>(
         .map_err(|error| error.to_string())?;
     let present: std::collections::BTreeSet<&str> =
         stored.iter().map(|row| row.key.as_str()).collect();
+    if manifest.config_schema.is_some() {
+        return Ok(manifest.schema_missing(&present));
+    }
     Ok(manifest
         .config
         .iter()
@@ -115,10 +157,19 @@ pub fn bind_secret<S: PluginDataStore>(
     secret_id: i64,
 ) -> Result<(), String> {
     let manifest = PluginManifest::parse(&plugin.manifest_json)?;
-    match manifest.config_field(name) {
-        Some(field) if field.secret => {}
-        Some(_) => return Err(format!("{name} 没有声明 secret = true，不能绑定密钥")),
-        None => return Err(format!("未知配置项：{name}")),
+    if manifest.config_schema.is_some() {
+        // JSON Schema 模式：x-secret-ref: true 的项才能绑定。
+        if !manifest.schema_is_secret(name) {
+            return Err(format!(
+                "{name} 不是密钥项（config_schema 里没有 x-secret-ref），不能绑定密钥"
+            ));
+        }
+    } else {
+        match manifest.config_field(name) {
+            Some(field) if field.secret => {}
+            Some(_) => return Err(format!("{name} 没有声明 secret = true，不能绑定密钥")),
+            None => return Err(format!("未知配置项：{name}")),
+        }
     }
     if secret_id <= 0 {
         return Err("secret id 必须为正数".to_owned());

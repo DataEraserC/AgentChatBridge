@@ -952,6 +952,10 @@ pub struct DeliveryWindow {
     pub context_after: usize,
     /// 时钟/攒批唤醒投最旧的几条正文。
     pub batch_head: usize,
+    /// 上下文窗口排除已读（acked/水位以下）记录。默认 false = 现状
+    /// （上下文保留已读，给模型连续对话背景）。过滤逻辑在投递 composer
+    /// （core 只供 read_ids 快照）；未读正文不受影响。
+    pub exclude_read: bool,
 }
 
 impl Default for DeliveryWindow {
@@ -960,6 +964,7 @@ impl Default for DeliveryWindow {
             context_before: DEFAULT_CONTEXT_RECORDS,
             context_after: DEFAULT_CONTEXT_RECORDS,
             batch_head: DEFAULT_CONTEXT_RECORDS,
+            exclude_read: false,
         }
     }
 }
@@ -1005,7 +1010,8 @@ impl Default for AccessPolicy {
 pub struct DeliveryPolicy {
     /// composer 的 provider id。不写就用内置「从旧到新连续投一段」。
     pub provider: ProviderId,
-    /// 插件专属配置；内置 composer 忽略它。
+    /// composer 专属配置；core 不解释（内置 composer 忽略它）。「投递上下文
+    /// 排除已读」是订阅级投递窗口字段（window.exclude_read），不在这里。
     pub options: serde_json::Value,
 }
 
@@ -2398,6 +2404,7 @@ impl Config {
                     .unwrap_or(DEFAULT_CONTEXT_RECORDS),
                 context_after: raw_session.context_after.unwrap_or(DEFAULT_CONTEXT_RECORDS),
                 batch_head: raw_session.batch_head.unwrap_or(DEFAULT_CONTEXT_RECORDS),
+                exclude_read: raw_session.exclude_read.unwrap_or(false),
             };
             validate_window(&id, "", &session_window)?;
 
@@ -2857,6 +2864,7 @@ fn build_subscription(
         context_before: raw.context_before.unwrap_or(session_window.context_before),
         context_after: raw.context_after.unwrap_or(session_window.context_after),
         batch_head: raw.batch_head.unwrap_or(session_window.batch_head),
+        exclude_read: raw.exclude_read.unwrap_or(session_window.exclude_read),
     };
     validate_window(session, &room.to_string(), &window)?;
 
@@ -3920,6 +3928,9 @@ struct RawSession {
     /// 投递窗口的会话级默认值；订阅可以逐项覆盖。不写 = 3/3/3。
     #[serde(default)]
     context_before: Option<usize>,
+    /// 投递过的自动标已读（订阅级可覆盖）；缺省 false。
+    #[serde(default)]
+    exclude_read: Option<bool>,
     #[serde(default)]
     context_after: Option<usize>,
     #[serde(default)]
@@ -4140,6 +4151,9 @@ struct RawSubscription {
     context_before: Option<usize>,
     context_after: Option<usize>,
     batch_head: Option<usize>,
+    /// 上下文排除已读；不写就继承会话级默认值。
+    #[serde(default)]
+    exclude_read: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4380,19 +4394,141 @@ fn json_to_toml(value: &serde_json::Value) -> toml::Value {
 /// - 语义错误（secret 引用不存在、url 非法等）沿用 fail-closed：启动失败并
 ///   点名连接，由运维修正后重启；
 /// - 库以只读方式打开——core 不写适配器的文件。
+/// 适配器自有连接库的根目录。
+///
+/// `ACB_DATA_DIR` 设了：`<数据根>/state/adapters`（数据根含 `state/`）。
+/// 没设：`parent(storage.path)/adapters`——库文件与 acb.db 同层，和
+/// bridge main 给 `AdapterHost.state_dir` 的路径同一条解析。两条分支的
+/// 3a613c1 合并版曾把 fallback 也拼上 `state`，导致相对 storage.path 时
+/// 注入/注册表找 `state/state/adapters` 而工厂建在 `state/adapters`
+///（线上实测：注入静默空转）。注入（[`inject_adapter_connections`]）、
+/// 运行时注册表（engine 的 `register_provider_connections`）与 bridge
+/// main 共用这一个解析，保证两边看到同一批库。返回 `None` = storage.path
+/// 没有父目录（退化输入），不注入。
+pub fn adapter_connections_root(storage_path: &str) -> Option<std::path::PathBuf> {
+    let data_dir = std::env::var("ACB_DATA_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    adapter_connections_root_with(data_dir.as_deref(), storage_path)
+}
+
+/// 上面这条的纯函数形态（env 读取留在外壳，测试不用碰全局环境）。
+fn adapter_connections_root_with(
+    data_dir_env: Option<&str>,
+    storage_path: &str,
+) -> Option<std::path::PathBuf> {
+    match data_dir_env {
+        Some(data_dir) => Some(
+            std::path::Path::new(data_dir)
+                .join("state")
+                .join("adapters"),
+        ),
+        None => std::path::Path::new(storage_path)
+            .parent()
+            .map(|parent| parent.join("adapters")),
+    }
+}
+
+/// 各提供者当前在自有库里登记的连接 id（kind → ids）。
+///
+/// 启动时 engine 用它建立「哪些 config 连接是提供者注入的」基线，后续注册
+/// 推送按提供者整组替换。容错与注入一致：库打不开、表不存在、行不合法的
+/// 目录一律跳过——这里只做基线，不做校验。
+pub(crate) fn provider_connection_ids(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    let mut map: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return map;
+    };
+    let mut db_paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path().join("connections.db"))
+        .filter(|path| path.is_file())
+        .collect();
+    db_paths.sort();
+    for db_path in db_paths {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+        let Ok(connection) = rusqlite::Connection::open_with_flags(&db_path, flags) else {
+            continue;
+        };
+        let Ok(mut statement) = connection.prepare("SELECT id, kind FROM connections") else {
+            continue;
+        };
+        let Ok(rows) = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) else {
+            continue;
+        };
+        for (id, kind) in rows.flatten() {
+            if id.trim().is_empty() || kind.trim().is_empty() {
+                continue;
+            }
+            map.entry(kind).or_default().insert(id);
+        }
+    }
+    map
+}
+
+/// 把一条 wire 连接注册行构建成 `Connection`，校验与 config 路径共用
+/// [`build_connection`]（transport / ws-client url / 账号 / 路由全部同规矩）。
+///
+/// 凭据两种形态（用户裁定，ADR-031 D3）：
+/// - `token_secret` 引用：值在桥的 secrets 库里，查 `secret_values` 解析；
+///   引用不存在按 fail-closed 处理（该行报错跳过）。
+/// - `token` 明文：适配器自管凭据，绕过 secrets 直接带上（与库内 AcbKey
+///   明文形态同权）。两者都在时引用优先。
+pub(crate) fn build_connection_from_wire(
+    wire: &acb_adapter_api::WireConnection,
+    secret_values: &std::collections::BTreeMap<String, String>,
+) -> Result<Connection, String> {
+    let preset: SecretPreset = secret_values.clone();
+    let secrets = SecretStore::from_raw(None, SecretMode::Strict, Some(&preset))
+        .map_err(|error| error.to_string())?;
+    let token: Option<serde_json::Value> = wire
+        .token_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| serde_json::json!({ "secret": name }));
+    let raw: RawConnection = serde_json::from_value(serde_json::json!({
+        "id": wire.id,
+        "platform": wire.platform,
+        "kind": wire.kind,
+        "transport": wire.transport,
+        "url": wire.url,
+        "token": token,
+        "account": wire.account,
+        "admin_qqs": wire.admin_qqs,
+        "options": wire.options,
+        "routes": wire.routes,
+    }))
+    .map_err(|error| format!("wire 连接形状不合法：{error}"))?;
+    let mut connection = build_connection(raw, &secrets).map_err(|error| error.to_string())?;
+    if connection.token.is_none() {
+        connection.token = wire
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned);
+    }
+    Ok(connection)
+}
+
 fn inject_adapter_connections(merged: &mut toml::Value) {
-    let Some(storage_path) = merged
+    // 状态根的解析顺序：ACB_DATA_DIR 环境变量（桥与组件同源继承，绝对路径，
+    // 不依赖各进程的 CWD）→ [storage].path → DEFAULT_STORAGE_PATH。相对路径
+    // 按 CWD 解析——桥的 WorkingDirectory 是数据目录，组件进程必须同源，
+    // 否则注入只在桥进程里生效、预设的 acbctl 全部落空。
+    let storage_path = merged
         .get("storage")
         .and_then(|storage| storage.get("path"))
         .and_then(toml::Value::as_str)
         .map(str::to_owned)
-    else {
-        return;
-    };
-    let Some(root) = std::path::Path::new(&storage_path)
-        .parent()
-        .map(|parent| parent.join("adapters"))
-    else {
+        .unwrap_or_else(|| DEFAULT_STORAGE_PATH.to_owned());
+    let Some(root) = adapter_connections_root(&storage_path) else {
         return;
     };
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -4455,8 +4591,23 @@ fn inject_adapter_connections(merged: &mut toml::Value) {
             continue;
         };
         for row in rows.flatten() {
-            let (id, platform, kind, transport, url, account, token_secret, admin_json, routes_json, options_json) = row;
-            if id.trim().is_empty() || platform.trim().is_empty() || kind.trim().is_empty() || account.trim().is_empty() {
+            let (
+                id,
+                platform,
+                kind,
+                transport,
+                url,
+                account,
+                token_secret,
+                admin_json,
+                routes_json,
+                options_json,
+            ) = row;
+            if id.trim().is_empty()
+                || platform.trim().is_empty()
+                || kind.trim().is_empty()
+                || account.trim().is_empty()
+            {
                 eprintln!(
                     "{}",
                     acb_i18n::t!(
@@ -4479,10 +4630,7 @@ fn inject_adapter_connections(merged: &mut toml::Value) {
             {
                 eprintln!(
                     "{}",
-                    acb_i18n::t!(
-                        "kernel.config.adapter_connections_duplicate",
-                        id = id
-                    )
+                    acb_i18n::t!("kernel.config.adapter_connections_duplicate", id = id)
                 );
                 continue;
             }
@@ -4510,12 +4658,9 @@ fn inject_adapter_connections(merged: &mut toml::Value) {
                 entry.insert(
                     "token".to_owned(),
                     toml::Value::Table(
-                        [(
-                            "secret".to_owned(),
-                            toml::Value::String(secret_name),
-                        )]
-                        .into_iter()
-                        .collect(),
+                        [("secret".to_owned(), toml::Value::String(secret_name))]
+                            .into_iter()
+                            .collect(),
                     ),
                 );
             }
@@ -4870,7 +5015,8 @@ mod tests {
             DeliveryWindow {
                 context_before: 3,
                 context_after: 3,
-                batch_head: 3
+                batch_head: 3,
+                exclude_read: false
             }
         );
     }
@@ -7097,5 +7243,26 @@ capability = ["room_write"]
         .expect_err("覆盖层不能声明来源");
         assert!(matches!(error, ConfigError::ConsoleSecretSource), "{error}");
         unsafe { std::env::remove_var(variable) };
+    }
+
+    #[test]
+    fn adapter_connections_root_matches_factory_layout() {
+        // ACB_DATA_DIR：数据根含 state/，库在 <数据根>/state/adapters。
+        let with_env =
+            adapter_connections_root_with(Some("/data/acb"), "state/acb.db").expect("有");
+        assert_eq!(
+            with_env,
+            std::path::PathBuf::from("/data/acb/state/adapters")
+        );
+        // 回落：库与 acb.db 同层（与 AdapterHost.state_dir 的拼法一致）。
+        // 3a613c1 曾把这条分支也拼上 state，注入找 state/state/adapters，
+        // 工厂建在 state/adapters，线上注入静默空转——回归看守。
+        let fallback = adapter_connections_root_with(None, "state/acb.db").expect("有");
+        assert_eq!(fallback, std::path::PathBuf::from("state/adapters"));
+        let absolute = adapter_connections_root_with(None, "/data/acb/state/acb.db").expect("有");
+        assert_eq!(
+            absolute,
+            std::path::PathBuf::from("/data/acb/state/adapters")
+        );
     }
 }

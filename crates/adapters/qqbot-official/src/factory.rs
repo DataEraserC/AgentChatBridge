@@ -10,16 +10,20 @@
 //!   （AppSecret 值存控制台/agenix，适配器库不存明文）；
 //! - `options_json` 可带 `api_base` / `token_url` 覆盖默认端点。
 
-use std::borrow::Cow;
 use acb_kernel::{
     ADAPTER_API_VERSION, ADAPTER_CONNECTIONS_SCHEMA_SQL, AdapterCapability, AdapterError,
     AdapterFactory, AdapterHost, AdapterInstance, AdapterManifest, Connection, EventQueue,
     PluginEffect, PluginMetadata,
 };
+use std::borrow::Cow;
 
 use crate::{QqBotOfficialOutbound, TokenManager, supervise};
 
-static TRANSPORTS: &[Cow<'static, str>] = &[Cow::Borrowed("ws-client")];
+// 专用 transport `qq-gateway`：适配器直连官方网关（wss://api.sgroup.qq.com，
+// 固定端点），不走通用 ws-client 语义——后者在 config 解析层强制要求 ws://
+// url，而本适配器的 url 字段无效。 manifested transports 驱动控制台表单的
+// transport 下拉与 url 行显隐。
+static TRANSPORTS: &[Cow<'static, str>] = &[Cow::Borrowed("qq-gateway")];
 static CAPABILITIES: &[AdapterCapability] = &[
     AdapterCapability::ReceiveEvents,
     // 只能被动回复，但回复仍然是「发送」：桥的出站通道按它走。
@@ -75,9 +79,35 @@ fn ensure_connections_db(path: &std::path::Path) {
 #[derive(Debug, Default)]
 pub struct QqBotOfficialAdapterFactory;
 
+/// 连接表单的适配器自定义注解 + 端点覆盖项（JSON Schema 子集）：
+/// x-account 修正「账号」字段的语义（这里填 AppID，不是 QQ 号）；
+/// properties 与 factory 实际读取的 options 键（api_base / token_url）一致。
+/// static 里不能调 json!（非 const），manifest() 运行时注入。
+fn qqbot_options_schema() -> serde_json::Value {
+    serde_json::json!({
+        "x-account": {
+            "placeholder": "机器人的 AppID",
+            "description": "填官方开放平台的 AppID（不是 QQ 号）；AppSecret 走上面的密钥来源"
+        },
+        "type": "object",
+        "properties": {
+            "api_base": {
+                "type": "string",
+                "description": "覆盖 API 端点（默认 https://api.sgroup.qq.com）；自建网关/调试才需要"
+            },
+            "token_url": {
+                "type": "string",
+                "description": "覆盖取 token 的端点（默认 https://api.sgroup.qq.com/app/getAppAccessToken）"
+            }
+        }
+    })
+}
+
 impl AdapterFactory for QqBotOfficialAdapterFactory {
     fn manifest(&self) -> AdapterManifest {
-        MANIFEST.clone()
+        let mut manifest = MANIFEST.clone();
+        manifest.metadata.options_schema = Some(qqbot_options_schema());
+        manifest
     }
 
     fn create(
@@ -85,10 +115,13 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
         connection: &Connection,
         _events: EventQueue,
     ) -> Result<AdapterInstance, AdapterError> {
-        if connection.transport.as_str() != "ws-client" {
+        if connection.transport.as_str() != "qq-gateway" {
             return Err(AdapterError::Create(
                 connection.id.clone(),
-                acb_i18n::t!("adapter.qqbot.transport_unsupported", transport = connection.transport.as_str()),
+                acb_i18n::t!(
+                    "adapter.qqbot.transport_unsupported",
+                    transport = connection.transport.as_str()
+                ),
             ));
         }
         if connection.account.trim().is_empty() {
@@ -97,21 +130,31 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
                 acb_i18n::t!("adapter.qqbot.appid_required", id = connection.id),
             ));
         }
-        if connection.token.as_deref().unwrap_or_default().trim().is_empty() {
+        if connection
+            .token
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
             return Err(AdapterError::Create(
                 connection.id.clone(),
                 acb_i18n::t!("adapter.qqbot.secret_required", id = connection.id),
             ));
         }
-        let secret = connection.token.as_deref().unwrap_or_default().trim().to_owned();
+        let secret = connection
+            .token
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
         let token_url = option_str(connection, "token_url");
         let token_manager = match token_url {
             Some(url) => TokenManager::with_token_url(url, connection.account.trim(), secret),
             None => TokenManager::new(connection.account.trim(), secret),
         };
-        let api_base = option_str(connection, "api_base").unwrap_or_else(|| {
-            crate::outbound::default_api_base().to_owned()
-        });
+        let api_base = option_str(connection, "api_base")
+            .unwrap_or_else(|| crate::outbound::default_api_base().to_owned());
         // 出站与入站共享一份被动回复状态：入站记 msg_id 锚点，出站取用。
         let reply_state = crate::outbound::ReplyState::new();
         let outbound = Box::new(QqBotOfficialOutbound::new(
@@ -132,13 +175,15 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
             // 被动窗口锚点进自有库：重启后仍能回复（桥重启不丢 msg_id）。
             reply_state.bind(&host.state_dir.join("adapter.db"));
             // provider 侧连接库（标准 schema，core 定义）：确保存在，运维在此
-            // 维护连接行；core 配置构建时注入。
+            // 维护连接行。ensure 要拿库文件路径（与注入扫描的
+            // `state/adapters/<目录>/connections.db` 同形），传目录会建错位置。
             ensure_connections_db(
                 &host
                     .state_dir
                     .parent()
                     .expect("state_dir 有父目录")
-                    .join("qqbot"),
+                    .join("qqbot")
+                    .join("connections.db"),
             );
             supervise(
                 connection,
@@ -176,7 +221,7 @@ mod tests {
             id: "qqbot-main".into(),
             platform: "qq".into(),
             kind: "qqbot".into(),
-            transport: acb_kernel::Transport::WsClient,
+            transport: acb_kernel::Transport::parse("qq-gateway").expect("合法"),
             url: None,
             options: serde_json::json!({}),
             token: token.map(str::to_owned),
@@ -193,9 +238,19 @@ mod tests {
         assert_eq!(MANIFEST.kind.as_ref(), "qqbot");
         assert_eq!(MANIFEST.platform.as_ref(), "qq");
         assert_eq!(MANIFEST.metadata.title.as_deref(), Some("QQ 官方机器人"));
-        assert!(MANIFEST.transports.iter().any(|item| item == "ws-client"));
-        assert!(MANIFEST.capabilities.iter().any(|c| matches!(c, AdapterCapability::Send)));
-        assert!(MANIFEST.capabilities.iter().any(|c| matches!(c, AdapterCapability::ReceiveEvents)));
+        assert!(MANIFEST.transports.iter().any(|item| item == "qq-gateway"));
+        assert!(
+            MANIFEST
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, AdapterCapability::Send))
+        );
+        assert!(
+            MANIFEST
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, AdapterCapability::ReceiveEvents))
+        );
     }
 
     #[test]
@@ -217,12 +272,12 @@ mod tests {
     }
 
     #[test]
-    fn create_rejects_non_ws_client_transport() {
+    fn create_rejects_foreign_transport() {
         let mut connection = connection(Some("secret"));
         connection.transport = acb_kernel::Transport::Process;
         let error = QqBotOfficialAdapterFactory
             .create(&connection, EventQueue::channel().0)
-            .expect_err("只支持 ws-client");
+            .expect_err("只支持 qq-gateway");
         assert!(matches!(error, AdapterError::Create(_, _)));
     }
 

@@ -22,9 +22,9 @@ use acb_adapter_qqbot_official::QqBotOfficialAdapterFactory;
 use acb_kernel::storage::SettingsStore;
 use acb_kernel::{
     AdapterHost, AdapterInstance, AdapterStatus, Bridge, Config, ConfigSource, ControlRegistry,
-    DependencyRegistry, Element, EventQueue, FileRelay, Outbounds, PluginManager, RecordDraft,
-    RecordKind, RouteWorker, SecretStore, Sender, SqliteStore, carrier_create_failed, drain_events,
-    run_adapter, serve,
+    DependencyRegistry, Element, EventQueue, FileRelay, Outbounds, PluginManager,
+    ProviderConnections, RecordDraft, RecordKind, RouteWorker, SecretStore, Sender, SqliteStore,
+    carrier_create_failed, drain_events, run_adapter, serve,
 };
 use acb_memory_steward::{
     Notifier as MemoryNotifier, Steward, StewardConfig, SyncNotice, Target as MemoryTarget,
@@ -414,11 +414,29 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         None
     };
 
-    // 适配器自有状态目录的根：与 acb.db 同级（state/adapters/<连接名>/）。
-    let adapters_state_root = std::path::Path::new(&config.storage.path)
-        .parent()
-        .map(|parent| parent.join("adapters"))
+    // 适配器自有状态目录的根：与注入/注册表共用同一个解析（config.rs 的
+    // adapter_connections_root），保证 core 与适配器看到同一批库。
+    let adapters_state_root = acb_kernel::config::adapter_connections_root(&config.storage.path)
         .unwrap_or_else(|| std::path::PathBuf::from("state/adapters"));
+    // 连接注册推送（B期，ADR-031）：适配器的 `connections` wire 消息经载体进
+    // 这条通道，转发线程在锁内落进 engine 的运行时注册表。注册可能来自多个
+    // 适配器实例（同一种类的每条连接共享一个提供者库），通道是汇聚点。
+    let (connections_tx, connections_rx) = std::sync::mpsc::channel::<ProviderConnections>();
+    {
+        let bridge = Arc::clone(&bridge);
+        let shutdown = Arc::clone(&shutdown);
+        std::thread::spawn(move || {
+            while let Ok(update) = connections_rx.recv() {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                let mut guard = bridge
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.register_provider_connections(update);
+            }
+        });
+    }
     for (connection_id, launch) in launches {
         let state_dir = adapters_state_root.join(&connection_id);
         if let Err(error) = std::fs::create_dir_all(&state_dir) {
@@ -436,6 +454,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             shutdown: Arc::clone(&shutdown),
             status: AdapterStatus::new(connection_id.clone(), deps.clone()),
             state_dir,
+            connections: Some(connections_tx.clone()),
         };
         std::thread::spawn(move || run_adapter(host, launch));
     }

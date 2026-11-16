@@ -56,6 +56,7 @@ fn rule(id: &str) -> GrantRule {
         scope: GrantScope::Subscribed,
         target: None,
         capability: vec![GrantCapability::RoomRead, GrantCapability::RoomWrite],
+        permissions: Vec::new(),
     }
 }
 
@@ -69,6 +70,7 @@ fn sample() -> GrantsConfig {
         scope: GrantScope::Subscribed,
         target: None,
         capability: vec![GrantCapability::AccountSecret],
+        permissions: Vec::new(),
     });
     grants.rooms.insert(
         "qq:group/769843907".to_owned(),

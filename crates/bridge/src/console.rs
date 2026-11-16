@@ -565,6 +565,13 @@ impl<S: Store + Send + 'static> Console<S> {
                 (200, self.deps.snapshot(since).to_string())
             }
             ("GET", "/api/status") => (200, self.status()),
+            ("GET", "/api/connections") => (200, self.connections_view()),
+            ("GET", "/api/adapters") => {
+                let bridge = lock(&self.bridge);
+                (200, bridge.adapter_catalog().to_string())
+            }
+            ("GET", "/api/secrets") => (200, self.secrets_view()),
+            ("POST", "/api/secrets") => self.create_secret(body),
             ("GET", "/api/sessions") => (200, self.sessions()),
             // 记忆管家：最近一次同步时间、结果、冲突文件数与失败原因。
             // 管家线程写 status.json，这里只读，不阻塞任何同步动作。
@@ -653,6 +660,9 @@ impl<S: Store + Send + 'static> Console<S> {
             ("POST", p) if p.starts_with("/api/plugins/") && p.ends_with("/config") => {
                 self.plugin_config_update(p, body)
             }
+            ("POST", p) if p.starts_with("/api/plugins/") && p.ends_with("/secret-bind") => {
+                self.plugin_secret_bind(p, body)
+            }
             ("POST", p) if p.starts_with("/api/plugins/") && p.ends_with("/action") => {
                 self.plugin_run_action(p, body)
             }
@@ -709,6 +719,44 @@ impl<S: Store + Send + 'static> Console<S> {
             ("POST", "/api/model-penalty") => self.save_model_penalty(body),
             _ => error_response(404, acb_i18n::msg!("bridge.console.no_endpoint"), None),
         }
+    }
+
+    /// 连接视图（带来源标注）。
+    ///
+    /// config.toml 声明的与提供者注入的并存时，`source` 说明这条连接归谁管：
+    /// 改错地方会在下次注入/注册时被覆盖回来。token 与 url 查询串沿用
+    /// config_view 的遮蔽规则。
+    fn connections_view(&self) -> String {
+        let bridge = lock(&self.bridge);
+        let config = bridge.config();
+        let providers = bridge.provider_connection_ids();
+        let connections = config
+            .connections
+            .iter()
+            .map(|c| {
+                let source = providers
+                    .iter()
+                    .find(|(_, ids)| ids.contains(&c.id))
+                    .map(|(kind, _)| format!("provider:{kind}"))
+                    .unwrap_or_else(|| "config".to_owned());
+                json!({
+                    "id": c.id,
+                    "platform": c.platform,
+                    "kind": c.kind,
+                    "transport": c.transport.as_str(),
+                    "url": c.url.as_deref().map(mask_url_query).unwrap_or_default(),
+                    "token": c.token.as_deref().map(mask_secret),
+                    "account": c.account,
+                    "admin_qqs": c.admin_qqs,
+                    "source": source,
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "config_version": bridge.config_version(),
+            "connections": connections,
+        })
+        .to_string()
     }
 
     /// 记忆管家状态。读的是管家自己原子替换的 status.json；读不到就如实报错。
@@ -816,6 +864,10 @@ impl<S: Store + Send + 'static> Console<S> {
         let inbound = self.inbound_stats.snapshot();
         let route = self.route_worker.stats().snapshot();
         json!({
+            // 构建版本（flake 注入 ACB_BUILD_VERSION；非 nix 构建回落 dev）。
+            // 控制台头部显示它，用于分辨「这台桥跑的是哪次构建」。
+            "version": std::env::var("ACB_BUILD_VERSION")
+                .unwrap_or_else(|_| "dev".to_owned()),
             "connections": config.connections.len(),
             "sessions": config.sessions.len(),
             "harnesses": config.harnesses.len(),
@@ -1762,6 +1814,188 @@ impl<S: Store + Send + 'static> Console<S> {
                 Some(error),
             ),
         }
+    }
+
+    /// `POST /api/plugins/<id>/secret-bind`，body `{"name": "...", "secret_id": N}`。
+    /// x-secret-ref / secret 字段的绑定入口；值本体永远只存在密钥库。
+    fn plugin_secret_bind(&self, path: &str, body: &str) -> (u16, String) {
+        let Some((id, parts)) = Self::plugin_path_parts(path) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        if parts != ["secret-bind"] {
+            return error_response(404, acb_i18n::msg!("bridge.console.not_found"), None);
+        }
+        let value: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_response(
+                    400,
+                    acb_i18n::msg!("bridge.console.invalid_json"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let Some(name) = value.get("name").and_then(serde_json::Value::as_str) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        let Some(secret_id) = value.get("secret_id").and_then(serde_json::Value::as_i64) else {
+            return error_response(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        };
+        let mut bridge = lock(&self.bridge);
+        match bridge.plugin_bind_secret(&id, name, secret_id) {
+            Ok(()) => (200, json!({"ok": true}).to_string()),
+            Err(error) => error_response(
+                400,
+                acb_i18n::msg!("bridge.console.bad_request"),
+                Some(error),
+            ),
+        }
+    }
+
+    /// `GET /api/secrets`：密钥名单（id + 名字）。密钥选择器的数据源；
+    /// 值永远不出这个接口。
+    fn secrets_view(&self) -> String {
+        let bridge = lock(&self.bridge);
+        let secrets = match bridge.secrets_index() {
+            Ok(secrets) => secrets,
+            Err(error) => {
+                return error_response(
+                    500,
+                    acb_i18n::msg!("bridge.console.bad_request"),
+                    Some(error),
+                )
+                .1;
+            }
+        };
+        json!({
+            "secrets": secrets
+                .into_iter()
+                .map(|(id, name)| json!({"id": id, "name": name}))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
+    /// `POST /api/secrets`，body `{"name": "...", "value": "..."}`：控制台创建
+    /// 具名密钥。
+    ///
+    /// 三份落点与铸造流程同构（镜像 `persist_minted_secrets`）：
+    /// 1. 值文件（0600）——运行期 staged config 的解析来源；
+    /// 2. config.d 声明片段——fail-closed 语义靠它成立（引用一个不存在
+    ///    的来源必须启动失败，而不是静默放空）；
+    /// 3. AcbKey 密文进库——重启 preload 的权威值。
+    /// 没有 AcbKey 时跳过入库（与铸造一致：只留文件），选择器列表会少这一条。
+    /// 重名拒绝：引用它的连接/插件不能因为一次误保存被悄悄换值。
+    fn create_secret(&self, body: &str) -> (u16, String) {
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.invalid_json"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let name = parsed
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        let value = parsed
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if name.is_empty() || value.is_empty() {
+            return config_error(400, acb_i18n::msg!("bridge.console.bad_request"), None);
+        }
+        if !valid_secret_name(name) {
+            return config_error(
+                400,
+                acb_i18n::msg!("bridge.console.secret_name_invalid", name = name.to_owned()),
+                None,
+            );
+        }
+        {
+            let bridge = lock(&self.bridge);
+            let exists = bridge
+                .secrets_index()
+                .map(|index| index.iter().any(|(_, existing)| existing == name))
+                .unwrap_or(false);
+            if exists {
+                return config_error(
+                    400,
+                    acb_i18n::msg!("bridge.console.secret_exists", name = name.to_owned()),
+                    None,
+                );
+            }
+        }
+
+        // 1. 值文件（0600）。
+        let dir = Path::new(&self.config_dir);
+        let value_path = dir.join("secrets").join(format!("{name}.secret"));
+        if let Some(parent) = value_path.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                return self.secret_error(format!("create {}: {error}", parent.display()));
+            }
+        }
+        if let Err(error) = write_private_file(&value_path, &format!("{value}\n")) {
+            return self.secret_error(format!("write {}: {error}", value_path.display()));
+        }
+
+        // 2. 声明片段（逐名追加；重跑不重复写）。
+        let fragment = dir.join("60-console-secrets.toml");
+        let mut text = std::fs::read_to_string(&fragment).unwrap_or_default();
+        let marker = format!("name = \"{name}\"");
+        if !text.contains(&marker) {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&format!(
+                "\n# auto-generated by console for secret {name}\n[[secrets.sources]]\nname = \"{name}\"\nkind = \"file\"\npath = \"{}\"\nformat = \"raw\"\n",
+                value_path.display()
+            ));
+            if let Err(error) = std::fs::write(&fragment, text) {
+                return self.secret_error(format!("write {}: {error}", fragment.display()));
+            }
+        }
+
+        // 3. AcbKey 密文入库（没有 key 就只留文件，与铸造流程一致）。
+        match acb_kernel::crypto::AcbKey::load() {
+            Ok(Some(key)) => {
+                let cipher = match key.encrypt(value) {
+                    Ok(cipher) => cipher,
+                    Err(error) => return self.secret_error(error),
+                };
+                let mut bridge = lock(&self.bridge);
+                if let Err(error) =
+                    bridge.put_secret(name, &cipher, true, Some(key.kid()), Some("console"))
+                {
+                    return self.secret_error(error.to_string());
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return self.secret_error(error),
+        }
+
+        let locale = acb_i18n::request_locale();
+        (
+            200,
+            json!({
+                "ok": true,
+                "name": name,
+                "note": acb_i18n::msg!("bridge.console.secret_created_note").render(locale),
+            })
+            .to_string(),
+        )
+    }
+
+    fn secret_error(&self, detail: String) -> (u16, String) {
+        config_error(
+            500,
+            acb_i18n::msg!("bridge.console.secret_mint_failed"),
+            Some(detail),
+        )
     }
 
     /// `POST /api/plugins/<id>/action`，body `{"action": "...", "args": {...}}`。

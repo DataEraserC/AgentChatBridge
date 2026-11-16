@@ -697,3 +697,229 @@ runes 语法对多 agent 接手有真实成本）。
 "少一个依赖"当成了优点。但用户真正要的是**维护负担小**——手写的表格要自己管响应式、手写的
 表单要自己管校验、手写的弹层要自己管定位，每加一个页面就重付一次。依赖多 99 个包换掉 748 行
 需要人维护的 UI 代码，这笔账是划算的。
+
+---
+
+## 19. 本轮收尾（2026-11-15，接续 sess_9a2c607b 中断的 B期切片 2）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| grants 细粒度权限字符接线 | GrantRule/GrantQuery.permissions + `permission_matches`（精确/末段单层通配）+ `validate_permission_string` + `rule_permissions_cover`；PlatformOp 分支加第二道过滤；空 = 行为不变。补齐 f42f93c 提交信息声称但未落地的 `check_tool_access` platform_call 派生；`prepare_platform_call` 与 `high_risk_grant`（展示层）同源派生 `spec.permission_strings` | `cargo test --workspace` 1245 通过 / 0 失败（基线 1239 + 新增 6）；构造点 14 处全部补字段 |
+| ADR 031/032 | 031 适配器自有存储与连接注入（含 7d587b5 返工事故）；032 权限字符。未实现部分显式标注（B期 wire 注册协议、C期表单、D期 cutover、外部库形态） | `docs/adr/0031-adapter-owned-storage.md`、`docs/adr/0032-permission-strings.md` |
+| 推送 | d6f6c97（权限接线）+ docs 提交 → `origin/dev_20261025` | `git push` ff 成功，`git log origin/dev_20261025 -1` |
+
+遗留：nix-config flake.lock 的 acb input 仍在 3a613c1，换代与部署待运维窗口；onebot cutover（删 config 行）与 QQ 链接确认待用户。
+
+## 20. B/C 期落地（2026-11-15，ADR-031 的连接注册协议 + 控制台 schema 表单）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| B期 wire 注册协议 | `connections` 推送（回放/变更 + `removed` 注销）+ `connections_list` 协议变体；`WireConnection` 补 `token_secret`/`routes` | adapter-api serde 测试 4 例 |
+| B期 core 注册表 | engine 启动基线读提供者自有库 id 集（与注入共用 `adapter_connections_root`）；`register_provider_connections` 按提供者整组替换，config 赢、注销移除、非法行跳过 | engine 单测 5 例（新增/替换/纯注销/config 赢/secret 解析） |
+| B期 接线 | `AdapterHost.connections` 通道；process 载体经共享槽位转发；onebot11 启动直接回放自有库行；bridge main 转发线程落注册表 | `GET /api/connections` 每条连接标 `source` |
+| B期 顺带修复 | `ensure_connections_db` 传目录不传库文件路径——注入扫 `<目录>/connections.db`，原实现建同名无后缀文件或静默失败 | onebot11/qqbot 两个工厂的调用点改为 `<kind>/connections.db` |
+| C期 JSON Schema | `PluginManifest.config_schema`（与 `config` 互斥）；子集校验（type/enum/minimum/maximum/required/default）；`x-secret-ref` 密钥项走 secret_refs | plugin_manifest 测试 5 例 |
+| C期 密钥选择器 | `GET /api/secrets`（id+name 名单，不含值）+ `POST /api/plugins/<id>/secret-bind`；控制台弹窗双轨渲染（schema → JSON Schema 表单 + 选择器，legacy 原样） | console.html JS 语法校验通过；schema 模式手工验证待换代后 |
+| C期 store 面 | `SecretsStore::secrets_index`（sqlite 真实 id；MemoryStore 稳定序号） | workspace 测试 |
+
+遗留：控制台内新建具名密钥入口未做；core 侧 `connections_list` 触发器未接（等外置 provider）；qqbot 回放推送未做；运行时创建适配器实例未做。
+
+## 21. D期落地（2026-11-15，换代 + onebot cutover）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 发现并修复注入空转根因 | unit 环境没有 ACB_DATA_DIR，3a613c1 的 fallback 分支多拼一层 `state`：注入找 `state/state/adapters`、工厂建在 `state/adapters`。`adapter_connections_root` 两分支各走各的拼法（dd8c7d1），bridge main 的 adapters_state_root 改走同一解析 | 回归测试 `adapter_connections_root_matches_factory_layout`；线上 `/api/connections` source 从 `config` 变 `provider:onebot11` |
+| 换代 | payload `/nix/store/wk2wkfcwqdn24a430ppvl6g65zfd66g6-acb-payload-0.1.0`（dev_20261025 @ dd8c7d1）→ `gen-1794681420303-324ccb97`，strategy=store | `acbctl upgrade --payload` 返回 req-1794681420256-e5aef461；桥 active、endpoint open、console 200 |
+| 回放推送验证 | onebot11 适配器启动时把自有库行推给运行时注册表 | `/api/connections`：qq → `source: provider:onebot11` |
+| onebot cutover | 删 config_objects 的 connection/qq 行（控制台 patch op delete）；连接由提供者库经注入接管，**桥无中断**（对比 7d587b5 之前的 outage #1） | patch 返回 `changes:["connections/qq: deleted"]`；删后 `SELECT COUNT(*)=0` 且连接仍在视图；依赖面板 qq `state=up accountOnline=true accountGood=true` |
+| B期注册表生效证据 | 重启后注册表基线来自提供者库 + 适配器回放 | source 标注（上两行） |
+
+遗留（需用户）：qqbot 连接要 AppSecret 录入控制台密钥库（qqbot-appsecret）后按 onebot11 同形补回放推送；QQ 官方机器人链路实测（发消息验证）待用户。upgrade status 请求终态停留在 `restarting`（pointer_committed），换代实际完成——状态机命名待查。
+
+## 22. 密钥录入 + 版本显示（2026-11-15，用户裁定：密钥引用一律下拉 + 密钥库管理）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 密钥创建 API | `POST /api/secrets`（名字+值）：值文件 0600 → config.d/60-console-secrets.toml 声明 → AcbKey 密文入库（无 AcbKey 时只留文件，与铸造一致）；重名拒绝（引用它的连接不能被悄悄换值） | `/api/secrets` 名单接口复用；控制台实测见换代后 |
+| 密钥库卡 | 配置页新增「密钥库」卡：名单（名字+id，值不回显）+ 新建对话框 | console.html secretsCard |
+| 引用字段下拉 | 连接表单「密钥来源名」改下拉（空=不设 + 库内全部 + ＋新建密钥…）；选新建在**同一对话框内**展开迷你创建块（已填字段不丢），建完自动选中 | addConnection 重写；插件 x-secret-ref 行加「＋新建密钥…」内联创建（选择器按 id 绑定，创建后重拉名单保持原选择） |
+| 版本显示 | /api/status 加 `version`（`ACB_BUILD_VERSION`，flake 以 `wrapProgram` 注入 `<cargo版本>+<git短哈希>`，非 nix 回落 dev）；控制台头部徽章 | flake.nix buildRev/buildVersion；头部 `#build-version` |
+| 连接表单判定 | 用户晒的表单字段形状正确（id/平台/适配器/地址/账号/密钥名）；qq2 若与 qq 同 URL 同账号会双连同一 bot——第二条连接需要不同账号或不同 WS 端口；「保存后要重启桥才连上」属实（实例生命周期随重启） | 见本轮汇报 |
+
+遗留：密钥删除入口未做（引用检查复杂，先走 acbctl/sqlite 运维流程）；会话表单的 secret 字段仍是文本（铸造会自动生成，无需选择器）。
+
+## 23. harness 全挂根因关闭 + 适配器驱动表单（2026-11-15，rebuild 后全链路验证）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| harness 全挂根因闭环 | cutover 删 config qq 行后，`acbctl sessions` 的加载路径（不同 CWD）里注入按相对 state 根找不到提供者库 → `dsh-qas` 订阅引用的 qq 连接消失 → 驱动循环失败（acbctl.err 40MB）。stopgap：`systemctl --user set-environment ACB_DATA_DIR=…`；durable：用户 rebuild 落 unit env（dcc57cbc）+ 新 acbl | drivers 日志 03:21:53 五个会话驱动全部拉起；依赖面板 codebuddy/dsh/opencode/zcode-acp 全 up（dsh 5 通道）、qq 在线 |
+| 新增连接表单按适配器 schema 生成 | `GET /api/adapters`（kind/platform/transports/docs/options_schema）；connection create patch 支持 transport/options（url 不再硬性必填）；onebot11/process 声明 options_schema；前端适配器下拉 → transport 下拉 → options 字段按 schema 渲染 → url 行按 transport 显隐 | 浏览器实测：onebot11 出 http_listen/async_upload_timeout_ms；切 process → transport=process、平台自动填 external、url 行隐藏、options 换 command/args/env/cwd/startup_timeout_secs（command 标必填） |
+| 密钥「＋ 新建密钥…」置顶 | 用户反馈落实：下拉第一项 | 浏览器实测选项顺序 |
+| 内联创建闭环 | 选「＋ 新建密钥…」→ 同对话框展开 → 创建并选用 → 下拉自动选中 | 浏览器实测：browser-e2e-test 创建成功、提示「hit save」；测试后三处（DB 行/值文件/声明片段）已清理 |
+| 版本徽章上线确认 | 头部显示 `0.1.0+470479b` | 浏览器实测 |
+| 换代 | payload `/nix/store/n86jd8r033b0h497baj6bxv5z7g9al74-acb-payload-0.1.0` → req-1794684529227-4dc3846b | `acbctl status --summary` active/open/200；`/api/adapters` 三适配器、schema 标注正确 |
+
+遗留：edit 连接表单的 options 编辑未做；适配器 schema 未覆盖动态库/进程外置适配器的分发机制（内置三个先行）；密钥删除入口未做。
+
+## 24. qqbot 表单修正（2026-11-15，用户实测反馈：url/账号语义错位）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| qqbot 专用 transport | `ws-client` → `qq-gateway`：适配器直连官方网关（wss://api.sgroup.qq.com），url 字段无效，而通用 ws-client 语义在 config 解析层强制 ws:// url——假约束。改名后 url 天然可选，表单 url 行自动隐藏 | 浏览器实测：选 qqbot → transport=qq-gateway、url 行隐藏、平台自动填 qq |
+| 账号语义适配器声明 | 三适配器 options_schema 加 `x-account` 注解（placeholder/说明），前端「账号」字段跟随；qqbot = AppID（不是 QQ 号）+ 端点覆盖项 api_base/token_url（与 factory 实际读取键一致） | 浏览器实测：placeholder「机器人的 AppID」、说明完整、api_base/token_url 渲染 |
+| nix-config 提交信息重写 | 用户授权；备份分支 `backup/pre-message-rewrite-c762055b` + `--force-with-lease`，`<new>` 占位符 → 实际哈希 706af4a | `git log -1` = b3cc1c32 |
+| 换代 | payload `/nix/store/ngv4hfn3r38lxh8y5bwngpdn6dzxj3hr-acb-payload-0.1.0`（f0b1d18）→ req-1794685629973-1f0fdd0b | version 徽章 `0.1.0+f0b1d18`（浏览器实测）；`/api/adapters` 三适配器 x-account/properties 全对 |
+
+遗留：url 的显隐/必填性仍靠 transport 名前缀推断（声明式 x-url 留待后续）；edit 表单 options 编辑；密钥删除入口。
+
+## 28. 投递去重的正确形态（2026-11-15，用户两次纠偏后定稿）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 设计纠偏 1 | 用户裁定：**agent 自己用 ack_messages 决定哪些标已读**，现有机制已满足——delivery_auto_ack（自动 ack）整个撤回（工作树还原，未提交过） | 工作树干净，`git status` 无残留 |
+| 设计纠偏 2 | 用户明确形态：**给投递策略插件加选项**——取唤醒消息前后若干条时排除已读 | DeliveryPolicy.options 新键 `exclude_read` |
+| 实现 | open_turn 的上下文窗口过滤已读（已读 = 水位以下 + 乱序 ack 集合，两种形态都查——初版漏了水位被回归测试抓住）；未读正文不受影响；外置 composer 同样受益 | 回归测试：消息1已读 → exclude_read=true 只投消息2，false 照旧投 [1,2] |
+| 换代 | `/nix/store/cmf5wgff86w90x9fxmbq4wvfp8dmhghj-acb-payload-0.1.0`（5ce59ed）→ req-1794693325386-b1583276 | version 徽章 `0.1.0+5ce59ed` |
+
+会话配置示例（TOML 或对象补丁）：
+  [sessions.delivery.options]
+  exclude_read = true
+默认 false = 现状（上下文保留已读，给模型连续对话背景）。
+
+### 二次纠偏（8f37107）：过滤逻辑归 composer，core 只供数据
+
+用户追问「修改是否在投递策略插件里完成的」后定稿：exclude_read 的
+过滤不在 acb 里嵌——core 从 options 解释键并过滤是越界。改为：
+DeliveryRequest 增加 read_ids（已读编号快照：水位以下 + 乱序 ack，
+只读数据），内置 composer 自己读 options.exclude_read 过滤上下文；
+Dylib 的 WireDeliveryRequest / Lua 的 request table 同步带 read_ids
+（JSON 加字段向后兼容），外置策略据此自行实现。core 回到中立：
+只供数据，不解释 options。ADR-0026 约束不变（composer 仍不写状态）。
+
+遗留：composer 的 options_schema 声明面（参考适配器 x-account 做法，
+让 exclude_read 之类选项在控制台可见可编辑，后续轮）。
+
+## 29. qqbot 媒体能力补齐（2026-11-15，a5e4966 已部署）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 切片 1：群聊端点修正 | message_url/files_url 按 scope 分支（group → /v2/groups/，其余 → /v2/users/）——此前群房间一律打 users 端点，群回复必拒 | `message_url_is_scope_aware` 单测 |
+| 切片 2：富媒体出站 | Image/Video/Audio/File 元素 → 抓取元素 url 字节 → multipart POST files 端点（srv_send_msg=false）→ file_info → msg_type 7 发送（content 文本随行）；上限 图10MB/视音频文件100MB 提前拦截；重复媒体元素报错；旧测试改判（媒体路径错误形态由平台/网络决定，不再走纯文本通道） | `multipart_carries_file_type_and_content`、`media_limits_cover_all_types`、`non_text_elements_go_through_media_upload_path` |
+| 切片 3：收侧附件可见化 | attachments 数组 → 正文追加 [类型 附件：文件名] 标记（平台下载 URL 需鉴权，完整媒体落地留后续轮） | `c2c_attachments_become_visible_markers` |
+| 切片 4：FRIEND_VERIFY 可见化 | 好友验证申请改记非 suppressed 事件（正文 openid + 待接入说明）；审批 platform_call 待官方接口核实后补 | 代码事实（event.rs match 臂） |
+| 换代 | `/nix/store/1fbwspdfd2b0i9jvgcg1l5nsn9rhb9xi-acb-payload-0.1.0`（a5e4966）→ req-1794724986122-92433ee5 | version `0.1.0+a5e4966`；依赖面板七项全 up |
+
+遗留：富媒体出站的真机发送验证（agent 发视频 → qqbot 房间送达）；审批
+platform_call；媒体落地（收侧下载→file_relay）。
+
+
+### 三次纠偏（e42eee6）：exclude_read 落订阅级投递窗口
+
+用户问「exclude_read 也是订阅级的吧？和投递上下多少条那个配置一致？」
+——是层级的正确位置：DeliveryWindow.exclude_read（默认 false），
+RawSession/RawSubscription 各加覆盖项，合并链与窗口一致（订阅覆盖 →
+会话默认 → false）。DeliveryRequest/WireDeliveryRequest/Lua table 透传
+window.exclude_read；内置 composer 改读 request.exclude_read；
+DeliveryPolicy.options 文档回退为「composer 专属配置，core 不解释」。
+
+教训：exclude_read 曾放在 [sessions.delivery.options]，而测试里写成
+[sessions.subscriptions.window] 子表——RawSubscription 是平铺字段没有
+window 嵌套表，整个子表被 serde 静默忽略，回归测试三易其稿才暴露。
+配置形态（订阅块内平铺）：
+
+  [[sessions.subscriptions]]
+  connection = "qqbot-official"
+  room = "private/<openid>"
+  exclude_read = true
+  context_before = 3
+  context_after = 0
+
+换代 req-1794696628775-51acfb17，version `0.1.0+e42eee6`；依赖面板
+六项全 up。
+
+### 补充结论（同日）
+
+- **换代确认**：req-1794696628775-51acfb17 状态已转 `stable`（stable window
+  通过并成为 LKG，gen-1794696628824-06bcc8da）——此前「停留在 restarting
+  命名待查」的疑问闭环：状态机正常，只是 stable 窗口有延迟。
+- **合并转发平台差异**：OneBot（snowluma）目录含完整转发族
+  （msg.forward 读 / msg.send_forward / 单发群·私聊 / forward_upload）；
+  QQ 官方机器人 API 消息类型只有 0 文本 / 2 markdown / 3 ark / 4 embed /
+  7 富媒体，**无合并转发接口**（发与读都没有）——平台能力边界，非实现缺口。
+- qqbot-official 网关重连 16 次 = 官方服务端定期要求重连（op 7）的常规行为，
+  适配器按 Resume 流程处理，依赖面板保持 up。
+- 视频经 OneBot 私聊发送成功（message_id 777205831）——OneBot 侧 RichMedia
+  能力验证通过。
+
+
+
+
+## 27. C2C 消息不到——READY 控制帧修复 + dispatch 诊断日志（2026-11-15）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 现象 | 用户私聊发了消息，没有任何 C2C 事件进来（发现日志只有 group/READY 假事件）；客户端 intents 无误（1<<25 群+单聊都在） | adapter/link.rs:29 |
+| READY 控制帧修复 | READY dispatch 只抓会话 id 后 continue——之前落到 unknown 分支被包成 notice（room group/READY），产生伪事件 | 换代重启后无新 group/READY 行 |
+| dispatch 诊断日志 | 每条 dispatch 打 event 类型——官方平台场景开关没开时消息根本不推，这是最便宜的判定点 | `grep dispatch ~/.local/state/acb/bridge.log`（注意：unit stdout/stderr 是 append 重定向到该文件，不在 journal） |
+| 换代 | `/nix/store/yir4d1189cnpms1xkzg9jjlbp3krf4ir-acb-payload-0.1.0`（6e96164）→ req-1794689371071-be622dc9 | version 徽章 `0.1.0+6e96164`；网关重连成功 |
+
+用户侧排查清单（C2C 平台侧）：①开放平台后台确认「消息单聊场景」已开通（沙箱环境只有沙箱成员可触发）；②323622242 需先添加 bot 为好友/联系人；③发消息后 `grep dispatch`——有 C2C_MESSAGE_CREATE 就是管道通了，没有就是平台没推。
+
+### C2C 真凶找到并修复（同一轮，8fdc416 已部署）
+
+`grep dispatch` 出了 `C2C_MESSAGE_CREATE`——平台在推。但随后
+`event parse failed: missing field: user_openid`：**C2C 载荷的 openid 在
+`author.user_openid`（嵌套），不在顶层**，旧代码顶层读不到就丢弃，私聊
+消息全部无声消失。修复：openid 提取链「顶层 → author.<field> → author.id」
+三种形态都读（author.id 同时是 sender），读不到时错误带 payload/author
+真实键名自诊断。回归测试四形态；workspace 1266 通过 0 失败；
+换代 req-1794690087627-1c75605d，version `0.1.0+8fdc416`。
+
+用户侧下一步：再发一条私聊 → `grep "qqbot-official:private" ~/.local/state/acb/bridge.log`
+拿 openid 房间串 → dsh-qas 加订阅 → 私聊即可唤醒 agent（qqbot 被动回复窗口由适配器处理）。
+
+### 订阅后的最后一环：唤醒门（0d6ffb0，同日）
+
+用户加了订阅仍无回应。排查：订阅本身精确匹配（room=private/E62C60CB…），
+但新订阅的 wake 全关（C2C 文本消息无 @/关键词/引用可命中）→ 默认唤醒
+一律 stay。且 qqbot 适配器把私聊消息 at_self 硬编码 false——**私聊天然
+冲我来**，at_mention 在单聊里永远不可能命中（C2C 无 @ 语义）。修复：
+C2C at_self=true（0d6ffb0 已部署，version 徽章实测），补断言 a3655e2。
+
+用户侧最终一步：控制台会话页 dsh-qas → qqbot 订阅的 Wake → 打开
+at_mention → 保存 → 私聊即应答。
+
+
+
+
+## 25. patch 缺段自动建段 + 端到端验证（2026-11-15，用户重试保存被段缺失拦截）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 根因 | 用户保存 qqbot 连接报『配置里没有 [[connections]] 段』：cutover 后库内连接对象为零，生成的文档无 `[[connections]]` 段，而 connection/session/persona/memory/harness 的 create 分支只改已有段 | 用户截图错误原文 |
+| 修复 | config_patch 统一走 `array_of_tables_mut_or_create`：create 语义 = 没有 → 建（connection/session 直改 + upsert_named_table 三个 op）；守卫抓到 expect 中文串改英文 | 回归测试 `create_first_entry_without_existing_section`（空文档建 qqbot 连接 + transport/options 透传 + Config::parse 校验） |
+| 端到端 | 浏览器重放用户流程（e2e-qqbot-check / AppID / qq-bot-app-secret / api_base+token_url 留空）：保存成功、对象落库（qq-gateway + secret 引用 + options 表）、连接视图可见；测试行已删 | `/api/connections` 两行：e2e 行（已删）+ qq（provider:onebot11） |
+| 顺带修 | 连接 options 空字符串不入库（适配器侧 option_str 本会过滤，配置存空键是噪音）；插件表单保持 legacy 语义（显式空串 = 清空） | c23bcee 已部署 |
+| 换代 | `/nix/store/mnicyvzc0d55w2xx9h7hjzfxqyj2rhwh-acb-payload-0.1.0`（c23bcee）→ req-1794687157665-74275bc8 | version 徽章 `0.1.0+c23bcee` |
+
+插曲：验证删除时 evaluate 里的 confirm 弹窗挂在页面上被用户 Esc 掉——测试行实际由 API 删除，无副作用。教训：浏览器脚本不要在可见 tab 上触发阻塞式 confirm。
+
+## 26. qqbot 订阅流程与发现日志（2026-11-15，用户要给 qas 订阅 323622442）
+
+| 项 | 结果 | 验收 |
+|---|---|---|
+| 语义澄清 | 官方机器人 API 不给 QQ 号→OpenID 映射：房间串是 `qq:group/<openid>` / `qq:private/<openid>`，订阅不能用 QQ 号；323622442 是 QQ 号，得先拿到它对 bot 的 OpenID | 代码事实（adapter event.rs） |
+| 发现日志 | 未订阅房间的事件原本无痕丢弃 → 每房间首次丢弃打一条含完整房间串的日志（去重不刷屏），用户拿它配订阅 | 回归测试 `unsubscribed_room_logs_once_then_drops`；换代 `req-1794688108691-5aaf619d`，version `0.1.0+9ddcc9f` |
+
+流程（用户侧）：重启桥（qqbot-official 实例建立）→ 用 323622442 私聊/群 @ 机器人一句 → `journalctl --user -u acb-bridge | grep 房间` 拿 openid 房间串 → 控制台会话页 dsh-qas「+ Subscribe」填该串 → 下一轮自动生效。
+
+勘误与排查结论：
+- 用户指正：bridge.log 里 `qq:private/323622442` 的反复 access 审计是 **snowluma（qq 连接）的正常私聊流量**（onebot 世界房间串用 QQ 号是对的），放行 basis 是内置规则 `base-system-admin-private`，与 qqbot 订阅无关——上一轮的误读收回（核实：config_objects 九个会话的 payload 都不含该串）。
+- exit 75 ×2（04:13 / 04:29）= 我当轮两次换代（57b5c18 / c23bcee）的**设计内机制**：launcher「停旧 → 提交指针 → 退出 75 → systemd 重拉进新代」（launcher/src/main.rs:475）。不是崩溃。注：unit 的 stdout/stderr 是 `append` 重定向（落 state/acb/bridge.log），journal 里看不到 launcher 原文。
+
+
+
+
+
+
+

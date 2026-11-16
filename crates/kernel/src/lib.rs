@@ -38,8 +38,8 @@ pub mod wire;
 
 pub use adapter::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
-    AdapterInstance, AdapterManifest, AdapterStatus, carrier_create_failed, create_instance,
-    manifest_supports_transport, run_adapter, validate_manifest,
+    AdapterInstance, AdapterManifest, AdapterStatus, ProviderConnections, carrier_create_failed,
+    create_instance, manifest_supports_transport, run_adapter, validate_manifest,
 };
 pub use config::{
     ADAPTER_CONNECTIONS_SCHEMA_SQL, AccessPolicy, CONSOLE_CONFIG_FILENAME, ClockPolicy, Config,

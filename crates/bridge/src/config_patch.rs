@@ -59,6 +59,55 @@ fn secret_item(name: &str) -> Item {
     Item::Value(Value::InlineTable(table))
 }
 
+/// JSON 对象 → toml_edit 表（连接 options 的透传转换）。对象进子表，
+/// 数组进 TOML 数组；空对象 = 不插入（调用方判断）。
+fn json_to_edit_table(object: &serde_json::Map<String, serde_json::Value>) -> Item {
+    let mut table = Table::new();
+    for (key, item) in object {
+        table.insert(key, json_to_edit_item(item));
+    }
+    Item::Table(table)
+}
+
+fn json_to_edit_item(item: &serde_json::Value) -> Item {
+    match item {
+        serde_json::Value::Null => Item::None,
+        serde_json::Value::String(text) => value(text.clone()),
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                value(int)
+            } else {
+                value(number.as_f64().unwrap_or_default())
+            }
+        }
+        serde_json::Value::Bool(flag) => value(*flag),
+        serde_json::Value::Array(items) => {
+            let mut array = toml_edit::Array::new();
+            for item in items {
+                match item {
+                    // 数组里的对象进内联表（TOML 数组不支持子表语法）。
+                    serde_json::Value::Object(map) => {
+                        let mut inline = InlineTable::new();
+                        for (key, inner) in map {
+                            if let Item::Value(inner_value) = json_to_edit_item(inner) {
+                                inline.insert(key, inner_value);
+                            }
+                        }
+                        array.push(Value::InlineTable(inline));
+                    }
+                    scalar => {
+                        if let Item::Value(inner_value) = json_to_edit_item(scalar) {
+                            array.push(inner_value);
+                        }
+                    }
+                }
+            }
+            Item::Value(Value::Array(array))
+        }
+        serde_json::Value::Object(map) => json_to_edit_table(map),
+    }
+}
+
 /// 应用一组补丁操作，返回（改完的 TOML 全文，人话改动清单）。
 pub fn apply_patch(
     text: &str,
@@ -132,10 +181,7 @@ fn session_op(
             .ok_or(msg!("bridge.patch.session_persona_required"))?;
         let persona_id = persona.to_owned();
 
-        let sessions = doc
-            .get_mut("sessions")
-            .and_then(Item::as_array_of_tables_mut)
-            .ok_or(msg!("bridge.patch.session_section_missing"))?;
+        let sessions = array_of_tables_mut_or_create(doc, "sessions");
         let mut table = Table::new();
         table.insert("id", value(id.clone()));
         table.insert("harness", value(harness.to_owned()));
@@ -406,6 +452,27 @@ fn harness_table<'a>(doc: &'a mut DocumentMut, id: &str) -> Option<&'a Table> {
 /// - 修改：`{"op":"connection","id":"qq","patch":{"url":"..","secret":"..","account":".."}}`
 /// - 新建：`{"op":"connection","id":"qq2","create":{"platform":"qq","kind":"onebot11",
 ///   "url":"ws://..","account":"10002","secret":"qq-token"}}`
+/// 取「`[[section]]` 数组表」用于追加新建条目；段不存在时**先建空段**。
+///
+/// 库对象化（schema 15）之后，某类对象为零时生成的文档就没有对应段——
+/// 首个该类对象必须能凭空建出来（2026-11-15 实测：cutover 清空连接对象后
+/// 「新增连接」直接被段缺失拒绝）。create 语义 = 没有 → 建。
+fn array_of_tables_mut_or_create<'a>(
+    doc: &'a mut DocumentMut,
+    array_key: &str,
+) -> &'a mut ArrayOfTables {
+    if doc
+        .get(array_key)
+        .and_then(Item::as_array_of_tables)
+        .is_none()
+    {
+        doc.insert(array_key, Item::ArrayOfTables(ArrayOfTables::new()));
+    }
+    doc.get_mut(array_key)
+        .and_then(Item::as_array_of_tables_mut)
+        .expect("section was just inserted or already existed")
+}
+
 fn connection_op(
     doc: &mut DocumentMut,
     op: &serde_json::Value,
@@ -434,30 +501,45 @@ fn connection_op(
             .get("kind")
             .and_then(serde_json::Value::as_str)
             .ok_or(msg!("bridge.patch.connection_kind_required"))?;
+        // url 不再硬性必填：process 等外置适配器不需要 url（命令在 options
+        // 里）；ws-client 必须有 url 的校验归 config 解析（build_connection），
+        // 报错会点名连接。
         let url = create
             .get("url")
             .and_then(serde_json::Value::as_str)
-            .filter(|u| !u.is_empty())
-            .ok_or(msg!("bridge.patch.connection_url_required"))?;
+            .map(str::trim)
+            .filter(|u| !u.is_empty());
         let account = create
             .get("account")
             .and_then(serde_json::Value::as_str)
             .ok_or(msg!("bridge.patch.connection_account_required"))?;
 
-        let connections = doc
-            .get_mut("connections")
-            .and_then(Item::as_array_of_tables_mut)
-            .ok_or(msg!("bridge.patch.connection_section_missing"))?;
+        let connections = array_of_tables_mut_or_create(doc, "connections");
         let mut table = Table::new();
         table.insert("id", value(id.clone()));
         table.insert("platform", value(platform.to_owned()));
         table.insert("kind", value(kind.to_owned()));
-        table.insert("url", value(url.to_owned()));
+        if let Some(url) = url {
+            table.insert("url", value(url.to_owned()));
+        }
+        if let Some(transport) = create
+            .get("transport")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            table.insert("transport", value(transport.to_owned()));
+        }
         table.insert("account", value(account.to_owned()));
         if let Some(secret) = create.get("secret").and_then(serde_json::Value::as_str) {
             if !secret.is_empty() {
                 table.insert("token", secret_item(secret));
             }
+        }
+        // 适配器专属选项（JSON 对象 → TOML 表）。形状由适配器 manifest 的
+        // options_schema 声明，控制台按它渲染；这里只做透传转换。
+        if let Some(options) = create.get("options").and_then(serde_json::Value::as_object) {
+            table.insert("options", json_to_edit_table(options));
         }
         connections.push(table);
         changes.push(msg!("bridge.patch.connection_created", id = &id));
@@ -702,10 +784,7 @@ fn upsert_named_table(
     changes: &mut Vec<Message>,
 ) -> Result<(), PatchError> {
     let id = string_field(op, "id")?;
-    let array = doc
-        .get_mut(array_key)
-        .and_then(Item::as_array_of_tables_mut)
-        .ok_or(msg!("bridge.patch.section_missing", section = array_key))?;
+    let array = array_of_tables_mut_or_create(doc, array_key);
 
     let existing = array
         .iter_mut()
@@ -892,6 +971,39 @@ keywords = ["喂"]
 
     fn parse_ops(value: serde_json::Value) -> Vec<serde_json::Value> {
         value.as_array().expect("测试里都是数组").to_vec()
+    }
+
+    #[test]
+    fn create_first_entry_without_existing_section() {
+        // 库对象化后某类对象为零时，生成的文档没有对应段——首个对象必须能
+        // 凭空建出来（2026-11-15 实测：cutover 清空连接对象后「新增连接」
+        // 被段缺失拒绝）。create 语义 = 没有 → 建。
+        let text = r#"
+[storage]
+path = "state/acb.db"
+"#;
+        let ops = parse_ops(serde_json::json!([
+            {"op": "connection", "id": "qqbot-official", "create": {
+                "platform": "qq", "kind": "qqbot", "transport": "qq-gateway",
+                "account": "1906414316", "secret": "qq-bot-app-secret",
+                "options": {"api_base": "https://api.sgroup.qq.com"}
+            }}
+        ]));
+        let (new_text, changes) = super::apply_patch(&text, &ops).expect("补丁能打");
+        assert!(new_text.contains("[[connections]]"), "{new_text}");
+        assert!(
+            new_text.contains("transport = \"qq-gateway\""),
+            "{new_text}"
+        );
+        assert!(new_text.contains("api_base"), "{new_text}");
+        assert_eq!(changes.len(), 1);
+        // 整份还能被 Config::parse 接受。
+        let config = acb_kernel::Config::parse_fixture(&new_text).expect("补丁后配置合法");
+        assert_eq!(config.connections[0].id, "qqbot-official");
+        assert_eq!(
+            config.connections[0].options["api_base"],
+            "https://api.sgroup.qq.com"
+        );
     }
 
     #[test]

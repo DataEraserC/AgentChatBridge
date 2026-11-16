@@ -10,6 +10,13 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
       version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+      # 构建身份：git 提交短哈希优先，脏树/无 git 回落到时间戳。控制台头部
+      # 显示它（/api/status 的 version 字段，来源 ACB_BUILD_VERSION），
+      # 用来分辨「这台桥跑的是哪次构建」。
+      buildRev = if self ? shortRev then self.shortRev
+        else if self ? dirtyShortRev then self.dirtyShortRev
+        else self.lastModifiedDate or "unknown";
+      buildVersion = "${version}+${builtins.toString buildRev}";
 
       # 整个 workspace 的 Rust 构建：产出全部二进制。它本身不再是部署产物，
       # 只作为 acbl / payload 两个分发包的取材来源。
@@ -67,7 +74,9 @@
       # bin/acb-bridge、harnesses/、deploy/start-drivers.sh、acb-contract.json。
       # examples/lua 也属于 payload：unit 的 ACB_LUA_DIR 指向 profile 的
       # examples/lua，缺了这一代就启动失败（2026-11-09 升级事故）。
-      acb-payload = pkgs.runCommand "acb-payload-${version}" { } ''
+      acb-payload = pkgs.runCommand "acb-payload-${version}" {
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+      } ''
         mkdir -p $out/bin $out/harnesses $out/deploy $out/examples
         install -m755 ${workspace}/bin/acb-bridge $out/bin/acb-bridge
         install -m755 ${workspace}/bin/acb-notifier $out/bin/acb-notifier
@@ -75,6 +84,8 @@
         cp -r ${./examples/lua} $out/examples/lua
         install -m755 ${./deploy/start-drivers.sh} $out/deploy/start-drivers.sh
         install -m644 ${./deploy/acb-contract.json} $out/acb-contract.json
+        # 构建身份随 payload 走：桥在 /api/status 里回这个值，控制台头部显示。
+        wrapProgram $out/bin/acb-bridge --set ACB_BUILD_VERSION ${buildVersion}
       '';
     in
     {

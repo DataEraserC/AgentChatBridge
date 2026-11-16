@@ -72,6 +72,7 @@ fn spec(
         effect,
         record,
         verification: acb_kernel::Verification::verified("platform test fixture"),
+        permissions: None,
     }
 }
 

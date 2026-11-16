@@ -45,7 +45,7 @@ use acb_kernel::{
     ADAPTER_API_VERSION, AdapterCapability, AdapterError, AdapterFactory, AdapterHost,
     AdapterInstance, AdapterManifest, AdapterStatus, CallError, CallOutcome, Connection, Element,
     EventQueue, MethodSpec, Outbound, OutboundError, OutgoingRecord, PluginEffect, PluginMetadata,
-    RoomId, Sent,
+    ProviderConnections, RoomId, Sent,
 };
 
 /// 等子进程回一条动作结果的上限。
@@ -61,6 +61,43 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const WRITE_QUEUE_LINES: usize = 64;
 /// 单行写入排队的最长等待。超过就认为子进程停止读取：标记连接不可用并杀掉重启。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 连接 options 的形状声明（JSON Schema 子集，与插件 config_schema 同一
+/// 渲染器）。keys 必须与 parse_options 实际读取的一致：command 必填。
+/// static 里不能调 json!（非 const），manifest() 运行时注入。
+fn process_options_schema() -> serde_json::Value {
+    serde_json::json!({
+        "x-account": {"placeholder": "bot 标识"},
+        "type": "object",
+        "required": ["command"],
+        "properties": {
+            "command": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "启动命令；第一个元素是程序，其余是参数"
+            },
+            "args": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "追加参数（与 command 拼接）"
+            },
+            "env": {
+                "type": "object",
+                "description": "子进程环境变量（值必须是字符串）"
+            },
+            "cwd": {
+                "type": "string",
+                "description": "子进程工作目录"
+            },
+            "startup_timeout_secs": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 10,
+                "description": "等子进程说 hello 的时限（秒）"
+            }
+        }
+    })
+}
 
 static TRANSPORTS: &[Cow<'static, str>] = &[Cow::Borrowed("process")];
 static CAPABILITIES: &[AdapterCapability] = &[
@@ -105,7 +142,9 @@ pub struct ProcessAdapterFactory;
 
 impl AdapterFactory for ProcessAdapterFactory {
     fn manifest(&self) -> AdapterManifest {
-        MANIFEST.clone()
+        let mut manifest = MANIFEST.clone();
+        manifest.metadata.options_schema = Some(process_options_schema());
+        manifest
     }
 
     fn create(
@@ -239,6 +278,11 @@ struct SharedProcess {
     catalog: Mutex<Arc<[MethodSpec]>>,
     /// 子进程 hello 里声明的入站能力；重启时跟着新 hello 更新。
     info: Mutex<WireAdapterInfo>,
+    /// 连接注册推送口（B期协议）。launch 闭包从 AdapterHost 拿到 sender 后填入；
+    /// 在此之前适配器推来的注册消息只能丢弃并打日志（首个子进程可能在
+    /// launch 之前就说话，槽位解耦了这个时序）。Arc 包一层：start_child 的
+    /// 两条调用路径（首启/重启）都只拿得到 shared 的切片引用。
+    connections: Arc<Mutex<Option<Sender<ProviderConnections>>>>,
 }
 
 // 启动期一次性返回三件异质产物（出站口、恢复闭包、manifest）；拆成类型别名反而
@@ -257,6 +301,7 @@ fn spawn_process(
 > {
     let config = parse_options(connection)?;
     let connection_id = connection.id.clone();
+    let provider = connection.kind.clone();
     let restart_events = events.clone();
 
     let shared = Arc::new(SharedProcess {
@@ -266,11 +311,14 @@ fn spawn_process(
         write_failed: Arc::new(AtomicBool::new(false)),
         catalog: Mutex::new(Arc::from(Vec::<MethodSpec>::new())),
         info: Mutex::new(WireAdapterInfo::default()),
+        connections: Arc::new(Mutex::new(None)),
     });
 
     let (child, writer, catalog, info) = start_child(
         &config,
         &connection_id,
+        &provider,
+        Arc::clone(&shared.connections),
         events,
         Arc::clone(&shared.pending),
         Arc::clone(&shared.alive),
@@ -301,11 +349,19 @@ fn spawn_process(
     };
 
     let launch: Box<dyn FnOnce(AdapterHost) + Send> = Box::new(move |host| {
+        // 注册推送口从 host 拿：bridge 在 launch 前才建好通道。填进共享槽位，
+        // 已在跑的 reader 线程（首个子进程）和之后重启的都从这里取。
+        *shared
+            .connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = host.connections;
         supervise(
             host.shutdown,
             host.status,
             config,
             connection_id,
+            provider,
+            Arc::clone(&shared.connections),
             shared,
             restart_events,
             child,
@@ -342,6 +398,8 @@ fn runtime_manifest(platform: &str, shared: &SharedProcess) -> AdapterManifest {
 fn start_child(
     config: &ProcessConfig,
     connection: &str,
+    provider: &str,
+    connections: Arc<Mutex<Option<Sender<ProviderConnections>>>>,
     events: EventQueue,
     pending: Pending,
     alive: Arc<AtomicBool>,
@@ -392,6 +450,8 @@ fn start_child(
     let (hello_tx, hello_rx) = mpsc::channel();
     spawn_reader(
         connection.to_owned(),
+        provider.to_owned(),
+        connections,
         stdout,
         events,
         pending,
@@ -456,6 +516,8 @@ fn supervise(
     status: AdapterStatus,
     config: ProcessConfig,
     connection: String,
+    provider: String,
+    connections: Arc<Mutex<Option<Sender<ProviderConnections>>>>,
     shared: Arc<SharedProcess>,
     events: EventQueue,
     mut child: Child,
@@ -506,6 +568,8 @@ fn supervise(
         match start_child(
             &config,
             &connection,
+            &provider,
+            Arc::clone(&connections),
             events.clone(),
             Arc::clone(&shared.pending),
             Arc::clone(&shared.alive),
@@ -566,6 +630,8 @@ fn spawn_stderr(connection: String, stderr: std::process::ChildStderr) {
 
 fn spawn_reader(
     connection: String,
+    provider: String,
+    connections: Arc<Mutex<Option<Sender<ProviderConnections>>>>,
     stdout: std::process::ChildStdout,
     events: EventQueue,
     pending: Pending,
@@ -676,6 +742,44 @@ fn spawn_reader(
                             message = message
                         )
                     );
+                }
+                AdapterMessage::Connections {
+                    connections: registered,
+                    removed,
+                } => {
+                    let sender = connections
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
+                    match sender {
+                        Some(sender) => {
+                            if let Err(error) = sender.send(ProviderConnections {
+                                provider: provider.clone(),
+                                connections: registered,
+                                removed,
+                            }) {
+                                eprintln!(
+                                    "{}",
+                                    acb_i18n::t!(
+                                        "adapter.process.connections_forward_failed",
+                                        connection = connection,
+                                        error = error
+                                    )
+                                );
+                            }
+                        }
+                        None => {
+                            // launch 还没把通道装进槽位（首条消息竞态）或载体
+                            // 无注册通道：如实丢弃，适配器下次重连会回放。
+                            eprintln!(
+                                "{}",
+                                acb_i18n::t!(
+                                    "adapter.process.connections_no_channel",
+                                    connection = connection
+                                )
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -999,6 +1103,7 @@ mod tests {
             write_failed: Arc::clone(&write_failed),
             catalog: Mutex::new(Arc::from(Vec::<MethodSpec>::new())),
             info: Mutex::new(WireAdapterInfo::default()),
+            connections: Arc::new(Mutex::new(None)),
         };
 
         // 1 MiB 远大于管道缓冲；writer 取走后会卡在 write_all。

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
@@ -66,7 +66,17 @@ pub fn supervise(
     let session = Arc::new(Mutex::new(SessionState::default()));
     while !shutdown.load(Ordering::Relaxed) {
         status.attempt();
-        match run_connection(&connection, &url, &token_manager, &reply_state, &shutdown, &events, &status, &session, &id) {
+        match run_connection(
+            &connection,
+            &url,
+            &token_manager,
+            &reply_state,
+            &shutdown,
+            &events,
+            &status,
+            &session,
+            &id,
+        ) {
             Ok(()) => {
                 // 退出信号亮了：正常收工。
                 return;
@@ -75,7 +85,11 @@ pub fn supervise(
                 status.failed("connect", &error.to_string());
                 eprintln!(
                     "{}",
-                    acb_i18n::t!("adapter.qqbot.disconnected", id = id, detail = error.to_string())
+                    acb_i18n::t!(
+                        "adapter.qqbot.disconnected",
+                        id = id,
+                        detail = error.to_string()
+                    )
                 );
             }
         }
@@ -115,14 +129,24 @@ fn run_connection(
         acb_i18n::t!("adapter.qqbot.connected", id = id, url = url)
     );
     let last_seq = AtomicU64::new(0);
-    let result = handshake_and_read(connection, ws, token_manager, reply_state, shutdown, events, &last_seq, session);
+    let result = handshake_and_read(
+        connection,
+        ws,
+        token_manager,
+        reply_state,
+        shutdown,
+        events,
+        &last_seq,
+        session,
+    );
     let _ = status.disconnected("gateway_closed", "read loop ended");
     result
 }
 
 /// 连上网关。TLS 由 tungstenite 的 rustls 特性处理（wss://）。
 fn connect(url: &str) -> Result<Ws, LinkError> {
-    let (ws, _response) = tungstenite::connect(url).map_err(|error| LinkError::Connect(error.to_string()))?;
+    let (ws, _response) =
+        tungstenite::connect(url).map_err(|error| LinkError::Connect(error.to_string()))?;
     set_stream_timeout(&ws, READ_TICK);
     Ok(ws)
 }
@@ -265,7 +289,10 @@ fn handshake_and_read(
                 match payload.get("op").and_then(|value| value.as_u64()) {
                     Some(0) => {
                         // Dispatch：记序号、解事件、进队列。
-                        let seq = payload.get("s").and_then(|value| value.as_u64()).unwrap_or(0);
+                        let seq = payload
+                            .get("s")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(0);
                         if seq > 0 {
                             last_seq.store(seq, Ordering::Relaxed);
                         }
@@ -278,7 +305,9 @@ fn handshake_and_read(
                             continue;
                         }
                         let payload_data = payload.get("d").cloned().unwrap_or(Value::Null);
-                        // READY dispatch 带会话 id：Resume 重连要用它。
+                        // READY 是控制帧：抓会话 id（Resume 要用）后直接吃掉，
+                        // 不能落到 event::parse——否则它会被 unknown 分支包成
+                        // notice 记录（room group/READY），造成伪事件噪音。
                         if event_type == "READY" {
                             let session_id = payload_data
                                 .get("session_id")
@@ -288,7 +317,18 @@ fn handshake_and_read(
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
                                 .session_id = session_id;
+                            continue;
                         }
+                        // 每条 dispatch 都留一行：官方平台的场景开关（群/单聊）
+                        // 没开时消息根本不推，这里是最便宜的判定点。
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "adapter.qqbot.dispatch",
+                                connection = connection.id,
+                                event = event_type
+                            )
+                        );
                         match event::parse(
                             &connection.id,
                             &event_type,

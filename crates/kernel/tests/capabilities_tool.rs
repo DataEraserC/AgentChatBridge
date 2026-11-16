@@ -84,6 +84,7 @@ fn catalog() -> Arc<[MethodSpec]> {
             effect: Effect::Read,
             record: RecordMode::None,
             verification: Verification::verified("capabilities test fake"),
+            permissions: None,
         });
     }
     methods.push(MethodSpec {
@@ -98,6 +99,7 @@ fn catalog() -> Arc<[MethodSpec]> {
         effect: Effect::Write,
         record: RecordMode::None,
         verification: Verification::verified("capabilities test fake"),
+        permissions: None,
     });
     methods.push(MethodSpec {
         name: "account.cookies".into(),
@@ -111,6 +113,7 @@ fn catalog() -> Arc<[MethodSpec]> {
         effect: Effect::Read,
         record: RecordMode::None,
         verification: Verification::verified("capabilities test fake"),
+        permissions: None,
     });
     methods.push(MethodSpec {
         name: "fake.unverified".into(),
@@ -124,6 +127,7 @@ fn catalog() -> Arc<[MethodSpec]> {
         effect: Effect::Write,
         record: RecordMode::None,
         verification: Verification::unverified("只有单一来源", "跑一次实验"),
+        permissions: None,
     });
     methods.push(MethodSpec {
         name: "system.restart".into(),
@@ -140,6 +144,7 @@ fn catalog() -> Arc<[MethodSpec]> {
             "platform self-declared unsupported: 平台自述不支持重启",
             "隔离实例调用并记录 retcode",
         ),
+        permissions: None,
     });
     methods.into()
 }

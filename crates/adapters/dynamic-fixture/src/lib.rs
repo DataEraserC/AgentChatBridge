@@ -225,6 +225,12 @@ unsafe extern "C" fn fixture_invoke(
                 },
             },
         },
+        CoreMessage::ConnectionsList { id } => AdapterMessage::Reply {
+            id,
+            result: WireResult::Connections {
+                connections: Vec::new(),
+            },
+        },
         CoreMessage::Shutdown => {
             fixture.stop.store(true, Ordering::Relaxed);
             if let Some(log) = fixture.host.log {
@@ -280,6 +286,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "read".into(),
             record: "none".into(),
             verification: verified(),
+            permissions: None,
         },
         WireMethodSpec {
             name: "demo.send".into(),
@@ -293,6 +300,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "send".into(),
             record: "message".into(),
             verification: verified(),
+            permissions: None,
         },
         WireMethodSpec {
             name: "demo.fail".into(),
@@ -306,6 +314,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "read".into(),
             record: "none".into(),
             verification: verified(),
+            permissions: None,
         },
         WireMethodSpec {
             name: "demo.slow".into(),
@@ -319,6 +328,7 @@ fn catalog() -> Vec<WireMethodSpec> {
             effect: "read".into(),
             record: "none".into(),
             verification: verified(),
+            permissions: None,
         },
     ]
 }
