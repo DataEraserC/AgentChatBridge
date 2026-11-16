@@ -12,7 +12,9 @@ use acb_kernel::{
 
 use crate::channel::ProcessChannel;
 use crate::config::ProcessProviderConfig;
-use crate::provider::{ProcessAccessManager, ProcessClockManager, ProcessWakeManager};
+use crate::provider::{
+    ProcessAccessManager, ProcessClockManager, ProcessRouteManager, ProcessWakeManager,
+};
 
 pub struct ProcessProviderLoader {
     configs: Vec<ProcessProviderConfig>,
@@ -36,6 +38,7 @@ impl PluginLoader for ProcessProviderLoader {
             let point = match config.extension.as_str() {
                 "wake" => ExtensionPoint::Wake,
                 "clock" => ExtensionPoint::Clock,
+                "route" => ExtensionPoint::Route,
                 _ => ExtensionPoint::Access,
             };
             if !points.contains(&point) {
@@ -91,6 +94,7 @@ impl PluginLoader for ProcessProviderLoader {
             let installed: Arc<dyn ManagerPlugin> = match config.extension.as_str() {
                 "wake" => Arc::new(ProcessWakeManager::new(id.clone(), metadata, channel)),
                 "clock" => Arc::new(ProcessClockManager::new(id.clone(), metadata, channel)),
+                "route" => Arc::new(ProcessRouteManager::new(id.clone(), metadata, channel)),
                 _ => Arc::new(ProcessAccessManager::new(id.clone(), metadata, channel)),
             };
             manager

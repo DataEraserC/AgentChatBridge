@@ -2,13 +2,17 @@
 
 use std::sync::{Arc, Mutex};
 
-use acb_adapter_api::{WireAccessRequest, WireClockRequest, WireResult, WireWakeRequest};
+use acb_adapter_api::{
+    WireAccessRequest, WireClockRequest, WireResult, WireRouteAction, WireRouteDecision,
+    WireRouteRequest, WireWakeRequest,
+};
 use acb_kernel::{
     AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Capability, ClockContext,
-    ClockPolicy, ClockProvider, ExtensionPoint, Health, ManagerManifest, ManagerPlugin,
-    PLUGIN_API_VERSION, PluginError, PluginMetadata, PluginSource, ProviderDescriptor, ProviderId,
-    ProviderInstance, ProviderOptions, WakeContext, WakeDecision, WakePolicy, WakeProvider,
-    WakeVerdict,
+    ClockPolicy, ClockProvider, ExtensionPoint, Health, InterruptScope, ManagerManifest,
+    ManagerPlugin, PLUGIN_API_VERSION, PluginError, PluginMetadata, PluginSource,
+    ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, RoomId, RouteAction,
+    RouteContext, RouteDecision, RoutePolicy, RouteProvider, WakeContext, WakeDecision, WakePolicy,
+    WakeProvider, WakeVerdict,
 };
 use serde_json::json;
 
@@ -439,6 +443,314 @@ impl ClockProvider for ProcessClockProvider {
                 false
             }
             Err(_) => false,
+        }
+    }
+}
+
+/// Route 扩展点的进程实现（ADR-0033 第二层）。
+///
+/// route 与其它三个不同：判定结果带**动作**（发消息 / 跑任务 / 打断 / 唤醒），
+/// 所以回执不是 `Decision { decision: String }` 而是结构化的
+/// `WireResult::Route { decision }`。这层不把它压成字符串——动作有参数，
+/// 压成字符串就是把协议变成解析题。
+pub(crate) struct ProcessRouteManager {
+    provider: ProviderId,
+    metadata: PluginMetadata,
+    channel: Arc<ProcessChannel>,
+    cached: Mutex<Option<Arc<ProcessRouteProvider>>>,
+}
+
+impl ProcessRouteManager {
+    pub(crate) fn new(
+        provider: ProviderId,
+        metadata: PluginMetadata,
+        channel: Arc<ProcessChannel>,
+    ) -> Self {
+        Self {
+            provider,
+            metadata,
+            channel,
+            cached: Mutex::new(None),
+        }
+    }
+}
+
+impl ManagerPlugin for ProcessRouteManager {
+    fn manifest(&self) -> ManagerManifest {
+        ManagerManifest::new(
+            self.provider.namespace(),
+            PLUGIN_API_VERSION,
+            vec![Capability::RouteDecision],
+        )
+        .with_metadata(self.metadata.clone())
+    }
+
+    fn descriptors(&self) -> Vec<ProviderDescriptor> {
+        vec![
+            ProviderDescriptor::new(
+                self.provider.clone(),
+                ExtensionPoint::Route,
+                PLUGIN_API_VERSION,
+                vec![Capability::RouteDecision],
+            )
+            .with_metadata(self.metadata.clone())
+            .with_source(PluginSource::Dynamic),
+        ]
+    }
+
+    fn instantiate(
+        &self,
+        id: &ProviderId,
+        options: ProviderOptions<'_>,
+    ) -> Result<ProviderInstance, PluginError> {
+        if id != &self.provider {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        }
+        if !matches!(options, ProviderOptions::Route(_)) {
+            return Err(PluginError::Provider {
+                id: id.to_string(),
+                detail: "process route provider requires Route options".to_owned(),
+            });
+        }
+        let mut cached = self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let provider = cached
+            .get_or_insert_with(|| {
+                Arc::new(ProcessRouteProvider {
+                    channel: Arc::clone(&self.channel),
+                })
+            })
+            .clone();
+        Ok(ProviderInstance::Route(provider))
+    }
+
+    fn health(&self) -> Health {
+        self.channel.health()
+    }
+
+    fn shutdown(&self) {
+        self.channel.shutdown();
+    }
+}
+
+struct ProcessRouteProvider {
+    channel: Arc<ProcessChannel>,
+}
+
+impl RouteProvider for ProcessRouteProvider {
+    fn decide(&self, options: &RoutePolicy, context: &RouteContext<'_>) -> RouteDecision {
+        // 载体不可用时 `Pass`：把消息交回正常流程（入库、按 wake 策略决定是否
+        // 唤醒），比 `Drop` 安全——静默吃掉消息是更难查的故障。
+        if !matches!(self.channel.health(), Health::Healthy) {
+            return RouteDecision::Pass;
+        }
+        let wire = WireRouteRequest {
+            connection: context.connection.to_owned(),
+            platform: context.platform.to_owned(),
+            room: context.room.to_string(),
+            sender_id: context.sender.id.clone(),
+            sender_role: sender_role_name(context.sender.role.as_ref()).to_owned(),
+            is_admin: context.is_admin,
+            kind: record_kind_name(context.kind).to_owned(),
+            elements: context.elements.to_vec(),
+            text: context.text.to_owned(),
+            at_self: context.at_self,
+            reply_to_self: context.reply_to_self,
+            has_body: context.has_body,
+            event: context.event.map(str::to_owned),
+            tags: context.tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            sessions: context.sessions.to_vec(),
+        };
+        let request = serde_json::to_value(wire).unwrap_or(serde_json::Value::Null);
+        let options_json = json!({
+            "provider": options.provider.to_string(),
+            "extra": options.options,
+        });
+        match self.channel.decide("route", options_json, request) {
+            Ok(WireResult::Route { decision }) => route_decision(decision),
+            Ok(other) => {
+                self.channel
+                    .note_invalid_reply(&format!("expected route reply, got {other:?}"));
+                RouteDecision::Pass
+            }
+            Err(_) => RouteDecision::Pass,
+        }
+    }
+}
+
+/// 身份 → wire 上的词。与 Lua 载体的 `role_name` 用同一套词，
+/// 免得同一个角色在两种载体里要写不同的字符串。
+fn sender_role_name(role: Option<&acb_kernel::SenderRole>) -> &'static str {
+    match role {
+        Some(acb_kernel::SenderRole::SystemAdmin) => "system_admin",
+        Some(acb_kernel::SenderRole::Owner) => "owner",
+        Some(acb_kernel::SenderRole::Admin) => "admin",
+        None => "",
+    }
+}
+
+/// 记录种类 → wire 上的词。只有两种：消息与事件。
+fn record_kind_name(kind: &acb_kernel::RecordKind) -> &'static str {
+    match kind {
+        acb_kernel::RecordKind::Message => "message",
+        acb_kernel::RecordKind::Event { .. } => "event",
+    }
+}
+
+/// wire 的 route 判定 → core 的 `RouteDecision`。
+///
+/// 单拎出来是为了能直接测映射：尤其是 `Interrupt` 的三档 scope 与
+/// 「房间省略 = 触发房间」这两条容易写错的语义。
+fn route_decision(wire: WireRouteDecision) -> RouteDecision {
+    match wire {
+        WireRouteDecision::Pass => RouteDecision::Pass,
+        WireRouteDecision::Drop { reason } => RouteDecision::Drop { reason },
+        WireRouteDecision::Handle {
+            store,
+            wake,
+            actions,
+        } => RouteDecision::Handle {
+            store,
+            wake,
+            actions: actions.into_iter().filter_map(route_action).collect(),
+        },
+    }
+}
+
+/// 一个 wire 动作 → core 动作。返回 `None` 表示这条动作用不了（房间 id 非法等），
+/// 调用方跳过它而不是让整条判定失效——少一个动作好过整条消息不处理。
+fn route_action(wire: WireRouteAction) -> Option<RouteAction> {
+    match wire {
+        WireRouteAction::Interrupt { scope, sessions } => {
+            let scope = match scope.as_str() {
+                "connection" => InterruptScope::Connection,
+                "sessions" => InterruptScope::Sessions(sessions),
+                // 未知值按默认（触发房间）：宁可打断范围小一点，
+                // 也不要因为拼错一个词就把整条连接的所有会话都掐了。
+                _ => InterruptScope::Room,
+            };
+            Some(RouteAction::Interrupt { scope })
+        }
+        WireRouteAction::Send { room, elements } => Some(RouteAction::Send {
+            room: room.and_then(|text| RoomId::parse(&text).ok()),
+            elements,
+        }),
+        WireRouteAction::Task { handler, params } => Some(RouteAction::Task { handler, params }),
+        WireRouteAction::Wake {
+            session,
+            room,
+            reason,
+        } => Some(RouteAction::Wake {
+            session,
+            room: room.and_then(|text| RoomId::parse(&text).ok()),
+            reason,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use acb_adapter_api::WireRouteAction;
+
+    /// `Pass` / `Drop` 一对一透传。
+    #[test]
+    fn pass_and_drop_map_directly() {
+        assert_eq!(route_decision(WireRouteDecision::Pass), RouteDecision::Pass);
+        assert_eq!(
+            route_decision(WireRouteDecision::Drop {
+                reason: Some("noise".to_owned()),
+            }),
+            RouteDecision::Drop {
+                reason: Some("noise".to_owned()),
+            }
+        );
+    }
+
+    /// `Interrupt` 的三档 scope：拼错的值按 `Room` 兜底。
+    ///
+    /// 兜底方向要往「影响面小」走：把 `connection` 误判成一整条连接，会掐掉
+    /// 别的群的会话；误判成当前房间最多少断一个。
+    #[test]
+    fn interrupt_scope_falls_back_to_room_on_unknown_value() {
+        let scope_of = |scope: &str| match route_action(WireRouteAction::Interrupt {
+            scope: scope.to_owned(),
+            sessions: vec!["a".to_owned()],
+        }) {
+            Some(RouteAction::Interrupt { scope }) => scope,
+            other => panic!("应当是 Interrupt，实际 {other:?}"),
+        };
+
+        assert_eq!(scope_of("room"), InterruptScope::Room);
+        assert_eq!(scope_of("connection"), InterruptScope::Connection);
+        assert_eq!(
+            scope_of("sessions"),
+            InterruptScope::Sessions(vec!["a".to_owned()])
+        );
+        assert_eq!(scope_of("nonsense"), InterruptScope::Room);
+    }
+
+    /// `Send` / `Wake` 的 room 省略 = 触发房间（`None`）；非法 id 只丢这一个动作。
+    #[test]
+    fn optional_room_is_none_or_dropped_action() {
+        // 省略 room：保持 None，由 core 解释成触发房间。
+        match route_action(WireRouteAction::Send {
+            room: None,
+            elements: Vec::new(),
+        }) {
+            Some(RouteAction::Send { room, .. }) => assert!(room.is_none()),
+            other => panic!("应当是 Send，实际 {other:?}"),
+        }
+        match route_action(WireRouteAction::Wake {
+            session: None,
+            room: None,
+            reason: Some("why".to_owned()),
+        }) {
+            Some(RouteAction::Wake { room, .. }) => assert!(room.is_none()),
+            other => panic!("应当是 Wake，实际 {other:?}"),
+        }
+        // 非法 room id：动作仍然保留，只是 room 变成 None（不是整条丢弃）。
+        match route_action(WireRouteAction::Send {
+            room: Some("不是房间".to_owned()),
+            elements: Vec::new(),
+        }) {
+            Some(RouteAction::Send { room, .. }) => assert!(room.is_none()),
+            other => panic!("应当是 Send，实际 {other:?}"),
+        }
+    }
+
+    /// `Handle` 的 store / wake 透传，动作按序映射。
+    #[test]
+    fn handle_carries_flags_and_actions_in_order() {
+        let decision = route_decision(WireRouteDecision::Handle {
+            store: true,
+            wake: false,
+            actions: vec![
+                WireRouteAction::Task {
+                    handler: "b23".to_owned(),
+                    params: json!({"url": "x"}),
+                },
+                WireRouteAction::Interrupt {
+                    scope: "room".to_owned(),
+                    sessions: Vec::new(),
+                },
+            ],
+        });
+        match decision {
+            RouteDecision::Handle {
+                store,
+                wake,
+                actions,
+            } => {
+                assert!(store);
+                assert!(!wake);
+                assert_eq!(actions.len(), 2);
+                assert!(matches!(actions[0], RouteAction::Task { .. }));
+                assert!(matches!(actions[1], RouteAction::Interrupt { .. }));
+            }
+            other => panic!("应当是 Handle，实际 {other:?}"),
         }
     }
 }

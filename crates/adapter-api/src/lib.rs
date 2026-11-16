@@ -295,6 +295,109 @@ pub struct WireClockRequest {
     pub last_record_at: Option<i64>,
 }
 
+/// route 策略判定的 wire 形状。
+///
+/// 与其它策略的请求同构：只给「这次消息长什么样」，判定由适配器/插件做。
+#[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
+pub struct WireRouteRequest {
+    pub connection: String,
+    pub platform: String,
+    pub room: String,
+    pub sender_id: String,
+    #[serde(default)]
+    pub sender_role: String,
+    /// 发送者是不是这条连接点名的系统管理员。
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub kind: String,
+    pub elements: Vec<Element>,
+    /// 只拼 Text 段：命令匹配不该被 @ / 引用的占位符干扰。
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub at_self: bool,
+    #[serde(default)]
+    pub reply_to_self: bool,
+    #[serde(default)]
+    pub has_body: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 订阅这个房间的会话（按配置顺序）。
+    #[serde(default)]
+    pub sessions: Vec<String>,
+}
+
+/// route 策略的判定结果。
+///
+/// 与 [`WireResult::Decision`] 分开：route 的动作是有结构的（发消息、跑任务、
+/// 打断、直接唤醒），塞进 `decision` 字符串会让这一层变成字符串协议。
+#[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireRouteDecision {
+    /// 继续走正常流程：入库、唤醒。
+    Pass,
+    /// 吃掉，不写流水、不叫醒。
+    Drop {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// 交给代码处理。
+    Handle {
+        /// 这条命令本身要不要写流水。
+        #[serde(default)]
+        store: bool,
+        /// 处理完要不要让 AI 也看到这条。
+        #[serde(default)]
+        wake: bool,
+        #[serde(default)]
+        actions: Vec<WireRouteAction>,
+    },
+}
+
+/// route 判定里的一个动作。
+#[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireRouteAction {
+    /// 提前结束轮次。
+    Interrupt {
+        /// `room` = 触发消息所在房间（默认）；`connection` = 整条连接；
+        /// `sessions` = 点名若干会话。
+        #[serde(default = "default_interrupt_scope")]
+        scope: String,
+        #[serde(default)]
+        sessions: Vec<String>,
+    },
+    /// 以桥的身份发一条消息。`room = null` 发到触发消息所在房间。
+    Send {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room: Option<String>,
+        #[serde(default)]
+        elements: Vec<Element>,
+    },
+    /// 跑一个后台任务。
+    Task {
+        handler: String,
+        #[serde(default)]
+        params: Value,
+    },
+    /// 直接请求唤醒（绕过 wake 策略，core 会按信任层级与频率上限复核）。
+    Wake {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+fn default_interrupt_scope() -> String {
+    "room".to_owned()
+}
+
 /// 投递批次选择的 wire 形状。`records` 是这一轮的候选流水（含 id）。
 #[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
 pub struct WireDeliveryRequest {
@@ -635,6 +738,10 @@ pub enum WireResult {
     Connections {
         #[serde(default)]
         connections: Vec<WireConnection>,
+    },
+    /// route 策略判定的回执。
+    Route {
+        decision: WireRouteDecision,
     },
     /// 房间枚举的回执（对 [`CoreMessage::RoomsList`]）。
     ///
