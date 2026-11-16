@@ -4,15 +4,16 @@ use std::sync::{Arc, Mutex};
 
 use acb_adapter_api::{
     WireAccessRequest, WireClockRequest, WireResult, WireRouteAction, WireRouteDecision,
-    WireRouteRequest, WireWakeRequest,
+    WireRouteRequest, WireTurnErrorAction, WireTurnErrorRequest, WireWakeRequest,
 };
 use acb_kernel::{
     AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Capability, ClockContext,
     ClockPolicy, ClockProvider, ExtensionPoint, Health, InterruptScope, ManagerManifest,
     ManagerPlugin, PLUGIN_API_VERSION, PluginError, PluginMetadata, PluginSource,
     ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, RoomId, RouteAction,
-    RouteContext, RouteDecision, RoutePolicy, RouteProvider, WakeContext, WakeDecision, WakePolicy,
-    WakeProvider, WakeVerdict,
+    RouteContext, RouteDecision, RoutePolicy, RouteProvider, TurnErrorAction, TurnErrorPolicy,
+    TurnErrorProvider, TurnErrorRequest, WakeContext, WakeDecision, WakePolicy, WakeProvider,
+    WakeVerdict,
 };
 use serde_json::json;
 
@@ -752,5 +753,235 @@ mod route_tests {
             }
             other => panic!("应当是 Handle，实际 {other:?}"),
         }
+    }
+}
+
+/// TurnError 扩展点的进程实现（ADR-0033 第二层最后一格）。
+///
+/// wire 形状早就有了（`WireTurnErrorRequest` / `WireTurnErrorAction` /
+/// `WireResult::Actions`），缺的只是载体这一侧的 manager——这正是本次调查
+/// 暴露的问题：协议先设计好了，但没有载体把它接上。
+pub(crate) struct ProcessTurnErrorManager {
+    provider: ProviderId,
+    metadata: PluginMetadata,
+    channel: Arc<ProcessChannel>,
+    cached: Mutex<Option<Arc<ProcessTurnErrorProvider>>>,
+}
+
+impl ProcessTurnErrorManager {
+    pub(crate) fn new(
+        provider: ProviderId,
+        metadata: PluginMetadata,
+        channel: Arc<ProcessChannel>,
+    ) -> Self {
+        Self {
+            provider,
+            metadata,
+            channel,
+            cached: Mutex::new(None),
+        }
+    }
+}
+
+impl ManagerPlugin for ProcessTurnErrorManager {
+    fn manifest(&self) -> ManagerManifest {
+        ManagerManifest::new(
+            self.provider.namespace(),
+            PLUGIN_API_VERSION,
+            vec![Capability::TurnErrorDecision],
+        )
+        .with_metadata(self.metadata.clone())
+    }
+
+    fn descriptors(&self) -> Vec<ProviderDescriptor> {
+        vec![
+            ProviderDescriptor::new(
+                self.provider.clone(),
+                ExtensionPoint::TurnError,
+                PLUGIN_API_VERSION,
+                vec![Capability::TurnErrorDecision],
+            )
+            .with_metadata(self.metadata.clone())
+            .with_source(PluginSource::Dynamic),
+        ]
+    }
+
+    fn instantiate(
+        &self,
+        id: &ProviderId,
+        options: ProviderOptions<'_>,
+    ) -> Result<ProviderInstance, PluginError> {
+        if id != &self.provider {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        }
+        if !matches!(options, ProviderOptions::TurnError(_)) {
+            return Err(PluginError::Provider {
+                id: id.to_string(),
+                detail: "process turn_error provider requires TurnError options".to_owned(),
+            });
+        }
+        let mut cached = self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let provider = cached
+            .get_or_insert_with(|| {
+                Arc::new(ProcessTurnErrorProvider {
+                    channel: Arc::clone(&self.channel),
+                })
+            })
+            .clone();
+        Ok(ProviderInstance::TurnError(provider))
+    }
+
+    fn health(&self) -> Health {
+        self.channel.health()
+    }
+
+    fn shutdown(&self) {
+        self.channel.shutdown();
+    }
+}
+
+struct ProcessTurnErrorProvider {
+    channel: Arc<ProcessChannel>,
+}
+
+impl TurnErrorProvider for ProcessTurnErrorProvider {
+    fn decide(
+        &self,
+        options: &TurnErrorPolicy,
+        request: &TurnErrorRequest<'_>,
+    ) -> Vec<TurnErrorAction> {
+        // 载体不可用时退回请求里带来的默认动作：失败通知是「出事了要有人知道」
+        // 的通道，这时更不能把通知也弄丢。
+        if !matches!(self.channel.health(), Health::Healthy) {
+            return fallback_turn_error_actions(request);
+        }
+        let wire = WireTurnErrorRequest {
+            session: request.session.to_owned(),
+            room: request.room.to_string(),
+            error: request.error.to_owned(),
+            actions: request.actions.iter().map(turn_error_action_wire).collect(),
+            default_actions: request
+                .default_actions
+                .iter()
+                .map(turn_error_action_wire)
+                .collect(),
+        };
+        let request_json = serde_json::to_value(wire).unwrap_or(serde_json::Value::Null);
+        let options_json = json!({
+            "provider": options.provider.to_string(),
+            "extra": options.options,
+        });
+        match self
+            .channel
+            .decide("turn_error", options_json, request_json)
+        {
+            Ok(WireResult::Actions { actions }) => actions
+                .into_iter()
+                .filter_map(turn_error_action_core)
+                .collect(),
+            Ok(other) => {
+                self.channel
+                    .note_invalid_reply(&format!("expected actions reply, got {other:?}"));
+                fallback_turn_error_actions(request)
+            }
+            Err(_) => fallback_turn_error_actions(request),
+        }
+    }
+}
+
+/// 内置默认选择：会话自己的动作非空就用它，否则用全局默认。
+///
+/// 载体不可用时沿用这条规则——它是「不出事时桥本来会怎么做」的定义，
+/// 这里只是把它当作兜底，不发明新行为。
+fn fallback_turn_error_actions(request: &TurnErrorRequest<'_>) -> Vec<TurnErrorAction> {
+    if request.actions.is_empty() {
+        request.default_actions.to_vec()
+    } else {
+        request.actions.to_vec()
+    }
+}
+
+fn turn_error_action_wire(action: &TurnErrorAction) -> WireTurnErrorAction {
+    match action {
+        TurnErrorAction::Log => WireTurnErrorAction::Log,
+        TurnErrorAction::Send { room } => WireTurnErrorAction::Send {
+            room: room.to_string(),
+        },
+    }
+}
+
+/// wire 动作 → core 动作。房间 id 解析失败就跳过**这一条**动作，
+/// 不让整份通知作废（少发一个房间好过一条都不发）。
+fn turn_error_action_core(action: WireTurnErrorAction) -> Option<TurnErrorAction> {
+    match action {
+        WireTurnErrorAction::Log => Some(TurnErrorAction::Log),
+        WireTurnErrorAction::Send { room } => RoomId::parse(&room)
+            .ok()
+            .map(|room| TurnErrorAction::Send { room }),
+    }
+}
+
+#[cfg(test)]
+mod turn_error_tests {
+    use super::*;
+
+    /// 动作双向映射：`Log` 与 `Send{room}` 都要能过去再回来。
+    #[test]
+    fn actions_round_trip() {
+        let room = RoomId::new("qq", "group/1").expect("合法房间");
+        let wire = turn_error_action_wire(&TurnErrorAction::Log);
+        assert_eq!(wire, WireTurnErrorAction::Log);
+        assert_eq!(turn_error_action_core(wire), Some(TurnErrorAction::Log));
+
+        let wire = turn_error_action_wire(&TurnErrorAction::Send { room: room.clone() });
+        assert_eq!(
+            turn_error_action_core(wire),
+            Some(TurnErrorAction::Send { room })
+        );
+    }
+
+    /// 非法房间只用掉这一条动作，不牵连其它。
+    #[test]
+    fn invalid_room_drops_only_that_action() {
+        assert_eq!(
+            turn_error_action_core(WireTurnErrorAction::Send {
+                room: "不是房间".to_owned(),
+            }),
+            None
+        );
+        // Log 不受影响。
+        assert_eq!(
+            turn_error_action_core(WireTurnErrorAction::Log),
+            Some(TurnErrorAction::Log)
+        );
+    }
+
+    /// 载体不可用时的兜底：沿用内置规则（会话动作优先，否则全局默认）。
+    #[test]
+    fn fallback_prefers_session_actions_then_defaults() {
+        let room = RoomId::new("qq", "private/9").expect("合法房间");
+        let session_actions = vec![TurnErrorAction::Send { room: room.clone() }];
+        let defaults = vec![TurnErrorAction::Log];
+
+        let with_session = TurnErrorRequest {
+            session: "s",
+            room: &room,
+            error: "boom",
+            actions: &session_actions,
+            default_actions: &defaults,
+        };
+        assert_eq!(fallback_turn_error_actions(&with_session), session_actions);
+
+        let without_session = TurnErrorRequest {
+            session: "s",
+            room: &room,
+            error: "boom",
+            actions: &[],
+            default_actions: &defaults,
+        };
+        assert_eq!(fallback_turn_error_actions(&without_session), defaults);
     }
 }
