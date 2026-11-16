@@ -48,6 +48,7 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "route",
     "turn_error",
     "tool_access",
+    "prompt",
 ];
 
 fn default_startup_timeout() -> u64 {
@@ -232,6 +233,20 @@ mod tests {
         )
         .expect("tool_access 是支持的扩展点");
         assert_eq!(configs[0].extension, "tool_access");
+    }
+
+    #[test]
+    fn accepts_prompt_extension() {
+        let configs = ProcessProviderConfig::from_toml(
+            r#"
+            [[process_providers]]
+            id = "demo.prompt"
+            extension = "prompt"
+            command = ["echo"]
+            "#,
+        )
+        .expect("prompt 是支持的扩展点");
+        assert_eq!(configs[0].extension, "prompt");
     }
 
     #[test]

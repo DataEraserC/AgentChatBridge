@@ -295,6 +295,34 @@ pub struct WireClockRequest {
     pub last_record_at: Option<i64>,
 }
 
+/// 上下文注入（Prompt 扩展点）的请求。
+///
+/// 插件按这个上下文决定要不要贡献一段上下文；回 [`WirePromptDraft`] 列表。
+#[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
+pub struct WirePromptRequest {
+    pub session: String,
+    pub room: String,
+    #[serde(default)]
+    pub platform: String,
+    /// 开轮原因：`wake` / `clock`。
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_reason: Option<String>,
+    /// 本轮开始时间（毫秒）。
+    pub now: i64,
+}
+
+/// 插件贡献的一段上下文。
+///
+/// `priority` 由插件给，core 按它排序后拼进系统提示。**来源（哪个 plugin）由 core
+/// 填**，wire 上没有来源字段——插件伪造不了出处。
+#[derive(Debug, Clone, PartialEq, DeriveSerialize, Deserialize)]
+pub struct WirePromptDraft {
+    pub text: String,
+    #[serde(default)]
+    pub priority: i32,
+}
+
 /// 工具调用的授权判定请求（ToolAccess 扩展点）。
 ///
 /// 这个扩展点**只能否决**：回 `deny` 会被采纳，回 `allow` 不会绕过 core 自己的
@@ -771,6 +799,11 @@ pub enum WireResult {
     Connections {
         #[serde(default)]
         connections: Vec<WireConnection>,
+    },
+    /// 上下文注入的回执。
+    Prompts {
+        #[serde(default)]
+        drafts: Vec<WirePromptDraft>,
     },
     /// 工具授权判定的回执。`deny` 生效，`allow` 只是「不否决」。
     ToolAccess {

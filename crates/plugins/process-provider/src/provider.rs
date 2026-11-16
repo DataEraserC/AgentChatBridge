@@ -3,18 +3,19 @@
 use std::sync::{Arc, Mutex};
 
 use acb_adapter_api::{
-    WireAccessRequest, WireClockRequest, WireResult, WireRouteAction, WireRouteDecision,
-    WireRouteRequest, WireToolAccessRequest, WireTurnErrorAction, WireTurnErrorRequest,
-    WireWakeRequest,
+    WireAccessRequest, WireClockRequest, WirePromptDraft, WirePromptRequest, WireResult,
+    WireRouteAction, WireRouteDecision, WireRouteRequest, WireToolAccessRequest,
+    WireTurnErrorAction, WireTurnErrorRequest, WireWakeRequest,
 };
 use acb_kernel::{
     AccessDecision, AccessPolicy, AccessProvider, AccessRequest, Capability, ClockContext,
     ClockPolicy, ClockProvider, ExtensionPoint, Health, InterruptScope, ManagerManifest,
-    ManagerPlugin, PLUGIN_API_VERSION, PluginError, PluginMetadata, PluginSource,
-    ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions, RoomId, RouteAction,
-    RouteContext, RouteDecision, RoutePolicy, RouteProvider, ToolAccessContext, ToolAccessProvider,
-    ToolAccessVerdict, TurnErrorAction, TurnErrorPolicy, TurnErrorProvider, TurnErrorRequest,
-    WakeContext, WakeDecision, WakePolicy, WakeProvider, WakeVerdict,
+    ManagerPlugin, PLUGIN_API_VERSION, PluginError, PluginMetadata, PluginSource, PromptContext,
+    PromptDraft, PromptProvider, ProviderDescriptor, ProviderId, ProviderInstance, ProviderOptions,
+    RoomId, RouteAction, RouteContext, RouteDecision, RoutePolicy, RouteProvider,
+    ToolAccessContext, ToolAccessProvider, ToolAccessVerdict, TurnErrorAction, TurnErrorPolicy,
+    TurnErrorProvider, TurnErrorRequest, WakeContext, WakeDecision, WakePolicy, WakeProvider,
+    WakeVerdict,
 };
 use serde_json::json;
 
@@ -1186,5 +1187,188 @@ mod tool_access_tests {
         assert_eq!(wire.place, "console");
         assert_eq!(wire.room_scope, "");
         assert_eq!(wire.origin_sender, None);
+    }
+}
+
+/// Prompt 扩展点的进程实现（ADR-0033）。
+///
+/// 优先级机制早就有了：`PromptDraft` 自带 `priority`，core 按它排序后拼进系统
+/// 提示（`engine.rs` 里已经在消费）。所以这一格不需要新设计——**来源由 core 填**，
+/// 插件只能贡献文本与优先级，伪造不了出处（`PromptDraft` 的注释原文）。
+pub(crate) struct ProcessPromptManager {
+    provider: ProviderId,
+    metadata: PluginMetadata,
+    channel: Arc<ProcessChannel>,
+    cached: Mutex<Option<Arc<ProcessPromptProvider>>>,
+}
+
+impl ProcessPromptManager {
+    pub(crate) fn new(
+        provider: ProviderId,
+        metadata: PluginMetadata,
+        channel: Arc<ProcessChannel>,
+    ) -> Self {
+        Self {
+            provider,
+            metadata,
+            channel,
+            cached: Mutex::new(None),
+        }
+    }
+}
+
+impl ManagerPlugin for ProcessPromptManager {
+    fn manifest(&self) -> ManagerManifest {
+        ManagerManifest::new(
+            self.provider.namespace(),
+            PLUGIN_API_VERSION,
+            vec![Capability::PromptContribute],
+        )
+        .with_metadata(self.metadata.clone())
+    }
+
+    fn descriptors(&self) -> Vec<ProviderDescriptor> {
+        vec![
+            ProviderDescriptor::new(
+                self.provider.clone(),
+                ExtensionPoint::Prompt,
+                PLUGIN_API_VERSION,
+                vec![Capability::PromptContribute],
+            )
+            .with_metadata(self.metadata.clone())
+            .with_source(PluginSource::Dynamic),
+        ]
+    }
+
+    fn instantiate(
+        &self,
+        id: &ProviderId,
+        options: ProviderOptions<'_>,
+    ) -> Result<ProviderInstance, PluginError> {
+        if id != &self.provider {
+            return Err(PluginError::UnknownProvider(id.to_string()));
+        }
+        // Prompt 不需要策略配置，用 Observer 这一档表达「无配置」。
+        if !matches!(options, ProviderOptions::Observer) {
+            return Err(PluginError::Provider {
+                id: id.to_string(),
+                detail: "process prompt provider takes no options".to_owned(),
+            });
+        }
+        let mut cached = self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let provider = cached
+            .get_or_insert_with(|| {
+                Arc::new(ProcessPromptProvider {
+                    channel: Arc::clone(&self.channel),
+                })
+            })
+            .clone();
+        Ok(ProviderInstance::Prompt(provider))
+    }
+
+    fn health(&self) -> Health {
+        self.channel.health()
+    }
+
+    fn shutdown(&self) {
+        self.channel.shutdown();
+    }
+}
+
+struct ProcessPromptProvider {
+    channel: Arc<ProcessChannel>,
+}
+
+impl PromptProvider for ProcessPromptProvider {
+    fn prompts(&self, context: &PromptContext) -> Result<Vec<PromptDraft>, String> {
+        // 载体不可用时贡献空列表：上下文注入是**增量**，少一段能让这轮照常跑；
+        // 返回 Err 会让 core 当失败处理，代价更大。
+        if !matches!(self.channel.health(), Health::Healthy) {
+            return Ok(Vec::new());
+        }
+        let wire = WirePromptRequest {
+            session: context.session.clone(),
+            room: context.room.to_string(),
+            platform: context.platform.clone(),
+            reason: turn_reason_name(context.reason).to_owned(),
+            wake_reason: context.wake_reason.clone(),
+            now: context.now,
+        };
+        let request = serde_json::to_value(wire).map_err(|error| error.to_string())?;
+        match self.channel.decide("prompt", json!({}), request) {
+            Ok(WireResult::Prompts { drafts }) => Ok(drafts
+                .into_iter()
+                .map(|draft| PromptDraft {
+                    text: draft.text,
+                    priority: draft.priority,
+                })
+                .collect()),
+            Ok(other) => {
+                self.channel
+                    .note_invalid_reply(&format!("expected prompts reply, got {other:?}"));
+                Ok(Vec::new())
+            }
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+}
+
+/// 开轮原因 → wire 上的词。与 `TurnReason` 的 serde 表示保持一致
+/// （`wake` / `clock`），免得同一件事在两条路上有两个名字。
+fn turn_reason_name(reason: acb_kernel::TurnReason) -> &'static str {
+    match reason {
+        acb_kernel::TurnReason::Wake => "wake",
+        acb_kernel::TurnReason::Clock => "clock",
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    /// 开轮原因的词与 `TurnReason` 的 serde 表示一致。
+    ///
+    /// 不一致的后果是同一个原因在 wire 上是 `wake`、在别处是 `Wake`，
+    /// 外部插件要猜——这种不一致最难查。
+    #[test]
+    fn turn_reason_words_match_serde_representation() {
+        for reason in [acb_kernel::TurnReason::Wake, acb_kernel::TurnReason::Clock] {
+            let name = turn_reason_name(reason);
+            let serialized = serde_json::to_value(reason).expect("可序列化");
+            assert_eq!(
+                serialized.as_str(),
+                Some(name),
+                "wire 上的词要与 TurnReason 的 serde 表示一致"
+            );
+        }
+    }
+
+    /// 草稿映射保留文本与优先级，**不带来源**——来源由 core 填。
+    #[test]
+    fn drafts_keep_text_and_priority_without_source() {
+        let drafts = vec![
+            WirePromptDraft {
+                text: "背景：这个人昨天问过同样的问题".to_owned(),
+                priority: 10,
+            },
+            WirePromptDraft {
+                text: "提醒：今天有发布会".to_owned(),
+                priority: -5,
+            },
+        ];
+        let mapped: Vec<PromptDraft> = drafts
+            .into_iter()
+            .map(|draft| PromptDraft {
+                text: draft.text,
+                priority: draft.priority,
+            })
+            .collect();
+        assert_eq!(mapped.len(), 2);
+        assert_eq!(mapped[0].priority, 10);
+        assert_eq!(mapped[1].priority, -5);
+        assert_eq!(mapped[1].text, "提醒：今天有发布会");
     }
 }
