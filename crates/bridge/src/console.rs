@@ -322,6 +322,52 @@ pub struct Console<S: Store> {
     memory_steward: Option<PathBuf>,
     /// 插件动作执行器（按 plugin id 找）。没有动作的插件不会有条目。
     plugin_actions: Vec<Arc<dyn acb_kernel::PluginActionRunner>>,
+    /// 房间枚举的内存缓存（ADR-0033）：连接名 → (取回时刻, 结果)。
+    ///
+    /// 为什么要缓存：`list_rooms` 每次都真的问平台（QQ 那边是两次 API 调用），
+    /// 打开一次下拉就够平台限流一次。TTL 由 `ACB_CONSOLE_ROOMS_TTL_SECS` 控制，
+    /// **0 = 不缓存**（用户裁定：N 可以设为 0）。
+    room_cache: Mutex<std::collections::HashMap<String, (i64, RoomsPayload)>>,
+}
+
+/// 一次房间枚举的结果，缓存与响应共用同一个形状。
+///
+/// `supported = false` 与 `rooms` 为空是两件事：前者是这个适配器不实现枚举，
+/// 后者是实现了但确实没有可选房间。控制台据此决定「给下拉」还是「留手输框」。
+#[derive(Debug, Clone)]
+struct RoomsPayload {
+    supported: bool,
+    rooms: Vec<acb_kernel::RoomChoice>,
+}
+
+/// 房间缓存的默认 TTL（秒）。0 = 不缓存。
+///
+/// 默认 60 秒：够挡住「反复打开下拉」，又不至于让新加的群长时间看不见。
+const DEFAULT_ROOMS_TTL_SECS: u64 = 60;
+
+fn rooms_ttl_secs() -> u64 {
+    parse_rooms_ttl(std::env::var("ACB_CONSOLE_ROOMS_TTL_SECS").ok().as_deref())
+}
+
+/// 解析 TTL 配置。抽成纯函数是为了能直接测边界：缺省、空串、0、非法值、负数。
+///
+/// `0` 必须被当成「不缓存」而不是「没配置」——用户裁定 N 可以设为 0。
+fn parse_rooms_ttl(raw: Option<&str>) -> u64 {
+    match raw.map(str::trim) {
+        None | Some("") => DEFAULT_ROOMS_TTL_SECS,
+        Some(text) => match text.parse::<u64>() {
+            Ok(seconds) => seconds,
+            // 非法值退回默认并**不静默**：打一行，否则「设了没生效」要猜半天。
+            // 文案用英文：`rust_console_copy_has_no_hardcoded_cjk` 守着 console.rs
+            // 的非测试代码里不得有硬编码中文（给人看的文案全走 i18n）。
+            Err(_) => {
+                eprintln!(
+                    "console: ignoring unparsable ACB_CONSOLE_ROOMS_TTL_SECS={text:?}, using default {DEFAULT_ROOMS_TTL_SECS}"
+                );
+                DEFAULT_ROOMS_TTL_SECS
+            }
+        },
+    }
 }
 
 impl<S: Store + Send + 'static> Console<S> {
@@ -352,6 +398,7 @@ impl<S: Store + Send + 'static> Console<S> {
             deps,
             memory_steward,
             plugin_actions,
+            room_cache: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -460,7 +507,11 @@ impl<S: Store + Send + 'static> Console<S> {
                 return write_response(&mut stream, 204, "text/plain", "", &[]);
             }
 
-            let (path, query) = split_query(&path);
+            // 注意：这里**不能**遮蔽 `path`——`route` 里还要用它拆查询串。
+            // 2026-11-17 修：原先这里用 split_query 的结果遮蔽了 path 变量，
+            // 于是进 `route` 的 path 已不含 `?…`，`route` 里再拆恒为空串，
+            // 所有带查询参数的接口（?session= / ?connection= / ?status=）都读不到值。
+            let (bare_path, query) = split_query(&path);
             // 三条门路：Authorization: Bearer 头、浏览器 cookie（进门时种下的）、
             // ?token=（登录表单跳转用）。cookie 是刷新后不掉登录的关键：localStorage
             // 在某些嵌入环境（沙箱 iframe）里会被禁/清掉，cookie 由浏览器自己管。
@@ -470,7 +521,7 @@ impl<S: Store + Send + 'static> Console<S> {
 
             if !authorized {
                 // 页面本身：没 token 时给登录页（不是 JSON），人才能输 token 进来。
-                if method == "GET" && path == "/" {
+                if method == "GET" && bare_path == "/" {
                     let html = login_html(acb_i18n::request_locale());
                     return write_response(
                         &mut stream,
@@ -486,7 +537,7 @@ impl<S: Store + Send + 'static> Console<S> {
 
             // 管理页。route 只管 JSON API。进门带 ?token= 时顺手种个 cookie：
             // 之后刷新/关掉重开都靠它，不用再输一遍令牌。
-            if method == "GET" && path == "/" {
+            if method == "GET" && bare_path == "/" {
                 let set_cookie = if query_ok {
                     format!(
                         "Set-Cookie: acb_console={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000\r\n",
@@ -509,7 +560,7 @@ impl<S: Store + Send + 'static> Console<S> {
             // 运维习惯，切换应该是一次单独的行动，而不是混在重写里一起发生。
             // 切换方法：把下面这个分支改成根路径，或直接让 `GET /` 返回
             // `console_web::index_html()`。
-            if method == "GET" && crate::console_web::is_next_ui_path(path) {
+            if method == "GET" && crate::console_web::is_next_ui_path(bare_path) {
                 let set_cookie = if query_ok {
                     format!(
                         "Set-Cookie: acb_console={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000\r\n",
@@ -521,10 +572,10 @@ impl<S: Store + Send + 'static> Console<S> {
                 let headers: Vec<&str> = std::iter::once(set_cookie.as_str())
                     .filter(|value| !value.is_empty())
                     .collect();
-                return crate::console_web::serve(&mut stream, path, &headers);
+                return crate::console_web::serve(&mut stream, bare_path, &headers);
             }
 
-            let (status, body) = self.route(&method, path, &body, peer);
+            let (status, body) = self.route(&method, &path, &body, peer);
             write_response(&mut stream, status, "application/json", &body, &[])
         })
     }
@@ -573,6 +624,9 @@ impl<S: Store + Send + 'static> Console<S> {
             ("GET", "/api/secrets") => (200, self.secrets_view()),
             ("POST", "/api/secrets") => self.create_secret(body),
             ("GET", "/api/sessions") => (200, self.sessions()),
+            // 房间枚举（ADR-0033）：控制台订阅编辑用下拉而不是手输。
+            // 只读、只走适配器自报的 `list_rooms`，不碰 platform_call。
+            ("GET", "/api/rooms") => self.rooms_view(query_param(query, "connection")),
             // 记忆管家：最近一次同步时间、结果、冲突文件数与失败原因。
             // 管家线程写 status.json，这里只读，不阻塞任何同步动作。
             ("GET", "/api/memory-steward") => (200, self.memory_steward_status()),
@@ -992,6 +1046,77 @@ impl<S: Store + Send + 'static> Console<S> {
     /// 不带 `session` = 全局默认链；带 `session` = 那个会话实际生效的链，
     /// 并告诉调用方它是「自己配的」还是「继承全局」。
     /// 和策略同一个语义：库是唯一来源，改完轮次边界生效。
+    /// `GET /api/rooms?connection=X`：这条连接上可选的所有房间（含未订阅的）。
+    ///
+    /// 语义：
+    /// - `supported = false` → 这个适配器不实现枚举，界面保留手输框
+    /// - `supported = true, rooms = []` → 实现了，但确实没有可选房间
+    /// - 缺 `connection` → 400（不是 404：这是参数问题）
+    /// - 连接不存在 → 404
+    ///
+    /// 结果按 `ACB_CONSOLE_ROOMS_TTL_SECS` 缓存（0 = 不缓存）。
+    fn rooms_view(&self, connection: Option<&str>) -> (u16, String) {
+        let Some(connection) = connection.map(str::trim).filter(|value| !value.is_empty()) else {
+            return error_response(
+                400,
+                acb_i18n::msg!("bridge.console.rooms_connection_required"),
+                None,
+            );
+        };
+
+        let ttl_ms = (rooms_ttl_secs() as i64).saturating_mul(1000);
+        let now = now_millis();
+
+        // 命中缓存就直接回，不碰适配器。
+        if ttl_ms > 0 {
+            let cache = self
+                .room_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some((at, payload)) = cache.get(connection) {
+                if now.saturating_sub(*at) < ttl_ms {
+                    return (200, rooms_json(connection, payload, true));
+                }
+            }
+        }
+
+        let mut bridge = lock(&self.bridge);
+        // 连接不存在时明确报 404：否则前端会拿一个空列表当「这个平台没房间」。
+        if bridge.config().connection(connection).is_none() {
+            return error_response(
+                404,
+                acb_i18n::msg!("bridge.console.rooms_connection_unknown"),
+                Some(connection.to_owned()),
+            );
+        }
+        let payload = match bridge.room_choices(connection) {
+            Ok(Some(rooms)) => RoomsPayload {
+                supported: true,
+                rooms,
+            },
+            Ok(None) => RoomsPayload {
+                supported: false,
+                rooms: Vec::new(),
+            },
+            Err(detail) => {
+                return error_response(
+                    502,
+                    acb_i18n::msg!("bridge.console.rooms_unavailable"),
+                    Some(detail),
+                );
+            }
+        };
+
+        if ttl_ms > 0 {
+            let mut cache = self
+                .room_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.insert(connection.to_owned(), (now, payload.clone()));
+        }
+        (200, rooms_json(connection, &payload, false))
+    }
+
     fn model_fallbacks_view(&self, session: Option<&str>) -> (u16, String) {
         let bridge = lock(&self.bridge);
         let config = bridge.config();
@@ -2541,6 +2666,25 @@ fn write_response(
     stream.flush()
 }
 
+/// 房间枚举结果 → JSON。`cached` 标明这次是不是命中缓存（排查时有用）。
+fn rooms_json(connection: &str, payload: &RoomsPayload, cached: bool) -> String {
+    json!({
+        "connection": connection,
+        "supported": payload.supported,
+        "cached": cached,
+        "rooms": payload
+            .rooms
+            .iter()
+            .map(|choice| json!({
+                "room": choice.room.to_string(),
+                "label": choice.label,
+                "kind": choice.kind,
+            }))
+            .collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
 /// 惩罚策略 → JSON。字段名与前端 TS 类型一一对应（`PenaltyPolicy`）。
 fn policy_json(policy: acb_kernel::FallbackPolicy) -> serde_json::Value {
     json!({
@@ -3238,6 +3382,111 @@ room = "group/123"
         assert!(
             backup_text.contains("delivery_limit = 50"),
             "备份是旧覆盖层"
+        );
+    }
+    /// TTL 配置的边界：缺省/空串用默认，`0` 是「不缓存」而不是「没配置」，
+    /// 非法值退回默认（否则「设了没生效」要猜半天）。
+    #[test]
+    fn room_ttl_parsing_distinguishes_zero_from_unset() {
+        assert_eq!(parse_rooms_ttl(None), DEFAULT_ROOMS_TTL_SECS);
+        assert_eq!(parse_rooms_ttl(Some("")), DEFAULT_ROOMS_TTL_SECS);
+        assert_eq!(parse_rooms_ttl(Some("   ")), DEFAULT_ROOMS_TTL_SECS);
+        // 用户裁定：N 可设为 0，即不缓存。这条不能被当成「没配置」。
+        assert_eq!(parse_rooms_ttl(Some("0")), 0);
+        assert_eq!(parse_rooms_ttl(Some("300")), 300);
+        assert_eq!(parse_rooms_ttl(Some(" 45 ")), 45);
+        // 非法值退回默认，不 panic、不静默当 0。
+        assert_eq!(parse_rooms_ttl(Some("abc")), DEFAULT_ROOMS_TTL_SECS);
+        assert_eq!(parse_rooms_ttl(Some("-1")), DEFAULT_ROOMS_TTL_SECS);
+    }
+
+    /// 「不支持枚举」与「支持但为空」在 JSON 里必须是两种形状。
+    ///
+    /// 合并的后果是控制台把「这个平台没实现」显示成「你没有群」，
+    /// 用户会去查群设置而不是换适配器。
+    #[test]
+    fn rooms_json_separates_unsupported_from_empty() {
+        let unsupported = rooms_json(
+            "qq",
+            &RoomsPayload {
+                supported: false,
+                rooms: Vec::new(),
+            },
+            false,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&unsupported).expect("合法 JSON");
+        assert_eq!(parsed["supported"], false);
+        assert_eq!(parsed["rooms"].as_array().map(Vec::len), Some(0));
+
+        let empty = rooms_json(
+            "qq",
+            &RoomsPayload {
+                supported: true,
+                rooms: Vec::new(),
+            },
+            false,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&empty).expect("合法 JSON");
+        assert_eq!(parsed["supported"], true);
+        assert_eq!(parsed["rooms"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// 房间条目带上 room/label/kind 三个字段，且 `cached` 如实反映本次来源。
+    #[test]
+    fn rooms_json_carries_room_fields_and_cache_flag() {
+        let room = acb_kernel::RoomId::new("qq", "group/42").expect("合法房间");
+        let body = rooms_json(
+            "qq",
+            &RoomsPayload {
+                supported: true,
+                rooms: vec![acb_kernel::RoomChoice {
+                    room,
+                    label: "测试群".to_owned(),
+                    kind: "group".to_owned(),
+                }],
+            },
+            true,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("合法 JSON");
+        assert_eq!(parsed["cached"], true);
+        assert_eq!(parsed["rooms"][0]["room"], "qq:group/42");
+        assert_eq!(parsed["rooms"][0]["label"], "测试群");
+        assert_eq!(parsed["rooms"][0]["kind"], "group");
+    }
+    /// `handle` 必须把**带查询串的原始 path** 交给 `route`。
+    ///
+    /// 2026-11-17 修的既有 bug：`handle` 里曾写成
+    /// `let (path, query) = split_query(&path);`，把 `path` 遮蔽成不含 `?…`
+    /// 的版本，于是 `route` 里再拆一次恒为空串——所有带查询参数的接口
+    /// （`?session=` / `?connection=` / `?status=`）都读不到值，且**不报错**，
+    /// 表现是「参数没生效」而不是「参数错了」。
+    ///
+    /// 判据只看 `handle` 那一段：全局扫会命中本测试自己的字符串字面量。
+    #[test]
+    fn handle_passes_the_raw_path_to_route() {
+        let source = include_str!("console.rs");
+        let code = source.split("#[cfg(test)]").next().expect("有非测试代码");
+        // 截到 handle 结束：只看真正处理请求的那一段。
+        let handle_start = code.find("fn handle(").expect("有 handle");
+        let handle_end = code[handle_start..]
+            .find("fn authorized(")
+            .map(|offset| handle_start + offset)
+            .unwrap_or(code.len());
+        let handle = &code[handle_start..handle_end];
+
+        // 去掉注释行再判：注释里会提到这串代码，不该算违规。
+        let live_code: String = handle
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !live_code.contains("let (path, query) = split_query(&path);"),
+            "handle 里又出现了遮蔽 path 的写法，查询串会被丢掉"
+        );
+        assert!(
+            handle.contains("self.route(&method, &path, &body, peer)"),
+            "route 应当收到未遮蔽的 path"
         );
     }
 }

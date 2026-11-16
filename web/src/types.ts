@@ -83,7 +83,13 @@ export interface SessionView {
   model?: string | null;
   busy?: boolean;
   queued?: number;
-  subscriptions?: SubscriptionView[];
+  /**
+   * 已订阅的房间，**字符串数组**（`qq:group/1` 形态）。
+   *
+   * 与 `/api/config` 里的对象形态不同：那个带 wake 策略，这个只是渲染用的
+   * 房间串。以前这里写成了 `SubscriptionView[]`，与后端对不上。
+   */
+  subscriptions?: string[];
   /** 桥 ↔ harness 会话映射。 */
   mapping?: { session_id?: string; harness?: string } | null;
   /** 投过 ≥3 次仍未确认的房间（D7）。 */
@@ -249,4 +255,27 @@ export interface PenaltyView {
   penalties: ActivePenalty[];
   pending_reload: boolean;
   config_version: number;
+}
+
+/**
+ * `GET /api/rooms?connection=X` —— 这条连接上可选的所有房间（含未订阅）。
+ *
+ * `supported = false` 与 `rooms` 为空是**两件事**：前者是这个适配器不实现枚举
+ * （界面保留手输框），后者是实现了但确实没有可选房间。合并会让人去查群设置
+ * 而不是换适配器。
+ */
+export interface RoomsView {
+  connection: string;
+  supported: boolean;
+  /** 本次结果是否命中服务端缓存（TTL 由 ACB_CONSOLE_ROOMS_TTL_SECS 控制，0 = 不缓存）。 */
+  cached: boolean;
+  rooms: RoomChoice[];
+}
+
+/** 一条可选的房间。`label` 只给人看，不参与路由。 */
+export interface RoomChoice {
+  room: string;
+  label: string;
+  /** 平台侧分类提示：`group` / `private` 等，core 只透传。 */
+  kind: string;
 }

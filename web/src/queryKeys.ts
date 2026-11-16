@@ -16,4 +16,6 @@ export const queryKeys = {
   modelPenalty: (session: string | null) => ["model-penalty", session] as const,
   config: ["config"] as const,
   configToml: ["config-toml"] as const,
+  /** 房间枚举按连接分键：换连接要重取。 */
+  rooms: (connection: string) => ["rooms", connection] as const,
 };

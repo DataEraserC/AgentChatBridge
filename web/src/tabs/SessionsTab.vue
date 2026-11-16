@@ -14,6 +14,7 @@ import { queryKeys } from "../queryKeys";
 import type { SessionsView } from "../types";
 import PageCard from "../components/PageCard.vue";
 import QueryState from "../components/QueryState.vue";
+import SubscriptionEditor from "../components/SubscriptionEditor.vue";
 
 const { t } = useI18n();
 
@@ -63,7 +64,20 @@ const headers = computed(() => [
         density="comfortable"
         :items-per-page="20"
         :no-data-text="t('console.sessions.empty')"
+        show-expand
       >
+        <!-- 展开行：编辑这个会话的订阅。房间能枚举就下拉，不能就手输。 -->
+        <template #expanded-row="{ columns, item }">
+          <tr>
+            <td :colspan="columns.length" class="pa-4">
+              <div class="text-subtitle-2 mb-2">{{ t("console.rooms.editTitle") }}</div>
+              <SubscriptionEditor
+                :session-id="item.id"
+                :subscriptions="item.subscriptions ?? []"
+              />
+            </td>
+          </tr>
+        </template>
         <template #item.id="{ item }">
           <code class="text-caption">{{ item.id }}</code>
           <span v-if="item.name && item.name !== item.id" class="text-caption text-medium-emphasis">
@@ -80,7 +94,7 @@ const headers = computed(() => [
                 {{ item.roomCount || t("console.sessions.noRooms") }}
               </span>
             </template>
-            <div v-for="sub in item.subscriptions" :key="sub.room">{{ sub.room }}</div>
+            <div v-for="sub in item.subscriptions" :key="sub">{{ sub }}</div>
           </v-tooltip>
         </template>
         <template #item.state="{ item }">
