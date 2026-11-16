@@ -489,9 +489,11 @@ fn no_dsh_session_removes_registered_bundle() {
     let dsh = fake_dsh(&dir.0, DUMP_HMR_ENABLED);
 
     let with_dsh = write(&dir.0.join("config-dsh.toml"), CONFIG_ONE_DSH);
-    assert!(run_script(&with_dsh, &dsh_home, &dsh, &home)
-        .status
-        .success());
+    assert!(
+        run_script(&with_dsh, &dsh_home, &dsh, &home)
+            .status
+            .success()
+    );
     let old = ours(&manifest);
     assert_eq!(old.len(), 1);
 
@@ -629,4 +631,309 @@ fn fails_fast_without_dsh_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!missing_home.exists(), "安全失败不得创建目录");
+}
+
+// ---------------------------------------------------------------------------
+// 默认值漂移守卫（dsh_defaults_guard.mjs）
+//
+// 现场事故：ACB 的会话 preset（`acb-dsh-snowluma-test`）和 agent-default-model
+// 被写进了整个 profile 的运行态默认值，导致不用 ACB 的人开新会话也拿到 ACB 的
+// composition / 模型。这几条测试钉住守卫能**检出**、且只**修复能归因**的那一部分。
+// ---------------------------------------------------------------------------
+
+fn guard_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../deploy/presets/dsh-presets/dsh_defaults_guard.mjs")
+}
+
+/// nix 真相层：profile 快照。selectedDefault 是 standard，模型是部署默认。
+const GUARD_PROFILE_PATCH: &str = r#"
+- id: agent-preset-registry
+  name: "@deepseek-ai/dsh-agent-preset-registry"
+  config:
+    default: standard
+    selectedDefault: standard
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: trae
+    model: deepseek-v4.1-flash
+"#;
+
+/// 运行态：ACB 把 selectedDefault 改成它自己的会话 preset、把模型换成别的。
+const GUARD_DRIFT_DOCUMENT: &str = r#"
+- id: agent-preset-registry
+  name: "@deepseek-ai/dsh-agent-preset-registry"
+  config:
+    default: standard
+    selectedDefault: acb-dsh-snowluma-test
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: new-api-y9000p2025-openai-responses
+    model: 1AgentRouter/gpt-5.6-sol
+"#;
+
+/// 建一个只含 profile 快照 + settings-persist/auto.json 的假 DSH_HOME。
+fn guard_fixture(dir: &Path, document: &str) -> PathBuf {
+    let dsh_home = dir.join("dsh-home");
+    write(
+        &dsh_home.join("profiles/nix-web-acb/cordis.patch.yml"),
+        GUARD_PROFILE_PATCH,
+    );
+    let state = serde_json::json!({
+        "schema": 1,
+        "profile": "nix-web-acb",
+        "source": "auto",
+        "fingerprint": "owner=nix\nschema=1\nprofile=nix-web-acb\n",
+        "documentText": document,
+        "rows": [
+            { "id": "agent-preset-registry",
+              "config": { "default": "standard", "selectedDefault": "acb-dsh-snowluma-test" } },
+            { "id": "agent-default-model",
+              "config": { "provider": "new-api-y9000p2025-openai-responses",
+                          "model": "1AgentRouter/gpt-5.6-sol" } }
+        ],
+        "updatedAt": "2026-11-15T10:00:05.000Z"
+    });
+    write(
+        &dsh_home.join("settings-persist/nix-web-acb/auto.json"),
+        &format!("{state:#}\n"),
+    );
+    dsh_home
+}
+
+fn run_guard(dsh_home: &Path, extra: &[&str]) -> Output {
+    let mut command = Command::new(node_bin());
+    command
+        .arg(guard_path())
+        .arg("--dsh-home")
+        .arg(dsh_home)
+        .arg("--profile")
+        .arg("nix-web-acb")
+        .args(extra);
+    command.output().expect("run dsh_defaults_guard")
+}
+
+fn auto_json(dsh_home: &Path) -> serde_json::Value {
+    let raw = fs::read_to_string(dsh_home.join("settings-persist/nix-web-acb/auto.json"))
+        .expect("auto.json");
+    serde_json::from_str(&raw).expect("auto.json json")
+}
+
+/// 从 YAML 文本里取某块某字段（测试侧自带，避免依赖被测算法的正确性）。
+fn field_in_block(text: &str, entry: &str, field: &str) -> Option<String> {
+    let mut inside = false;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("- id: ") {
+            inside = rest.trim() == entry;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(&format!("{field}:")) {
+            return Some(rest.trim().trim_matches(['"', '\'']).to_string());
+        }
+    }
+    None
+}
+
+#[test]
+fn guard_reports_acb_preset_default_without_fixing_it() {
+    // 语义（2026-11-16 复核后改定）：`selectedDefault` 在整个 dsh 里只有一个
+    // 写入点——浏览器设置页的人工点击（dsh-client-ui-agent-preset 的
+    // `remote.settings.update`）。registry 侧只有只读配置。也就是说磁盘上出现
+    // `acb-*` 无法归因到任何进程，**很可能就是人手选的**（用户也确认过这一点）。
+    // 所以守卫只读：报出来、给人看，不改写、非零退出也不该有。
+    let dir = temp_dir("guard-detect");
+    let dsh_home = guard_fixture(&dir.0, GUARD_DRIFT_DOCUMENT);
+
+    let output = run_guard(&dsh_home, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "只读诊断不该用非零退出码（调用方会当成告警，久了守卫就被关掉）；stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("acb-dsh-snowluma-test"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("needs-human-review"),
+        "不能把无法归因的值说成 ACB 造成的：{stdout}"
+    );
+    assert!(
+        !stdout.contains("acb-caused"),
+        "磁盘上没有任何证据支持 acb-caused：{stdout}"
+    );
+    assert!(
+        stdout.contains("model-default-drift"),
+        "模型默认值漂移也要报：{stdout}"
+    );
+    assert!(
+        stdout.contains("unattributed"),
+        "模型漂移不得假装能归因：{stdout}"
+    );
+    // 只读：文件必须一个字都没变。
+    let after = auto_json(&dsh_home);
+    assert_eq!(
+        after["documentText"].as_str().expect("documentText"),
+        GUARD_DRIFT_DOCUMENT,
+        "守卫不得改写 auto.json"
+    );
+}
+
+#[test]
+fn guard_refuses_apply_because_it_must_not_write_user_settings() {
+    // 旧行为是 `--apply` 把 auto.json 的 selectedDefault 自动恢复成快照值。
+    // 既然那是人的选择，脚本代劳就等于覆盖用户设置——正是用户抱怨的那类行为。
+    // 现在这个参数被明确拒绝（退出码 2，stderr 说明原因），而不是静默忽略。
+    let dir = temp_dir("guard-apply-removed");
+    let dsh_home = guard_fixture(&dir.0, GUARD_DRIFT_DOCUMENT);
+    let before = auto_json(&dsh_home);
+    let before_text = serde_json::to_string(&before).expect("serialize");
+
+    let output = run_guard(&dsh_home, &["--apply"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "已移除的参数要给出用法错误，不能静默成功；stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--apply") && stderr.contains("只读"),
+        "要说清为什么拒绝：{stderr}"
+    );
+
+    let after = auto_json(&dsh_home);
+    assert_eq!(
+        serde_json::to_string(&after).expect("serialize"),
+        before_text,
+        "拒绝执行时更不能动文件"
+    );
+    // 不许留备份文件：没写就没有备份。
+    let backups: Vec<_> = fs::read_dir(dsh_home.join("settings-persist/nix-web-acb"))
+        .expect("dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.starts_with("auto.json.bak-"))
+        .collect();
+    assert!(backups.is_empty(), "只读守卫不该写备份：{backups:?}");
+}
+
+#[test]
+fn guard_leaves_user_chosen_default_alone() {
+    // 用户自己选了 minimal：那不是 ACB 造成的，守卫只能报告。
+    let dir = temp_dir("guard-user");
+    let document = GUARD_DRIFT_DOCUMENT.replace("acb-dsh-snowluma-test", "minimal");
+    let dsh_home = dir.0.join("dsh-home");
+    write(
+        &dsh_home.join("profiles/nix-web-acb/cordis.patch.yml"),
+        GUARD_PROFILE_PATCH,
+    );
+    let state = serde_json::json!({
+        "schema": 1,
+        "profile": "nix-web-acb",
+        "documentText": document,
+        "rows": [{ "id": "agent-preset-registry",
+                   "config": { "default": "standard", "selectedDefault": "minimal" } }],
+    });
+    write(
+        &dsh_home.join("settings-persist/nix-web-acb/auto.json"),
+        &format!("{state:#}\n"),
+    );
+
+    // `minimal` 不是 ACB 造成的，不算缺陷：不能因为它每次启动都报警（噪声会
+    // 让人关掉守卫），也不能改写成 nix 快照值（那是抢用户的 Settings UI）。
+    let output = run_guard(&dsh_home, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "用户自己的选择不算漂移；stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = auto_json(&dsh_home);
+    assert_eq!(
+        state["rows"][0]["config"]["selectedDefault"], "minimal",
+        "用户的选择不得被改写"
+    );
+    let backups: Vec<_> = fs::read_dir(dsh_home.join("settings-persist/nix-web-acb"))
+        .expect("dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.starts_with("auto.json.bak-"))
+        .collect();
+    assert!(backups.is_empty(), "没有修复时不该写备份：{backups:?}");
+}
+
+#[test]
+fn guard_is_clean_on_matching_profile() {
+    let dir = temp_dir("guard-clean");
+    let dsh_home = dir.0.join("dsh-home");
+    write(
+        &dsh_home.join("profiles/nix-web-acb/cordis.patch.yml"),
+        GUARD_PROFILE_PATCH,
+    );
+    let state = serde_json::json!({
+        "schema": 1,
+        "profile": "nix-web-acb",
+        "documentText": GUARD_PROFILE_PATCH,
+        "rows": [
+            { "id": "agent-preset-registry",
+              "config": { "default": "standard", "selectedDefault": "standard" } },
+            { "id": "agent-default-model",
+              "config": { "provider": "trae", "model": "deepseek-v4.1-flash" } }
+        ],
+    });
+    write(
+        &dsh_home.join("settings-persist/nix-web-acb/auto.json"),
+        &format!("{state:#}\n"),
+    );
+
+    let output = run_guard(&dsh_home, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "干净时必须 0；stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn presets_script_reports_drift_without_blocking_install() {
+    // 守卫挂在 dsh-presets 组件里：有漂移只 warn，不影响 bundle 安装。
+    let dir = temp_dir("guard-in-presets");
+    let dsh_home = dir.0.join("dsh-home");
+    let home = dir.0.join("home");
+    fs::create_dir_all(&home).expect("home");
+    let manifest = profile_manifest(&dsh_home, &["@deepseek-ai/dsh-base"]);
+    guard_fixture(&dir.0, GUARD_DRIFT_DOCUMENT);
+    let config = write(&dir.0.join("config.toml"), CONFIG_ONE_DSH);
+    let dsh = fake_dsh(&dir.0, DUMP_HMR_ENABLED);
+
+    let output = run_script(&config, &dsh_home, &dsh, &home);
+    assert!(
+        output.status.success(),
+        "漂移不得挡安装；stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("需要人看一眼"),
+        "必须把可疑条目报出来：{stderr}"
+    );
+    assert!(
+        stderr.contains("acb-dsh-snowluma-test"),
+        "要指出是哪个 preset：{stderr}"
+    );
+    assert!(
+        !stderr.contains("--apply"),
+        "不得再提示一个已移除的参数：{stderr}"
+    );
+    assert_eq!(ours(&manifest).len(), 1, "bundle 仍要安装");
 }

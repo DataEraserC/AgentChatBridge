@@ -709,6 +709,12 @@ class TurnDriver {
     const { provider, model: modelId, reasoningEffort } = model
     const key = `${provider}/${modelId}/${reasoningEffort || ""}`
     if (this.modelPinned.get(sessionId) === key) return
+    // 先存全局默认值，钉完再写回去。dsh 的 `session/selectModel` 不只改这个会话：
+    // 它在后台把同一个选择**无条件**存成 agent-default-model（见
+    // dsh-api-session-controller 的 selectModel 注释原文「save the default in the
+    // background」）。ACB 每开一个新会话就钉一次，等于把别人的默认模型一路改掉。
+    // 这里做「存 → 钉 → 还原」，失败不影响本轮。
+    const restore = await this.#captureDefaultModel()
     try {
       await this.dsh.selectModel(sessionId, { provider, model: modelId, reasoningEffort })
       this.modelPinned.set(sessionId, key)
@@ -727,6 +733,47 @@ class TurnDriver {
       }
       // transport / auth / protocol 失败原样上抛：不能把它们都报成「模型不存在」。
       throw error
+    } finally {
+      await restore()
+    }
+  }
+
+  /**
+   * 记下 agent-default-model 的当前值，返回一个「写回去」的闭包。
+   *
+   * 为什么不是简单的 get/set：`selectModel` 的默认值持久化是**异步**的
+   * （宿主侧 `void saveSelection(...)`），钉完模型立刻读到的可能还是旧值。
+   * 所以这里在钉之前快照、钉之后**再读一次**确认真的被改了才写回，
+   * 避免在 dsh 还没落盘时就把自己刚写的值覆盖回去。
+   *
+   * 读不到 settings（headless / 未挂 config-editor）时返回 no-op：
+   * 那种组合下 selectModel 本来也不会持久化默认值。
+   */
+  async #captureDefaultModel() {
+    const ns = "agent-default-model"
+    let before
+    try {
+      before = await this.dsh.readSettingsNamespace(ns)
+    } catch (error) {
+      this.log("warn", t("dsh.default_model_read_failed", { error: error?.message ?? error }))
+      return async () => {}
+    }
+    if (!before) return async () => {}
+    return async () => {
+      try {
+        const after = await this.dsh.readSettingsNamespace(ns)
+        if (!after) return
+        const changed = JSON.stringify(after.value) !== JSON.stringify(before.value)
+        if (!changed) return
+        await this.dsh.replaceSettingsNamespace(ns, before.user, after.revision)
+        this.log("info", t("dsh.default_model_restored", {
+          provider: before.value?.provider ?? "",
+          model: before.value?.model ?? "",
+        }))
+      } catch (error) {
+        // 还原失败不挡这一轮：会话级选择已经生效，坏的只是别人的默认值。
+        this.log("warn", t("dsh.default_model_restore_failed", { error: error?.message ?? error }))
+      }
     }
   }
 

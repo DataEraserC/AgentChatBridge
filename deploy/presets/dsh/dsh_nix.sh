@@ -29,6 +29,28 @@ PATCH=${ACB_DSH_PATCH:-}
 PROFILE=${ACB_DSH_PROFILE:-nix-web-acb}
 PORT=${ACB_DSH_PORT:-3080}
 
+# 启动前检查「ACB 的默认 preset/模型写到了整个 profile」是否已经发生。
+#
+# 只报告、不静默改写：默认值同时是用户 Settings UI 要写的字段，抢写会让用户
+# 刚选的默认值又变回去。修复由 `dsh_defaults_guard.mjs --apply` 显式触发。
+# 守卫不在（旧 payload / 未安装）时静默跳过：它不是 dsh 起不来的原因，
+# 不该因为缺少它就让组件启动失败。
+check_defaults() {
+  guard=${ACB_DSH_DEFAULTS_GUARD:-}
+  [[ -n $guard && -x $guard ]] || return 0
+  home=${ACB_DSH_HOME:-${DSH_HOME:-}}
+  [[ -n $home ]] || return 0
+  local out status
+  out=$("$guard" --dsh-home "$home" --profile "$PROFILE" 2>&1) && status=0 || status=$?
+  # 0=干净，3=有漂移；其它（2=用法/环境）也算清过，不挡启动。
+  if [[ $status -eq 3 ]]; then
+    echo "dsh: 检测到默认值漂移（不挡启动；用 dsh_defaults_guard.mjs --apply 修复）：" >&2
+    [[ -n $out ]] && printf '%s\n' "$out" | sed 's/^/dsh:   /' >&2
+  fi
+  return 0
+}
+check_defaults
+
 DSH_BIN=${ACB_DSH_BIN:-}
 if [[ -z $DSH_BIN ]]; then
   wrapper=$(command -v dsh || true)

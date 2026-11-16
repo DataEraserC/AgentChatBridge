@@ -45,7 +45,32 @@ class ControllableDsh {
 
   async selectModel(sessionId, choice) {
     this.modelPicks.push({ sessionId, ...choice })
+    // 真实 dsh 的 selectModel 会把这个选择**同时**存成全局默认
+    // （agent-default-model），这正是要防的行为；假 dsh 必须照做，
+    // 否则「钉模型污染默认值」这条测试根本复现不出来。
+    if (this.defaultModel !== undefined) {
+      this.defaultModel = { provider: choice.provider, model: choice.model }
+    }
     return { selected: choice }
+  }
+
+  // settings 面：默认不挂（headless 组合），设了 defaultModel 才装作挂了。
+  async readSettingsNamespace(ns) {
+    this.settingsReads = (this.settingsReads ?? 0) + 1
+    if (this.defaultModel === undefined) return null
+    return {
+      ns,
+      revision: this.settingsRevision ?? 1,
+      value: { ...this.defaultModel },
+      user: { ...this.defaultModel },
+    }
+  }
+
+  async replaceSettingsNamespace(ns, section, expectedRevision) {
+    this.settingsWrites = this.settingsWrites ?? []
+    this.settingsWrites.push({ ns, section, expectedRevision })
+    this.defaultModel = { ...section }
+    return { ns }
   }
 
   // 探活用：驱动在「模型接口超时」后会问一句 dsh 还活着吗。
@@ -1102,5 +1127,120 @@ test("后备模型不在 catalog 里时跳到再下一个", async (t) => {
   dsh.lastFollow.push({ type: "turn/end", data: { turn: "t2" } })
   const turnEnd = await nextTurnEnd(bridge)
   assert.equal(turnEnd.error, undefined, "backup 跑完就不该报失败")
+  await runPromise
+})
+
+// ---------------------------------------------------------------------------
+// 钉模型不得改掉别人的默认模型
+//
+// 现场事故：ACB 每开会话都调 session/selectModel，而 dsh 的 selectModel 会把它
+// 当成**用户默认值**写进 agent-default-model（宿主侧后台异步落盘）。结果不用
+// ACB 的人开新会话也拿到 ACB 的模型。修法：钉之前快照、钉之后还原。
+// ---------------------------------------------------------------------------
+
+test("钉模型不改全局默认模型：钉完要还原", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const dsh = new ControllableDsh()
+  // 别人的默认值：钉完必须还是它。
+  dsh.defaultModel = { provider: "trae", model: "deepseek-v4.1-flash" }
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "new-api-y9000p2025-openai-responses/1Agent2Api/glm-5.3-flash",
+      },
+    }),
+    link,
+  )
+
+  await waitFor(() => dsh.modelPicks.length === 1, "应调用 selectModel")
+  await waitFor(() => dsh.prompts.length === 1, "选好模型后要投话")
+  // 还原发生在钉模型之后、prompt 之前；prompt 到了就说明已经还原过。
+  assert.deepEqual(
+    dsh.defaultModel,
+    { provider: "trae", model: "deepseek-v4.1-flash" },
+    "钉会话模型不得改动 agent-default-model",
+  )
+  assert.equal(dsh.settingsWrites?.length, 1, "应当恰好写回一次默认值")
+  assert.deepEqual(
+    dsh.settingsWrites[0].section,
+    { provider: "trae", model: "deepseek-v4.1-flash" },
+    "写回的必须是钉之前的原值",
+  )
+
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
+  await runPromise
+})
+
+test("还原默认模型失败不影响这一轮", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const dsh = new ControllableDsh()
+  dsh.defaultModel = { provider: "trae", model: "deepseek-v4.1-flash" }
+  dsh.replaceSettingsNamespace = async () => {
+    throw new DshError("rejected", "settings/rejected: this section is read-only")
+  }
+
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/deepseek-v4.1-flash",
+      },
+    }),
+    link,
+  )
+
+  // 还原失败只是别人的默认值没救回来，本轮的会话级选择照样有效。
+  await waitFor(() => dsh.prompts.length === 1, "还原失败不得挡投话")
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
+  await runPromise
+  const turnEnd = await nextTurnEnd(bridge)
+  assert.equal(turnEnd.error, undefined, "还原失败不该让这一轮失败")
+})
+
+test("没有 settings 面（headless）时不尝试还原", async (t) => {
+  const bridge = await new FakeBridge().start()
+  const link = await connectedLink(bridge)
+  t.after(async () => {
+    link.close()
+    await bridge.stop()
+  })
+
+  const dsh = new ControllableDsh() // defaultModel 未设 = 不挂 settings
+  const driver = new TurnDriver({ dsh, log: () => {} })
+  const runPromise = driver.run(
+    delivery({
+      session_info: {
+        id: "main",
+        name: "main",
+        harness: "dsh",
+        model: "trae/deepseek-v4.1-flash",
+      },
+    }),
+    link,
+  )
+
+  await waitFor(() => dsh.prompts.length === 1, "应正常投话")
+  assert.equal(dsh.settingsWrites, undefined, "没有 settings 面就不该写")
+  dsh.lastFollow.push({ type: "turn/end", data: { turn: "t1" } })
   await runPromise
 })

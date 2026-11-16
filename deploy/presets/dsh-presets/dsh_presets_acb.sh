@@ -97,6 +97,30 @@ MANIFEST=$PROFILE_DIR/package.json
 NODE_MODULES=$PROFILE_DIR/node_modules
 BUNDLE_PREFIX=acb-presets-live-
 
+# ---- 默认值检查（只读诊断，绝不改写） --------------------------------------
+# 两件事分开看：
+#   1. `agent-default-model`：ACB 每轮 `session/selectModel` 钉模型，而 dsh 的
+#      selectModel 会把该选择**无条件**写成全局默认。这是真实的 ACB 副作用，
+#      已在驱动侧修掉（钉之前存、钉完还原）。守卫只负责在它复发时报出来。
+#   2. `selectedDefault`：全 dsh 只有一个写入点——浏览器设置页的人工点击。
+#      磁盘上出现 `acb-*` **无法归因**，很可能就是人手选的，所以守卫只看不改。
+# 两者都只打印。守卫的 `--apply` 已被移除：程序代劳改这里的值 = 覆盖用户设置。
+check_defaults() {
+  local guard=$HERE/dsh_defaults_guard.mjs
+  [[ -f $guard ]] || return 0
+  local out
+  out=$("$NODE" "$guard" --dsh-home "$DSH_HOME_DIR" --profile "$PROFILE" 2>&1) || true
+  # 守卫是只读的，退出码不再承载「有漂移」；有没有东西要看输出里有没有条目。
+  # 判据：除最后那句「本守卫只读…」提示外，还有以 `dsh-defaults-guard: ` 开头的内容行。
+  if printf '%s\n' "$out" | grep -qv '本守卫只读' && printf '%s\n' "$out" | grep -q 'dsh-defaults-guard: .* @ '; then
+    warn "dsh 默认值有需要人看一眼的条目（不挡安装；本机未改动任何文件）："
+    printf '%s\n' "$out" | sed 's/^/dsh-presets:   /' >&2
+    warn "要改就自己编辑该文件，或在 dsh 的 Settings 页重新选择默认值。"
+  fi
+  return 0
+}
+check_defaults
+
 SESSIONS_OUT=$("$ACBCTL" sessions --config "$CONFIG") || fail "acbctl sessions 失败"
 
 tmp_dir=$(mktemp -d)

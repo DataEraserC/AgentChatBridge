@@ -157,6 +157,9 @@ const METHOD_ARG_WRAPPERS = {
   "workspace/create": "request",
   "workspace/rename": "request",
   "workspace/delete": "request",
+  // settings 系（默认值快照/还原用）不在这里登记：它们的签名是位置参数
+  // `replace(ns, section, expectedRevision)`，wire 名就是形参名，直接摊在 args 里。
+  // 不登记 = `wrapArgs` 走 `undefined` 分支，原样放 args；正合需要。
 }
 
 /// 可以安全重放的端点。只读或幂等；prompt/create 这类绝不重发。
@@ -452,6 +455,48 @@ export class DshClient {
       model,
       ...(reasoningEffort ? { reasoningEffort } : {}),
     })
+  }
+
+  /**
+   * 读一个 settings 命名空间的当前视图（含 `revision` 与 `value`）。
+   *
+   * 用途：`selectModel` 会把会话选择**当成用户默认值**写进 agent-default-model。
+   * ACB 只想要「这个会话用这个模型」，不想改别人的默认值，所以钉模型前先存下
+   * 原值、钉完再写回去。返回 null 表示这个 dsh 没挂 settings（headless 等），
+   * 调用方应当当作「无需还原」而不是失败。
+   */
+  async readSettingsNamespace(ns, { timeoutMs } = {}) {
+    const result = await this.callUnary("settings/describe", {}, { timeoutMs })
+    const namespaces = result?.namespaces
+    if (!Array.isArray(namespaces)) return null
+    const view = namespaces.find((candidate) => candidate?.ns === ns)
+    if (!view) return null
+    return {
+      ns,
+      revision: typeof view.revision === "number" ? view.revision : undefined,
+      value: view.value && typeof view.value === "object" ? view.value : {},
+      user: view.user && typeof view.user === "object" ? view.user : {},
+    }
+  }
+
+  /**
+   * 整段替换一个 settings 命名空间的 user section。
+   *
+   * 用 `replace` 而不是 `update`：`update` 是合并，写回去时无法删掉
+   * 「原本不存在、被 selectModel 新增」的字段；`replace` 能把这一段恢复成
+   * 与快照完全一致的状态。带 `expectedRevision` 做乐观锁——期间用户在
+   * Settings UI 改过就让这次写失败，而不是覆盖掉用户的改动。
+   */
+  async replaceSettingsNamespace(ns, section, expectedRevision, { timeoutMs } = {}) {
+    return this.callUnary(
+      "settings/replace",
+      {
+        ns,
+        section: section ?? {},
+        ...(expectedRevision === undefined ? {} : { expectedRevision }),
+      },
+      { timeoutMs },
+    )
   }
 
 /**
