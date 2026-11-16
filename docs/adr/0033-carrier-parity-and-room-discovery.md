@@ -21,7 +21,7 @@
 | `kernel`（内置） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | `plugins/lua`（Script） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — | — | ❌ |
 | `adapters/dynamic`（.so） | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | — | — | — | ✅ |
-| `plugins/process-provider`（Process） | ✅ | ✅ | ✅ | — | ✅ | ✅ | — | — | — | — | — | — |
+| `plugins/process-provider`（Process） | ✅ | ✅ | ✅ | — | ✅ | ✅ | — | — | — | ✅ | ✅ | — |
 | `plugins/process-tools` | — | — | — | — | — | — | — | — | ✅ | — | — | — |
 | `plugins/trusted` | ✅ | — | — | — | — | — | — | — | — | — | — | — |
 | `wasm-host` | — | — | — | — | — | — | — | — | — | — | — | ❌ |
@@ -145,6 +145,8 @@ core 认识「有查询这回事」，不认识查询的内容。
 | `7f56f05` | Process: clock |
 | `acb1027` | Process: route（这一格真的扩了 wire：`WireRouteDecision` / `WireRouteAction`） |
 | `62db559` | Process: turn_error（wire 早就有，缺的只是载体侧的接线） |
+| `29873ce` | ToolAccess 可外部化 + 修正矩阵多处错标 |
+| `b08dbad` | Prompt 可外部化 + 核实 Tool 早已完整 |
 
 三条实测出来的判断，写下来省下一次：
 
@@ -157,32 +159,42 @@ core 认识「有查询这回事」，不认识查询的内容。
 3. **「不对等」的形态常常是「缺接线」而不是「缺设计」**。turn_error 的 wire
    形状齐全，但没有任何载体实现它——只看设计文档会以为这个能力已经有了。
 
-## 已知不对等（本 ADR 未解决，带原因）
+## 已知不对等（本 ADR 收口后的状态）
 
-判据是**有没有 wire 形状**：`adapter-api` 里存在 `Wire<X>Request` 才能外部化，
-否则只能内置。现状：
+判据是**有没有 wire 形状**：`adapter-api` 里存在 `Wire<X>Request` 才能经
+`[[process_providers]]` 外部化。
 
-| 扩展点 | 有 wire 形状 | 谁能外部实现 | 缺什么 |
-|---|:-:|---|---|
-| Wake / Access / Clock / Receive / Route / TurnError / Delivery / Send | ✅ | Lua、dynamic、process（后两者按各自覆盖） | — |
-| **ToolAccess** | ❌ | **只有 kernel** | wire 形状 + 载体接线 |
-| **Prompt** | ❌ | **只有 kernel** | wire 形状 + 优先级规则 |
-| **Tool** | ❌（只有 `process-tools` 这个专用 crate） | 只能走 `process-tools` | wire 形状 + 「外部工具怎么被调用」的协议 |
+| 扩展点 | 谁能外部实现 |
+|---|---|
+| Wake / Access / Clock / Receive / Route / TurnError / Delivery / Send | Lua、dynamic、process（按各自覆盖） |
+| **ToolAccess** | kernel + **process**（本次补） |
+| **Prompt** | kernel + **process**（本次补） |
+| **Tool** | kernel + `process-tools`（专用载体，stdio JSON-RPC，早就有） |
 
-**ToolAccess 不在安全边界上**。核实过：`ProviderInstance::ToolAccess` 早就存在，
-`ToolAccessProvider::check` 是普通 trait（无 sealed、无 unsafe），而且它**只能否决、
-不能放行**——trait 注释原文「只能拒绝，不能放行 core 的判定」。外部实现参与的是
-「加一道否决」，不是「给自己开权限」。所以缺的是纯工程（wire 形状 + 接线），
-不是策略限制。
+### 收口时纠正的三处误判
 
-其余两格的难点不在于「做不了」，而在于要**先定一件事**：
+调查过程中有三条判断是错的，记下来避免下次再犯：
 
-- **Prompt**：外部提示词与人格卡谁优先、冲突时怎么办。不定清楚会造出第三个真相源。
-- **Tool**：外部工具的调用协议（参数、超时、取消、结果信封）。`ToolProvider` 的签名
-  里带运行期对象，不是纯 JSON 能表达，需要像 route 那样单独设计 wire。
+1. **「ToolAccess 不能外部化是因为安全」——错**。`ProviderInstance::ToolAccess`
+   早就存在，`check` 是普通 trait，而且**只能否决、不能放行**。缺的只是 wire
+   形状与接线。
+2. **「Tool 要先定外部工具的调用协议」——错**。`plugins/process-tools` 是一个
+   完整实现：stdio 行 JSON-RPC、超时、崩溃退避、健康状态、配置入口
+   `[[tool_plugins]]`、集成测试齐全。它只是走专用载体，不是
+   `[[process_providers]]`。
+3. **「Prompt 要先拍板优先级规则」——错**。`PromptDraft` 自带 `priority`，
+   core 按它排序后拼进系统提示，且「来源由 core 填，插件不能伪造」。
 
-**wasm-host** 是唯一真的「大设计」：需要 wasm ABI（导入表、内存约定、错误传播、
-宿主函数），与上面三个不是一个量级。
+三条错误的共同点：**我把「我没找到」当成了「不存在」**。这次的教训是判据要落在
+「有没有 wire 形状 / 有没有 impl」这种可 grep 的事实上，而不是我对架构的印象。
+
+### 仍然不对等的
+
+| 缺口 | 原因 |
+|---|---|
+| **`wasm-host` 零扩展点** | 唯一真的「大设计」：需要 wasm ABI（导入表、内存约定、错误传播、宿主函数），与上面几格不是一个量级 |
+| **Lua 缺 ToolAccess / Prompt / Tool** | Lua 载体目前不提供这三格。它有自己的取舍（脚本内做工具/上下文注入意义有限），但如果要「各种载体均等」，这是最后一块 |
+| **dynamic 缺 Route / ToolAccess / Prompt / Tool** | 同上，按需再补 |
 
 ## 已知代价
 
