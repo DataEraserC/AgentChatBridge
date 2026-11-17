@@ -170,9 +170,11 @@ const roomRows = computed(() =>
   Object.entries(currentRooms.value).map(([room, cfg]) => {
     const record = cfg as Record<string, unknown>;
     const route = record.approval_route;
+    const members = record.members;
     return {
       room,
       trust: String(record.trust ?? "untrusted"),
+      members: Array.isArray(members) ? (members as string[]) : [],
       approval_route: Array.isArray(route) ? (route as string[]) : [],
     };
   }),
@@ -194,12 +196,33 @@ const currentRoles = computed<Array<Record<string, unknown>>>(() =>
   draft.value ? draft.value.roles : ((grants.value.roles ?? []) as Array<Record<string, unknown>>),
 );
 
+/**
+ * 把「逗号分隔的一串」解析成数组。
+ *
+ * 用逗号而不是 chips 编辑：这两个字段的值是人手输的 openid / 房间串，长度不固定，
+ * chips 在 20 个元素时会挤成一列；而逗号串可以直接从别处粘过来。
+ */
+function parseList(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 /** 改房间的信任档位。只动草稿，保存时才落库。 */
 function setRoomTrust(room: string, trust: string): void {
   if (!draft.value) beginEdit();
   const rooms = draft.value?.rooms;
   if (!rooms) return;
   rooms[room] = { ...(rooms[room] ?? {}), trust };
+}
+
+/** 改房间政策的某个列表字段（members / approval_route）。 */
+function setRoomList(room: string, field: "members" | "approval_route", raw: string): void {
+  if (!draft.value) beginEdit();
+  const rooms = draft.value?.rooms;
+  if (!rooms) return;
+  rooms[room] = { ...(rooms[room] ?? {}), [field]: parseList(raw) };
 }
 
 function removeRoom(room: string): void {
@@ -300,7 +323,10 @@ const ruleHeaders = computed(() => [
 const roomHeaders = computed(() => [
   { title: t("console.policy.col.room"), key: "room" },
   { title: t("console.policy.col.trust"), key: "trust" },
+  { title: t("console.policy.col.members"), key: "members" },
   { title: t("console.policy.col.route"), key: "approval_route" },
+  // 只在编辑态给操作列，和规则表一致。
+  ...(draft.value ? [{ title: "", key: "__actions", sortable: false }] : []),
 ]);
 
 const roleHeaders = computed(() => [
@@ -467,8 +493,35 @@ function joinList(value: unknown): string {
             {{ item.trust === "trusted" ? t("console.policy.trusted") : t("console.policy.untrusted") }}
           </v-chip>
         </template>
+        <template #item.members="{ item }">
+          <!-- 编辑态用逗号串：这两个字段的值是人手输的 openid，chips 在几十个元素时
+               会挤成一列，而逗号串可以直接从别处粘过来。 -->
+          <v-text-field
+            v-if="draft"
+            :model-value="item.members.join(', ')"
+            :placeholder="t('console.policy.membersPlaceholder')"
+            density="compact"
+            variant="plain"
+            hide-details
+            style="min-width: 12rem"
+            @update:model-value="setRoomList(item.room, 'members', String($event))"
+          />
+          <span v-else class="text-caption text-medium-emphasis">
+            {{ item.members.length ? item.members.join(", ") : t("console.deps.none") }}
+          </span>
+        </template>
         <template #item.approval_route="{ item }">
-          <span class="text-caption text-medium-emphasis">
+          <v-text-field
+            v-if="draft"
+            :model-value="item.approval_route.join(', ')"
+            :placeholder="t('console.policy.routePlaceholder')"
+            density="compact"
+            variant="plain"
+            hide-details
+            style="min-width: 12rem"
+            @update:model-value="setRoomList(item.room, 'approval_route', String($event))"
+          />
+          <span v-else class="text-caption text-medium-emphasis">
             {{ item.approval_route.length ? item.approval_route.join(", ") : t("console.deps.none") }}
           </span>
         </template>
