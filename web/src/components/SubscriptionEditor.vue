@@ -32,6 +32,23 @@ const draftRoom = ref("");
 /** 房间选择器暴露的校验状态：`unknown` 时禁止提交（ADR-0035）。 */
 const picker = ref<{ verifyState: { state: string; detail: string } } | null>(null);
 
+/**
+ * 连接变了：清掉已选的房间并重新问一遍候选。
+ *
+ * 为什么不用 `v-model`：`v-select` 的 `:items` 是 `computed` 出来的对象数组，
+ * 配 `v-model` 时实测**不更新**——`connection` 一直是空字符串，于是
+ * `RoomPicker` 的 `enabled` 恒为 false、`/api/rooms` 从不发出，下拉里只剩父级
+ * 残留的菜单项。换成显式 `@update:model-value` 才可靠。
+ */
+function onConnectionChange(value: string | null): void {
+  const next = (value ?? "").trim();
+  if (next === connection.value) return;
+  connection.value = next;
+  // 换连接后原来的房间大概率不属于新连接，清掉免得提交一个错配的组合。
+  draftRoom.value = "";
+  picker.value = null;
+}
+
 /** 手输了一个库中不存在的房间：报错、不提交、不留痕。 */
 const blocked = computed(() => picker.value?.verifyState.state === "unknown");
 
@@ -114,7 +131,7 @@ function remove(room: string): void {
     </div>
 
     <v-select
-      v-model="connection"
+      :model-value="connection"
       :items="connections"
       item-title="title"
       item-value="value"
@@ -124,6 +141,7 @@ function remove(room: string): void {
       hide-details
       class="mt-3"
       style="max-width: 18rem"
+      @update:model-value="onConnectionChange($event as string)"
     />
 
     <div class="d-flex ga-2 mt-2 flex-wrap align-start">
