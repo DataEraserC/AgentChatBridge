@@ -239,3 +239,44 @@ fn policy_json_round_trip_keeps_every_field() {
 fn shared(store: MemoryStore) -> Arc<Mutex<MemoryStore>> {
     Arc::new(Mutex::new(store))
 }
+
+/// 控制台读策略必须看到**刚保存的那份**，即使还没到轮次边界。
+///
+/// 两条语义同时成立：
+///   - 运行时 `config().grants` 要等轮次边界才换（一轮里可能判定多次）
+///   - 控制台要立刻看到库里的新值（用户刚点过保存）
+///
+/// 2026-11-17 用户要求「数据库存的和页面上显示的保持一致」。实现上分成两个
+/// 入口：`replace_policy` 只写库 + 挂边界标记；`stored_policy` 直接读库给控制台。
+#[test]
+fn console_sees_the_saved_policy_before_the_turn_boundary() {
+    let mut bridge = bridge_with(MemoryStore::new());
+
+    let mut next = bridge.config().grants.clone();
+    next.rooms.insert(
+        "qq:group/769843907".to_owned(),
+        RoomGrant {
+            trust: Default::default(),
+            members: vec![],
+            approval_route: vec!["qq:private/323622442".to_owned()],
+        },
+    );
+    bridge.replace_policy(&next).expect("能写");
+
+    // 运行时快照还没换（边界未到）……
+    assert!(
+        !bridge
+            .config()
+            .grants
+            .rooms
+            .contains_key("qq:group/769843907"),
+        "运行时策略仍要等边界"
+    );
+    // ……但控制台读库能看到。
+    let (stored, from_store) = bridge.stored_policy();
+    assert!(from_store, "应当真的读到了库");
+    assert!(
+        stored.rooms.contains_key("qq:group/769843907"),
+        "控制台必须看到刚保存的规则，否则保存成功但页面显示旧数据"
+    );
+}

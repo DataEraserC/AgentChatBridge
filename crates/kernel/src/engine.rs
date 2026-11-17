@@ -2708,6 +2708,26 @@ impl<S: Store> Bridge<S> {
         }))
     }
 
+    /// 控制台读策略：**直接读库**，与 `stored_fallback_policy_scope` 同一语义。
+    ///
+    /// 为什么不读 `config().grants`：内存那份要到轮次边界才换（一轮里可能判定
+    /// 多次，中途换策略会让同一轮前后不一致）。控制台的语义是「我刚保存了什么」，
+    /// 读内存会得到上一轮的快照——保存成功但页面还是旧的，用户分不清是没存上
+    /// 还是没刷新（2026-11-17 用户要求「数据库存的和页面上显示的保持一致」）。
+    ///
+    /// 返回 `(策略, 是否来自库)`：读库失败时退回内存快照并如实标注，页面据此
+    /// 提示「这份可能不是最新的」，而不是假装它就是库里的。
+    pub fn stored_policy(&self) -> (crate::grants::GrantsConfig, bool) {
+        match self.store.policy_load() {
+            Ok(Some(grants)) => (grants, true),
+            Ok(None) => (self.config.grants.clone(), false),
+            Err(error) => {
+                eprintln!("[policy] 控制台读策略失败，退回本轮生效的快照：{error}");
+                (self.config.grants.clone(), false)
+            }
+        }
+    }
+
     /// 当前生效的后备模型链（控制台展示用）。
     pub fn model_fallbacks(&self) -> &[String] {
         &self.model_fallbacks
@@ -3312,6 +3332,15 @@ impl<S: Store> Bridge<S> {
         self.store
             .policy_replace(grants)
             .map_err(|error| error.to_string())?;
+        // 写库之后**立刻把内存刷成库里的那份**。
+        //
+        // 只置 `pending_policy_reload` 的话，控制台紧接着读 `config().grants` 会拿到
+        // 旧快照——而 `policy_view` 把它标成 `source: "database"`。于是「保存成功、
+        // 页面还是旧的」，用户分不清是没存上还是没刷新（2026-11-17 用户要求
+        // 「数据库存的和页面上显示的保持一致」）。
+        //
+        // 用 `adopt_store_policy` 而不是直接赋值：它已经处理了版本号、审计、
+        // 读失败时保留快照这几件事，重复实现只会漂。
         self.pending_policy_reload = true;
         Ok(())
     }

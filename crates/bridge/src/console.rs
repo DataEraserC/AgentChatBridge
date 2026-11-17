@@ -989,7 +989,9 @@ impl<S: Store + Send + 'static> Console<S> {
     /// 「为什么这条规则不生效」就变成了猜谜。
     fn policy_view(&self) -> (u16, String) {
         let bridge = lock(&self.bridge);
-        let mut grants = bridge.config().grants.clone();
+        // 读库而不是读内存：内存那份要到轮次边界才换，这里要的是「现在库里是什么」。
+        // 见 `Bridge::stored_policy` 的注释。
+        let (mut grants, from_store) = bridge.stored_policy();
         // 内置角色只做展示/迁移；库里还没有角色时先把它们端出来，避免页面空白。
         if grants.roles.is_empty() {
             grants.roles = acb_kernel::grants::builtin_roles();
@@ -997,7 +999,9 @@ impl<S: Store + Send + 'static> Console<S> {
         (
             200,
             json!({
-                "source": "database",
+                // 如实标注：读库失败时页面要能看出「这份可能不是最新的」，
+                // 而不是硬写 database 骗人。
+                "source": if from_store { "database" } else { "memory" },
                 "grants": grants,
                 "pending_reload": bridge.has_pending_policy_reload(),
                 "config_version": bridge.config_version(),
