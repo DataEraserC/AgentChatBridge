@@ -12,17 +12,20 @@
  * 自动跟随。
  */
 
-/* 开关：关闭态必须有可见轮廓。 */
+/* 开关：关闭态必须有可见轮廓。
+   用 `!important` + 更高特异性：Vuetify 的组件样式在运行时注入，纯靠顺序压不住。 */
+.v-selection-control .v-switch__track,
 .v-switch .v-switch__track {
   opacity: 1 !important;
-  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  background-color: rgb(var(--v-theme-surface-variant));
+  border: 1.5px solid rgb(var(--v-theme-outline)) !important;
+  background-color: rgb(var(--v-theme-surface-bright)) !important;
 }
 
 /* 关闭态的滑块：默认与轨道同色，看不出「这是个可以拨的东西」。 */
-.v-switch:not(.v-switch--on) .v-switch__thumb {
-  background-color: rgb(var(--v-theme-on-surface-variant));
-  opacity: 0.9;
+.v-switch:not(.v-switch--on) .v-switch__thumb,
+.v-selection-control:not(.v-selection-control--dirty) .v-switch__thumb {
+  background-color: rgb(var(--v-theme-on-surface-variant)) !important;
+  opacity: 1 !important;
 }
 
 /* 复选框/单选框：未选中时的边框要看得出来。 */
