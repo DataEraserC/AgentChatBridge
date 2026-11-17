@@ -28,7 +28,10 @@ pub fn load(config: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, St
     let preset = acb_kernel::secrets_db::preload(config, config_dir)
         .map_err(|error| format!("preload secrets: {error}"))?;
     if !preset.is_empty() {
-        acb_kernel::secrets_db::install(preset);
+        // 克隆一份留给第二段：`install` 消费掉它，但叠加库对象那次加载同样要用——
+        // 库里的会话会引用库内密钥（`token = { secret = "dsh-qas-token" }`），
+        // 不传预设就会报「references undeclared secret source」而整份加载失败。
+        acb_kernel::secrets_db::install(preset.clone());
     }
     let loaded = Config::load(config, config_dir).map_err(|error| {
         format!(
@@ -36,10 +39,18 @@ pub fn load(config: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, St
             config.display()
         )
     })?;
-    let store = acb_kernel::SqliteStore::open(&loaded.config.storage.path).map_err(|error| {
+    // 相对 `storage.path` 必须锚定到数据根，否则库跟着 cwd 走。
+    //
+    // 2026-11-17 真机踩中：默认值是相对路径 `state/acb.db`，而 systemd 把桥的
+    // cwd 设成 `<ACB_DATA_DIR>`，所以桥读到的是对的库；但 `acbctl` 从任意目录
+    // 被调用（`drivers_acb.sh` 在 state/drivers 下跑），相对路径解析到别处，
+    // 于是**打开/新建了一个空库**，`acbctl sessions` 返回零个会话 → 驱动一个都
+    // 不起 → dsh 会话全部失联，且脚本不报错（「零个会话」是合法输出）。
+    let storage_path = resolve_storage_path(&loaded.config.storage.path);
+    let store = acb_kernel::SqliteStore::open(&storage_path).map_err(|error| {
         format!(
             "open store {} (from {}): {error}",
-            loaded.config.storage.path,
+            storage_path.display(),
             config.display()
         )
     })?;
@@ -50,7 +61,17 @@ pub fn load(config: &Path, config_dir: Option<&Path>) -> Result<LoadedConfig, St
         // 库还没初始化：首次部署，按文件走（桥第一次启动会把文件导入库）。
         None => loaded,
         Some(objects) => {
-            Config::load_with_objects(config, config_dir, Some(&objects)).map_err(|error| {
+            // 必须带库内密钥预设：库里的会话/连接引用的是**库内**密钥名，
+            // 而配置文件里不会声明它们（它们随业务对象一起进了库）。
+            // 不带预设 → 加载失败 → `acbctl sessions` 退出非零 → 驱动脚本
+            // 保留现状、一个驱动都不起（2026-11-17 真机踩中）。
+            Config::load_with_secrets(
+                config,
+                config_dir,
+                Some(&objects),
+                (!preset.is_empty()).then_some(&preset),
+            )
+            .map_err(|error| {
                 format!(
                     "load config {} with store objects: {error}",
                     config.display()
@@ -287,5 +308,87 @@ mod tests {
 
         let loaded = load(&base, None).expect("加载");
         assert_eq!(loaded.config.grants.rules[0].id, "from-file");
+    }
+}
+
+/// 把 `storage.path` 解析成绝对路径，规则与桥一致。
+///
+/// 顺序：
+/// 1. 已是绝对路径 → 原样用；
+/// 2. `ACB_DATA_DIR` 设了 → `<数据根>/<相对路径>`
+///    （桥的 systemd unit 就是 `WorkingDirectory=<数据根>` + 相对默认值）；
+/// 3. 都没有 → 相对当前目录（旧行为，首次部署时靠它）。
+///
+/// 为什么必须是 2 优先于 3：`acbctl` 被驱动脚本从任意 cwd 调用，而桥的 cwd
+/// 固定是数据根。不做这一步，两边看到的是两个不同的库。
+fn resolve_storage_path(raw: &str) -> PathBuf {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match std::env::var("ACB_DATA_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(data_dir) => Path::new(&data_dir).join(path),
+        None => path.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+mod storage_path_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// 这三个测试都要改进程级的 `ACB_DATA_DIR`，并行会互相踩（实测：
+    /// 「无数据根」那条读到另一条设的 `/data/acb`）。用互斥量串起来。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_lock<T>(body: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        body()
+    }
+
+    /// 绝对路径原样返回，不被前缀污染。
+    #[test]
+    fn absolute_storage_path_is_untouched() {
+        with_lock(|| {
+            let resolved = resolve_storage_path("/var/lib/acb/state/acb.db");
+            assert_eq!(resolved, PathBuf::from("/var/lib/acb/state/acb.db"));
+        });
+    }
+
+    /// 相对路径在没有 ACB_DATA_DIR 时保持相对（首次部署的旧行为）。
+    #[test]
+    fn relative_path_without_data_dir_stays_relative() {
+        with_lock(|| {
+            let saved = std::env::var("ACB_DATA_DIR").ok();
+            // SAFETY: 持锁期间独占环境变量。
+            unsafe { std::env::remove_var("ACB_DATA_DIR") };
+            let resolved = resolve_storage_path("state/acb.db");
+            match saved {
+                Some(value) => unsafe { std::env::set_var("ACB_DATA_DIR", value) },
+                None => unsafe { std::env::remove_var("ACB_DATA_DIR") },
+            }
+            assert_eq!(resolved, PathBuf::from("state/acb.db"));
+        });
+    }
+
+    /// 有 ACB_DATA_DIR 时锚定到数据根——这是修掉「acbctl 读到空库」的关键。
+    #[test]
+    fn relative_path_is_anchored_to_data_dir() {
+        with_lock(|| {
+            let saved = std::env::var("ACB_DATA_DIR").ok();
+            // SAFETY: 持锁期间独占环境变量。
+            unsafe { std::env::set_var("ACB_DATA_DIR", "/data/acb") };
+            let resolved = resolve_storage_path("state/acb.db");
+            match saved {
+                Some(value) => unsafe { std::env::set_var("ACB_DATA_DIR", value) },
+                None => unsafe { std::env::remove_var("ACB_DATA_DIR") },
+            }
+            assert_eq!(resolved, PathBuf::from("/data/acb/state/acb.db"));
+        });
     }
 }

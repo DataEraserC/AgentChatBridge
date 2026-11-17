@@ -52,8 +52,16 @@ fn storage_path(base_path: &Path, config_dir: Option<&Path>) -> Option<PathBuf> 
         }
     }
 
-    // 没写 `[storage]` 就用默认值：与 `SqliteStore::open` 一样按进程 cwd 解析。
-    let mut found = Some(PathBuf::from(crate::config::DEFAULT_STORAGE_PATH));
+    // 没写 `[storage]` 就用默认值。默认值是相对路径 `state/acb.db`，必须锚定到
+    // 数据根而不是进程 cwd。
+    //
+    // 2026-11-17 真机踩中：`acbctl` 被 `drivers_acb.sh` 从 `<state>/drivers` 调用，
+    // 相对路径解析到别处 → 打开/新建空库 → 库内密钥一个都读不到 → 带库对象的
+    // 配置加载报「references undeclared secret source」→ 驱动一个都不起 →
+    // dsh 全部失联。桥自己没这个问题，因为 systemd 把它的 cwd 设成了数据根。
+    let mut found = Some(anchor_to_data_root(&PathBuf::from(
+        crate::config::DEFAULT_STORAGE_PATH,
+    )));
     read_into(base_path, &mut found);
     if let Some(dir) = config_dir.filter(|dir| dir.is_dir()) {
         let mut fragments: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -71,7 +79,24 @@ fn storage_path(base_path: &Path, config_dir: Option<&Path>) -> Option<PathBuf> 
             read_into(&fragment, &mut found);
         }
     }
-    found
+    found.map(|path| anchor_to_data_root(&path))
+}
+
+/// 把相对库路径锚定到数据根（`ACB_DATA_DIR`），与桥的 cwd 语义对齐。
+///
+/// 绝对路径原样返回。没有 `ACB_DATA_DIR` 时保持相对——那是首次部署、从仓库
+/// 目录直接跑桥的场景。
+fn anchor_to_data_root(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match std::env::var("ACB_DATA_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(data_dir) => Path::new(&data_dir).join(path),
+        None => path.to_path_buf(),
+    }
 }
 
 /// 预取库内密钥。返回值直接喂给 `Config::load_with_secrets`。
@@ -151,5 +176,37 @@ mod tests {
         )
         .expect("默认路径");
         assert_eq!(path, PathBuf::from(crate::config::DEFAULT_STORAGE_PATH));
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    /// 绝对路径不被改写。
+    #[test]
+    fn absolute_path_untouched() {
+        assert_eq!(
+            anchor_to_data_root(Path::new("/var/lib/acb/state/acb.db")),
+            PathBuf::from("/var/lib/acb/state/acb.db")
+        );
+    }
+
+    /// 有 `ACB_DATA_DIR` 时相对路径锚定到数据根。
+    ///
+    /// 这是 2026-11-17 那次故障的核心：`acbctl` 从 `<state>/drivers` 被调用，
+    /// 相对路径解析到别处，于是打开了空库、读不到库内密钥、`acbctl sessions`
+    /// 返回零个会话，驱动一个都不起。
+    #[test]
+    fn relative_path_anchors_to_data_dir() {
+        let saved = std::env::var("ACB_DATA_DIR").ok();
+        // SAFETY: 测试内设置环境变量。
+        unsafe { std::env::set_var("ACB_DATA_DIR", "/data/acb") };
+        let resolved = anchor_to_data_root(Path::new("state/acb.db"));
+        match saved {
+            Some(value) => unsafe { std::env::set_var("ACB_DATA_DIR", value) },
+            None => unsafe { std::env::remove_var("ACB_DATA_DIR") },
+        }
+        assert_eq!(resolved, PathBuf::from("/data/acb/state/acb.db"));
     }
 }
