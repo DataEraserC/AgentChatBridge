@@ -54,6 +54,25 @@ pub fn parse(
             // 私聊消息天然「冲我来」：唤醒策略的 at_mention 才能在单聊里工作。
             true,
         ),
+        // 机器人被加入/移出群聊。
+        //
+        // **这两个事件是「房间发现」的关键**：官方没有「列出机器人所在群」的
+        // 接口，但入群那一刻平台会推 `group_openid`。把它写成一条**非 suppressed**
+        // 的记录落到 `qqbot-official:group/<openid>` 房间，`records` 表就有了这个
+        // 房间——控制台的 `seen` 候选立刻能看到它，不用等用户在群里 @ 机器人。
+        //
+        // 两个事件都在 intents `1<<25`（`GROUP_AND_C2C_EVENT`）里，现有连接已经
+        // 订阅了那一位，所以不需要改 Identify。
+        "GROUP_ADD_ROBOT" | "GROUP_DEL_ROBOT" => {
+            membership(connection, event_type, payload, at, "get_status/group")
+        }
+        // 用户添加/删除机器人好友（单聊关系的建立与解除）。
+        //
+        // 与入群同理：写进 `private/<openid>` 房间，让控制台能看到这个私聊对象存在，
+        // 而不是必须等对方先发消息。
+        "FRIEND_ADD" | "FRIEND_DEL" => {
+            membership(connection, event_type, payload, at, "get_status/private")
+        }
         // FRIEND_VERIFY：有人申请加好友。记一条**非 suppressed** 事件——
         // 审批动作（官方接口形态待文档核实）未实现前，至少让流水与会话
         // 看得见申请的存在。其余类型（interaction、audit…）仍记 suppressed。
@@ -152,6 +171,78 @@ fn message(
     })
     .with_platform_id(msg_id.clone());
     Ok(Parsed::Record(draft))
+}
+
+/// 群/好友关系变动（入群、退群、加好友、删好友）→ 一条落在**真实房间**里的记录。
+///
+/// 与 [`notice`] 的区别：`notice` 把房间写成 `group/<事件名>`（那只是个兜底的
+/// 归档位，不对应任何真实房间）；这里必须落到 `group/<openid>` / `private/<openid>`，
+/// 因为控制台的房间候选就是按真实房间 id 查 `records` 的（ADR-0035）。
+fn membership(
+    connection: &str,
+    event_type: &str,
+    payload: &Value,
+    at: i64,
+    kind_hint: &str,
+) -> Result<Parsed, EventError> {
+    // 群的字段是 `group_openid`；好友的字段是 `openid`（也可能落在 author 里）。
+    let openid = text_of(payload.get("group_openid"))
+        .or_else(|| text_of(payload.get("openid")))
+        .or_else(|| {
+            payload
+                .get("author")
+                .and_then(|value| text_of(value.get("openid")))
+        })
+        .filter(|openid| !openid.is_empty())
+        .ok_or_else(|| {
+            let keys: Vec<String> = payload
+                .as_object()
+                .map(|map| map.keys().cloned().collect())
+                .unwrap_or_default();
+            EventError::Missing(format!("openid (payload keys: {keys:?})"))
+        })?;
+    let scope = if event_type.starts_with("GROUP_") {
+        "group"
+    } else {
+        "private"
+    };
+    let room = RoomId::new(connection, format!("{scope}/{openid}"))
+        .map_err(|error| EventError::BadRoom(error.to_string()))?;
+    // 摘要给人和 agent 看：入群/退群/加好友/删好友，一眼知道发生了什么。
+    let summary = match event_type {
+        "GROUP_ADD_ROBOT" => "机器人被加入群聊".to_owned(),
+        "GROUP_DEL_ROBOT" => "机器人被移出群聊".to_owned(),
+        "FRIEND_ADD" => "用户添加机器人为好友".to_owned(),
+        "FRIEND_DEL" => "用户删除机器人好友".to_owned(),
+        other => other.to_owned(),
+    };
+    Ok(Parsed::Record(RecordDraft {
+        room,
+        kind: RecordKind::Event {
+            event: format!("qq.{event_type}"),
+            tags: vec!["notice".to_owned(), "membership".to_owned()],
+            payload: Some(payload.clone()),
+            summary: Some(summary.clone()),
+            body: false,
+        },
+        sender: Sender {
+            id: "qq".to_owned(),
+            name: "QQ 官方".to_owned(),
+            role: None,
+        },
+        at,
+        elements: vec![Element::Text { text: summary }],
+        at_self: false,
+        platform_id: None,
+        reply_to_self: false,
+        target_platform_id: None,
+        target_labels: Vec::new(),
+        // 非 suppressed：这条记录要落库，房间才会出现在 `records` 里。
+        // `suppressed` 的语义是「只给流水看、不进投递」，那会让房间发现失效。
+        suppressed: false,
+        room_scope: Some(RoomScope::MultiParty),
+        room_labels: Vec::new(),
+    }))
 }
 
 fn notice(
@@ -304,5 +395,88 @@ mod tests {
         assert!(message.contains("user_openid"), "{message}");
         assert!(message.contains("payload keys"), "{message}");
         assert!(message.contains("content"), "{message}");
+    }
+    /// 入群事件必须落到**真实群房间**，而且不能是 suppressed。
+    ///
+    /// 这是「拉机器人进群就能看到房间」的实现基础（ADR-0035）：官方没有群列表
+    /// 接口，但入群那一刻会推 `group_openid`。记录落到 `group/<openid>` 且不
+    /// suppressed，`records` 表才有这个房间，控制台的 `seen` 候选才看得到。
+    #[test]
+    fn group_add_robot_lands_in_the_real_room() {
+        let payload = json!({
+            "group_openid": "GRP_OPENID",
+            "op_member_openid": "OP_MEMBER",
+            "timestamp": 1784570534
+        });
+        let parsed = parse(
+            "qqbot-official",
+            "GROUP_ADD_ROBOT",
+            &payload,
+            &ReplyState::new(),
+            1,
+        )
+        .expect("能解析");
+        let Parsed::Record(record) = parsed else {
+            panic!("入群应当产生一条记录");
+        };
+        assert_eq!(
+            record.room.to_string(),
+            "qqbot-official:group/GRP_OPENID",
+            "必须落到真实群房间，不是 group/GROUP_ADD_ROBOT 这种兜底位"
+        );
+        assert!(
+            !record.suppressed,
+            "suppressed 的记录不进 records 表，房间发现会失效"
+        );
+        assert!(
+            record.room_labels.is_empty() && record.room_scope.is_some(),
+            "房间元数据齐全"
+        );
+    }
+
+    /// 好友事件落到 `private/<openid>`。
+    #[test]
+    fn friend_add_lands_in_the_private_room() {
+        let payload = json!({
+            "openid": "USER_OPENID",
+            "timestamp": 1784570523,
+            "scene": 1001,
+            "scene_param": "",
+            "author": { "union_openid": "UNION" }
+        });
+        let parsed = parse(
+            "qqbot-official",
+            "FRIEND_ADD",
+            &payload,
+            &ReplyState::new(),
+            1,
+        )
+        .expect("能解析");
+        let Parsed::Record(record) = parsed else {
+            panic!("加好友应当产生一条记录");
+        };
+        assert_eq!(
+            record.room.to_string(),
+            "qqbot-official:private/USER_OPENID"
+        );
+        assert!(!record.suppressed);
+    }
+
+    /// 移出群 / 删好友也要落记录（房间可能还要被清理，但事实要留痕）。
+    #[test]
+    fn removal_events_also_record() {
+        let payload = json!({ "group_openid": "G1", "timestamp": 1 });
+        let parsed = parse(
+            "qqbot-official",
+            "GROUP_DEL_ROBOT",
+            &payload,
+            &ReplyState::new(),
+            1,
+        )
+        .expect("能解析");
+        let Parsed::Record(record) = parsed else {
+            panic!("退群应当产生一条记录");
+        };
+        assert_eq!(record.room.to_string(), "qqbot-official:group/G1");
     }
 }
