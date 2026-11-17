@@ -22,7 +22,9 @@ const policy = useQuery({
   queryFn: () => api.get<PolicyView>("/api/policy"),
 });
 
-const rules = computed(() => policy.data.value?.rules ?? []);
+// 后端把策略放在 `grants` 里，不摊平在顶层（见 types.ts 的 PolicyView）。
+const grants = computed(() => policy.data.value?.grants ?? {});
+const rules = computed(() => grants.value.rules ?? []);
 interface RoomRow {
   room: string;
   trust?: string;
@@ -30,13 +32,32 @@ interface RoomRow {
 }
 
 const rooms = computed<RoomRow[]>(() =>
-  Object.entries(policy.data.value?.rooms ?? {}).map(([room, config]) => ({
+  Object.entries(grants.value.rooms ?? {}).map(([room, config]) => ({
     room,
     ...(config as Omit<RoomRow, "room">),
   })),
 );
-const admins = computed(() => policy.data.value?.admins ?? []);
-const roles = computed(() => policy.data.value?.roles ?? []);
+/**
+ * 管理员：后端是 `system_admin` + `bot_admin` 两个字段，没有 `admins` 数组。
+ * 拼成统一的行给表格用。
+ */
+const admins = computed(() => {
+  const rows: Array<{ kind: string; account: string; connection: string }> = [];
+  for (const [kind, value] of [
+    ["system_admin", grants.value.system_admin],
+    ["bot_admin", grants.value.bot_admin],
+  ] as const) {
+    if (!value) continue;
+    const record = value as Record<string, unknown>;
+    rows.push({
+      kind,
+      account: String(record.account ?? ""),
+      connection: String(record.connection ?? ""),
+    });
+  }
+  return rows;
+});
+const roles = computed(() => grants.value.roles ?? []);
 
 const ruleHeaders = computed(() => [
   { title: t("console.policy.col.effect"), key: "effect" },
@@ -137,8 +158,14 @@ function joinList(value: unknown): string {
         {{ t("console.policy.noAdmins") }}
       </div>
       <div v-else class="d-flex flex-wrap ga-2">
-        <v-chip v-for="admin in admins" :key="admin" size="small" variant="tonal">
-          <code>{{ admin }}</code>
+        <v-chip
+          v-for="admin in admins"
+          :key="`${admin.kind}:${admin.connection}:${admin.account}`"
+          size="small"
+          variant="tonal"
+        >
+          <span class="text-medium-emphasis me-1">{{ admin.kind }}</span>
+          <code>{{ admin.connection ? `${admin.connection}:${admin.account}` : admin.account }}</code>
         </v-chip>
       </div>
 

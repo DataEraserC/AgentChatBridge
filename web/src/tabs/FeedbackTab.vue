@@ -20,7 +20,7 @@ const feedback = useQuery({
   queryFn: () => api.get<FeedbacksView>("/api/feedback"),
 });
 
-const rows = computed(() => feedback.data.value?.feedbacks ?? []);
+const rows = computed(() => feedback.data.value?.feedback ?? []);
 
 const headers = computed(() => [
   { title: t("console.feedback.col.id"), key: "id" },

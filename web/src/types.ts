@@ -190,18 +190,44 @@ export interface FeedbackView {
 }
 
 export interface FeedbacksView {
-  feedbacks: FeedbackView[];
+  /**
+   * 后端字段是 `feedback`（单数），不是 `feedbacks`。
+   *
+   * 2026-11-17 修：前端原先读 `feedbacks`，于是库里 14 条反馈在页面上显示成
+   * 「没有反馈记录」——看起来像「没人提过意见」。
+   */
+  feedback: FeedbackView[];
   total?: number;
 }
 
 /** `GET /api/policy` —— 权限规则、房间信任、管理员、审批路由。 */
+/**
+ * `GET /api/policy` —— 权限与审批。
+ *
+ * **注意 `grants` 这一层**：后端把策略整体放在 `grants` 里（就是内核的
+ * `Grants` 结构），不是摊平在顶层。2026-11-17 修：前端原先直接读
+ * `policy.rules`，于是库里明明有 13 条规则、7 条房间配置、1 个系统管理员，
+ * 页面却显示「还没有规则 / 还没有房间级配置 / 没有管理员」——看起来像
+ * 「默认全拒，谁都不能用」，实际上权限是配好的。
+ */
 export interface PolicyView {
-  rules?: Array<Record<string, unknown>>;
-  rooms?: Record<string, Record<string, unknown>>;
-  accounts?: Record<string, Record<string, unknown>>;
-  admins?: string[];
-  roles?: Array<Record<string, unknown>>;
-  assignments?: Array<Record<string, unknown>>;
+  config_version?: number;
+  pending_reload?: boolean;
+  /** `database` = 直接读库；`memory` = 读库失败退回快照。 */
+  source?: string;
+  grants?: {
+    rules?: Array<Record<string, unknown>>;
+    /** 房间级配置：房间 id → { approval_route, members, trust, … }。 */
+    rooms?: Record<string, Record<string, unknown>>;
+    accounts?: Record<string, Record<string, unknown>>;
+    roles?: Array<Record<string, unknown>>;
+    assignments?: Array<Record<string, unknown>>;
+    /** 系统管理员（一个）。可能是 `{ account, connection }` 或 null。 */
+    system_admin?: Record<string, unknown> | null;
+    bot_admin?: Record<string, unknown> | null;
+    /** 显式拒绝清单。 */
+    deny?: Array<Record<string, unknown>>;
+  };
 }
 
 /** `GET /api/model-fallbacks[?session=]` —— `console.rs` 的 `model_fallbacks_view`。 */
