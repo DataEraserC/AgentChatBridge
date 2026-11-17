@@ -643,6 +643,19 @@ pub struct FallbackScope {
 }
 
 /// 桥的核心：配置 + 存储 + 出站，加上调度状态。
+/// 这条记录是不是「房间关系变动」事件（入群/退群/加好友/删好友）。
+///
+/// 判据是适配器打的 `membership` 标签——平台无关：onebot 的未来实现、
+/// 其他平台的同类事件只要打这个标签就自动享受「未订阅也落库」的待遇。
+///
+/// 为什么需要它：关系事件是发现新房间的唯一途径（见 ingest 里的调用点）。
+fn is_membership_event(draft: &RecordDraft) -> bool {
+    matches!(
+        &draft.kind,
+        RecordKind::Event { tags, .. } if tags.iter().any(|tag| tag == "membership")
+    )
+}
+
 pub struct Bridge<S: Store> {
     config: Config,
     /// 唯一判定入口。默认是内置 `CorePolicy`；后续可替换为插件实现。
@@ -3495,6 +3508,25 @@ impl<S: Store> Bridge<S> {
         let subscribers = Self::subscribers_of(&self.config, &room);
 
         if subscribers.is_empty() {
+            // 房间关系变动（入群/退群/加好友/删好友）**即使没订阅也要落库**。
+            //
+            // 理由：它是「发现新房间」的唯一途径。若也按未订阅丢弃，就形成死锁
+            // ——没订阅 → 丢弃 → 库里没有这个房间 → 控制台的房间候选看不到它
+            // → 用户永远无法订阅。2026-11-17 实测正是如此：
+            //   dispatch GROUP_ADD_ROBOT
+            //   room qqbot-official:group/25FF... has no subscribed session; dropped
+            // 适配器解析是对的，是 core 这一步把它扔掉的。
+            //
+            // 只放行关系事件：普通消息仍按原语义丢弃（未订阅群里每条消息都入库
+            // 会污染流水），而关系事件是一条一次的一次性事实。
+            if is_membership_event(&draft) {
+                // `BridgeError::Storage` 有 #[from]，直接用 `?` 转换。
+                let record = self.store.append(draft.clone())?;
+                return Ok(Ingest::Recorded {
+                    id: record.id,
+                    woke: Vec::new(),
+                });
+            }
             // 未订阅房间的事件无处落库（见 Ingest::NotSubscribed）。OpenID 类
             // 平台的房间串只能在这里学到：每房间首次丢弃时打一条含完整房间串
             // 的日志，用户拿它去配订阅；之后不再重复。
@@ -14305,6 +14337,101 @@ mod target_param_tests {
 }
 
 #[cfg(test)]
+/// 未订阅房间的**关系事件**必须落库——这是发现新房间的唯一途径。
+///
+/// 2026-11-17 线上实测：`GROUP_ADD_ROBOT` 被适配器正确解析成
+/// `qqbot-official:group/25FF...`，但 core 因为「没有会话订阅这个房间」把它
+/// 丢弃了。于是形成死锁：没订阅 → 丢弃 → 库里没这个房间 → 控制台候选看不到
+/// → 用户永远无法订阅。
+#[cfg(test)]
+mod membership_ingest_tests {
+    use super::*;
+    use crate::storage::{MemoryStore, Transcript};
+
+    fn config_text() -> String {
+        r#"
+        [[personas]]
+        id = "p"
+        name = "人格"
+        text = "你是桥。"
+
+        [[harnesses]]
+        id = "dsh"
+        name = "DSH"
+
+        "#
+        .to_owned()
+    }
+
+    fn bridge() -> Bridge<MemoryStore> {
+        Bridge::with_plugins(
+            Config::parse_fixture(&config_text()).expect("配置合法"),
+            MemoryStore::new(),
+            Box::new(NoopOutboundForRegistry),
+            PluginManager::with_native_builtins(),
+        )
+    }
+
+    fn draft(room: &RoomId, tag: &str) -> RecordDraft {
+        RecordDraft {
+            room: room.clone(),
+            kind: RecordKind::Event {
+                event: "qq.GROUP_ADD_ROBOT".to_owned(),
+                tags: vec![tag.to_owned()],
+                payload: None,
+                summary: Some("机器人被加入群聊".to_owned()),
+                body: false,
+            },
+            sender: Sender {
+                id: "qq".to_owned(),
+                name: "QQ 官方".to_owned(),
+                role: None,
+            },
+            at: 1,
+            elements: vec![Element::Text {
+                text: "机器人被加入群聊".to_owned(),
+            }],
+            at_self: false,
+            platform_id: None,
+            reply_to_self: false,
+            target_platform_id: None,
+            target_labels: Vec::new(),
+            suppressed: false,
+            room_scope: Some(RoomScope::MultiParty),
+            room_labels: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn membership_event_from_unsubscribed_room_is_stored() {
+        let mut bridge = bridge();
+        let room = RoomId::new("qq", "group/NEWROOM").expect("合法房间");
+
+        let result = bridge.ingest(draft(&room, "membership")).expect("能吞");
+        assert!(
+            matches!(&result, Ingest::Recorded { woke, .. } if woke.is_empty()),
+            "关系事件要落库且不叫醒任何人，实际 {result:?}"
+        );
+        assert!(
+            bridge.store().count(&room).expect("可读") > 0,
+            "落库之后这个房间才可能出现在控制台候选里"
+        );
+    }
+
+    #[test]
+    fn ordinary_event_from_unsubscribed_room_is_still_dropped() {
+        let mut bridge = bridge();
+        let room = RoomId::new("qq", "group/NOISE").expect("合法房间");
+
+        let result = bridge.ingest(draft(&room, "notice")).expect("能吞");
+        assert!(
+            matches!(&result, Ingest::NotSubscribed { .. }),
+            "普通事件仍按原语义丢弃——未订阅群的每条消息都入库会污染流水，实际 {result:?}"
+        );
+        assert_eq!(bridge.store().count(&room).expect("可读"), 0);
+    }
+}
+
 mod connection_registry_tests {
     use super::*;
     use crate::adapter::ProviderConnections;
