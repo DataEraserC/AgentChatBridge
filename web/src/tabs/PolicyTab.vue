@@ -536,7 +536,7 @@ function joinList(value: unknown): string {
             density="compact"
             variant="plain"
             hide-details
-            style="max-width: 9rem"
+            style="min-width: 7rem"
             @update:model-value="setRuleField(item.effect, item.idx, 'subject', String($event))"
           />
           <code v-else class="text-caption">{{ item.subject || item.account || item.member || t("console.deps.none") }}</code>
@@ -568,7 +568,7 @@ function joinList(value: unknown): string {
             density="compact"
             variant="plain"
             hide-details
-            style="max-width: 8rem"
+            style="min-width: 6rem"
             @update:model-value="setRuleField(item.effect, item.idx, 'place', String($event))"
           />
           <span v-else class="text-caption">{{ item.place || "—" }}</span>
@@ -583,7 +583,7 @@ function joinList(value: unknown): string {
             density="compact"
             variant="plain"
             hide-details
-            style="max-width: 9rem"
+            style="min-width: 7rem"
             @update:model-value="setRuleField(item.effect, item.idx, 'scope', String($event))"
           />
           <span v-else class="text-caption">{{ item.scope || "—" }}</span>
