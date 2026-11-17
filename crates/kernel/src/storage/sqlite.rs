@@ -306,13 +306,13 @@ CREATE TABLE IF NOT EXISTS session_model_fallbacks (
 -- 为什么只有一份策略表、惩罚本身不落库：惩罚是「此刻别用它」的短期判断，重启后
 -- 重新累计；能跨重启的是「什么时候该罚」，那才是业务对象。
 CREATE TABLE IF NOT EXISTS model_fallback_policy (
-    session              TEXT,        -- NULL = 全局默认
+    model                TEXT,        -- NULL = 全局默认；值 = 这个模型自己的策略
     enabled              INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
     failure_threshold    INTEGER NOT NULL DEFAULT 0 CHECK (failure_threshold >= 0),
     failure_window_secs  INTEGER NOT NULL DEFAULT 0 CHECK (failure_window_secs >= 0),
     penalty_secs         INTEGER NOT NULL DEFAULT 0 CHECK (penalty_secs >= 0),
     updated_at           INTEGER NOT NULL,
-    PRIMARY KEY (session)
+    PRIMARY KEY (model)
 );
 
 -- 业务对象（schema 15）。连接/会话/人格/记忆/harness 从配置文件搬进库。
@@ -546,6 +546,38 @@ impl SqliteStore {
                 version = version,
                 current = SCHEMA_VERSION
             )));
+        }
+
+        // 惩罚策略的作用域从「会话」改成「模型」。
+        //
+        // 用户裁定（2026-11-17）：只做模型级——全局一份默认，每个模型可以单独覆盖。
+        // 原来那一层是「每个会话一份」，一个会话里所有模型共用一套阈值。
+        //
+        // 旧行**不迁移**：C 方案本来就要去掉会话这一层，而会话策略与模型策略
+        // 语义不同（前者约束「这个会话里的所有模型」，后者约束「这个模型」），
+        // 硬搬到模型列上会得到一堆奇怪的行。旧行直接丢，每个模型回落到全局默认。
+        //
+        // 用「表里还有没有 session 列」判断，而不是靠版本号：这个改动之前
+        // `SCHEMA_VERSION` 停在 17 没动（见文件头），所以版本号分不出来。
+        if self
+            .columns_of("model_fallback_policy")?
+            .iter()
+            .any(|name| name == "session")
+        {
+            self.conn
+                .execute_batch(
+                    "DROP TABLE model_fallback_policy;
+                     CREATE TABLE model_fallback_policy (
+                         model                TEXT,
+                         enabled              INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
+                         failure_threshold    INTEGER NOT NULL DEFAULT 0 CHECK (failure_threshold >= 0),
+                         failure_window_secs  INTEGER NOT NULL DEFAULT 0 CHECK (failure_window_secs >= 0),
+                         penalty_secs         INTEGER NOT NULL DEFAULT 0 CHECK (penalty_secs >= 0),
+                         updated_at           INTEGER NOT NULL,
+                         PRIMARY KEY (model)
+                     );",
+                )
+                .map_err(|error| backend(error.to_string()))?;
         }
 
         // 1 → 2：引用回复要判「被引用的是谁发的」，得留下平台消息编号。
@@ -2934,37 +2966,34 @@ impl ModelFallbackPolicy for SqliteStore {
         self.store_fallback_policy(None, Some(policy))
     }
 
-    fn session_fallback_policy(
-        &self,
-        session: &str,
-    ) -> Result<Option<FallbackPolicy>, StorageError> {
-        self.load_fallback_policy(Some(session))
+    fn model_fallback_policy(&self, model: &str) -> Result<Option<FallbackPolicy>, StorageError> {
+        self.load_fallback_policy(Some(model))
     }
 
-    fn replace_session_fallback_policy(
+    fn replace_model_fallback_policy(
         &mut self,
-        session: &str,
+        model: &str,
         policy: Option<&FallbackPolicy>,
     ) -> Result<(), StorageError> {
-        self.store_fallback_policy(Some(session), policy)
+        self.store_fallback_policy(Some(model), policy)
     }
 
-    fn session_fallback_policies(&self) -> Result<BTreeMap<String, FallbackPolicy>, StorageError> {
+    fn model_fallback_policies(&self) -> Result<BTreeMap<String, FallbackPolicy>, StorageError> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT session, enabled, failure_threshold, failure_window_secs, penalty_secs
-                 FROM model_fallback_policy WHERE session IS NOT NULL ORDER BY session",
+                "SELECT model, enabled, failure_threshold, failure_window_secs, penalty_secs
+                 FROM model_fallback_policy WHERE model IS NOT NULL ORDER BY model",
             )
             .map_err(io_error)?;
         let rows = stmt.query_map([], policy_columns).map_err(io_error)?;
         let mut out = BTreeMap::new();
         for row in rows {
-            let (session, policy) = row.map_err(io_error)?;
-            // `WHERE session IS NOT NULL` 已经排除了全局行；这里再兜一层，
-            // 免得以后放宽查询时把全局那份错当成某个会话的覆盖。
-            if let Some(session) = session {
-                out.insert(session, policy);
+            let (model, policy) = row.map_err(io_error)?;
+            // `WHERE model IS NOT NULL` 已经排除了全局行；这里再兜一层，
+            // 免得以后放宽查询时把全局那份错当成某个模型的覆盖。
+            if let Some(model) = model {
+                out.insert(model, policy);
             }
         }
         Ok(out)
@@ -2975,16 +3004,16 @@ impl SqliteStore {
     /// 读一份策略。`None` = 全局默认；`Some(id)` 只读该会话**自己的**那条，不回落。
     fn load_fallback_policy(
         &self,
-        session: Option<&str>,
+        model: Option<&str>,
     ) -> Result<Option<FallbackPolicy>, StorageError> {
-        // `session IS ?1` 同时覆盖 `IS NULL` 与 `IS 'x'`：SQLite 的 `IS` 对 NULL 也成立，
-        // 这样全局行与会话行共用一个查询，不用写两次 SQL。
+        // `model IS ?1` 同时覆盖 `IS NULL` 与 `IS 'x'`：SQLite 的 `IS` 对 NULL 也成立，
+        // 这样全局行与模型行共用一个查询，不用写两次 SQL。
         let found = self
             .conn
             .query_row(
-                "SELECT session, enabled, failure_threshold, failure_window_secs, penalty_secs
-                 FROM model_fallback_policy WHERE session IS ?1",
-                params![session],
+                "SELECT model, enabled, failure_threshold, failure_window_secs, penalty_secs
+                 FROM model_fallback_policy WHERE model IS ?1",
+                params![model],
                 policy_columns,
             )
             .optional()
@@ -2995,14 +3024,14 @@ impl SqliteStore {
     /// 写一份策略；`policy = None` 删除该行（会话覆盖用它回落全局）。
     fn store_fallback_policy(
         &mut self,
-        session: Option<&str>,
+        model: Option<&str>,
         policy: Option<&FallbackPolicy>,
     ) -> Result<(), StorageError> {
         let Some(policy) = policy else {
             self.conn
                 .execute(
-                    "DELETE FROM model_fallback_policy WHERE session IS ?1",
-                    params![session],
+                    "DELETE FROM model_fallback_policy WHERE model IS ?1",
+                    params![model],
                 )
                 .map_err(io_error)?;
             return Ok(());
@@ -3014,16 +3043,16 @@ impl SqliteStore {
         self.conn
             .execute(
                 "INSERT INTO model_fallback_policy
-                     (session, enabled, failure_threshold, failure_window_secs, penalty_secs, updated_at)
+                     (model, enabled, failure_threshold, failure_window_secs, penalty_secs, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT (session) DO UPDATE SET
+                 ON CONFLICT (model) DO UPDATE SET
                      enabled = excluded.enabled,
                      failure_threshold = excluded.failure_threshold,
                      failure_window_secs = excluded.failure_window_secs,
                      penalty_secs = excluded.penalty_secs,
                      updated_at = excluded.updated_at",
                 params![
-                    session,
+                    model,
                     policy.enabled as i64,
                     policy.failure_threshold as i64,
                     policy.failure_window_secs as i64,
@@ -3036,9 +3065,9 @@ impl SqliteStore {
     }
 }
 
-/// 策略表的列读取：`session` + 四个策略字段。两个查询共用一份，免得列顺序漂移。
+/// 策略表的列读取：`model` + 四个策略字段。两个查询共用一份，免得列顺序漂移。
 ///
-/// `session` 是 `Option`：全局默认那一行的这一列是 NULL，按 `String` 读会直接报
+/// `model` 是 `Option`：全局默认那一行的这一列是 NULL，按 `String` 读会直接报
 /// 「Invalid column type Null」。
 fn policy_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Option<String>, FallbackPolicy)> {
     let session: Option<String> = row.get(0)?;

@@ -48,14 +48,62 @@ const chain = useQuery({
     ),
 });
 
+/**
+ * 全局默认惩罚策略。
+ *
+ * 作用域是**模型级**（用户裁定 2026-11-17）：全局这份是「没单独配的模型都用它」，
+ * 每个模型可以在行内单独覆盖。所以这里不再按 `scope`（会话）查——那一层已经去掉。
+ */
 const penalty = useQuery({
-  queryKey: computed(() => queryKeys.modelPenalty(scope.value)),
+  queryKey: queryKeys.modelPenalty(""),
+  queryFn: () => api.get<PenaltyView>("/api/model-penalty"),
+});
+
+/** 某个模型自己的策略（对话框里查）；`null` = 没配，回落全局。 */
+const modelPolicy = useQuery({
+  queryKey: computed(() => queryKeys.modelPenalty(editingModel.value ?? "")),
   queryFn: () =>
     api.get<PenaltyView>(
-      scope.value
-        ? `/api/model-penalty?session=${encodeURIComponent(scope.value)}`
-        : "/api/model-penalty",
+      `/api/model-penalty?model=${encodeURIComponent(editingModel.value ?? "")}`,
     ),
+  enabled: computed(() => !!editingModel.value),
+});
+
+/** 正在编辑策略的模型 id；`null` = 对话框关着。 */
+const editingModel = ref<string | null>(null);
+const modelDraft = ref<PenaltyPolicy>({
+  enabled: false,
+  failure_threshold: 0,
+  failure_window_secs: 0,
+  penalty_secs: 0,
+});
+const modelNotice = ref("");
+
+watch(
+  () => modelPolicy.data.value?.policy,
+  (policy) => {
+    if (policy) modelDraft.value = { ...policy };
+  },
+  { immediate: true },
+);
+
+/** 打开某个模型的策略对话框。 */
+function openModelPolicy(model: string): void {
+  editingModel.value = model;
+  modelNotice.value = "";
+}
+
+const saveModelPolicy = useMutation({
+  mutationFn: ({ model, policy }: { model: string; policy: PenaltyPolicy | null }) =>
+    api.post("/api/model-penalty", { model, policy }),
+  onSuccess: async () => {
+    modelNotice.value = t("console.penalty.saved");
+    editingModel.value = null;
+    await client.invalidateQueries({ queryKey: ["model-penalty"] });
+  },
+  onError: (error) => {
+    modelNotice.value = error instanceof Error ? error.message : String(error);
+  },
 });
 
 /** 范围改了，两条查询都按新键重取（不用手工 refetch）。 */
@@ -152,7 +200,8 @@ watch(
 
 const savePolicy = useMutation({
   mutationFn: (policy: PenaltyPolicy) =>
-    api.post("/api/model-penalty", { session: scope.value, policy }),
+    // 不带 `model` = 改全局默认那一份。
+    api.post("/api/model-penalty", { policy }),
   onSuccess: async () => {
     policyNotice.value = t("console.penalty.saved");
     await client.invalidateQueries({ queryKey: ["model-penalty"] });
@@ -231,6 +280,16 @@ const penalties = computed(() => penalty.data.value?.penalties ?? []);
           </span>
         </template>
         <template #item.actions="{ item }">
+          <!-- 每个模型单独的策略：失败几次罚、罚多久。默认继承下面那块「全局默认」。 -->
+          <v-btn
+            icon
+            size="x-small"
+            variant="text"
+            :aria-label="t('console.penalty.perModel')"
+            @click="openModelPolicy(item.model)"
+          >
+            <v-icon :icon="icons.key" size="small" />
+          </v-btn>
           <v-btn
             icon
             size="x-small"
@@ -384,5 +443,86 @@ const penalties = computed(() => penalty.data.value?.penalties ?? []);
         </v-chip>
       </div>
     </QueryState>
+
+  <!-- 单个模型的策略：默认继承全局，可以在这里覆盖。 -->
+  <v-dialog
+    :model-value="editingModel !== null"
+    max-width="34rem"
+    @update:model-value="editingModel = null"
+  >
+    <v-card>
+      <v-card-title>{{ t("console.penalty.perModelTitle", { model: editingModel ?? "" }) }}</v-card-title>
+      <v-card-text>
+        <p class="text-caption text-medium-emphasis mb-3">
+          {{ t("console.penalty.perModelHint") }}
+        </p>
+        <v-switch
+          v-model="modelDraft.enabled"
+          :label="t('console.penalty.enabled')"
+          color="primary"
+          inset
+        />
+        <v-row dense>
+          <v-col cols="12" sm="4">
+            <v-text-field
+              v-model.number="modelDraft.failure_threshold"
+              type="number"
+              min="0"
+              :label="t('console.penalty.threshold')"
+              density="comfortable"
+              variant="outlined"
+            />
+          </v-col>
+          <v-col cols="12" sm="4">
+            <v-text-field
+              v-model.number="modelDraft.failure_window_secs"
+              type="number"
+              min="0"
+              :label="t('console.penalty.window')"
+              density="comfortable"
+              variant="outlined"
+            />
+          </v-col>
+          <v-col cols="12" sm="4">
+            <v-text-field
+              v-model.number="modelDraft.penalty_secs"
+              type="number"
+              min="0"
+              :label="t('console.penalty.duration')"
+              density="comfortable"
+              variant="outlined"
+            />
+          </v-col>
+        </v-row>
+        <v-alert
+          v-if="modelNotice"
+          type="info"
+          variant="tonal"
+          density="compact"
+          class="mt-2"
+          :text="modelNotice"
+        />
+      </v-card-text>
+      <v-card-actions>
+        <v-btn
+          variant="text"
+          color="error"
+          :disabled="saveModelPolicy.isPending.value"
+          @click="saveModelPolicy.mutate({ model: editingModel!, policy: null })"
+        >
+          {{ t("console.penalty.inherit") }}
+        </v-btn>
+        <v-spacer />
+        <v-btn variant="text" @click="editingModel = null">{{ t("console.feedback.cancel") }}</v-btn>
+        <v-btn
+          color="primary"
+          :loading="saveModelPolicy.isPending.value"
+          @click="saveModelPolicy.mutate({ model: editingModel!, policy: modelDraft })"
+        >
+          {{ t("console.policy.save") }}
+        </v-btn>
+      </v-card-actions>
+    </v-card>
+  </v-dialog>
   </PageCard>
 </template>

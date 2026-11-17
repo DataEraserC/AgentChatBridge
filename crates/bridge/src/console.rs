@@ -799,7 +799,9 @@ impl<S: Store + Send + 'static> Console<S> {
             }
             ("POST", "/api/model-fallbacks") => self.save_model_fallbacks(body),
             // 失败惩罚策略：读库（保存后立刻可见），写库（下一轮生效）。
-            ("GET", "/api/model-penalty") => self.model_penalty_view(query_param(query, "session")),
+            // `?model=` = 那个模型自己的策略（没配则回落全局）；不带 = 全局默认。
+            // 旧前端传的 `?session=` 不再有意义（作用域已改成模型级），忽略它。
+            ("GET", "/api/model-penalty") => self.model_penalty_view(query_param(query, "model")),
             ("POST", "/api/model-penalty") => self.save_model_penalty(body),
             _ => error_response(404, acb_i18n::msg!("bridge.console.no_endpoint"), None),
         }
@@ -1342,18 +1344,18 @@ impl<S: Store + Send + 'static> Console<S> {
     /// 策略读**库**而不是内存：控制台保存完会立刻回读，读内存会看到保存前那份
     /// （与 `/api/model-fallbacks` 同一个坑，见 `stored_fallback_scope` 的注释）。
     /// `penalties` 是内存态，桥重启即空——那是它的语义，不是缺陷。
-    fn model_penalty_view(&self, session: Option<&str>) -> (u16, String) {
+    fn model_penalty_view(&self, model: Option<&str>) -> (u16, String) {
         let bridge = lock(&self.bridge);
-        let (policy, inherited) = bridge.stored_fallback_policy_scope(session);
+        let (policy, inherited) = bridge.stored_fallback_policy_scope(model);
         let now = now_millis();
         let penalties: Vec<serde_json::Value> = bridge
             .active_model_penalties(now)
             .into_iter()
-            .filter(|(owner, _, _, _)| match session {
-                // 会话范围：这个会话自己的惩罚，加上全局层的。
-                Some(id) => owner.as_deref().is_none_or(|owner| owner == id),
-                // 全局范围：只看全局层。
-                None => owner.is_none(),
+            // 惩罚一律记在全局层（模型维度与「哪个会话在用」无关），所以这里
+            // 只按模型筛：带了 `?model=` 就只看那个模型，不带就看全部。
+            .filter(|(_, penalized, _, _)| match model {
+                Some(id) => penalized == id,
+                None => true,
             })
             .map(|(owner, model, class, remaining_secs)| {
                 json!({
@@ -1367,7 +1369,7 @@ impl<S: Store + Send + 'static> Console<S> {
         (
             200,
             json!({
-                "session": session,
+                "model": model,
                 "policy": policy_json(policy),
                 "inherited": inherited,
                 "penalties": penalties,
@@ -1378,9 +1380,9 @@ impl<S: Store + Send + 'static> Console<S> {
         )
     }
 
-    /// `POST /api/model-penalty`：`{"session": "id"?, "policy": {...} | null}`。
+    /// `POST /api/model-penalty`：`{"model": "id"?, "policy": {...} | null}`。
     ///
-    /// 会话侧传 `null` = 删掉覆盖、回落全局；全局侧传 `null` 由内核拒绝
+    /// 模型侧传 `null` = 删掉覆盖、回落全局默认；不给 `model` 传 `null` 由内核拒绝
     /// （要停用请传一份 `enabled = false` 的策略——那比「没有策略」更好排查）。
     fn save_model_penalty(&self, body: &str) -> (u16, String) {
         let parsed: serde_json::Value = match serde_json::from_str(body) {
@@ -1393,8 +1395,9 @@ impl<S: Store + Send + 'static> Console<S> {
                 );
             }
         };
-        let session = parsed
-            .get("session")
+        // `model` 缺省 = 全局默认策略；给了就是那个模型的覆盖。
+        let model = parsed
+            .get("model")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty());
@@ -1419,12 +1422,12 @@ impl<S: Store + Send + 'static> Console<S> {
             },
         };
         let mut bridge = lock(&self.bridge);
-        match bridge.replace_fallback_policy(session, policy.as_ref()) {
+        match bridge.replace_fallback_policy(model, policy.as_ref()) {
             Ok(()) => (
                 200,
                 json!({
                     "ok": true,
-                    "session": session,
+                    "model": model,
                     "policy": policy_json(policy.unwrap_or_default()),
                 })
                 .to_string(),

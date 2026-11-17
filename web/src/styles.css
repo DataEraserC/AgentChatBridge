@@ -12,14 +12,21 @@
  * 自动跟随。
  */
 
-/* 开关：关闭态必须有可见轮廓。
-   用 `!important` + 更高特异性：Vuetify 的组件样式在运行时注入，纯靠顺序压不住。 */
-.v-selection-control .v-switch__track,
-.v-switch .v-switch__track {
+/* 开关：**关闭态**必须有可见轮廓。
+   用 `!important` + 更高特异性：Vuetify 的组件样式在运行时注入，纯靠顺序压不住。
+
+   **必须限定在关闭态**（`:not(.v-switch--on)` 与 `:not(.v-selection-control--dirty)`）：
+   第一版没限定，结果打开状态也被刷成 surface-bright，`color="primary"` 被
+   `!important` 压掉——开关开了还是灰的（2026-11-17 用户报的第二个问题，
+   是这条规则引入的）。 */
+.v-switch:not(.v-switch--on) .v-switch__track,
+.v-selection-control:not(.v-selection-control--dirty) .v-switch__track {
   opacity: 1 !important;
   border: 1.5px solid rgb(var(--v-theme-outline)) !important;
   background-color: rgb(var(--v-theme-surface-bright)) !important;
 }
+
+/* 打开态的滑块与轨道交给 Vuetify 的 `color` 槽，不加任何覆盖。 */
 
 /* 关闭态的滑块：默认与轨道同色，看不出「这是个可以拨的东西」。 */
 .v-switch:not(.v-switch--on) .v-switch__thumb,

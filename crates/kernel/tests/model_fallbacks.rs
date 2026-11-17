@@ -492,41 +492,45 @@ fn penalty_expires_on_its_own_without_a_sweep() {
 }
 
 #[test]
-fn session_policy_overrides_the_global_one() {
+fn model_policy_overrides_the_global_one() {
     let mut bridge = bridge();
-    // 全局：阈值高到不会罚；会话：一次就罚。
+    // 全局：阈值高到不会罚；`trae/b` 自己：一次就罚。
     bridge
         .replace_fallback_policy(None, Some(&policy(true, 99, 60, 300)))
         .expect("全局策略");
     bridge
-        .replace_fallback_policy(Some("main"), Some(&policy(true, 1, 60, 300)))
-        .expect("会话策略");
+        .replace_fallback_policy(Some("trae/b"), Some(&policy(true, 1, 60, 300)))
+        .expect("模型策略");
     bridge
         .replace_model_fallbacks(None, &["trae/b".into()])
         .expect("链");
     bridge.ingest(message()).expect("边界");
 
     assert_eq!(
-        bridge.session_fallback_policy("main").failure_threshold,
+        bridge.model_fallback_policy("trae/b").failure_threshold,
         1,
-        "会话自己配了就用自己那份"
+        "模型自己配了就用自己那份"
+    );
+    assert_eq!(
+        bridge.model_fallback_policy("trae/other").failure_threshold,
+        99,
+        "没配的模型回落全局"
     );
     assert_eq!(
         bridge.fallback_policy().failure_threshold,
         99,
-        "全局那份不能被会话策略改掉"
+        "全局那份不能被模型策略改掉"
     );
 
     let now = 1_000_000i64;
     bridge.note_model_failure(Some("main"), "trae/b", "model_unavailable", now);
     assert!(
         bridge.fallback_plan(Some("main"), now).models.is_empty(),
-        "会话层当天就罚"
+        "这个模型当天就被罚（阈值 1），链里只剩它 → 没有可用的"
     );
-    assert_eq!(
-        bridge.fallback_plan(None, now).models,
-        ["trae/b".to_owned()],
-        "全局范围没有这条惩罚：会话策略只在那个会话里生效"
+    assert!(
+        bridge.fallback_plan(None, now).models.is_empty(),
+        "惩罚记在模型上，与哪个会话无关"
     );
 }
 
@@ -580,8 +584,8 @@ fn sqlite_persists_penalty_policy_across_reopen() {
             .replace_fallback_policy(&policy(true, 3, 120, 600))
             .expect("写全局");
         store
-            .replace_session_fallback_policy("main", Some(&policy(false, 1, 60, 60)))
-            .expect("写会话");
+            .replace_model_fallback_policy("trae/b", Some(&policy(false, 1, 60, 60)))
+            .expect("写模型");
     }
     {
         let store = SqliteStore::open(&path).expect("重开");
@@ -590,21 +594,21 @@ fn sqlite_persists_penalty_policy_across_reopen() {
         assert_eq!(global.failure_threshold, 3);
         assert_eq!(global.failure_window_secs, 120);
         assert_eq!(global.penalty_secs, 600);
-        let session = store
-            .session_fallback_policy("main")
-            .expect("读会话")
-            .expect("有这个会话的策略");
-        assert!(!session.enabled, "会话自己那份原样读回");
-        assert_eq!(store.session_fallback_policies().expect("读全部").len(), 1);
+        let model = store
+            .model_fallback_policy("trae/b")
+            .expect("读模型")
+            .expect("有这个模型的策略");
+        assert!(!model.enabled, "模型自己那份原样读回");
+        assert_eq!(store.model_fallback_policies().expect("读全部").len(), 1);
     }
     {
         // 会话侧写 None = 删掉覆盖，回落全局；全局那份不受影响。
         let mut store = SqliteStore::open(&path).expect("再开");
         store
-            .replace_session_fallback_policy("main", None)
-            .expect("删会话策略");
+            .replace_model_fallback_policy("trae/b", None)
+            .expect("删模型策略");
         assert!(
-            store.session_fallback_policy("main").expect("读").is_none(),
+            store.model_fallback_policy("trae/b").expect("读").is_none(),
             "删掉之后没有覆盖了"
         );
         assert_eq!(

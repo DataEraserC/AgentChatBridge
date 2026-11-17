@@ -828,21 +828,21 @@ pub trait ModelFallbackPolicy {
     /// 整份替换全局默认策略。
     fn replace_fallback_policy(&mut self, policy: &FallbackPolicy) -> Result<(), StorageError>;
 
-    /// 某个会话自己的策略；`None` = 没单独配，调用方回落到全局。
-    fn session_fallback_policy(
-        &self,
-        session: &str,
-    ) -> Result<Option<FallbackPolicy>, StorageError>;
+    /// 某个模型自己的策略；`None` = 没单独配，调用方回落到全局默认。
+    ///
+    /// 作用域是**模型**（用户裁定 2026-11-17：「只做模型级」）：同一个会话里
+    /// 不同模型可以有不同阈值，比如贵的模型罚得早、便宜的模型多容忍几次。
+    fn model_fallback_policy(&self, model: &str) -> Result<Option<FallbackPolicy>, StorageError>;
 
-    /// 写/清某个会话的策略。`None` = 删掉该会话的覆盖，回落全局。
-    fn replace_session_fallback_policy(
+    /// 写/清某个模型的策略。`None` = 删掉该模型的覆盖，回落全局默认。
+    fn replace_model_fallback_policy(
         &mut self,
-        session: &str,
+        model: &str,
         policy: Option<&FallbackPolicy>,
     ) -> Result<(), StorageError>;
 
-    /// 所有单独配置过策略的会话。启动/轮次边界一次读进来，别按会话逐条查。
-    fn session_fallback_policies(
+    /// 所有单独配置过策略的模型。启动/轮次边界一次读进来，别按模型逐条查。
+    fn model_fallback_policies(
         &self,
     ) -> Result<std::collections::BTreeMap<String, FallbackPolicy>, StorageError>;
 }
@@ -1135,7 +1135,7 @@ pub struct MemoryStore {
     /// 模型失败惩罚策略：全局默认一份。
     fallback_policy: FallbackPolicy,
     /// 每个会话自己的惩罚策略。没有条目 = 回落全局那份。
-    session_fallback_policies: BTreeMap<String, FallbackPolicy>,
+    model_fallback_policies: BTreeMap<String, FallbackPolicy>,
     /// 有没有被写过。和 sqlite 的 `policy_initialized` 标记同一个意思：
     /// 「导入过一份空的」和「从没导入过」必须分得开，否则重启会把清空当成首次导入。
     policy_initialized: bool,
@@ -1840,32 +1840,29 @@ impl ModelFallbackPolicy for MemoryStore {
         Ok(())
     }
 
-    fn session_fallback_policy(
-        &self,
-        session: &str,
-    ) -> Result<Option<FallbackPolicy>, StorageError> {
-        Ok(self.session_fallback_policies.get(session).copied())
+    fn model_fallback_policy(&self, model: &str) -> Result<Option<FallbackPolicy>, StorageError> {
+        Ok(self.model_fallback_policies.get(model).copied())
     }
 
-    fn replace_session_fallback_policy(
+    fn replace_model_fallback_policy(
         &mut self,
-        session: &str,
+        model: &str,
         policy: Option<&FallbackPolicy>,
     ) -> Result<(), StorageError> {
         match policy {
             Some(policy) => {
-                self.session_fallback_policies
-                    .insert(session.to_owned(), *policy);
+                self.model_fallback_policies
+                    .insert(model.to_owned(), *policy);
             }
             None => {
-                self.session_fallback_policies.remove(session);
+                self.model_fallback_policies.remove(model);
             }
         }
         Ok(())
     }
 
-    fn session_fallback_policies(&self) -> Result<BTreeMap<String, FallbackPolicy>, StorageError> {
-        Ok(self.session_fallback_policies.clone())
+    fn model_fallback_policies(&self) -> Result<BTreeMap<String, FallbackPolicy>, StorageError> {
+        Ok(self.model_fallback_policies.clone())
     }
 }
 
