@@ -52,6 +52,86 @@ const sessions = useQuery({
   queryFn: () => api.get<SessionsView>("/api/sessions"),
 });
 
+/**
+ * 新增会话要挑 harness / persona / token，三者都来自后端，不手写。
+ *
+ * 为什么必须让用户选 token：`session_op` 的 create 要求 `secret`（密钥名），
+ * 没有它配置加载直接报 `session_token_required`。
+ */
+const config = useQuery({
+  queryKey: queryKeys.config,
+  queryFn: () =>
+    api.get<{
+      harnesses?: Array<{ id: string }>;
+      personas?: Array<{ id: string }>;
+    }>("/api/config"),
+});
+
+const secrets = useQuery({
+  queryKey: queryKeys.secrets,
+  queryFn: () => api.get<{ secrets: Array<{ name: string }> }>("/api/secrets"),
+});
+
+const harnessOptions = computed(() =>
+  (config.data.value?.harnesses ?? []).map((h) => ({ value: h.id, title: h.id })),
+);
+const personaOptions = computed(() =>
+  (config.data.value?.personas ?? []).map((p) => ({ value: p.id, title: p.id })),
+);
+const secretOptions = computed(() =>
+  (secrets.data.value?.secrets ?? []).map((s) => ({ value: s.name, title: s.name })),
+);
+
+/** 新增会话的对话框状态。`open = false` 时内容保留，便于改错重试。 */
+const createOpen = ref(false);
+const createForm = ref({ id: "", harness: "", persona: "", secret: "", name: "" });
+
+/** 删除确认：先问，再删。会话带订阅与记忆挂载，误删代价高。 */
+const deleteTarget = ref<string | null>(null);
+
+/** 配置补丁：一个入口覆盖 `session`(create) 与 `delete`。 */
+const patch = useMutation({
+  mutationFn: (op: Record<string, unknown>) =>
+    api.post<{ ok?: boolean; error?: string; detail?: string; changes?: string[] }>(
+      "/api/config/patch",
+      { ops: [op] },
+    ),
+  onSuccess: async (reply) => {
+    if (reply?.error) {
+      notice.value = reply.detail ? `${reply.error}（${reply.detail}）` : reply.error;
+      return;
+    }
+    notice.value = (reply?.changes ?? []).join("；") || t("console.models.saved");
+    createOpen.value = false;
+    deleteTarget.value = null;
+    await client.invalidateQueries({ queryKey: queryKeys.sessions });
+    await client.invalidateQueries({ queryKey: queryKeys.config });
+  },
+  onError: (error) => {
+    notice.value = error instanceof Error ? error.message : String(error);
+  },
+});
+
+function submitCreate(): void {
+  const form = createForm.value;
+  patch.mutate({
+    op: "session",
+    id: form.id.trim(),
+    create: {
+      harness: form.harness,
+      persona: form.persona,
+      secret: form.secret,
+      ...(form.name.trim() ? { name: form.name.trim() } : {}),
+    },
+  });
+}
+
+function confirmDelete(): void {
+  const id = deleteTarget.value;
+  if (!id) return;
+  patch.mutate({ op: "delete", section: "session", id });
+}
+
 const rows = computed(() =>
   (sessions.data.value?.sessions ?? []).map((session) => ({
     ...session,
@@ -75,6 +155,15 @@ const headers = computed(() => [
 <template>
   <PageCard title-key="console.sessions.title" tip-key="console.sessions.intro">
     <template #actions>
+      <v-btn
+        size="small"
+        color="primary"
+        variant="tonal"
+        :prepend-icon="icons.add"
+        @click="createOpen = true"
+      >
+        {{ t("console.sessions.create") }}
+      </v-btn>
       <v-chip v-if="rows.length" size="small" variant="tonal">{{ rows.length }}</v-chip>
       <v-btn
         size="small"
@@ -143,6 +232,16 @@ const headers = computed(() => [
             icon
             size="x-small"
             variant="text"
+            color="error"
+            :aria-label="t('console.sessions.delete')"
+            @click.stop="deleteTarget = item.id"
+          >
+            <v-icon :icon="icons.remove" size="small" />
+          </v-btn>
+          <v-btn
+            icon
+            size="x-small"
+            variant="text"
             color="warning"
             :aria-label="t('console.sessions.reset')"
             :loading="control.isPending.value"
@@ -174,5 +273,88 @@ const headers = computed(() => [
         </template>
       </v-data-table>
     </QueryState>
+
+    <!-- 新增会话：harness / persona / token 全部从后端列，不手写。 -->
+    <v-dialog v-model="createOpen" max-width="36rem">
+      <v-card>
+        <v-card-title>{{ t("console.sessions.createTitle") }}</v-card-title>
+        <v-card-text>
+          <v-text-field
+            v-model="createForm.id"
+            :label="t('console.sessions.col.id')"
+            :hint="t('console.sessions.createIdHint')"
+            persistent-hint
+            density="comfortable"
+            variant="outlined"
+            class="mb-4"
+          />
+          <v-select
+            v-model="createForm.harness"
+            :items="harnessOptions"
+            item-title="title"
+            item-value="value"
+            :label="t('console.sessions.col.harness')"
+            density="comfortable"
+            variant="outlined"
+            class="mb-4"
+          />
+          <v-select
+            v-model="createForm.persona"
+            :items="personaOptions"
+            item-title="title"
+            item-value="value"
+            :label="t('console.sessions.persona')"
+            density="comfortable"
+            variant="outlined"
+            class="mb-4"
+          />
+          <v-select
+            v-model="createForm.secret"
+            :items="secretOptions"
+            item-title="title"
+            item-value="value"
+            :label="t('console.sessions.secret')"
+            :hint="t('console.sessions.secretHint')"
+            persistent-hint
+            density="comfortable"
+            variant="outlined"
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="createOpen = false">{{ t("console.feedback.cancel") }}</v-btn>
+          <v-btn
+            color="primary"
+            :loading="patch.isPending.value"
+            :disabled="
+              !createForm.id.trim() ||
+              !createForm.harness ||
+              !createForm.persona ||
+              !createForm.secret
+            "
+            @click="submitCreate"
+          >
+            {{ t("console.sessions.create") }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- 删除会话：先确认。会话带订阅与记忆挂载，误删代价高。 -->
+    <v-dialog :model-value="deleteTarget !== null" max-width="30rem" @update:model-value="deleteTarget = null">
+      <v-card>
+        <v-card-title>{{ t("console.sessions.deleteTitle", { id: deleteTarget ?? "" }) }}</v-card-title>
+        <v-card-text class="text-body-2">
+          {{ t("console.sessions.deleteWarning") }}
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="deleteTarget = null">{{ t("console.feedback.cancel") }}</v-btn>
+          <v-btn color="error" :loading="patch.isPending.value" @click="confirmDelete">
+            {{ t("console.sessions.delete") }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </PageCard>
 </template>

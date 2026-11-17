@@ -15,6 +15,8 @@ export const queryKeys = {
   modelFallbacks: (session: string | null) => ["model-fallbacks", session] as const,
   modelPenalty: (session: string | null) => ["model-penalty", session] as const,
   config: ["config"] as const,
+  /** 密钥名清单（只给名字，不给值）。新增会话要挑一个。 */
+  secrets: ["secrets"] as const,
   configToml: ["config-toml"] as const,
   /** 房间枚举按连接分键：换连接要重取。 */
   rooms: (connection: string) => ["rooms", connection] as const,

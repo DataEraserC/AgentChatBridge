@@ -36,7 +36,15 @@ const grants = computed(() => policy.data.value?.grants ?? {});
  *
  * `draft === null` 表示「没有未保存的改动」，此时显示库里的那份。
  */
-type Draft = { rules: Array<Record<string, unknown>>; deny: Array<Record<string, unknown>> };
+type Draft = {
+  rules: Array<Record<string, unknown>>;
+  deny: Array<Record<string, unknown>>;
+  /** 房间级政策：房间 id → { trust, members, approval_route }。 */
+  rooms: Record<string, Record<string, unknown>>;
+  system_admin: Record<string, unknown> | null;
+  bot_admin: Record<string, unknown> | null;
+  roles: Array<Record<string, unknown>>;
+};
 const draft = ref<Draft | null>(null);
 
 /** 当前显示的行：有草稿用草稿，否则用库里的。 */
@@ -51,9 +59,15 @@ const currentDeny = computed<Array<Record<string, unknown>>>(() => {
 
 /** 进入编辑态：把库里的规则拷一份到草稿。 */
 function beginEdit(): void {
+  const g = grants.value;
+  // 深拷贝：草稿必须能在不碰原数据的前提下任意增删，否则取消编辑改不回去。
   draft.value = {
     rules: JSON.parse(JSON.stringify(currentRules.value)),
     deny: JSON.parse(JSON.stringify(currentDeny.value)),
+    rooms: JSON.parse(JSON.stringify(g.rooms ?? {})),
+    system_admin: JSON.parse(JSON.stringify(g.system_admin ?? null)),
+    bot_admin: JSON.parse(JSON.stringify(g.bot_admin ?? null)),
+    roles: JSON.parse(JSON.stringify(g.roles ?? [])),
   };
 }
 
@@ -128,6 +142,10 @@ function submit(): void {
     ...grants.value,
     rules: draft.value.rules,
     deny: draft.value.deny,
+    rooms: draft.value.rooms,
+    system_admin: draft.value.system_admin,
+    bot_admin: draft.value.bot_admin,
+    roles: draft.value.roles,
   };
   save.mutate({ grants: next });
 }
@@ -140,18 +158,92 @@ const rows = computed<Array<Record<string, unknown> & { effect: "allow" | "deny"
   ...currentRules.value.map((rule) => ({ ...rule, effect: "allow" as const })),
   ...currentDeny.value.map((rule) => ({ ...rule, effect: "deny" as const })),
 ]);
-interface RoomRow {
-  room: string;
-  trust?: string;
-  approval_route?: string;
+/* ── 房间 / 管理员 / 角色的编辑（ADR：每个页面都要能增删改查） ────────── */
+
+/** 当前显示的房间配置：编辑态用草稿，否则用库里的。 */
+const currentRooms = computed<Record<string, Record<string, unknown>>>(() =>
+  draft.value ? draft.value.rooms : ((grants.value.rooms ?? {}) as Record<string, Record<string, unknown>>),
+);
+
+/** 房间行：房间 id 摊平成表格要的形状。 */
+const roomRows = computed(() =>
+  Object.entries(currentRooms.value).map(([room, cfg]) => {
+    const record = cfg as Record<string, unknown>;
+    const route = record.approval_route;
+    return {
+      room,
+      trust: String(record.trust ?? "untrusted"),
+      approval_route: Array.isArray(route) ? (route as string[]) : [],
+    };
+  }),
+);
+
+/** 信任档位，与 `grants::Trust` 的 serde 表示一致。 */
+const TRUST_OPTIONS = computed(() => [
+  { value: "untrusted", title: t("console.policy.untrusted") },
+  { value: "trusted", title: t("console.policy.trusted") },
+]);
+
+const currentSystemAdmin = computed<Record<string, unknown> | null>(() =>
+  draft.value
+    ? draft.value.system_admin
+    : ((grants.value.system_admin ?? null) as Record<string, unknown> | null),
+);
+
+const currentRoles = computed<Array<Record<string, unknown>>>(() =>
+  draft.value ? draft.value.roles : ((grants.value.roles ?? []) as Array<Record<string, unknown>>),
+);
+
+/** 改房间的信任档位。只动草稿，保存时才落库。 */
+function setRoomTrust(room: string, trust: string): void {
+  if (!draft.value) beginEdit();
+  const rooms = draft.value?.rooms;
+  if (!rooms) return;
+  rooms[room] = { ...(rooms[room] ?? {}), trust };
 }
 
-const rooms = computed<RoomRow[]>(() =>
-  Object.entries(grants.value.rooms ?? {}).map(([room, config]) => ({
-    room,
-    ...(config as Omit<RoomRow, "room">),
-  })),
-);
+function removeRoom(room: string): void {
+  if (!draft.value) beginEdit();
+  delete draft.value?.rooms[room];
+}
+
+/** 新增房间政策。房间 id 必须手输——后端没有「列出所有房间」的稳定来源
+ *  （`seen` 只是有消息的房间，不等于可配范围）。 */
+const newRoomId = ref("");
+function addRoom(): void {
+  const room = newRoomId.value.trim();
+  if (!room) return;
+  if (!draft.value) beginEdit();
+  const rooms = draft.value?.rooms;
+  if (!rooms) return;
+  if (!rooms[room]) rooms[room] = { trust: "untrusted", members: [], approval_route: [] };
+  newRoomId.value = "";
+}
+
+/** 改系统管理员的某一项。两项都空 = 没有管理员（后端用 null 表达）。 */
+function setSystemAdmin(field: "connection" | "account", value: string): void {
+  if (!draft.value) beginEdit();
+  if (!draft.value) return;
+  const next = { ...(draft.value.system_admin ?? {}), [field]: value.trim() };
+  const empty = String(next.connection ?? "") === "" && String(next.account ?? "") === "";
+  draft.value.system_admin = empty ? null : next;
+}
+
+function clearSystemAdmin(): void {
+  if (!draft.value) beginEdit();
+  if (draft.value) draft.value.system_admin = null;
+}
+
+/** 删角色。内置角色不给删：它们由迁移写入，删了下次启动会被补齐。 */
+function removeRole(id: string): void {
+  if (!draft.value) beginEdit();
+  const roles = draft.value?.roles;
+  if (!roles) return;
+  const at = roles.findIndex((role) => String(role.id) === id);
+  if (at >= 0 && roles[at].builtin !== true) roles.splice(at, 1);
+}
+
+
 /**
  * 管理员：后端是 `system_admin` + `bot_admin` 两个字段，没有 `admins` 数组。
  * 拼成统一的行给表格用。
@@ -172,7 +264,6 @@ const admins = computed(() => {
   }
   return rows;
 });
-const roles = computed(() => grants.value.roles ?? []);
 
 /**
  * 规则的列。
@@ -350,7 +441,7 @@ function joinList(value: unknown): string {
       <h3 class="text-subtitle-2 mt-6 mb-2">{{ t("console.policy.rooms") }}</h3>
       <v-data-table
         :headers="roomHeaders"
-        :items="rooms"
+        :items="roomRows"
         item-value="room"
         density="comfortable"
         :items-per-page="20"
@@ -360,17 +451,82 @@ function joinList(value: unknown): string {
           <code class="text-caption">{{ item.room }}</code>
         </template>
         <template #item.trust="{ item }">
-          <v-chip :color="item.trust === 'trusted' ? 'success' : 'default'" size="small" variant="tonal">
+          <v-select
+            v-if="draft"
+            :model-value="item.trust"
+            :items="TRUST_OPTIONS"
+            item-title="title"
+            item-value="value"
+            density="compact"
+            variant="plain"
+            hide-details
+            style="max-width: 9rem"
+            @update:model-value="setRoomTrust(item.room, String($event))"
+          />
+          <v-chip v-else :color="item.trust === 'trusted' ? 'success' : 'default'" size="small" variant="tonal">
             {{ item.trust === "trusted" ? t("console.policy.trusted") : t("console.policy.untrusted") }}
           </v-chip>
         </template>
         <template #item.approval_route="{ item }">
-          <span class="text-caption text-medium-emphasis">{{ item.approval_route || t("console.deps.none") }}</span>
+          <span class="text-caption text-medium-emphasis">
+            {{ item.approval_route.length ? item.approval_route.join(", ") : t("console.deps.none") }}
+          </span>
+        </template>
+        <template v-if="draft" #item.__actions="{ item }">
+          <v-btn
+            icon
+            size="x-small"
+            variant="text"
+            color="error"
+            :aria-label="t('console.policy.remove')"
+            @click="removeRoom(item.room)"
+          >
+            <v-icon :icon="icons.remove" size="small" />
+          </v-btn>
         </template>
       </v-data-table>
+      <div v-if="draft" class="d-flex ga-2 mt-2 align-center">
+        <v-text-field
+          v-model="newRoomId"
+          :label="t('console.policy.addRoomLabel')"
+          :hint="t('console.policy.addRoomHint')"
+          persistent-hint
+          density="compact"
+          variant="outlined"
+          hide-details
+          style="max-width: 22rem"
+        />
+        <v-btn size="small" variant="tonal" :disabled="!newRoomId.trim()" @click="addRoom">
+          {{ t("console.policy.addRoom") }}
+        </v-btn>
+      </div>
 
       <h3 class="text-subtitle-2 mt-6 mb-2">{{ t("console.policy.admins") }}</h3>
-      <div v-if="!admins.length" class="text-body-2 text-medium-emphasis">
+      <!-- 编辑态：后端是单个 `system_admin` 对象，改它的 connection / account。 -->
+      <div v-if="draft" class="d-flex ga-2 align-center flex-wrap">
+        <v-text-field
+          :model-value="String(currentSystemAdmin?.connection ?? '')"
+          :label="t('console.rooms.connection')"
+          density="compact"
+          variant="outlined"
+          hide-details
+          style="max-width: 14rem"
+          @update:model-value="setSystemAdmin('connection', String($event))"
+        />
+        <v-text-field
+          :model-value="String(currentSystemAdmin?.account ?? '')"
+          :label="t('console.policy.adminAccount')"
+          density="compact"
+          variant="outlined"
+          hide-details
+          style="max-width: 14rem"
+          @update:model-value="setSystemAdmin('account', String($event))"
+        />
+        <v-btn size="small" variant="text" color="error" @click="clearSystemAdmin">
+          {{ t("console.policy.clearAdmin") }}
+        </v-btn>
+      </div>
+      <div v-else-if="!admins.length" class="text-body-2 text-medium-emphasis">
         {{ t("console.policy.noAdmins") }}
       </div>
       <div v-else class="d-flex flex-wrap ga-2">
@@ -385,11 +541,11 @@ function joinList(value: unknown): string {
         </v-chip>
       </div>
 
-      <template v-if="roles.length">
+      <template v-if="currentRoles.length">
         <h3 class="text-subtitle-2 mt-6 mb-2">{{ t("console.policy.roles") }}</h3>
         <v-data-table
-          :headers="roleHeaders"
-          :items="roles"
+          :headers="draft ? [...roleHeaders, { title: '', key: '__actions', sortable: false }] : roleHeaders"
+          :items="currentRoles"
           item-value="id"
           density="comfortable"
           :items-per-page="20"
@@ -399,6 +555,22 @@ function joinList(value: unknown): string {
           </template>
           <template #item.source="{ item }">
             <span class="text-caption text-medium-emphasis">{{ item.source || t("console.deps.none") }}</span>
+          </template>
+          <template v-if="draft" #item.__actions="{ item }">
+            <v-btn
+              v-if="item.builtin !== true"
+              icon
+              size="x-small"
+              variant="text"
+              color="error"
+              :aria-label="t('console.policy.remove')"
+              @click="removeRole(String(item.id))"
+            >
+              <v-icon :icon="icons.remove" size="small" />
+            </v-btn>
+            <span v-else class="text-caption text-medium-emphasis">
+              {{ t("console.policy.builtin") }}
+            </span>
           </template>
         </v-data-table>
       </template>
