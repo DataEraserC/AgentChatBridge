@@ -25,7 +25,15 @@ const policy = useQuery({
 
 // 后端把策略放在 `grants` 里，不摊平在顶层（见 types.ts 的 PolicyView）。
 const grants = computed(() => policy.data.value?.grants ?? {});
-const rules = computed(() => grants.value.rules ?? []);
+/**
+ * 全部规则行 = 允许规则 + 拒绝规则，各带 `effect` 标记。
+ *
+ * 分开算再合并，而不是信任行内字段——效果由来源数组决定（见 `effectLabel`）。
+ */
+const rules = computed<Array<Record<string, unknown> & { effect: "allow" | "deny" }>>(() => [
+  ...(grants.value.rules ?? []).map((rule) => ({ ...rule, effect: "allow" as const })),
+  ...(grants.value.deny ?? []).map((rule) => ({ ...rule, effect: "deny" as const })),
+]);
 interface RoomRow {
   room: string;
   trust?: string;
@@ -102,8 +110,20 @@ const roleHeaders = computed(() => [
   { title: t("console.policy.col.source"), key: "source" },
 ]);
 
-function isAllow(rule: Record<string, unknown>): boolean {
-  return rule.allow === true || String(rule.allow) === "true";
+/**
+ * 规则是「允许」还是「拒绝」。
+ *
+ * **不能看 `rule.allow`**：`GrantRule` 结构里根本没有这个字段。后端把授权
+ * 分成两个数组：
+ *   - `rules` → 允许（"只做加法"）
+ *   - `deny`  → 显式拒绝（"只做减法"）
+ * 所以「来自哪个数组」就是效果本身，行里不用再带标记。
+ *
+ * 2026-11-17 修：前端原先判断 `rule.allow === true`，字段不存在 → 永远 false
+ * → 13 条**允许**规则全被渲染成「拒绝」，看起来像「全拒，谁都不能用」。
+ */
+function effectLabel(isDeny: boolean): string {
+  return isDeny ? t("console.policy.deny") : t("console.policy.allow");
 }
 
 function joinList(value: unknown): string {
@@ -138,8 +158,12 @@ function joinList(value: unknown): string {
         :no-data-text="t('console.policy.noRules')"
       >
         <template #item.effect="{ item }">
-          <v-chip :color="isAllow(item) ? 'success' : 'error'" size="small" variant="tonal">
-            {{ isAllow(item) ? t("console.policy.allow") : t("console.policy.deny") }}
+          <v-chip
+            :color="item.effect === 'allow' ? 'success' : 'error'"
+            size="small"
+            variant="tonal"
+          >
+            {{ effectLabel(item.effect === 'deny') }}
           </v-chip>
         </template>
         <template #item.subject="{ item }">
