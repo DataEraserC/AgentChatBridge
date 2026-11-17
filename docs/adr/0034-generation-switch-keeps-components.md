@@ -29,6 +29,29 @@ maybe_handle_upgrade():
 `KillMode=process` 保证了 systemd 不会连带杀组件的 cgroup，但
 **launcher 自己在退出前主动收敛了它们**——保护被自己的收尾逻辑绕过。
 
+## 实测：`KillMode=process` 挡不住 unit 重启（2026-11-17）
+
+第一版实现只做了「launcher 退出前不收敛组件」+「新 launcher 接管」。日志证明
+第一步生效了：
+
+    acb-launcher: generation switch (exit 75); leaving components running for the next launcher to adopt
+
+但组件仍然全部消失（pid 1750415 → 1763095，启动时间就是 launcher 重启那一刻）。
+原因不是 launcher 主动停——是 **systemd 在 unit 重启时清空了整个 cgroup**。
+组件都在 `acb-bridge.service` 的 cgroup 里，`KillMode=process` 只免除「systemd
+主动杀子进程」，不免除「unit 停止 → 重启这个动作本身」。
+
+实测确认（10 分钟实验）：
+
+| 机制 | 立即返回 | cgroup | unit 重启后存活 |
+|---|:-:|---|:-:|
+| `command.spawn()` | ✅ | acb-bridge.service | ❌ |
+| `systemd-run --scope` | ❌ **阻塞到子进程退出** | 同 unit | ✅ |
+| `systemd-run --unit=xxx`（独立 unit） | ✅ | 独立 unit | ✅ |
+
+`--scope` 不能用：它与调用方同生命周期，会卡住 launcher 的 tick 循环
+（实测 3 秒子进程 → 卡 3 秒）。所以必须用**独立 unit**。
+
 ## 决策：换代路径不收敛组件，新 launcher 接管
 
 ### 1. 区分「换代退出」与「停机退出」
@@ -46,27 +69,49 @@ maybe_handle_upgrade():
 失败回滚路径（stage 失败 / 提交失败 / 目标不可用）仍然收敛：
 那时新旧代都没起来，留着组件没有归属，反而会挡住下一次启动。
 
-### 2. 新 launcher 启动时接管存活组件
+### 2. 组件跑在独立 unit 里，脱离 acb-bridge 的 cgroup
+
+`component_runtime` 的 spawn 改为：
+
+```
+systemd-run --user --unit=acb-component-<name> --collect --service-type=... \
+    --setenv=... <program> <args>
+```
+
+- 独立 unit 名 `acb-component-<name>.service`，与 `acb-bridge.service` 平级，
+  所以换代重启 bridge 时它不在被清理的 cgroup 里
+- `--collect`：失败后自动清理，避免 `systemctl` 里堆一堆 failed unit
+- 日志仍由我们自己的 log 文件承载（`--property=StandardOutput=`），
+  与现在一致
+- `oneshot` 与 `leave_running` 语义不变
+
+### 3. 新 launcher 启动时接管存活组件
 
 现状：`ComponentManager::new` 无条件 spawn 所有 enabled 组件。
 直接不收敛会导致**同一组件两份进程**。
 
 接管判据（三条全中才接管）：
 
-1. `components/<name>.json` 里记着 `pid` 且非空
-2. `kill(pid, 0)` 成功（进程还在）
-3. `/proc/<pid>/exe` 解析出的路径**与本次要启动的 program 相同**
+1. 独立 unit `acb-component-<name>.service` 存在且 `active`
+2. `systemctl --user show ... -p MainPID` 给出非 0 的 pid
+3. **命令行匹配**：该 pid 的 `/proc/<pid>/cmdline` 里能找到配置的 program
 
-第 3 条是必须的：pid 会被复用，仅凭「pid 还活着」可能接管一个毫不相干的进程。
-比较用 `instance.rs` 里已有的 `same_program`（它已经处理了 nix `.<name>-wrapped`
-包装器，见上一次换代死循环的教训）。
+第 3 条不能省，但**不能用 `/proc/<pid>/exe`**。实测：acb 的组件大多是脚本，
+exe 读到的是解释器——
+
+    opencode: exe = bash,  cmdline = [bash, .../opencode_nix.sh]
+    dsh:      exe = node,  cmdline = [node, --expose-internals, .../dsh...]
+
+拿 exe 比配置里的程序路径永远不相等，接管会全部失败（第一版就是这么挂的）。
+改用 cmdline：program 出现在其中，且 `args` 按序在其后。
 
 接管后：不 spawn，把 state 里的 `phase` 保持为 `healthy`，继续正常 probe。
 probe 失败时按既有重启策略处理——接管来的进程与原生起的没有区别。
 
 ### 3. 幂等与去重
 
-`acbctl component status` 已经在读 `components/<name>.json`，接管不改变它的形状。
+`acbctl component status` 已经在读 `components/<name>.json`，接管不改变它的形状，
+但要多一处来源：`systemctl --user list-units 'acb-component-*'` 能看到真实存活情况。
 唯一新增的语义：启动时如果接管成功，日志里明确写一句
 `adopted running component <name> pid=<pid>`，否则「为什么没重启」无从查起。
 

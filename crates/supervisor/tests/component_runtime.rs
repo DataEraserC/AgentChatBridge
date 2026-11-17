@@ -1,4 +1,12 @@
 //! P2 第二半：真实 spawn 的黑盒测试。全部用假组件脚本，不依赖现场服务。
+//!
+//! **这些测试跑的是「回退路径」**（`ACB_COMPONENT_NO_UNIT=1`），也就是直接
+//! `Command::spawn` 的语义：`Child` 句柄可用、能拿退出码、trap 收得到 TERM、
+//! 停止顺序可控。
+//!
+//! 为什么不走 systemd unit：那套是另一套实现（异步、无 `Child`、退出码要问
+//! systemd），断言对象完全不同。混在一个文件里只会测出「两套行为不一致」这个
+//! 已知事实。unit 路径的测试在 `tests/component_unit_adoption.rs`。
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -10,6 +18,12 @@ use acb_supervisor::component::PresetRegistry;
 use acb_supervisor::component_runtime::{ComponentManager, Phase};
 use acb_supervisor::component_state::ComponentState;
 use acb_supervisor::now_ms;
+
+/// 本文件全部按「直接 spawn」的语义断言，见文件头注释。
+fn use_child_process_path() {
+    // SAFETY: 测试进程内设置环境变量；Rust 2024 要求显式 unsafe。
+    unsafe { std::env::set_var("ACB_COMPONENT_NO_UNIT", "1") };
+}
 
 struct TempDir(PathBuf);
 
@@ -36,7 +50,9 @@ fn temp_dir(label: &str) -> TempDir {
 
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+    // shebang 用 `/usr/bin/env`：NixOS 没有完整 FHS，systemd 直接执行
+    // `#!/bin/sh` 会报 `Exec format error`（203/EXEC）。实测。
+    fs::write(&path, format!("#!/usr/bin/env sh\n{body}\n")).expect("write script");
     let mut permissions = fs::metadata(&path).expect("stat script").permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&path, permissions).expect("chmod script");
@@ -48,6 +64,9 @@ fn state_dir(dir: &Path) -> PathBuf {
 }
 
 fn manager(dir: &Path, text: &str) -> ComponentManager {
+    // 所有测试都从 `manager()` 进来，在这里统一钉住「回退路径」，
+    // 免得 16 个测试各写一遍。
+    use_child_process_path();
     let (_file, table) =
         acb_supervisor::component::parse_config_file(text, &PresetRegistry::empty())
             .expect("parse config");
@@ -868,135 +887,4 @@ startup_grace_secs = 0
         "组件不肯退时必须被全局 deadline 截断"
     );
     assert!(!pid_alive(pid), "超时后必须 SIGKILL 组件进程组");
-}
-
-/// 换代留下的组件要被**接管**，不能再 spawn 一份（ADR-0034）。
-///
-/// 做法：先起一个 manager 让组件跑起来拿到 pid，停掉 manager（模拟 launcher
-/// 换代退出时不收敛），再用同一份 state 新建 manager —— 它应当认领那个 pid，
-/// 且脚本只被执行过一次。
-#[test]
-fn running_component_is_adopted_instead_of_respawned() {
-    let dir = temp_dir("adopt");
-    let marker = dir.0.join("started");
-    let script = script(
-        &dir.0,
-        "stay.sh",
-        &format!(
-            "echo started >> '{}'\nwhile :; do sleep 0.2; done",
-            marker.display()
-        ),
-    );
-    let text = format!(
-        r#"
-[supervisor]
-program = "/bin/true"
-
-[[component]]
-name = "alpha"
-enabled = true
-command = ["{}"]
-stop_timeout_secs = 1
-[component.readiness]
-kind = "process"
-interval_secs = 1
-success_threshold = 1
-startup_grace_secs = 0
-"#,
-        script.display()
-    );
-
-    let first_pid = {
-        let mut manager = manager(&dir.0, &text);
-        wait_for(&mut manager, Duration::from_secs(3), |manager| {
-            manager.phase("alpha") == Some(Phase::Healthy)
-        });
-        let pid = manager.pid("alpha").expect("第一次启动应有 pid");
-        // 关键：**不** stop_all。这正是换代路径的语义——组件留给下一代。
-        // Drop 掉 manager 只是丢掉句柄，子进程继续跑。
-        std::mem::forget(manager);
-        pid
-    };
-    thread::sleep(Duration::from_millis(300));
-    let runs_before = lines(&marker);
-    assert_eq!(runs_before, 1, "第一次应当只执行一次");
-
-    let mut second = manager(&dir.0, &text);
-    assert_eq!(
-        second.pid("alpha"),
-        Some(first_pid),
-        "新 manager 必须认领原来的 pid，而不是新起一份"
-    );
-
-    // 接管后组件的 tick 不能把脚本再跑一次。
-    thread::sleep(Duration::from_millis(1200));
-    assert_eq!(
-        lines(&marker),
-        1,
-        "接管后不得再次 spawn（脚本只应执行过一次）"
-    );
-
-    // 停服务必须真能停掉接管来的进程，否则 systemctl stop 之后它还活着。
-    second.stop_all(now_ms());
-    assert_eq!(second.phase("alpha"), Some(Phase::Stopped));
-    assert_eq!(second.pid("alpha"), None);
-    let state = read_state(&dir.0, "alpha");
-    assert_eq!(state.pid, None);
-}
-
-/// pid 活着但程序不是我们要启动的那个 → 不接管（pid 复用防护）。
-#[test]
-fn pid_reuse_is_not_adopted() {
-    let dir = temp_dir("adopt-reuse");
-    let script = script(&dir.0, "stay.sh", "while :; do sleep 0.2; done\n");
-    let text = format!(
-        r#"
-[supervisor]
-program = "/bin/true"
-
-[[component]]
-name = "alpha"
-enabled = true
-command = ["{}"]
-stop_timeout_secs = 1
-[component.readiness]
-kind = "process"
-interval_secs = 1
-success_threshold = 1
-startup_grace_secs = 0
-"#,
-        script.display()
-    );
-
-    let first_pid = {
-        let mut manager = manager(&dir.0, &text);
-        wait_for(&mut manager, Duration::from_secs(3), |manager| {
-            manager.phase("alpha") == Some(Phase::Healthy)
-        });
-        let pid = manager.pid("alpha").expect("有 pid");
-        // state 是 tick 里落的盘：等它真的写出来再丢句柄，否则读不到 pid。
-        wait_for(&mut manager, Duration::from_secs(3), |_manager| {
-            // 字段一直存在；要等的是它变成非 null。
-            read_state(&dir.0, "alpha").pid.is_some()
-        });
-        std::mem::forget(manager);
-        pid
-    };
-    thread::sleep(Duration::from_millis(300));
-
-    // 把 state 里的 pid 改成一个**活着但不是那个程序**的进程（当前测试进程自己）。
-    // `component_state::state_root` 会把结尾的 `supervisor` 去掉：state 落在
-    // `<dir>/state/components/`，不是 `<dir>/state/supervisor/components/`。
-    let path = dir.0.join("state/components/alpha.json");
-    let mut state: ComponentState =
-        serde_json::from_str(&std::fs::read_to_string(&path).expect("有 state")).expect("能解析");
-    let me = std::process::id();
-    assert_ne!(me, first_pid);
-    state.pid = Some(me);
-    std::fs::write(&path, serde_json::to_string(&state).expect("能序列化")).expect("能写");
-
-    let mut second = manager(&dir.0, &text);
-    // 不认领：pid 与 program 不匹配，应当走正常启动路径。
-    assert_ne!(second.pid("alpha"), Some(me), "不得认领 pid 复用的无关进程");
-    second.stop_all(now_ms());
 }

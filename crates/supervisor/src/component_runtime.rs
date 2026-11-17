@@ -89,6 +89,11 @@ struct Managed {
     ran_dependency_generations: Vec<(String, u64)>,
     log_path: PathBuf,
     dirty: bool,
+    /// 承载这个组件的 systemd unit 名（ADR-0034）。
+    ///
+    /// 非 `None` 时进程跑在独立 unit 里：`child` 为 `None`，存活与停止都走
+    /// `systemctl --user`，而不是 `try_wait` / `Child::kill`。
+    unit: Option<String>,
     /// 从上一代 launcher 接管的进程 pid（ADR-0034）。
     ///
     /// 非 `None` 时 `child` 必为 `None`：接管的进程不是我们的子进程，拿不到
@@ -117,6 +122,35 @@ impl Managed {
 ///
 /// 拿不到 program（配置在解析阶段就有问题）时不接管：那种情况应当走正常
 /// 启动路径去报错，而不是把一个既存进程当成自己的。
+/// 换代后接管：上一代的组件跑在 `acb-component-<name>.service` 里，新 launcher
+/// 起来时那个 unit 仍然 active（它不在 bridge 的 cgroup 里，ADB-0034 实测确认）。
+///
+/// 认领之后不能再去 spawn，否则同一组件两份进程——两份抢同一个端口。
+fn adopt_unit(entry: &ResolvedComponent) -> Option<(String, u32)> {
+    if entry.kind == ComponentType::Oneshot && entry.stop_action == StopAction::LeaveRunning {
+        return None;
+    }
+    let unit = crate::component_unit::unit_name(&entry.name);
+    let state = crate::component_unit::state(&unit)?;
+    if state.active_state != "active" {
+        return None;
+    }
+    if state.main_pid == 0 {
+        return None;
+    }
+    // 命令行复核：pid 会复用，但 unit 名是我们自己起的，撞车概率极低；
+    // 仍然复核一次，防止 unit 名被外部占用而 pid 指向无关进程。
+    let (program, _args) = command_for(entry).ok()?;
+    let cmdline = crate::instance::process_cmdline(state.main_pid)?;
+    if !cmdline
+        .iter()
+        .any(|part| crate::instance::same_program(part, &program))
+    {
+        return None;
+    }
+    Some((unit, state.main_pid))
+}
+
 fn adopt_candidate(entry: &ResolvedComponent, previous: Option<&ComponentState>) -> Option<u32> {
     // `leave_running` 的 oneshot 本来就故意留着，语义上不算接管。
     if entry.kind == ComponentType::Oneshot && entry.stop_action == StopAction::LeaveRunning {
@@ -213,13 +247,19 @@ impl ComponentManager {
             let healthy_before = previous
                 .as_ref()
                 .is_some_and(|state| state.phase == Phase::Healthy.as_str());
-            let adopted = adopt_candidate(entry, previous.as_ref());
-            if let Some(pid) = adopted {
-                eprintln!(
-                    "acb-component: adopted running component {} pid={pid} (generation switch left it alive)",
-                    entry.name
-                );
-            }
+            // 第一优先：认领上一代留下的**独立 unit**（换代的正路）。
+            // 第二优先：认领裸进程（旧布局 / 回退路径下的兼容）。
+            let adopted_unit = adopt_unit(entry);
+            let adopted = match &adopted_unit {
+                Some((unit, pid)) => {
+                    eprintln!(
+                        "acb-component: adopted unit {unit} for {} pid={pid} (generation switch left it running)",
+                        entry.name
+                    );
+                    Some(*pid)
+                }
+                None => adopt_candidate(entry, previous.as_ref()),
+            };
             let phase = if !entry.enabled {
                 Phase::Stopped
             } else if failed_before {
@@ -241,6 +281,7 @@ impl ComponentManager {
             //   3. `/proc/<pid>/exe` 与本次要启动的 program 是同一个程序
             //      —— pid 会复用，只看「活着」可能认领到毫不相干的进程。
             components.push(Managed {
+                unit: adopted_unit.map(|(unit, _)| unit),
                 adopted_pid: adopted,
                 entry: entry.clone(),
                 phase,
@@ -371,7 +412,12 @@ impl ComponentManager {
                 comp.entry.kind == ComponentType::Oneshot
                     && comp.entry.stop_action == StopAction::LeaveRunning
             })
-            .filter_map(|comp| comp.child.as_ref().map(Child::id).or(comp.adopted_pid))
+            .filter_map(|comp| match &comp.unit {
+                Some(unit) => crate::component_unit::state(unit)
+                    .map(|state| state.main_pid)
+                    .filter(|pid| *pid != 0),
+                None => comp.child.as_ref().map(Child::id).or(comp.adopted_pid),
+            })
             .collect()
     }
 
@@ -383,10 +429,16 @@ impl ComponentManager {
     }
 
     pub fn pid(&self, name: &str) -> Option<u32> {
-        self.components
+        let comp = self
+            .components
             .iter()
-            .find(|comp| comp.entry.name == name)
-            .and_then(|comp| comp.child.as_ref().map(Child::id).or(comp.adopted_pid))
+            .find(|comp| comp.entry.name == name)?;
+        if let Some(unit) = &comp.unit {
+            return crate::component_unit::state(unit)
+                .map(|state| state.main_pid)
+                .filter(|pid| *pid != 0);
+        }
+        comp.child.as_ref().map(Child::id).or(comp.adopted_pid)
     }
 
     pub fn enabled_count(&self) -> usize {
@@ -418,7 +470,19 @@ impl ComponentManager {
         // 接管的进程不是我们的子进程，`try_wait` 拿不到它的退出，
         // 只能靠 `/proc` 判活（ADR-0034）。死掉就当作 exited，交给同一套
         // 重启策略处理——接管来的与原生的在后续路径上没有区别。
-        if let Some(pid) = self.components[index].adopted_pid {
+        // 跑在独立 unit 里的组件：问 systemd 要状态，而不是我们的 `Child`。
+        if let Some(unit) = self.components[index].unit.clone() {
+            let active = crate::component_unit::state(&unit)
+                .map(|state| state.active_state == "active" || state.active_state == "activating")
+                .unwrap_or(false);
+            if !active {
+                self.components[index].unit = None;
+                self.components[index].record_failure(format!("unit {unit} is no longer active"));
+                self.components[index].phase = Phase::Restarting;
+                self.components[index].next_start_at_ms = now;
+                return;
+            }
+        } else if let Some(pid) = self.components[index].adopted_pid {
             if !crate::instance::process_alive(pid) {
                 self.components[index].adopted_pid = None;
                 self.components[index].record_failure(format!("adopted process {pid} exited"));
@@ -666,7 +730,12 @@ impl ComponentManager {
             return;
         }
         let kind = self.components[index].entry.kind;
-        if kind == ComponentType::Simple && self.components[index].child.is_none() {
+        // 进程还没起来就不探测。跑在独立 unit 里的组件没有 `Child`，
+        // 只看 `child.is_none()` 会把它当成「没起来」而永远不 probe。
+        let running = self.components[index].child.is_some()
+            || self.components[index].adopted_pid.is_some()
+            || self.components[index].unit.is_some();
+        if kind == ComponentType::Simple && !running {
             return;
         }
 
@@ -760,7 +829,18 @@ impl ComponentManager {
     fn probe_ready(&self, index: usize) -> bool {
         let readiness = &self.components[index].entry.readiness;
         match readiness.kind {
-            ReadinessKind::Process => self.components[index].child.is_some(),
+            // 组件跑在独立 unit 里时没有 `Child`：判活要看 unit 是否还 active。
+            // 只看 `child.is_some()` 会让所有 unit 化的组件永远判不健康。
+            ReadinessKind::Process => {
+                if let Some(unit) = &self.components[index].unit {
+                    crate::component_unit::state(unit)
+                        .map(|state| state.active_state == "active")
+                        .unwrap_or(false)
+                } else {
+                    self.components[index].child.is_some()
+                        || self.components[index].adopted_pid.is_some()
+                }
+            }
             ReadinessKind::Tcp => {
                 let host = connect_host(&readiness.host);
                 let Some(port) = readiness.port else {
@@ -803,26 +883,34 @@ impl ComponentManager {
             .try_clone()
             .map_err(|error| format!("clone log {}: {error}", log_path.display()))?;
 
-        let mut command = Command::new(&program);
-        command
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(stderr));
-
-        if let Some(cwd) = entry.process.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
-            command.current_dir(cwd);
-        }
+        // 优先用独立 unit 起组件（ADR-0034）：组件若留在 acb-bridge 的 cgroup 里，
+        // 换代重启 unit 时会被 systemd 一起清掉。
+        //
+        // `systemd-run` 不可用时回退到直接 spawn——那种情况下换代仍会带走组件，
+        // 但组件能跑起来，不能因为隔离机制缺失让整个桥不可用。
+        let mut env_pairs: Vec<(String, String)> = Vec::new();
 
         // 只注入 ACB_COMPONENT_* / ACB_ENV_FILE；密钥值本身不写进组件配置或日志。
-        command.env("ACB_COMPONENT_NAME", &entry.name);
-        command.env("ACB_COMPONENT_TYPE", entry.kind.to_string());
-        command.env("ACB_COMPONENT_STATE_DIR", &self.state_dir);
-        command.env("ACB_COMPONENT_LOG_PATH", &log_path);
-        command.env("ACB_COMPONENT_CONFIG_SHA256", &self.config_sha256);
-        command.env("ACB_COMPONENT_STOP_ACTION", entry.stop_action.to_string());
+        env_pairs.push(("ACB_COMPONENT_NAME".to_owned(), entry.name.clone()));
+        env_pairs.push(("ACB_COMPONENT_TYPE".to_owned(), entry.kind.to_string()));
+        env_pairs.push((
+            "ACB_COMPONENT_STATE_DIR".to_owned(),
+            self.state_dir.to_string_lossy().into_owned(),
+        ));
+        env_pairs.push((
+            "ACB_COMPONENT_LOG_PATH".to_owned(),
+            log_path.to_string_lossy().into_owned(),
+        ));
+        env_pairs.push((
+            "ACB_COMPONENT_CONFIG_SHA256".to_owned(),
+            self.config_sha256.clone(),
+        ));
+        env_pairs.push((
+            "ACB_COMPONENT_STOP_ACTION".to_owned(),
+            entry.stop_action.to_string(),
+        ));
         if let Some(instance_id) = &self.instance_id {
-            command.env("ACB_COMPONENT_INSTANCE_ID", instance_id);
+            env_pairs.push(("ACB_COMPONENT_INSTANCE_ID".to_owned(), instance_id.clone()));
         }
         if let Some(env_file) = entry
             .process
@@ -830,15 +918,58 @@ impl ComponentManager {
             .as_deref()
             .filter(|path| !path.is_empty())
         {
-            command.env("ACB_ENV_FILE", env_file);
+            env_pairs.push(("ACB_ENV_FILE".to_owned(), env_file.to_owned()));
         }
         if let Some(file) = entry.file.as_deref().filter(|file| !file.is_empty()) {
-            command.env("ACB_COMPONENT_FILE", file);
+            env_pairs.push(("ACB_COMPONENT_FILE".to_owned(), file.to_owned()));
         }
         for (position, value) in entry.compose_bin.iter().enumerate() {
-            command.env(format!("ACB_COMPONENT_COMPOSE_BIN_{position}"), value);
+            env_pairs.push((
+                format!("ACB_COMPONENT_COMPOSE_BIN_{position}"),
+                value.clone(),
+            ));
         }
         for (key, value) in &entry.env {
+            env_pairs.push((key.clone(), value.clone()));
+        }
+
+        // oneshot 不进独立 unit：它的语义是「跑完就退」，而 `systemd-run` 是异步的，
+        // 我们会立刻判定「已退出」并反复重跑（实测跑出 10 次）。oneshot 生命周期
+        // 短，换代时被带走也不会影响会话，所以保留原来的同步路径。
+        let unitizable = entry.kind != ComponentType::Oneshot;
+        if unitizable && crate::component_unit::available() {
+            let spec = crate::component_unit::Spec {
+                name: &entry.name,
+                program: &program,
+                args: &args,
+                cwd: entry.process.cwd.as_deref(),
+                env: env_pairs,
+                log_path: &log_path,
+            };
+            let unit = crate::component_unit::start(&spec).map_err(|error| {
+                eprintln!("acb-component: {} start failed: {error}", entry.name);
+                error
+            })?;
+            // 独立 unit 拿不到 `Child`：存活判定与停止都另走一条路（见 tick_one / stop_one）。
+            let pid = crate::component_unit::wait_main_pid(&unit, Duration::from_secs(5))
+                .ok_or_else(|| format!("{unit} started but never became active"))?;
+            self.components[index].child = None;
+            self.components[index].adopted_pid = None;
+            self.components[index].unit = Some(unit);
+            return Ok(pid);
+        }
+
+        // 回退路径：直接 spawn（换代会带走组件，但没有 systemd-run 时别无选择）。
+        let mut command = Command::new(&program);
+        command
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(stderr));
+        if let Some(cwd) = entry.process.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+            command.current_dir(cwd);
+        }
+        for (key, value) in &env_pairs {
             command.env(key, value);
         }
 
@@ -853,6 +984,7 @@ impl ComponentManager {
             .map_err(|error| format!("spawn {program}: {error}"))?;
         let pid = child.id();
         self.components[index].child = Some(child);
+        self.components[index].unit = None;
         Ok(pid)
     }
 
@@ -904,6 +1036,23 @@ impl ComponentManager {
             return;
         }
         self.components[index].stop_requested = true;
+        // 独立 unit 最干净：交给 systemctl 停，它会按 unit 的 KillMode 收敛整组。
+        if let Some(unit) = self.components[index].unit.take() {
+            let timeout = self.components[index].entry.stop_timeout_secs;
+            let timeout = match deadline {
+                Some(deadline) => deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_secs()
+                    .min(timeout),
+                None => timeout,
+            };
+            if let Err(error) = crate::component_unit::stop(&unit, timeout) {
+                eprintln!(
+                    "acb-component: cannot stop unit {unit} for {}: {error}",
+                    self.components[index].entry.name
+                );
+            }
+        }
         // 接管的进程不是我们的子进程，`Child` 那边是空的；必须单独按 pid 停，
         // 否则 `systemctl stop` 之后它还活着（ADR-0034 的验证项 2 就靠这条）。
         if let Some(pid) = self.components[index].adopted_pid.take() {

@@ -15,6 +15,7 @@ pub mod adopted;
 pub mod component;
 pub mod component_runtime;
 pub mod component_state;
+pub mod component_unit;
 pub mod instance;
 mod pointer;
 pub mod proctree;
