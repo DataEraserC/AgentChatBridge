@@ -918,6 +918,20 @@ impl ComponentManager {
         if let Some(instance_id) = &self.instance_id {
             env_pairs.push(("ACB_COMPONENT_INSTANCE_ID".to_owned(), instance_id.clone()));
         }
+        // `ACB_DATA_DIR` 必须显式传下去（ADR-0034 落地时踩到）。
+        //
+        // 直接 spawn 的组件继承 launcher 的环境，所以以前不需要写这一行；但
+        // `systemd-run` 起的是**独立 unit**，它拿不到 launcher 的环境。少了这个
+        // 变量，组件里的 `acbctl` 就按相对路径 `state/acb.db` + 进程 cwd 找库
+        // （cwd 是 `$HOME`），于是打开/新建了一个空库：读不到会话与库内密钥，
+        // `acbctl sessions` 返回零个会话 → 驱动一个都不起 → dsh 全部失联，
+        // 而脚本不会报错（「零个会话」是合法输出）。
+        if let Ok(data_dir) = std::env::var("ACB_DATA_DIR") {
+            let data_dir = data_dir.trim();
+            if !data_dir.is_empty() {
+                env_pairs.push(("ACB_DATA_DIR".to_owned(), data_dir.to_owned()));
+            }
+        }
         if let Some(env_file) = entry
             .process
             .env_file

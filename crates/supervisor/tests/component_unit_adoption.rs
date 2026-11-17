@@ -374,3 +374,70 @@ startup_grace_secs = 0
     second.stop_all(now_ms());
     cleanup_unit("utdelta");
 }
+
+/// 组件 unit 必须拿到 `ACB_DATA_DIR`。
+///
+/// 这是 2026-11-17 线上实测踩到的：`systemd-run` 起的是独立 unit，**不继承**
+/// launcher 的环境。少了这个变量，组件里的 `acbctl` 按相对路径 `state/acb.db`
+/// + 进程 cwd（`$HOME`）找库，于是打开/新建了一个空库：读不到会话与库内密钥，
+/// `acbctl sessions` 返回零个会话 → 驱动一个都不起 → dsh 全部失联，
+/// 而脚本不报错（「零个会话」是合法输出）。
+#[test]
+fn component_unit_receives_data_dir() {
+    if !unit_mode_available() {
+        eprintln!("skip: systemd-run unavailable");
+        return;
+    }
+    let dir = temp_dir("data-dir");
+    let marker = dir.0.join("env");
+    let script = script(
+        &dir.0,
+        "envwatch.sh",
+        &format!(
+            "echo \"ACB_DATA_DIR=${{ACB_DATA_DIR:-<unset>}}\" > '{}'\nwhile :; do sleep 0.2; done",
+            marker.display()
+        ),
+    );
+    let text = format!(
+        r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "utepsilon"
+enabled = true
+command = ["{}"]
+stop_timeout_secs = 1
+[component.readiness]
+kind = "process"
+interval_secs = 1
+success_threshold = 1
+startup_grace_secs = 0
+"#,
+        script.display()
+    );
+
+    // 钉住一个可辨认的数据根，再从组件脚本里读回来。
+    let saved = std::env::var("ACB_DATA_DIR").ok();
+    // SAFETY: 持锁（本文件测试串行跑）——这里只影响本进程派生的 unit。
+    unsafe { std::env::set_var("ACB_DATA_DIR", "/data/acb-probe") };
+
+    let mut manager = manager(&dir.0, &text);
+    wait_for(&mut manager, Duration::from_secs(10), |manager| {
+        manager.phase("utepsilon") == Some(Phase::Healthy)
+    });
+    thread::sleep(Duration::from_millis(400));
+    manager.stop_all(now_ms());
+    cleanup_unit("utepsilon");
+
+    match saved {
+        Some(value) => unsafe { std::env::set_var("ACB_DATA_DIR", value) },
+        None => unsafe { std::env::remove_var("ACB_DATA_DIR") },
+    }
+
+    let written = fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        written.contains("ACB_DATA_DIR=/data/acb-probe"),
+        "组件 unit 必须收到 ACB_DATA_DIR，实际：{written}"
+    );
+}
