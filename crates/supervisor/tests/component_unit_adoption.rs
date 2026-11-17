@@ -302,3 +302,75 @@ startup_grace_secs = 0
     second.stop_all(now_ms());
     cleanup_unit("utgamma");
 }
+
+/// 组件脚本用 `exec` 把自己换成别的程序时，仍然要能认出自己。
+///
+/// 这是线上实测踩到的（2026-11-17）：dsh 的 `dsh_nix.sh` 内部 `exec node ...`，
+/// 于是 `/proc/<pid>/cmdline` 里**没有** `dsh_nix.sh`，只有 `node .../bin.js`。
+/// 第一版用命令行复核身份，结果 dsh 每次换代都被重建——4 个组件里唯一失败的
+/// 就是它，而它恰恰是会话所在的那个。
+///
+/// 修法：改用我们注入的 `ACB_COMPONENT_NAME`（unit 属性，`exec` 抹不掉）。
+#[test]
+fn component_that_execs_into_another_program_is_still_adopted() {
+    if !unit_mode_available() {
+        eprintln!("skip: systemd-run unavailable");
+        return;
+    }
+    let dir = temp_dir("exec-adopt");
+    let marker = dir.0.join("started");
+    // 模拟 dsh：脚本 exec 成另一个程序，脚本名从 cmdline 里消失。
+    let node = std::process::Command::new("sh")
+        .args(["-c", "command -v sleep"])
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .expect("找得到 sleep");
+    let script = script(
+        &dir.0,
+        "wrapper.sh",
+        &format!("echo started >> '{}'\nexec {} 600", marker.display(), node),
+    );
+    let text = format!(
+        r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "utdelta"
+enabled = true
+command = ["{}"]
+stop_timeout_secs = 1
+[component.readiness]
+kind = "process"
+interval_secs = 1
+success_threshold = 1
+startup_grace_secs = 0
+"#,
+        script.display()
+    );
+
+    let first_pid = {
+        let mut manager = manager(&dir.0, &text);
+        wait_for(&mut manager, Duration::from_secs(10), |manager| {
+            manager.phase("utdelta") == Some(Phase::Healthy)
+        });
+        let pid = manager.pid("utdelta").expect("有 pid");
+        std::mem::forget(manager);
+        pid
+    };
+    thread::sleep(Duration::from_millis(300));
+
+    // 真正的断言：认出自己，不重建。
+    let second = manager(&dir.0, &text);
+    assert_eq!(
+        second.pid("utdelta"),
+        Some(first_pid),
+        "exec 掉脚本名的组件也必须被认领（否则每次换代都重建，会话就断了）"
+    );
+
+    let mut second = second;
+    second.stop_all(now_ms());
+    cleanup_unit("utdelta");
+}

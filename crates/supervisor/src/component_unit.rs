@@ -188,6 +188,37 @@ pub fn stop(unit: &str, timeout_secs: u64) -> Result<(), String> {
     Err(format!("{unit} still active after {timeout_secs}s"))
 }
 
+/// 查一个组件 unit 的 `ACB_COMPONENT_NAME`，用来确认它确实是这个组件。
+///
+/// 为什么不用命令行：组件脚本常用 `exec` 换成真正的程序，脚本名从 cmdline
+/// 里消失（dsh 就是：`dsh_nix.sh` 内部 `exec node ...`）。而我们在
+/// `--setenv` 里注入的 `ACB_COMPONENT_NAME` 是 unit 的属性，`exec` 抹不掉。
+pub fn component_name_of(unit: &str) -> Option<String> {
+    let output = Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            unit,
+            "--property=Environment",
+            "--no-pager",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // 输出形态是 `Environment=K=V K=V ...`（不带 `--value` 时 systemd 会加
+    // 属性名前缀）。先剥掉它，再按空格切出各对。
+    let body = text
+        .trim()
+        .strip_prefix("Environment=")
+        .unwrap_or(text.trim());
+    body.split_whitespace()
+        .find_map(|pair| pair.strip_prefix("ACB_COMPONENT_NAME="))
+        .map(str::to_owned)
+}
+
 /// 一个组件 unit 的当前状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitState {

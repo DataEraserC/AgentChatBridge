@@ -138,14 +138,20 @@ fn adopt_unit(entry: &ResolvedComponent) -> Option<(String, u32)> {
     if state.main_pid == 0 {
         return None;
     }
-    // 命令行复核：pid 会复用，但 unit 名是我们自己起的，撞车概率极低；
-    // 仍然复核一次，防止 unit 名被外部占用而 pid 指向无关进程。
-    let (program, _args) = command_for(entry).ok()?;
-    let cmdline = crate::instance::process_cmdline(state.main_pid)?;
-    if !cmdline
-        .iter()
-        .any(|part| crate::instance::same_program(part, &program))
-    {
+    // 这里**不做命令行复核**，与裸进程接管（`adopt_candidate`）不同。
+    //
+    // 理由：unit 名 `acb-component-<name>.service` 是我们自己起的，它本身就是
+    // 身份；而命令行不可靠——组件脚本常用 `exec` 把自己换成真正的程序，
+    // 脚本名从 cmdline 里彻底消失。实测：
+    //   opencode: cmdline = [bash .../opencode_nix.sh]  ← 能对上
+    //   dsh:      cmdline = [node .../bin.js]           ← dsh_nix.sh 已被 exec 掉
+    // 拿它做判据会让 dsh 每次换代都被重建（实测 4 个组件里只有它重启了），
+    // 而 dsh 恰恰是会话所在的那个。
+    //
+    // 改成校验我们自己注入的 `ACB_COMPONENT_NAME`：它是 unit 的属性，
+    // `exec` 抹不掉，也因此挡得住「unit 名被外部占用」这种意外。
+    let name = crate::component_unit::component_name_of(&unit)?;
+    if name != entry.name {
         return None;
     }
     Some((unit, state.main_pid))
