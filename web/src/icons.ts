@@ -25,6 +25,8 @@ import {
   mdiFileEyeOutline,
   mdiInformationOutline,
   mdiKeyOutline,
+  mdiLinkOff,
+  mdiPlus,
   mdiRefresh,
   mdiSwapHorizontal,
 } from "@mdi/js";
@@ -33,6 +35,15 @@ import {
 export const icons = {
   /** 刷新/重取。 */
   refresh: mdiRefresh,
+  /**
+   * 解绑 / 断开映射。
+   *
+   * 用「断链」而不是刷新图标：刷新在页面里已经表示「重新拉数据」，
+   * 同一个图标兼两个意思会让人不敢点——一个是只读重取，一个会重置真实映射。
+   */
+  disconnect: mdiLinkOff,
+  /** 新增。 */
+  add: mdiPlus,
   /** 「更多信息」的 ⓘ。 */
   info: mdiInformationOutline,
   /** 新旧控制台互跳。 */

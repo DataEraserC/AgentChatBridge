@@ -148,7 +148,7 @@ const headers = computed(() => [
             :loading="control.isPending.value"
             @click.stop="control.mutate({ session: item.id, command: 'reset' })"
           >
-            <v-icon :icon="icons.refresh" size="small" />
+            <v-icon :icon="icons.disconnect" size="small" />
           </v-btn>
         </template>
         <template #item.roomCount="{ item }">

@@ -1,0 +1,39 @@
+/**
+ * 全局可读性补充。
+ *
+ * 只放「Vuetify 默认值在这套配色下看不清」的修正，不放业务样式。
+ *
+ * 2026-11-17 用户报：「失败惩罚的启用按钮在亮色/暗色都看不清，和底色太接近」。
+ * 实测：关闭态 `v-switch__track` 的背景是 `surface-variant`（#22262e），与卡片
+ * 背景同一个色值，等于看不见。`color="primary"` 只作用于**打开**态。
+ *
+ * 修正方式：给关闭态的轨道一个明确的边框 + 比 surface 亮一档的底色。不改成
+ * 纯白/纯黑——那会在亮色主题下过重。用 `currentColor` 的半透明叠加，两套主题
+ * 自动跟随。
+ */
+
+/* 开关：关闭态必须有可见轮廓。 */
+.v-switch .v-switch__track {
+  opacity: 1 !important;
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background-color: rgb(var(--v-theme-surface-variant));
+}
+
+/* 关闭态的滑块：默认与轨道同色，看不出「这是个可以拨的东西」。 */
+.v-switch:not(.v-switch--on) .v-switch__thumb {
+  background-color: rgb(var(--v-theme-on-surface-variant));
+  opacity: 0.9;
+}
+
+/* 复选框/单选框：未选中时的边框要看得出来。 */
+.v-checkbox .v-selection-control__wrapper,
+.v-radio .v-selection-control__wrapper {
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+
+/* 下拉框的边框：`variant="plain"` 在表格行里会完全没有边界，
+   用户不知道那里可以点。 */
+.v-select .v-field--variant-plain .v-field__outline {
+  display: block;
+  opacity: 0.6;
+}
