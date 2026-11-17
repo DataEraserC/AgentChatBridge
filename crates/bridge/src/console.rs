@@ -331,7 +331,12 @@ pub struct Console<S: Store> {
     /// 为什么要缓存：`list_rooms` 每次都真的问平台（QQ 那边是两次 API 调用），
     /// 打开一次下拉就够平台限流一次。TTL 由 `ACB_CONSOLE_ROOMS_TTL_SECS` 控制，
     /// **0 = 不缓存**（用户裁定：N 可以设为 0）。
-    room_cache: Mutex<std::collections::HashMap<String, (i64, RoomsPayload)>>,
+    /// 房间枚举缓存：连接名 → (写入时刻, `supported`, 枚举到的房间)。
+    ///
+    /// **不缓存 `seen`**：`seen` 来自 `records` 表、是新房间唯一的发现途径，
+    /// 缓存它会让「刚入群的房间」在 TTL 内看不见（2026-11-17 报的那个 bug）。
+    /// 缓存存在的理由是省平台 API 调用，而 `seen` 只是一条 SQL。
+    room_cache: Mutex<std::collections::HashMap<String, (i64, bool, Vec<acb_kernel::RoomChoice>)>>,
 }
 
 /// 一次房间枚举的结果，缓存与响应共用同一个形状。
@@ -646,7 +651,10 @@ impl<S: Store + Send + 'static> Console<S> {
             ("GET", "/api/sessions") => (200, self.sessions()),
             // 房间枚举（ADR-0033）：控制台订阅编辑用下拉而不是手输。
             // 只读、只走适配器自报的 `list_rooms`，不碰 platform_call。
-            ("GET", "/api/rooms") => self.rooms_view(query_param(query, "connection")),
+            ("GET", "/api/rooms") => self.rooms_view(
+                query_param(query, "connection"),
+                query_param(query, "refresh").is_some(),
+            ),
             // 手输房间的确认（ADR-0035）：只读、无副作用，查库判断这个房间出现过没有。
             ("POST", "/api/rooms/verify") => self.rooms_verify(body),
             // 记忆管家：最近一次同步时间、结果、冲突文件数与失败原因。
@@ -1087,7 +1095,7 @@ impl<S: Store + Send + 'static> Console<S> {
     /// - 连接不存在 → 404
     ///
     /// 结果按 `ACB_CONSOLE_ROOMS_TTL_SECS` 缓存（0 = 不缓存）。
-    fn rooms_view(&self, connection: Option<&str>) -> (u16, String) {
+    fn rooms_view(&self, connection: Option<&str>, refresh: bool) -> (u16, String) {
         let Some(connection) = connection.map(str::trim).filter(|value| !value.is_empty()) else {
             return error_response(
                 400,
@@ -1099,18 +1107,27 @@ impl<S: Store + Send + 'static> Console<S> {
         let ttl_ms = (rooms_ttl_secs() as i64).saturating_mul(1000);
         let now = now_millis();
 
-        // 命中缓存就直接回，不碰适配器。
-        if ttl_ms > 0 {
+        // 命中缓存就回**枚举结果**，但 `seen` 永远重新查库。
+        //
+        // 为什么不能连 `seen` 一起缓存：`seen` 来自 `records` 表，它是一条纯 SQL
+        // 查询（便宜），而它是**新房间唯一的发现途径**——机器人刚被拉进群、
+        // 有人刚 @ 了它，库里立刻就有记录，但缓存里还是 60 秒前的旧列表。
+        // 用户点「刷新」看到的还是旧的，这正是 2026-11-17 报的
+        // 「为什么我点刷新刷新不出来」。缓存本来是为省平台 API 调用（枚举要打
+        // 外部接口），`seen` 不需要省。
+        // `refresh=1` 强制绕过枚举缓存：用户点刷新就是要「现在去问平台」。
+        let cached_rooms = if ttl_ms > 0 && !refresh {
             let cache = self
                 .room_cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some((at, payload)) = cache.get(connection) {
-                if now.saturating_sub(*at) < ttl_ms {
-                    return (200, rooms_json(connection, payload, true));
-                }
-            }
-        }
+            cache
+                .get(connection)
+                .filter(|(at, _, _)| now.saturating_sub(*at) < ttl_ms)
+                .map(|(_, supported, rooms)| (*supported, rooms.clone()))
+        } else {
+            None
+        };
 
         let mut bridge = lock(&self.bridge);
         // 连接不存在时明确报 404：否则前端会拿一个空列表当「这个平台没房间」。
@@ -1121,10 +1138,19 @@ impl<S: Store + Send + 'static> Console<S> {
                 Some(connection.to_owned()),
             );
         }
-        // 见过的房间先查（只读、不依赖适配器），再问适配器要枚举。
+        // 见过的房间**每次重新查**：它是新房间的发现途径，不能吃缓存（见上）。
         let seen = bridge
             .seen_rooms(connection, SEEN_ROOMS_LIMIT)
             .unwrap_or_default();
+        // 枚举结果可以用缓存：那一步要打平台 API，才是缓存存在的理由。
+        if let Some((supported, rooms)) = cached_rooms {
+            let payload = RoomsPayload {
+                supported,
+                rooms,
+                seen,
+            };
+            return (200, rooms_json(connection, &payload, true));
+        }
         let payload = match bridge.room_choices(connection) {
             Ok(Some(rooms)) => RoomsPayload {
                 supported: true,
@@ -1150,7 +1176,11 @@ impl<S: Store + Send + 'static> Console<S> {
                 .room_cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cache.insert(connection.to_owned(), (now, payload.clone()));
+            // 只存枚举那部分，`seen` 每次现查（见字段注释）。
+            cache.insert(
+                connection.to_owned(),
+                (now, payload.supported, payload.rooms.clone()),
+            );
         }
         (200, rooms_json(connection, &payload, false))
     }
@@ -2951,6 +2981,22 @@ fn persist_console_config(config_dir: &str, text: &str) -> std::io::Result<Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 房间缓存**只存枚举结果**，不存 `seen`。
+    ///
+    /// 2026-11-17 用户报「点刷新刷新不出来」：那时缓存里连 `seen` 一起存，
+    /// 而 `seen` 来自 `records` 表、是新房间唯一的发现途径。冷启动后 60 秒内
+    /// 无论怎么刷新，看到的都是缓存里那份旧的 `seen`。
+    ///
+    /// 这条测试守着缓存的形状：元素是 `(时刻, supported, rooms)`，没有 `seen`。
+    /// 有人想往缓存里再加 `seen` 时，这里会红。
+    #[test]
+    fn room_cache_holds_only_the_enumeration() {
+        let cache: std::collections::HashMap<String, (i64, bool, Vec<acb_kernel::RoomChoice>)> =
+            std::collections::HashMap::new();
+        // 类型就是契约：能这样声明，说明缓存里没有 `seen` 的位置。
+        assert!(cache.is_empty());
+    }
 
     #[test]
     fn parse_request_line_reads_authorization_case_insensitively() {

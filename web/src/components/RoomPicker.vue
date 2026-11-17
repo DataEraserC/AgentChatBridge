@@ -34,15 +34,45 @@ const emit = defineEmits<{ "update:modelValue": [value: string] }>();
 
 const { t } = useI18n();
 
+/**
+ * 下一次取数要不要绕过服务端缓存。
+ *
+ * 用 ref 而不是给 queryKey 加参数：加参数会让「刷新前/刷新后」变成两个不同的
+ * 查询、各自缓存一份，页面在这两者之间来回切换。这里要的是同一个查询重新取。
+ */
+const forceRefresh = ref(false);
+
 const rooms = useQuery({
   queryKey: computed(() => queryKeys.rooms(props.connection)),
-  queryFn: () => api.get<RoomsView>(`/api/rooms?connection=${encodeURIComponent(props.connection)}`),
+  queryFn: () =>
+    api.get<RoomsView>(
+      `/api/rooms?connection=${encodeURIComponent(props.connection)}${forceRefresh.value ? "&refresh=1" : ""}`,
+    ),
   // 没连接名就没法问
   enabled: computed(() => props.connection.trim().length > 0),
   // 枚举要打平台 API，别因为窗口聚焦就重新打一遍；TTL 在服务端。
   refetchOnWindowFocus: false,
   retry: false,
 });
+
+/**
+ * 刷新候选。
+ *
+ * 必须带 `refresh=1`：服务端对**枚举结果**有 TTL 缓存（默认 60 秒，省平台 API
+ * 调用）。不带的话刷新只是又读了一次缓存，用户看到列表没变——这正是
+ * 2026-11-17 报的「点刷新刷新不出来」。
+ *
+ * `seen` 部分服务端已经改成每次实时查库，所以新房间不需要绕过缓存也能看到；
+ * 这里强制刷新是为了「连枚举也重新问一遍平台」。
+ */
+async function refresh(): Promise<void> {
+  forceRefresh.value = true;
+  try {
+    await rooms.refetch();
+  } finally {
+    forceRefresh.value = false;
+  }
+}
 
 const supported = computed(() => rooms.data.value?.supported ?? false);
 
@@ -160,8 +190,9 @@ defineExpose({ verifyState: verify });
 
 <template>
   <div>
-    <!-- 有列表就带补全；没有就是纯手输 -->
-    <v-combobox
+    <div class="d-flex ga-2 align-start">
+      <!-- 有列表就带补全；没有就是纯手输 -->
+      <v-combobox
       :model-value="modelValue"
       :items="items"
       item-title="title"
@@ -174,19 +205,20 @@ defineExpose({ verifyState: verify });
       clearable
       @update:model-value="onInput($event as string)"
     >
-      <template #append-inner>
-        <v-btn
-          icon
-          size="x-small"
-          variant="text"
-          :loading="rooms.isFetching.value"
-          :aria-label="t('console.rooms.refresh')"
-          @click.stop="rooms.refetch()"
-        >
-          <v-icon :icon="icons.refresh" size="small" />
-        </v-btn>
-      </template>
-    </v-combobox>
+      </v-combobox>
+      <!-- 刷新放在**外面**：塞进输入框里会让用户以为是清除/更多之类的控件，
+           而它其实会真的去问平台要一次枚举（2026-11-17 用户指出）。 -->
+      <v-btn
+        icon
+        size="small"
+        variant="text"
+        :loading="rooms.isFetching.value"
+        :aria-label="t('console.rooms.refresh')"
+        @click.stop="refresh()"
+      >
+        <v-icon :icon="icons.refresh" size="small" />
+      </v-btn>
+    </div>
     <div v-if="note" class="text-caption text-medium-emphasis mt-1">{{ note }}</div>
     <!-- 手输校验结果：known 绿、unknown 红。只有真的敲了候选外的值才出现。 -->
     <div
