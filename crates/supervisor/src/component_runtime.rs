@@ -89,6 +89,12 @@ struct Managed {
     ran_dependency_generations: Vec<(String, u64)>,
     log_path: PathBuf,
     dirty: bool,
+    /// 从上一代 launcher 接管的进程 pid（ADR-0034）。
+    ///
+    /// 非 `None` 时 `child` 必为 `None`：接管的进程不是我们的子进程，拿不到
+    /// `Child` 句柄，所以存活判定要走 `/proc`（`instance::process_alive`）
+    /// 与启动 token 比对，而不是 `try_wait`。
+    adopted_pid: Option<u32>,
 }
 
 impl Managed {
@@ -97,6 +103,55 @@ impl Managed {
         self.last_error = Some(message.into());
         self.dirty = true;
     }
+}
+
+/// 判断上一条 state 里的进程能否被本次启动接管（ADR-0034）。
+///
+/// 三条全中才返回 `Some(pid)`：
+/// 1. state 里记着 pid；
+/// 2. 该 pid 还活着；
+/// 3. `/proc/<pid>/exe` 与本次要启动的 program 是同一个程序。
+///
+/// 第 3 条不能省：pid 会被系统复用，「活着」不等于「还是我们的那个进程」。
+/// 误接管一个无关进程，比多起一份更难查——它占着端口，而日志里看不出异常。
+///
+/// 拿不到 program（配置在解析阶段就有问题）时不接管：那种情况应当走正常
+/// 启动路径去报错，而不是把一个既存进程当成自己的。
+fn adopt_candidate(entry: &ResolvedComponent, previous: Option<&ComponentState>) -> Option<u32> {
+    // `leave_running` 的 oneshot 本来就故意留着，语义上不算接管。
+    if entry.kind == ComponentType::Oneshot && entry.stop_action == StopAction::LeaveRunning {
+        return None;
+    }
+    let pid = previous.and_then(|state| state.pid)?;
+    if !crate::instance::process_alive(pid) {
+        return None;
+    }
+    let (program, args) = command_for(entry).ok()?;
+    let cmdline = crate::instance::process_cmdline(pid)?;
+
+    // 判据用**命令行**而不是 `/proc/<pid>/exe`。
+    //
+    // 原因（实测，2026-11-17）：acb 的组件大多是脚本，`exe` 读到的是解释器：
+    //   opencode: exe = bash,  cmdline = [bash, .../opencode_nix.sh]
+    //   dsh:      exe = node,  cmdline = [node, --expose-internals, .../dsh...]
+    // 拿 exe 去比配置里的程序路径永远不相等，接管会全部失败。
+    //
+    // 判据：配置里的 program 必须出现在 cmdline 里，且 `args` 按序出现在它之后。
+    // 前者挡住「pid 复用到一个无关进程」，后者挡住「同一个脚本的不同实例」。
+    if !cmdline
+        .iter()
+        .any(|part| crate::instance::same_program(part, &program))
+    {
+        return None;
+    }
+    let start = cmdline
+        .iter()
+        .position(|part| crate::instance::same_program(part, &program))?;
+    let tail = &cmdline[start + 1..];
+    if !args.iter().all(|arg| tail.iter().any(|part| part == arg)) {
+        return None;
+    }
+    Some(pid)
 }
 
 /// 进程管理内核。只管理声明的组件；空表时 `tick` 是 no-op。
@@ -158,15 +213,35 @@ impl ComponentManager {
             let healthy_before = previous
                 .as_ref()
                 .is_some_and(|state| state.phase == Phase::Healthy.as_str());
+            let adopted = adopt_candidate(entry, previous.as_ref());
+            if let Some(pid) = adopted {
+                eprintln!(
+                    "acb-component: adopted running component {} pid={pid} (generation switch left it alive)",
+                    entry.name
+                );
+            }
             let phase = if !entry.enabled {
                 Phase::Stopped
             } else if failed_before {
                 Phase::Failed
+            } else if adopted.is_some() {
+                // 接管来的进程在跑：按 Healthy 起步，由 probe 决定是否真的健康。
+                // 置 Starting 会立刻再 spawn 一份，正是要避免的事。
+                Phase::Healthy
             } else {
                 Phase::Starting
             };
 
+            // 接管判定（ADR-0034）：换代时上一代 launcher 故意不收敛组件，
+            // 新 launcher 起来要认领它们，而不是再 spawn 一份。
+            //
+            // 三条全中才接管，缺一不可：
+            //   1. state 里记着 pid
+            //   2. 该 pid 还活着
+            //   3. `/proc/<pid>/exe` 与本次要启动的 program 是同一个程序
+            //      —— pid 会复用，只看「活着」可能认领到毫不相干的进程。
             components.push(Managed {
+                adopted_pid: adopted,
                 entry: entry.clone(),
                 phase,
                 child: None,
@@ -296,7 +371,7 @@ impl ComponentManager {
                 comp.entry.kind == ComponentType::Oneshot
                     && comp.entry.stop_action == StopAction::LeaveRunning
             })
-            .filter_map(|comp| comp.child.as_ref().map(Child::id))
+            .filter_map(|comp| comp.child.as_ref().map(Child::id).or(comp.adopted_pid))
             .collect()
     }
 
@@ -311,7 +386,7 @@ impl ComponentManager {
         self.components
             .iter()
             .find(|comp| comp.entry.name == name)
-            .and_then(|comp| comp.child.as_ref().map(Child::id))
+            .and_then(|comp| comp.child.as_ref().map(Child::id).or(comp.adopted_pid))
     }
 
     pub fn enabled_count(&self) -> usize {
@@ -340,17 +415,31 @@ impl ComponentManager {
             return;
         }
 
-        // 先收尸：退出语义优先于启动。
-        let polled = self.components[index]
-            .child
-            .as_mut()
-            .map(|child| child.try_wait());
-        match polled {
-            Some(Ok(Some(status))) => self.handle_exit(index, now, status, kind),
-            Some(Err(error)) => {
-                self.components[index].record_failure(format!("wait failed: {error}"));
+        // 接管的进程不是我们的子进程，`try_wait` 拿不到它的退出，
+        // 只能靠 `/proc` 判活（ADR-0034）。死掉就当作 exited，交给同一套
+        // 重启策略处理——接管来的与原生的在后续路径上没有区别。
+        if let Some(pid) = self.components[index].adopted_pid {
+            if !crate::instance::process_alive(pid) {
+                self.components[index].adopted_pid = None;
+                self.components[index].record_failure(format!("adopted process {pid} exited"));
+                // 走到 restart 分支：phase 置 Restarting 并把重试延后到策略允许。
+                self.components[index].phase = Phase::Restarting;
+                self.components[index].next_start_at_ms = now;
+                return;
             }
-            _ => {}
+        } else {
+            // 先收尸：退出语义优先于启动。
+            let polled = self.components[index]
+                .child
+                .as_mut()
+                .map(|child| child.try_wait());
+            match polled {
+                Some(Ok(Some(status))) => self.handle_exit(index, now, status, kind),
+                Some(Err(error)) => {
+                    self.components[index].record_failure(format!("wait failed: {error}"));
+                }
+                _ => {}
+            }
         }
 
         // oneshot + after：依赖重新「就绪」（healthy）是一次事件，重跑一次。
@@ -815,6 +904,28 @@ impl ComponentManager {
             return;
         }
         self.components[index].stop_requested = true;
+        // 接管的进程不是我们的子进程，`Child` 那边是空的；必须单独按 pid 停，
+        // 否则 `systemctl stop` 之后它还活着（ADR-0034 的验证项 2 就靠这条）。
+        if let Some(pid) = self.components[index].adopted_pid.take() {
+            let token = crate::instance::process_start_token(pid);
+            let configured = self.components[index].entry.stop_timeout_secs;
+            let timeout = match deadline {
+                Some(deadline) => deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_secs()
+                    .min(configured),
+                None => configured,
+            };
+            let stop_deadline = Instant::now() + Duration::from_secs(timeout);
+            if let Err(error) =
+                crate::instance::terminate_within(pid, token.as_deref(), stop_deadline)
+            {
+                eprintln!(
+                    "acb-component: cannot stop adopted component {} pid={pid}: {error}",
+                    self.components[index].entry.name
+                );
+            }
+        }
         if let Some(mut child) = self.components[index].child.take() {
             let configured = self.components[index].entry.stop_timeout_secs;
             let timeout = match deadline {
@@ -1134,7 +1245,9 @@ fn build_state(
         attempts: comp.attempts,
         consecutive_failures: comp.consecutive_failures,
         restarts: comp.restarts,
-        pid: comp.child.as_ref().map(Child::id),
+        // 接管的进程没有 `Child` 句柄，pid 单独记在 `adopted_pid` 里；
+        // 落盘时两者合一，`acbctl component status` 才看得到真实 pid。
+        pid: comp.child.as_ref().map(Child::id).or(comp.adopted_pid),
         instance_id: instance_id.map(str::to_string),
         config_sha256: config_sha256.to_string(),
         last_error: comp.last_error.clone(),

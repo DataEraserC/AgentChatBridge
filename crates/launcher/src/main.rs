@@ -293,15 +293,36 @@ fn main() -> ExitCode {
         thread::sleep(Duration::from_millis(100));
     }
 
-    // 升级 75 / 回滚 / 正常失败都走这里：先收敛组件与残留后代，避免 systemd
-    // 重拉后旧组件还活着而新 launcher 又起一份。bridge 可能已由 supervisor
-    // 停掉，`stop_child_within` 对空 child 是 no-op。
-    converge_shutdown(&mut component_manager, &mut supervisor);
+    // 换代（exit 75）与非换代（回滚 / 失败 / 放弃）在这里分道扬镳（ADR-0034）：
+    //
+    // - 换代：**不收敛组件**。它们要继续跑，由重新拉起的 launcher 接管。
+    //   用户裁定「换代不涉及到的程序不应该被重启」——dsh 会话就挂在组件下。
+    // - 其余：照旧收敛。那时代替代没起来，留着组件没有归属，反而会挡住下次启动
+    //   （新 launcher 起来时见到旧进程会当成残留）。
+    let code = supervisor.exit_code().unwrap_or(EXIT_OK);
+    // 判据不能用退出码：`EXIT_ROLLBACK`(75) 同时用于「换代成功」与「回滚」，
+    // 两者的组件语义相反。看 mailbox 里这次请求是否已推进到 `restarting`
+    // —— 那一步只在指针提交成功后才写（见 `committed_restart_exit`）。
+    let switching_generation = mailbox
+        .read_active()
+        .is_some_and(|active| active.status == "restarting");
+    if switching_generation {
+        eprintln!(
+            "acb-launcher: generation switch (exit {code}); leaving components running for the next launcher to adopt"
+        );
+        // bridge 已经由 `maybe_handle_upgrade` 停过；这里只补一次幂等收敛，
+        // 防止回滚路径残留（对空 child 是 no-op）。
+        if let Err(error) = supervisor.stop_child_within(Instant::now() + SHUTDOWN_BUDGET) {
+            eprintln!("acb-launcher: cannot stop bridge: {error}");
+        }
+    } else {
+        // 先收敛组件与残留后代，避免 systemd 重拉后旧组件还活着而新 launcher 又起一份。
+        converge_shutdown(&mut component_manager, &mut supervisor);
+    }
 
     if let Some(reason) = supervisor.failed() {
         eprintln!("acb-launcher: stopped: {reason}");
     }
-    let code = supervisor.exit_code().unwrap_or(EXIT_OK);
     finalize_active(&mailbox, code);
     notifier.stopping();
     ExitCode::from(code as u8)

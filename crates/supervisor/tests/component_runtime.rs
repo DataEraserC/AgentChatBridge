@@ -869,3 +869,134 @@ startup_grace_secs = 0
     );
     assert!(!pid_alive(pid), "超时后必须 SIGKILL 组件进程组");
 }
+
+/// 换代留下的组件要被**接管**，不能再 spawn 一份（ADR-0034）。
+///
+/// 做法：先起一个 manager 让组件跑起来拿到 pid，停掉 manager（模拟 launcher
+/// 换代退出时不收敛），再用同一份 state 新建 manager —— 它应当认领那个 pid，
+/// 且脚本只被执行过一次。
+#[test]
+fn running_component_is_adopted_instead_of_respawned() {
+    let dir = temp_dir("adopt");
+    let marker = dir.0.join("started");
+    let script = script(
+        &dir.0,
+        "stay.sh",
+        &format!(
+            "echo started >> '{}'\nwhile :; do sleep 0.2; done",
+            marker.display()
+        ),
+    );
+    let text = format!(
+        r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "alpha"
+enabled = true
+command = ["{}"]
+stop_timeout_secs = 1
+[component.readiness]
+kind = "process"
+interval_secs = 1
+success_threshold = 1
+startup_grace_secs = 0
+"#,
+        script.display()
+    );
+
+    let first_pid = {
+        let mut manager = manager(&dir.0, &text);
+        wait_for(&mut manager, Duration::from_secs(3), |manager| {
+            manager.phase("alpha") == Some(Phase::Healthy)
+        });
+        let pid = manager.pid("alpha").expect("第一次启动应有 pid");
+        // 关键：**不** stop_all。这正是换代路径的语义——组件留给下一代。
+        // Drop 掉 manager 只是丢掉句柄，子进程继续跑。
+        std::mem::forget(manager);
+        pid
+    };
+    thread::sleep(Duration::from_millis(300));
+    let runs_before = lines(&marker);
+    assert_eq!(runs_before, 1, "第一次应当只执行一次");
+
+    let mut second = manager(&dir.0, &text);
+    assert_eq!(
+        second.pid("alpha"),
+        Some(first_pid),
+        "新 manager 必须认领原来的 pid，而不是新起一份"
+    );
+
+    // 接管后组件的 tick 不能把脚本再跑一次。
+    thread::sleep(Duration::from_millis(1200));
+    assert_eq!(
+        lines(&marker),
+        1,
+        "接管后不得再次 spawn（脚本只应执行过一次）"
+    );
+
+    // 停服务必须真能停掉接管来的进程，否则 systemctl stop 之后它还活着。
+    second.stop_all(now_ms());
+    assert_eq!(second.phase("alpha"), Some(Phase::Stopped));
+    assert_eq!(second.pid("alpha"), None);
+    let state = read_state(&dir.0, "alpha");
+    assert_eq!(state.pid, None);
+}
+
+/// pid 活着但程序不是我们要启动的那个 → 不接管（pid 复用防护）。
+#[test]
+fn pid_reuse_is_not_adopted() {
+    let dir = temp_dir("adopt-reuse");
+    let script = script(&dir.0, "stay.sh", "while :; do sleep 0.2; done\n");
+    let text = format!(
+        r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "alpha"
+enabled = true
+command = ["{}"]
+stop_timeout_secs = 1
+[component.readiness]
+kind = "process"
+interval_secs = 1
+success_threshold = 1
+startup_grace_secs = 0
+"#,
+        script.display()
+    );
+
+    let first_pid = {
+        let mut manager = manager(&dir.0, &text);
+        wait_for(&mut manager, Duration::from_secs(3), |manager| {
+            manager.phase("alpha") == Some(Phase::Healthy)
+        });
+        let pid = manager.pid("alpha").expect("有 pid");
+        // state 是 tick 里落的盘：等它真的写出来再丢句柄，否则读不到 pid。
+        wait_for(&mut manager, Duration::from_secs(3), |_manager| {
+            // 字段一直存在；要等的是它变成非 null。
+            read_state(&dir.0, "alpha").pid.is_some()
+        });
+        std::mem::forget(manager);
+        pid
+    };
+    thread::sleep(Duration::from_millis(300));
+
+    // 把 state 里的 pid 改成一个**活着但不是那个程序**的进程（当前测试进程自己）。
+    // `component_state::state_root` 会把结尾的 `supervisor` 去掉：state 落在
+    // `<dir>/state/components/`，不是 `<dir>/state/supervisor/components/`。
+    let path = dir.0.join("state/components/alpha.json");
+    let mut state: ComponentState =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("有 state")).expect("能解析");
+    let me = std::process::id();
+    assert_ne!(me, first_pid);
+    state.pid = Some(me);
+    std::fs::write(&path, serde_json::to_string(&state).expect("能序列化")).expect("能写");
+
+    let mut second = manager(&dir.0, &text);
+    // 不认领：pid 与 program 不匹配，应当走正常启动路径。
+    assert_ne!(second.pid("alpha"), Some(me), "不得认领 pid 复用的无关进程");
+    second.stop_all(now_ms());
+}

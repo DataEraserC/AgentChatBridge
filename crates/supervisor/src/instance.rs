@@ -332,6 +332,32 @@ pub fn process_start_token(pid: u32) -> Option<String> {
     }
 }
 
+/// 读一个进程的命令行（`/proc/<pid>/cmdline`，NUL 分隔）。
+///
+/// 为什么需要它：组件配置里写的是**脚本**（`opencode_nix.sh` / `dsh_nix.sh`），
+/// 但 `/proc/<pid>/exe` 指向解释器（bash / node）——两者永远不相等。
+/// 判断「这个 pid 是不是我们要启动的那个组件」只能看命令行：
+/// 脚本路径出现在 argv 里。实测：
+/// - opencode: `bash .../presets/opencode/opencode_nix.sh`
+/// - dsh:      `node --expose-internals .../dsh...`
+pub fn process_cmdline(pid: u32) -> Option<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline")).ok()?;
+        let parts: Vec<String> = raw
+            .split(|byte| *byte == 0)
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+            .collect();
+        (!parts.is_empty()).then_some(parts)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 pub fn process_exe(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -348,7 +374,12 @@ pub fn process_exe(pid: u32) -> Option<PathBuf> {
     }
 }
 
-fn same_program(left: &str, right: &str) -> bool {
+/// 两个路径是否指同一个可执行文件（含 nix wrapper 规约）。
+///
+/// 公开出来是给组件接管用的（ADR-0034）：判断 state 里记的 pid 是否仍是
+/// 「这次要启动的那个程序」。pid 会复用，只凭「活着」就接管可能接管到
+/// 一个毫不相干的进程。
+pub fn same_program(left: &str, right: &str) -> bool {
     let canonical = |value: &str| {
         Path::new(value)
             .canonicalize()
