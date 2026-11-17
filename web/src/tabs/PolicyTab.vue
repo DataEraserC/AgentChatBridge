@@ -60,11 +60,34 @@ const admins = computed(() => {
 });
 const roles = computed(() => grants.value.roles ?? []);
 
+/**
+ * 规则的列。
+ *
+ * **必须带上 `id` / `place` / `scope` / `target`**：只给「效果/主体/能力/房间」
+ * 四列时，13 条规则在屏幕上长得一模一样（都是「拒绝 / system_admin / — / 全部
+ * 房间」），看起来像重复数据。实际上它们靠 `id`（`group-769843907-issue` 之类）、
+ * `place`（group/private）、`scope`（connection/room/subscribed）、`target`
+ * 区分。2026-11-17 用户就是被这个误导的。
+ */
+/** 规则的 target → 一句人话。`null` = 不限定（全部）。 */
+function describeTarget(target: unknown): string {
+  if (!target || typeof target !== "object") return t("console.policy.allRooms");
+  const record = target as Record<string, unknown>;
+  const kind = String(record.kind ?? "");
+  const id = String(record.id ?? "");
+  const sub = record.sub == null ? "" : String(record.sub);
+  if (!id) return t("console.policy.allRooms");
+  return sub ? `${kind}:${id}/${sub}` : `${kind}:${id}`;
+}
+
 const ruleHeaders = computed(() => [
+  { title: t("console.policy.col.id"), key: "id" },
   { title: t("console.policy.col.effect"), key: "effect" },
   { title: t("console.policy.col.subject"), key: "subject" },
   { title: t("console.policy.col.capabilities"), key: "capabilities" },
-  { title: t("console.policy.col.rooms"), key: "rooms" },
+  { title: t("console.policy.col.place"), key: "place" },
+  { title: t("console.policy.col.scope"), key: "scope" },
+  { title: t("console.policy.col.target"), key: "target" },
 ]);
 
 const roomHeaders = computed(() => [
@@ -122,13 +145,21 @@ function joinList(value: unknown): string {
         <template #item.subject="{ item }">
           <code class="text-caption">{{ item.subject || item.account || item.member || t("console.deps.none") }}</code>
         </template>
-        <template #item.capabilities="{ item }">
-          <span class="text-caption text-medium-emphasis">{{ joinList(item.capabilities) }}</span>
+        <template #item.id="{ item }">
+          <code class="text-caption">{{ item.id }}</code>
         </template>
-        <template #item.rooms="{ item }">
-          <span class="text-caption text-medium-emphasis">
-            {{ Array.isArray(item.rooms) && item.rooms.length ? joinList(item.rooms) : t("console.policy.allRooms") }}
-          </span>
+        <template #item.capabilities="{ item }">
+          <!-- 后端字段是 `capability`（单数，数组），不是 `capabilities`。 -->
+          <span class="text-caption text-medium-emphasis">{{ joinList(item.capability) }}</span>
+        </template>
+        <template #item.place="{ item }">
+          <span class="text-caption">{{ item.place || "—" }}</span>
+        </template>
+        <template #item.scope="{ item }">
+          <span class="text-caption">{{ item.scope || "—" }}</span>
+        </template>
+        <template #item.target="{ item }">
+          <span class="text-caption">{{ describeTarget(item.target) }}</span>
         </template>
       </v-data-table>
 
