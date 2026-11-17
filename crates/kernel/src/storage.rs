@@ -242,6 +242,25 @@ pub trait Transcript {
     /// 有记录的房间（清理由这里出发）。
     fn rooms(&self) -> Result<Vec<RoomId>, StorageError>;
 
+    /// 来过的房间 + 消息数 + 最近一条时间，按最近时间倒序，最多 `limit` 个。
+    ///
+    /// 与 [`rooms`](Self::rooms) 的区别是带统计：控制台的房间候选要让用户判断
+    /// 「这个群是活的吗」，光给 id 不够（ADR-0035）。
+    ///
+    /// 默认实现用 `rooms` + `count` + `latest` 拼，够测试替身用；真实存储覆盖成
+    /// 一条聚合查询，避免 N+1（控制台每次打开选择器都会调它）。
+    fn room_stats(&self, limit: usize) -> Result<Vec<RoomStat>, StorageError> {
+        let mut out = Vec::new();
+        for room in self.rooms()?.into_iter().take(limit) {
+            out.push(RoomStat {
+                messages: self.count(&room)?,
+                last_at: self.latest(&room)?,
+                room,
+            });
+        }
+        Ok(out)
+    }
+
     /// 房间里现有多少条。
     fn count(&self, room: &RoomId) -> Result<u64, StorageError>;
 
@@ -1035,6 +1054,18 @@ pub trait PluginDataStore {
 }
 
 /// 八样东西合起来。桥只依赖这一个约束，换后端只换实现。
+/// 一个来过的房间及其活跃度（ADR-0035）。
+///
+/// 控制台的房间候选要让用户判断「这个群是活的吗」，所以带 `messages` /
+/// `last_at`，而不是只给一个 id。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomStat {
+    pub room: RoomId,
+    pub messages: u64,
+    /// 最近一条消息的时间（Unix 毫秒）。
+    pub last_at: Option<u64>,
+}
+
 pub trait Store:
     Transcript
     + Watermarks
@@ -2543,6 +2574,54 @@ mod tests {
             store.count_delivery(&main, 2).expect("能记"),
             1,
             "没删的那条不受影响"
+        );
+    }
+
+    /// `room_stats` 给出消息数与最近时间，按最近时间倒序（ADR-0035）。
+    ///
+    /// 控制台的房间候选靠它让用户判断「这个群是活的吗」——只看 id 不够。
+    #[test]
+    fn room_stats_reports_message_counts() {
+        let mut store = MemoryStore::new();
+        let qq = room("qq", "1");
+        let discord = room("discord", "1");
+        store.append(draft(qq.clone(), "a")).expect("可写");
+        store.append(draft(qq.clone(), "b")).expect("可写");
+        store.append(draft(discord.clone(), "c")).expect("可写");
+
+        let stats = store.room_stats(10).expect("可读");
+        assert_eq!(stats.len(), 2, "有两个房间有记录");
+
+        let qq_stat = stats.iter().find(|s| s.room == qq).expect("有 qq");
+        assert_eq!(qq_stat.messages, 2);
+        assert!(qq_stat.last_at.is_some(), "有记录就有最近时间");
+
+        // limit 生效
+        assert_eq!(store.room_stats(1).expect("可读").len(), 1);
+    }
+
+    /// 手输校验的基础：库里没记录的房间 `count == 0`，有记录的 `> 0`。
+    ///
+    /// `Bridge::verify_room` 就是拿这两个判断「确认一次」的结果（ADR-0035），
+    /// 所以这里钉住底层语义：一个从没来过消息的房间必须是 0，不能被当成存在。
+    #[test]
+    fn unknown_room_has_zero_count() {
+        let mut store = MemoryStore::new();
+        let seen = room("qq", "1");
+        store.append(draft(seen.clone(), "a")).expect("可写");
+
+        assert!(
+            store.count(&seen).expect("可读") > 0,
+            "有记录的房间计数大于 0"
+        );
+        assert_eq!(
+            store.count(&room("qq", "never")).expect("可读"),
+            0,
+            "没来过消息的房间必须是 0，否则手输校验形同虚设"
+        );
+        assert!(
+            store.latest(&room("qq", "never")).expect("可读").is_none(),
+            "没来过消息的房间没有最近时间"
         );
     }
 

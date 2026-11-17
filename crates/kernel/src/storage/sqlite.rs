@@ -18,9 +18,9 @@ use super::{
     AuditEntry, AuditStore, ConfigObjectsStore, Cursor, Deliveries, FEEDBACK_CAP, Feedback,
     FeedbackDraft, FeedbackReply, Feedbacks, MIN_KEPT, ModelFallbackPolicy, ModelFallbacks, Note,
     NoteKey, NoteKind, Notes, PluginDataStore, PluginsStore, Policies, PolicyEffect, PrunePlan,
-    RecordDraft, Recorded, SecretsStore, SessionMap, SessionMaps, SettingsStore, StorageError,
-    StoredPluginConfig, StoredPluginRecord, StoredSecret, StuckUnread, TaskRecord, TaskStatus,
-    Tasks, TopicStatus, Transcript, Watermarks,
+    RecordDraft, Recorded, RoomStat, SecretsStore, SessionMap, SessionMaps, SettingsStore,
+    StorageError, StoredPluginConfig, StoredPluginRecord, StoredSecret, StuckUnread, TaskRecord,
+    TaskStatus, Tasks, TopicStatus, Transcript, Watermarks,
 };
 use crate::config_objects::{ConfigObject, ConfigObjectKind, ConfigObjects};
 use crate::grants::{
@@ -972,6 +972,49 @@ impl Transcript for SqliteStore {
             rooms.push(room);
         }
         Ok(rooms)
+    }
+
+    /// 一条聚合查询拿到「房间 + 消息数 + 最近时间」（ADR-0035）。
+    ///
+    /// 不用默认实现的 `rooms()` + 逐个 `count()`：那对每个房间都要一次查询，
+    /// 房间多时是 N+1。控制台每次打开选择器都会调它。
+    fn room_stats(&self, limit: usize) -> Result<Vec<RoomStat>, StorageError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT connection, room_key, COUNT(*) AS n, MAX(at) AS last_at \
+                 FROM records GROUP BY connection, room_key \
+                 ORDER BY last_at DESC LIMIT ?1",
+            )
+            .map_err(io_error)?;
+        let rows = statement
+            .query_map([limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })
+            .map_err(io_error)?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (connection, room_key, count, last_at) = row.map_err(io_error)?;
+            let room = RoomId::new(&connection, &room_key).map_err(|error| {
+                backend(acb_i18n::t!(
+                    "kernel.storage.unrecognized_room",
+                    connection = connection,
+                    room_key = room_key
+                )) as StorageError
+            })?;
+            out.push(RoomStat {
+                room,
+                messages: count.max(0) as u64,
+                last_at: last_at.map(|value| value.max(0) as u64),
+            });
+        }
+        Ok(out)
     }
 
     fn count(&self, room: &RoomId) -> Result<u64, StorageError> {

@@ -110,7 +110,7 @@ pub use route_worker::RouteWorker;
 pub use storage::{
     Counts, Cursor, Deliveries, FEEDBACK_CAP, Feedback, FeedbackDraft, FeedbackReply, Feedbacks,
     MIN_KEPT, MemoryStore, ModelFallbackPolicy, ModelFallbacks, Note, NoteKey, NoteKind, Notes,
-    Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded, SCHEMA_VERSION, SessionMap,
+    Policies, PolicyEffect, PrunePlan, RecordDraft, Recorded, RoomStat, SCHEMA_VERSION, SessionMap,
     SessionMaps, SqliteStore, StorageError, Store, StuckUnread, Tasks, TopicStatus, Transcript,
     Watermarks, unread,
 };

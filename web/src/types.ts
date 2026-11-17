@@ -310,9 +310,36 @@ export interface PenaltyView {
 export interface RoomsView {
   connection: string;
   supported: boolean;
+  /**
+   * 来过消息的房间（ADR-0035）。
+   *
+   * 与 `rooms` **分开**：`rooms` 是适配器自报的「平台上有哪些房间」，可信度由
+   * `supported` 决定；`seen` 是「这些房间确实有消息」，数据来自 `records` 表，
+   * **与适配器能力无关**。所以 `supported: false` 时 `seen` 照样可信——这正是
+   * `qqbot-official` 那种「平台不给枚举，但群是活的」情况。
+   */
+  seen?: SeenRoom[];
   /** 本次结果是否命中服务端缓存（TTL 由 ACB_CONSOLE_ROOMS_TTL_SECS 控制，0 = 不缓存）。 */
   cached: boolean;
   rooms: RoomChoice[];
+}
+
+/** 来过消息的房间，带活跃度。 */
+export interface SeenRoom {
+  room: string;
+  /** 这个房间累计有多少条消息。 */
+  messages: number;
+  /** 最近一条消息的时间（Unix 毫秒）；`null` = 未知。 */
+  last_at: number | null;
+}
+
+/** `POST /api/rooms/verify` 的回执：手输的房间在库里出现过没有。 */
+export interface RoomVerifyView {
+  known: boolean;
+  room: string;
+  /** `known: true` 时给出。 */
+  messages?: number;
+  last_at?: number | null;
 }
 
 /** 一条可选的房间。`label` 只给人看，不参与路由。 */

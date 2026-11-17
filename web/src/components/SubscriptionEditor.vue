@@ -28,6 +28,11 @@ const client = useQueryClient();
 const notice = ref("");
 const connection = ref("");
 const draftRoom = ref("");
+/** 房间选择器暴露的校验状态：`unknown` 时禁止提交（ADR-0035）。 */
+const picker = ref<{ verifyState: { state: string; detail: string } } | null>(null);
+
+/** 手输了一个库中不存在的房间：报错、不提交、不留痕。 */
+const blocked = computed(() => picker.value?.verifyState.state === "unknown");
 
 /** 连接列表从 `/api/config` 拿：那里已经按敏感字段遮过一遍。 */
 const config = useQuery({
@@ -59,6 +64,12 @@ const save = useMutation({
 function add(): void {
   const room = draftRoom.value.trim();
   if (!room) return;
+  if (blocked.value) {
+    // 用户在候选外手输了一个从没出现过消息的房间。ADR-0035 的裁定是
+    // 「没有这个群则报错，也不维护也不提交」，所以这里直接拦住。
+    notice.value = t("console.rooms.cannotSubmit");
+    return;
+  }
   const parts = room.split(":");
   if (parts.length < 2) {
     notice.value = t("console.rooms.badFormat");
@@ -117,6 +128,7 @@ function remove(room: string): void {
     <div class="d-flex ga-2 mt-2 flex-wrap align-start">
       <div style="flex: 1 1 22rem; min-width: 0">
         <RoomPicker
+          ref="picker"
           v-model="draftRoom"
           :connection="connection"
           :label="t('console.rooms.add')"
@@ -124,7 +136,7 @@ function remove(room: string): void {
       </div>
       <v-btn
         color="primary"
-        :disabled="save.isPending.value || !draftRoom.trim()"
+        :disabled="save.isPending.value || !draftRoom.trim() || blocked"
         @click="add"
       >
         {{ t("console.rooms.add") }}

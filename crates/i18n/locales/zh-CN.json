@@ -1532,6 +1532,10 @@
   "bridge.console.rooms_connection_required": "要指定连接名（?connection=）",
   "bridge.console.rooms_connection_unknown": "没有这条连接",
   "bridge.console.rooms_unavailable": "这个适配器现在给不出房间列表",
+  "bridge.console.rooms_bad_id": "房间写法不对，应形如「连接名:段/段」，例如 qq:group/123",
+  "bridge.console.rooms_verify_failed": "确认房间失败",
+  "bridge.console.rooms_body_json": "请求体不是 JSON",
+  "bridge.console.rooms_room_required": "要指定房间（room）",
   "adapter.qqbot.connected": "适配器 {id} 已连上网关 {url}",
   "adapter.qqbot.dispatch": "适配器 {connection}：dispatch {event}",
   "adapter.qqbot.disconnected": "适配器 {id} 掉线：{detail}",
@@ -1577,5 +1581,10 @@
   "console.rooms.remove": "移除",
   "console.rooms.connection": "连接",
   "console.rooms.badFormat": "房间要写成「连接名:段/段」，例如 qq:group/123",
-  "console.rooms.editTitle": "编辑订阅"
+  "console.rooms.editTitle": "编辑订阅",
+  "console.rooms.seenCount": "{count} 条消息",
+  "console.rooms.checking": "确认中…",
+  "console.rooms.verified": "确认：这个房间有 {count} 条消息",
+  "console.rooms.unknown": "库里没有这个房间的消息记录，不能添加；确认群号/房间 id 是否正确",
+  "console.rooms.cannotSubmit": "这个房间在库里没有消息记录，未提交（确认后重试）"
 }

@@ -341,8 +341,18 @@ pub struct Console<S: Store> {
 #[derive(Debug, Clone)]
 struct RoomsPayload {
     supported: bool,
+    /// 适配器自报的房间（依赖 `list_rooms` 实现）。
     rooms: Vec<acb_kernel::RoomChoice>,
+    /// 来过消息的房间（ADR-0035）。与 `rooms` 分开：它的语义是「这些房间确实
+    /// 有消息」，**与适配器能力无关**，所以 `supported: false` 时它照样可信。
+    seen: Vec<acb_kernel::RoomStat>,
 }
+
+/// `/api/rooms` 里 `seen` 段最多返回多少个房间。
+///
+/// 按最近消息倒序取，不要求一次给全：见过几百个群的账号，全列出来对选择器
+/// 没有帮助（ADR-0035 的已知代价）。
+const SEEN_ROOMS_LIMIT: usize = 200;
 
 /// 房间缓存的默认 TTL（秒）。0 = 不缓存。
 ///
@@ -637,6 +647,8 @@ impl<S: Store + Send + 'static> Console<S> {
             // 房间枚举（ADR-0033）：控制台订阅编辑用下拉而不是手输。
             // 只读、只走适配器自报的 `list_rooms`，不碰 platform_call。
             ("GET", "/api/rooms") => self.rooms_view(query_param(query, "connection")),
+            // 手输房间的确认（ADR-0035）：只读、无副作用，查库判断这个房间出现过没有。
+            ("POST", "/api/rooms/verify") => self.rooms_verify(body),
             // 记忆管家：最近一次同步时间、结果、冲突文件数与失败原因。
             // 管家线程写 status.json，这里只读，不阻塞任何同步动作。
             ("GET", "/api/memory-steward") => (200, self.memory_steward_status()),
@@ -1099,14 +1111,20 @@ impl<S: Store + Send + 'static> Console<S> {
                 Some(connection.to_owned()),
             );
         }
+        // 见过的房间先查（只读、不依赖适配器），再问适配器要枚举。
+        let seen = bridge
+            .seen_rooms(connection, SEEN_ROOMS_LIMIT)
+            .unwrap_or_default();
         let payload = match bridge.room_choices(connection) {
             Ok(Some(rooms)) => RoomsPayload {
                 supported: true,
                 rooms,
+                seen,
             },
             Ok(None) => RoomsPayload {
                 supported: false,
                 rooms: Vec::new(),
+                seen,
             },
             Err(detail) => {
                 return error_response(
@@ -1125,6 +1143,69 @@ impl<S: Store + Send + 'static> Console<S> {
             cache.insert(connection.to_owned(), (now, payload.clone()));
         }
         (200, rooms_json(connection, &payload, false))
+    }
+
+    /// `POST /api/rooms/verify` —— 手输房间的确认（ADR-0035）。
+    ///
+    /// 用户裁定：「用户可以手动输入，我们最终会确认一次，若确实有这个群则把其
+    /// 加入到我们的维护列表并将用户输入的这个提交，若没有这个群则报错，也不维护
+    /// 也不提交」。
+    ///
+    /// 这里只做**确认**：`known: false` 时前端不该提交订阅。不带副作用是刻意的
+    /// ——确认与提交分两步，确认失败不留下任何痕迹。
+    fn rooms_verify(&self, body: &str) -> (u16, String) {
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_response(
+                    400,
+                    acb_i18n::msg!("bridge.console.rooms_body_json"),
+                    Some(error.to_string()),
+                );
+            }
+        };
+        let room_text = parsed
+            .get("room")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(room_text) = room_text else {
+            return error_response(
+                400,
+                acb_i18n::msg!("bridge.console.rooms_room_required"),
+                None,
+            );
+        };
+        let Ok(room) = acb_kernel::RoomId::parse(room_text) else {
+            return error_response(
+                400,
+                acb_i18n::msg!("bridge.console.rooms_bad_id"),
+                Some(room_text.to_owned()),
+            );
+        };
+
+        let bridge = lock(&self.bridge);
+        match bridge.verify_room(&room) {
+            Ok(Some(stat)) => (
+                200,
+                json!({
+                    "known": true,
+                    "room": room.to_string(),
+                    "messages": stat.messages,
+                    "last_at": stat.last_at,
+                })
+                .to_string(),
+            ),
+            Ok(None) => (
+                200,
+                json!({ "known": false, "room": room.to_string() }).to_string(),
+            ),
+            Err(detail) => error_response(
+                502,
+                acb_i18n::msg!("bridge.console.rooms_verify_failed"),
+                Some(detail),
+            ),
+        }
     }
 
     fn model_fallbacks_view(&self, session: Option<&str>) -> (u16, String) {
@@ -2691,6 +2772,15 @@ fn rooms_json(connection: &str, payload: &RoomsPayload, cached: bool) -> String 
                 "kind": choice.kind,
             }))
             .collect::<Vec<_>>(),
+        "seen": payload
+            .seen
+            .iter()
+            .map(|stat| json!({
+                "room": stat.room.to_string(),
+                "messages": stat.messages,
+                "last_at": stat.last_at,
+            }))
+            .collect::<Vec<_>>(),
     })
     .to_string()
 }
@@ -3421,6 +3511,7 @@ room = "group/123"
             &RoomsPayload {
                 supported: false,
                 rooms: Vec::new(),
+                seen: Vec::new(),
             },
             false,
         );
@@ -3433,6 +3524,7 @@ room = "group/123"
             &RoomsPayload {
                 supported: true,
                 rooms: Vec::new(),
+                seen: Vec::new(),
             },
             false,
         );
@@ -3449,6 +3541,7 @@ room = "group/123"
             "qq",
             &RoomsPayload {
                 supported: true,
+                seen: Vec::new(),
                 rooms: vec![acb_kernel::RoomChoice {
                     room,
                     label: "测试群".to_owned(),

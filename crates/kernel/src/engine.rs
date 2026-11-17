@@ -65,7 +65,7 @@ use crate::policy::{CorePolicy, Policy, PolicyError};
 use crate::render;
 use crate::storage::{
     Cursor, FEEDBACK_CAP, Feedback, FeedbackReply, MIN_KEPT, Note, NoteKey, NoteKind, PrunePlan,
-    RecordDraft, StorageError, Store, TopicStatus, unread,
+    RecordDraft, RoomStat, StorageError, Store, TopicStatus, unread,
 };
 use crate::tickets::{
     ACTIVE_TTL_MS, AccessTicket, AccessTickets, ApprovalMeta, BatchReply, MAX_LIVE_PER_SESSION,
@@ -2669,6 +2669,43 @@ impl<S: Store> Bridge<S> {
         self.outbound
             .list_rooms(connection)
             .map_err(|error| error.to_string())
+    }
+
+    /// 这条连接上来过消息的房间（ADR-0035）。
+    ///
+    /// 与 [`room_choices`](Self::room_choices) 的区别：那个问的是「平台上有哪些
+    /// 房间」（依赖适配器实现枚举），这个查的是「哪些房间真的有消息」——数据
+    /// 来自 `records` 表，**与适配器能力无关**。
+    ///
+    /// 为什么需要它：`qqbot-official` 的平台 API 不提供「列出机器人所在的群」，
+    /// 但它收到的群消息会落库。于是那些群照样能出现在候选里，不用手输
+    /// openid。用户裁定：「自动维护有消息的群」。
+    pub fn seen_rooms(&self, connection: &str, limit: usize) -> Result<Vec<RoomStat>, String> {
+        let stats = self
+            .store
+            .room_stats(limit)
+            .map_err(|error| error.to_string())?;
+        Ok(stats
+            .into_iter()
+            .filter(|stat| stat.room.connection == connection)
+            .collect())
+    }
+
+    /// 某个房间是否在库里出现过（ADR-0035 的手输校验）。
+    ///
+    /// 只读、无副作用：手输的房间要「确认一次」，确认的后端就是这条。
+    /// 返回 `None` = 库里没有这个房间（调用方据此报错、不提交）。
+    pub fn verify_room(&self, room: &RoomId) -> Result<Option<RoomStat>, String> {
+        let count = self.store.count(room).map_err(|error| error.to_string())?;
+        if count == 0 {
+            return Ok(None);
+        }
+        let last_at = self.store.latest(room).map_err(|error| error.to_string())?;
+        Ok(Some(RoomStat {
+            room: room.clone(),
+            messages: count,
+            last_at,
+        }))
     }
 
     /// 当前生效的后备模型链（控制台展示用）。

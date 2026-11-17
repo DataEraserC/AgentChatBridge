@@ -1532,6 +1532,10 @@
   "bridge.console.rooms_connection_required": "connection name is required (?connection=)",
   "bridge.console.rooms_connection_unknown": "no such connection",
   "bridge.console.rooms_unavailable": "this adapter cannot enumerate rooms right now",
+  "bridge.console.rooms_bad_id": "malformed room; expected connection:segment/segment, e.g. qq:group/123",
+  "bridge.console.rooms_verify_failed": "room verification failed",
+  "bridge.console.rooms_body_json": "request body is not JSON",
+  "bridge.console.rooms_room_required": "room is required",
   "adapter.qqbot.connected": "adapter {id} connected to {url}",
   "adapter.qqbot.dispatch": "adapter {connection}: dispatch {event}",
   "adapter.qqbot.disconnected": "adapter {id} disconnected: {detail}",
@@ -1577,5 +1581,10 @@
   "console.rooms.remove": "Remove",
   "console.rooms.connection": "Connection",
   "console.rooms.badFormat": "A room must be connection:segment/segment, e.g. qq:group/123",
-  "console.rooms.editTitle": "Edit subscriptions"
+  "console.rooms.editTitle": "Edit subscriptions",
+  "console.rooms.seenCount": "{count} messages",
+  "console.rooms.checking": "Verifying…",
+  "console.rooms.verified": "Verified: this room has {count} messages",
+  "console.rooms.unknown": "No message history for this room; check the room id",
+  "console.rooms.cannotSubmit": "This room has no message history in the database; not submitted"
 }
