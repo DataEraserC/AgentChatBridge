@@ -14432,6 +14432,7 @@ mod membership_ingest_tests {
     }
 }
 
+#[cfg(test)]
 mod connection_registry_tests {
     use super::*;
     use crate::adapter::ProviderConnections;

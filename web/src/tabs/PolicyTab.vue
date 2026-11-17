@@ -154,9 +154,12 @@ function submit(): void {
  *
  * 分开算再合并，而不是信任行内字段——效果由来源数组决定（见 `effectLabel`）。
  */
-const rows = computed<Array<Record<string, unknown> & { effect: "allow" | "deny" }>>(() => [
-  ...currentRules.value.map((rule) => ({ ...rule, effect: "allow" as const })),
-  ...currentDeny.value.map((rule) => ({ ...rule, effect: "deny" as const })),
+/** 表格行：在原始数组下标上再带一个 `idx`，编辑时按它定位。 */
+const rows = computed<
+  Array<Record<string, unknown> & { effect: "allow" | "deny"; idx: number }>
+>(() => [
+  ...currentRules.value.map((rule, idx) => ({ ...rule, effect: "allow" as const, idx })),
+  ...currentDeny.value.map((rule, idx) => ({ ...rule, effect: "deny" as const, idx })),
 ]);
 /* ── 房间 / 管理员 / 角色的编辑（ADR：每个页面都要能增删改查） ────────── */
 
@@ -207,6 +210,78 @@ function parseList(raw: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+/**
+ * 规则各字段的合法取值。
+ *
+ * 全部对着后端枚举的 serde 表示抄的（`grants.rs`）：写错一个值后端会拒整份
+ * 提交，所以这里宁可列全，也不让人手打。
+ */
+const SUBJECT_OPTIONS = computed(() => [
+  { value: "system", title: "system" },
+  { value: "system_admin", title: "system_admin" },
+  { value: "bot_admin", title: "bot_admin" },
+  { value: "user", title: "user" },
+]);
+
+/** `Place` 序列化成字符串：private / group / console / none。 */
+const PLACE_OPTIONS = computed(() => [
+  { value: "private", title: t("console.policy.place.private") },
+  { value: "group", title: t("console.policy.place.group") },
+  { value: "console", title: t("console.policy.place.console") },
+  { value: "none", title: t("console.policy.place.none") },
+]);
+
+const SCOPE_OPTIONS = computed(() => [
+  { value: "subscribed", title: "subscribed" },
+  { value: "room", title: "room" },
+  { value: "connection", title: "connection" },
+  { value: "platform_op", title: "platform_op" },
+]);
+
+const CAPABILITY_OPTIONS = computed(() => [
+  { value: "room_read", title: "room_read" },
+  { value: "room_write", title: "room_write" },
+  { value: "connection_read", title: "connection_read" },
+  { value: "platform", title: "platform" },
+  { value: "destructive", title: "destructive" },
+  { value: "critical", title: "critical" },
+  { value: "account_read", title: "account_read" },
+  { value: "account_secret", title: "account_secret" },
+]);
+
+/** 改规则的某个标量字段。`id` 也在这里——后端用 id 做稳定标识，允许改。 */
+function setRuleField(
+  effect: "allow" | "deny",
+  index: number,
+  field: "id" | "subject" | "place" | "scope",
+  value: string,
+): void {
+  if (!draft.value) beginEdit();
+  const list = effect === "deny" ? draft.value?.deny : draft.value?.rules;
+  if (!list || !list[index]) return;
+  list[index] = { ...list[index], [field]: value.trim() };
+}
+
+/** 改规则的能力集合（多选）。 */
+function setRuleCapabilities(effect: "allow" | "deny", index: number, value: string[]): void {
+  if (!draft.value) beginEdit();
+  const list = effect === "deny" ? draft.value?.deny : draft.value?.rules;
+  if (!list || !list[index]) return;
+  list[index] = { ...list[index], capability: value };
+}
+
+/** 改规则的目标（`kind:id/sub` 简写成 `id`；空 = 不限定）。 */
+function setRuleTarget(effect: "allow" | "deny", index: number, raw: string): void {
+  if (!draft.value) beginEdit();
+  const list = effect === "deny" ? draft.value?.deny : draft.value?.rules;
+  if (!list || !list[index]) return;
+  const text = raw.trim();
+  list[index] = {
+    ...list[index],
+    target: text ? { kind: "connection", id: text, sub: null } : null,
+  };
 }
 
 /** 改房间的信任档位。只动草稿，保存时才落库。 */
@@ -297,6 +372,13 @@ const admins = computed(() => {
  * `place`（group/private）、`scope`（connection/room/subscribed）、`target`
  * 区分。2026-11-17 用户就是被这个误导的。
  */
+/** 规则的 target → 编辑框里显示的值（`id`；不限定就是空）。 */
+function targetText(target: unknown): string {
+  if (!target || typeof target !== "object") return "";
+  const record = target as Record<string, unknown>;
+  return String(record.id ?? "");
+}
+
 /** 规则的 target → 一句人话。`null` = 不限定（全部）。 */
 function describeTarget(target: unknown): string {
   if (!target || typeof target !== "object") return t("console.policy.allRooms");
@@ -431,24 +513,93 @@ function joinList(value: unknown): string {
             {{ effectLabel(item.effect === 'deny') }}
           </v-chip>
         </template>
-        <template #item.subject="{ item }">
-          <code class="text-caption">{{ item.subject || item.account || item.member || t("console.deps.none") }}</code>
-        </template>
+        <!-- 编辑态：每个字段就地可改，不用删了重加。 -->
         <template #item.id="{ item }">
-          <code class="text-caption">{{ item.id }}</code>
+          <v-text-field
+            v-if="draft"
+            :model-value="String(item.id ?? '')"
+            density="compact"
+            variant="plain"
+            hide-details
+            style="min-width: 12rem"
+            @update:model-value="setRuleField(item.effect, item.idx, 'id', String($event))"
+          />
+          <code v-else class="text-caption">{{ item.id }}</code>
+        </template>
+        <template #item.subject="{ item }">
+          <v-select
+            v-if="draft"
+            :model-value="String(item.subject ?? '')"
+            :items="SUBJECT_OPTIONS"
+            item-title="title"
+            item-value="value"
+            density="compact"
+            variant="plain"
+            hide-details
+            style="max-width: 9rem"
+            @update:model-value="setRuleField(item.effect, item.idx, 'subject', String($event))"
+          />
+          <code v-else class="text-caption">{{ item.subject || item.account || item.member || t("console.deps.none") }}</code>
         </template>
         <template #item.capabilities="{ item }">
-          <!-- 后端字段是 `capability`（单数，数组），不是 `capabilities`。 -->
-          <span class="text-caption text-medium-emphasis">{{ joinList(item.capability) }}</span>
+          <v-select
+            v-if="draft"
+            :model-value="item.capability"
+            :items="CAPABILITY_OPTIONS"
+            item-title="title"
+            item-value="value"
+            multiple
+            chips
+            density="compact"
+            variant="plain"
+            hide-details
+            style="min-width: 14rem"
+            @update:model-value="setRuleCapabilities(item.effect, item.idx, $event as string[])"
+          />
+          <span v-else class="text-caption text-medium-emphasis">{{ joinList(item.capability) }}</span>
         </template>
         <template #item.place="{ item }">
-          <span class="text-caption">{{ item.place || "—" }}</span>
+          <v-select
+            v-if="draft"
+            :model-value="String(item.place ?? 'group')"
+            :items="PLACE_OPTIONS"
+            item-title="title"
+            item-value="value"
+            density="compact"
+            variant="plain"
+            hide-details
+            style="max-width: 8rem"
+            @update:model-value="setRuleField(item.effect, item.idx, 'place', String($event))"
+          />
+          <span v-else class="text-caption">{{ item.place || "—" }}</span>
         </template>
         <template #item.scope="{ item }">
-          <span class="text-caption">{{ item.scope || "—" }}</span>
+          <v-select
+            v-if="draft"
+            :model-value="String(item.scope ?? 'subscribed')"
+            :items="SCOPE_OPTIONS"
+            item-title="title"
+            item-value="value"
+            density="compact"
+            variant="plain"
+            hide-details
+            style="max-width: 9rem"
+            @update:model-value="setRuleField(item.effect, item.idx, 'scope', String($event))"
+          />
+          <span v-else class="text-caption">{{ item.scope || "—" }}</span>
         </template>
         <template #item.target="{ item }">
-          <span class="text-caption">{{ describeTarget(item.target) }}</span>
+          <v-text-field
+            v-if="draft"
+            :model-value="targetText(item.target)"
+            :placeholder="t('console.policy.targetPlaceholder')"
+            density="compact"
+            variant="plain"
+            hide-details
+            style="min-width: 10rem"
+            @update:model-value="setRuleTarget(item.effect, item.idx, String($event))"
+          />
+          <span v-else class="text-caption">{{ describeTarget(item.target) }}</span>
         </template>
         <template #item.actions="{ item }">
           <v-btn
