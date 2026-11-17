@@ -20,6 +20,7 @@ import { api } from "../api";
 import { useI18n } from "../i18n";
 import { queryKeys } from "../queryKeys";
 import type { RoomVerifyView, RoomsView } from "../types";
+import { icons } from "../icons";
 
 const props = defineProps<{
   /** 连接名。空 = 还不知道要问哪条连接，此时只给手输框。 */
@@ -163,7 +164,7 @@ defineExpose({ verifyState: verify });
           :aria-label="t('console.rooms.refresh')"
           @click.stop="rooms.refetch()"
         >
-          <v-icon icon="mdi-refresh" size="small" />
+          <v-icon :icon="icons.refresh" size="small" />
         </v-btn>
       </template>
     </v-combobox>

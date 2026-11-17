@@ -12,6 +12,7 @@
 
 import { computed } from "vue";
 import { useI18n } from "../i18n";
+import { icons } from "../icons";
 
 const props = withDefaults(
   defineProps<{
@@ -44,7 +45,7 @@ const tipText = computed(() => (props.tipKey ? t(props.tipKey) : props.tip ?? ""
         size="x-small"
         :aria-label="t('console.ui.info.more')"
       >
-        <v-icon icon="mdi-information-outline" size="small" />
+        <v-icon :icon="icons.info" size="small" />
         <v-tooltip activator="parent" location="bottom" max-width="460">
           <span style="white-space: pre-line">{{ tipText }}</span>
         </v-tooltip>

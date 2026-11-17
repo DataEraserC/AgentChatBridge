@@ -14,6 +14,7 @@ import { queryKeys } from "../queryKeys";
 import type { DependenciesView, DependencyEntry, StatusView } from "../types";
 import PageCard from "../components/PageCard.vue";
 import QueryState from "../components/QueryState.vue";
+import { icons } from "../icons";
 
 const { t } = useI18n();
 
@@ -78,7 +79,7 @@ async function refresh(): Promise<void> {
       <v-btn
         size="small"
         variant="text"
-        prepend-icon="mdi-refresh"
+        :prepend-icon="icons.refresh"
         :loading="status.isFetching.value"
         @click="refresh"
       >
@@ -106,7 +107,7 @@ async function refresh(): Promise<void> {
       <v-btn
         size="small"
         variant="text"
-        prepend-icon="mdi-refresh"
+        :prepend-icon="icons.refresh"
         :loading="deps.isFetching.value"
         @click="deps.refetch()"
       >

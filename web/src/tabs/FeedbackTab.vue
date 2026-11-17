@@ -12,6 +12,7 @@ import { queryKeys } from "../queryKeys";
 import type { FeedbacksView } from "../types";
 import PageCard from "../components/PageCard.vue";
 import QueryState from "../components/QueryState.vue";
+import { icons } from "../icons";
 
 const { t } = useI18n();
 
@@ -51,7 +52,7 @@ function when(at: number | undefined): string {
       <v-btn
         size="small"
         variant="text"
-        prepend-icon="mdi-refresh"
+        :prepend-icon="icons.refresh"
         :loading="feedback.isFetching.value"
         @click="feedback.refetch()"
       >

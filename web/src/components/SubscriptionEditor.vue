@@ -15,6 +15,7 @@ import { api } from "../api";
 import { useI18n } from "../i18n";
 import { queryKeys } from "../queryKeys";
 import RoomPicker from "./RoomPicker.vue";
+import { icons } from "../icons";
 
 const props = defineProps<{
   sessionId: string;
@@ -108,7 +109,7 @@ function remove(room: string): void {
         :disabled="save.isPending.value"
         @click="remove(room)"
       >
-        <v-icon icon="mdi-close" size="small" />
+        <v-icon :icon="icons.close" size="small" />
       </v-btn>
     </div>
 

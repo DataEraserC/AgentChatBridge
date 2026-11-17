@@ -14,6 +14,7 @@ import { queryKeys } from "../queryKeys";
 import type { PolicyView } from "../types";
 import PageCard from "../components/PageCard.vue";
 import QueryState from "../components/QueryState.vue";
+import { icons } from "../icons";
 
 const { t } = useI18n();
 
@@ -93,7 +94,7 @@ function joinList(value: unknown): string {
       <v-btn
         size="small"
         variant="text"
-        prepend-icon="mdi-refresh"
+        :prepend-icon="icons.refresh"
         :loading="policy.isFetching.value"
         @click="policy.refetch()"
       >

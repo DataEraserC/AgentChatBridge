@@ -15,6 +15,7 @@ import type { SessionsView } from "../types";
 import PageCard from "../components/PageCard.vue";
 import QueryState from "../components/QueryState.vue";
 import SubscriptionEditor from "../components/SubscriptionEditor.vue";
+import { icons } from "../icons";
 
 const { t } = useI18n();
 
@@ -49,7 +50,7 @@ const headers = computed(() => [
       <v-btn
         size="small"
         variant="text"
-        prepend-icon="mdi-refresh"
+        :prepend-icon="icons.refresh"
         :loading="sessions.isFetching.value"
         @click="sessions.refetch()"
       >

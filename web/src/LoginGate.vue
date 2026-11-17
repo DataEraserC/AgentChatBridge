@@ -12,6 +12,7 @@
 import { ref } from "vue";
 import { api, ApiError, hasToken, storeToken } from "./api";
 import { useI18n } from "./i18n";
+import { icons } from "./icons";
 
 const emit = defineEmits<{ authed: [] }>();
 
@@ -62,7 +63,7 @@ async function submit(): Promise<void> {
               <div class="d-flex align-center mb-4">
                 <h1 class="text-h6">{{ t("console.ui.login.title") }}</h1>
                 <v-btn icon variant="text" size="x-small" class="ms-2" :aria-label="t('console.ui.info.more')">
-                  <v-icon icon="mdi-information-outline" size="small" />
+                  <v-icon :icon="icons.info" size="small" />
                   <v-tooltip activator="parent" location="bottom" max-width="420">
                     {{ t("console.ui.login.tip") }}
                   </v-tooltip>
@@ -76,7 +77,7 @@ async function submit(): Promise<void> {
                   :placeholder="t('console.ui.login.placeholder')"
                   type="password"
                   autocomplete="current-password"
-                  prepend-inner-icon="mdi-key-outline"
+                  prepend-inner-:icon="icons.key"
                   :rules="[(v: string) => !!v.trim() || t('console.ui.login.empty')]"
                 />
                 <v-alert

@@ -16,6 +16,7 @@ import type { PluginsView } from "../types";
 import PageCard from "../components/PageCard.vue";
 import QueryState from "../components/QueryState.vue";
 import PluginConfigForm from "../components/PluginConfigForm.vue";
+import { icons } from "../icons";
 
 const { t } = useI18n();
 const expanded = ref<string[]>([]);
@@ -47,7 +48,7 @@ function fieldCount(plugin: { schema?: { config?: unknown[] } }): number {
       <v-btn
         size="small"
         variant="text"
-        prepend-icon="mdi-refresh"
+        :prepend-icon="icons.refresh"
         :loading="plugins.isFetching.value"
         @click="plugins.refetch()"
       >

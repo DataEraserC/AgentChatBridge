@@ -14,6 +14,7 @@ import { useI18n, type Locale } from "./i18n";
 import { TABS } from "./router";
 import { vuetifyLocale } from "./plugins/vuetify";
 import LoginGate from "./LoginGate.vue";
+import { icons } from "./icons";
 
 const { t, locale, change } = useI18n();
 const route = useRoute();
@@ -123,7 +124,7 @@ const vLocale = computed(() => vuetifyLocale(locale.value));
       </v-app-bar-title>
 
       <v-btn icon variant="text" size="small" :aria-label="t('console.ui.info.more')">
-        <v-icon icon="mdi-information-outline" />
+        <v-icon :icon="icons.info" />
         <v-tooltip activator="parent" location="bottom" max-width="420">
           {{ t("console.ui.header.tip") }}
         </v-tooltip>
@@ -158,7 +159,7 @@ const vLocale = computed(() => vuetifyLocale(locale.value));
       <v-btn
         variant="text"
         size="small"
-        prepend-icon="mdi-swap-horizontal"
+        :prepend-icon="icons.swap"
         :title="t('console.ui.toLegacyTip')"
         @click="openLegacyConsole"
       >

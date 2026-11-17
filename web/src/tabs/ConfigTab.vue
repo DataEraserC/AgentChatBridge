@@ -13,6 +13,7 @@ import { useI18n } from "../i18n";
 import { queryKeys } from "../queryKeys";
 import PageCard from "../components/PageCard.vue";
 import QueryState from "../components/QueryState.vue";
+import { icons } from "../icons";
 
 const { t } = useI18n();
 const client = useQueryClient();
@@ -109,7 +110,7 @@ const scalarHeaders = computed(() => [
       <v-btn
         size="small"
         variant="text"
-        prepend-icon="mdi-refresh"
+        :prepend-icon="icons.refresh"
         :loading="config.isFetching.value"
         @click="config.refetch()"
       >
@@ -153,7 +154,7 @@ const scalarHeaders = computed(() => [
 
   <PageCard title-key="console.config.tomlTitle" tip-key="console.config.tomlIntro">
     <template #actions>
-      <v-btn size="small" variant="text" prepend-icon="mdi-file-eye-outline" @click="openToml">
+      <v-btn size="small" variant="text" :prepend-icon="icons.view" @click="openToml">
         {{ toml.data.value ? t("console.config.reload") : t("console.config.open") }}
       </v-btn>
     </template>

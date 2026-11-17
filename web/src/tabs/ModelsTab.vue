@@ -23,6 +23,7 @@ import type {
 import PageCard from "../components/PageCard.vue";
 import QueryState from "../components/QueryState.vue";
 import { ref, watch } from "vue";
+import { icons } from "../icons";
 
 const { t } = useI18n();
 const client = useQueryClient();
@@ -170,7 +171,7 @@ const penalties = computed(() => penalty.data.value?.penalties ?? []);
       <v-btn
         size="small"
         variant="text"
-        prepend-icon="mdi-refresh"
+        :prepend-icon="icons.refresh"
         :loading="chain.isFetching.value"
         @click="chain.refetch()"
       >
@@ -238,7 +239,7 @@ const penalties = computed(() => penalty.data.value?.penalties ?? []);
             :aria-label="t('console.models.up')"
             @click="move(item.position, -1)"
           >
-            <v-icon icon="mdi-arrow-up" size="small" />
+            <v-icon :icon="icons.arrowUp" size="small" />
           </v-btn>
           <v-btn
             icon
@@ -248,7 +249,7 @@ const penalties = computed(() => penalty.data.value?.penalties ?? []);
             :aria-label="t('console.models.down')"
             @click="move(item.position, 1)"
           >
-            <v-icon icon="mdi-arrow-down" size="small" />
+            <v-icon :icon="icons.arrowDown" size="small" />
           </v-btn>
           <v-btn
             icon
@@ -259,7 +260,7 @@ const penalties = computed(() => penalty.data.value?.penalties ?? []);
             :aria-label="t('console.models.remove')"
             @click="removeAt(item.position)"
           >
-            <v-icon icon="mdi-delete-outline" size="small" />
+            <v-icon :icon="icons.remove" size="small" />
           </v-btn>
         </template>
       </v-data-table>

@@ -27,6 +27,18 @@ skip() { echo "console-web: SKIP $*"; exit 0; }
 [[ -d $web_dir/node_modules ]] || skip "没有 $web_dir/node_modules；先在该目录 npm install"
 command -v node >/dev/null 2>&1 || skip "PATH 里没有 node"
 
+# 图标必须走 `src/icons.ts` 的路径常量，不能写 `mdi-xxx` 字符串。
+#
+# `vuetify.ts` 用的是 `mdi-svg` 图标集，它不吃字符串名：`<v-icon icon="mdi-arrow-up">`
+# 会把 `mdi-arrow-up` 原样写进 `<path d="mdi-arrow-up">`，浏览器画不出任何东西。
+# 症状最难查的那种——按钮存在、可点、量得到 20×20、aria-label 也对，只是空白。
+# 2026-11-17 真机踩中：用户报「看不到删除和调顺序按钮」。
+if grep -rn 'icon="mdi-' "$web_dir/src" --include='*.vue' >/dev/null 2>&1; then
+  hits=$(grep -rn 'icon="mdi-' "$web_dir/src" --include='*.vue' | head -5)
+  fail "图标写成了字符串名（mdi-svg 画不出来，改用 src/icons.ts 的常量）：
+$hits"
+fi
+
 # 产物必须存在：仓库里少了它就是漏提交。
 for f in index.html app.js app.css; do
   [[ -f $out_dir/$f ]] || fail "缺少产物 $out_dir/$f（构建后忘记提交？）"
