@@ -14471,6 +14471,7 @@ mod stored_sessions_tests {
     }
 }
 
+#[cfg(test)]
 mod membership_ingest_tests {
     use super::*;
     use crate::storage::{MemoryStore, Transcript};

@@ -222,6 +222,25 @@ stage_test() {
   fi
 }
 
+# ---------------------------------------------------------------- 非 test 编译
+# `cargo test` 以 `cfg(test)` 编译，**看不到**只在非 test 构建里才暴露的问题：
+# 最典型的是测试模块忘了写 `#[cfg(test)]`，它引用的 `Config::parse_fixture`
+# 只存在于 test/test-fixtures 下，于是 `cargo build` 挂、`cargo test` 全绿。
+# 2026-11-17 这个坑踩了两次，都是 `nix build` 才炸出来。
+stage_build() {
+  local log="$artifact_dir/cargo-build.log"
+  printf '  %s$ cargo build --workspace %s%s\n' "$c_dim" "$cargo_net_flag" "$c_off"
+  timeout "$test_timeout" cargo build --workspace $cargo_net_flag >"$log" 2>&1
+  local status=$?
+  if [ $status -ne 0 ]; then
+    local first_error
+    first_error=$(grep -aE '^error(\[E[0-9]+\])?:' "$log" | head -1)
+    record build FAIL "${first_error:-编译失败}（日志 $log）"
+    return
+  fi
+  record build OK "非 test 编译通过"
+}
+
 # ---------------------------------------------------------------- harness JS
 node_run_suite() { # $1=test 目录 $2=日志 $3=node 可执行文件
   # SAFE_DELETE_ENABLED=0：这些用例会建临时 profile 再整目录删掉，部分 AI 沙箱给
@@ -386,6 +405,8 @@ printf '%sacb verify%s  %s\n' "$c_dim" "$c_off" "$repo_root"
 
 [ $run_fmt -eq 1 ] && stage_fmt
 [ $run_test -eq 1 ] && stage_test
+# 非 test 编译：`cargo test` 是 cfg(test)，看不见「测试模块忘了 #[cfg(test)]」这类问题。
+[ $run_test -eq 1 ] && stage_build
 [ $run_node -eq 1 ] && stage_node
 [ $run_web -eq 1 ] && stage_web
 [ $run_guards -eq 1 ] && stage_guards
