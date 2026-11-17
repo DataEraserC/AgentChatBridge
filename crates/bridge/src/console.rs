@@ -1910,6 +1910,22 @@ impl<S: Store + Send + 'static> Console<S> {
         let bridge = lock(&self.bridge);
         let config = bridge.config();
         let maps = bridge.session_maps().unwrap_or_default();
+        // 订阅读**库里**那一份，不读内存快照。
+        //
+        // `config_patch` 保存后只是暂存（"saved and staged; takes effect on the
+        // next message/turn"），内存里的 `config` 要到下一个消息/轮次才换。
+        // 读内存就会出现「删了订阅但页面还在，再点一次报『没有这个订阅』」
+        // ——2026-11-17 用户报的正是这个。
+        //
+        // 读库失败（`None`）时退回内存快照：宁可显示旧数据，也不要这一页全空。
+        let stored = bridge.stored_sessions();
+        let stored_subs = |id: &str| -> Option<Vec<String>> {
+            stored
+                .as_ref()?
+                .iter()
+                .find(|session| session.id == id)
+                .map(|session| session.subscriptions.clone())
+        };
         let sessions: Vec<_> = config
             .sessions
             .iter()
@@ -1944,7 +1960,13 @@ impl<S: Store + Send + 'static> Console<S> {
                     "model_fallbacks": bridge.session_fallbacks(&session.id),
                     "model_fallbacks_inherited": !bridge.has_session_fallbacks(&session.id),
                     "memories": session.memories,
-                    "subscriptions": session.subscriptions.iter().map(|s| s.room.to_string()).collect::<Vec<_>>(),
+                    "subscriptions": stored_subs(&session.id).unwrap_or_else(|| {
+                        session
+                            .subscriptions
+                            .iter()
+                            .map(|s| s.room.to_string())
+                            .collect::<Vec<_>>()
+                    }),
                     "stuck_unread": {
                         "count": stuck_count,
                         "max_times": stuck_max,

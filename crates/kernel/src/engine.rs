@@ -643,6 +643,35 @@ pub struct FallbackScope {
 }
 
 /// 桥的核心：配置 + 存储 + 出站，加上调度状态。
+/// 控制台要读的「库里这一份会话」：只有 id 和订阅串。
+///
+/// 不做成完整的 `config::Session`：那个类型是**从 `RawSession` 手工构造**出来的
+/// （要校验 harness/ persona 存在、token 能解析等），不能直接 `Deserialize`。
+/// 控制台这一屏只需要「id + 订阅了哪些房间」，读这两项足够。
+#[derive(Debug, Clone)]
+pub struct StoredSession {
+    pub id: String,
+    /// `connection:room`，如 `qq:group/158296748`。
+    pub subscriptions: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct StoredSessionSubs {
+    sessions: Vec<StoredSessionSubsEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct StoredSessionSubsEntry {
+    #[serde(default)]
+    subscriptions: Vec<StoredSubscription>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct StoredSubscription {
+    connection: String,
+    room: String,
+}
+
 /// 这条记录是不是「房间关系变动」事件（入群/退群/加好友/删好友）。
 ///
 /// 判据是适配器打的 `membership` 标签——平台无关：onebot 的未来实现、
@@ -2702,6 +2731,41 @@ impl<S: Store> Bridge<S> {
             .into_iter()
             .filter(|stat| stat.room.connection == connection)
             .collect())
+    }
+
+    /// 库里的会话（**含订阅**），控制台读这个而不是读内存快照。
+    ///
+    /// 为什么：`config_patch` 保存后只是**暂存**（"saved and staged; takes effect
+    /// on the next message/turn"），内存里的 `config` 要到下一个消息/轮次才换。
+    /// 控制台读内存就会「删了还在，再点一次报『没有这个订阅』」——2026-11-17 用户
+    /// 报的正是这个。库是唯一事实源，控制台要看的就是「现在库里是什么」。
+    ///
+    /// 解析失败返回 `None`：调用方退回内存快照并如实标注，而不是假装读到了。
+    pub fn stored_sessions(&self) -> Option<Vec<StoredSession>> {
+        let objects = self.store.config_objects_load().ok()??;
+        let mut sessions = Vec::with_capacity(objects.sessions.len());
+        for object in &objects.sessions {
+            // 库里存的**就是完整的 `[[sessions]]` 片段**（已带表头，实测见
+            // `config_objects.payload`），所以直接解析，不要再补表头——
+            // 补了会变成两个 `[[sessions]]` 表，订阅全落到第二个空表里。
+            let parsed: StoredSessionSubs = match toml::from_str(&object.toml) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    eprintln!("[console] 库里会话 {:?} 解析失败，跳过：{error}", object.id);
+                    continue;
+                }
+            };
+            sessions.push(StoredSession {
+                id: object.id.clone(),
+                subscriptions: parsed
+                    .sessions
+                    .into_iter()
+                    .flat_map(|entry| entry.subscriptions)
+                    .map(|sub| format!("{}:{}", sub.connection, sub.room))
+                    .collect(),
+            });
+        }
+        Some(sessions)
     }
 
     /// 某个房间是否在库里出现过（ADR-0035 的手输校验）。
@@ -14344,6 +14408,69 @@ mod target_param_tests {
 /// 丢弃了。于是形成死锁：没订阅 → 丢弃 → 库里没这个房间 → 控制台候选看不到
 /// → 用户永远无法订阅。
 #[cfg(test)]
+/// 控制台读会话订阅读的是**库**，不是内存快照。
+///
+/// 2026-11-17 用户报：「点击删除时删除成功但是项目还在，第二次点击时报
+/// 『会话 dsh-qas 没有某个订阅』」。原因是 `config_patch` 只写库 + 挂暂存，
+/// 内存要到下一个消息/轮次才换；控制台读内存就会一直显示旧的订阅，
+/// 用户再点一次删除，服务端按库判断「本来就没有了」而报错。
+#[cfg(test)]
+mod stored_sessions_tests {
+    use super::*;
+    use crate::storage::{ConfigObjectsStore, MemoryStore};
+
+    fn config_text() -> String {
+        r#"
+        [[personas]]
+        id = "p"
+        name = "人格"
+        text = "你是桥。"
+
+        [[harnesses]]
+        id = "dsh"
+        name = "DSH"
+        "#
+        .to_owned()
+    }
+
+    fn bridge() -> Bridge<MemoryStore> {
+        Bridge::with_plugins(
+            Config::parse_fixture(&config_text()).expect("配置合法"),
+            MemoryStore::new(),
+            Box::new(NoopOutboundForRegistry),
+            PluginManager::with_native_builtins(),
+        )
+    }
+
+    #[test]
+    fn stored_sessions_reports_subscriptions_from_the_store() {
+        let mut bridge = bridge();
+        // 直接往库里放一条会话片段：订阅 qq:group/1。
+        let objects = crate::config_objects::ConfigObjects {
+            sessions: vec![crate::config_objects::ConfigObject {
+                id: "s1".to_owned(),
+                // 与库里真实格式一致：**带** `[[sessions]]` 表头，订阅用
+                // `[[sessions.subscriptions]]`。
+                toml: "[[sessions]]\nid = \"s1\"\nharness = \"dsh\"\npersona = \"p\"\ntoken = \"t\"\n\n[[sessions.subscriptions]]\nconnection = \"qq\"\nroom = \"group/1\"\n".to_owned(),
+            }],
+            ..Default::default()
+        };
+        bridge
+            .store_mut()
+            .config_objects_replace(&objects, 1)
+            .expect("能写库");
+
+        let stored = bridge.stored_sessions().expect("能读");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, "s1");
+        assert_eq!(
+            stored[0].subscriptions,
+            vec!["qq:group/1".to_owned()],
+            "读的必须是库里那份订阅"
+        );
+    }
+}
+
 mod membership_ingest_tests {
     use super::*;
     use crate::storage::{MemoryStore, Transcript};
