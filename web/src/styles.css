@@ -15,11 +15,11 @@
 /* 开关：**关闭态**必须有可见轮廓。
    用 `!important` + 更高特异性：Vuetify 的组件样式在运行时注入，纯靠顺序压不住。
 
-   **必须限定在关闭态**（`:not(.v-switch--on)` 与 `:not(.v-selection-control--dirty)`）：
-   第一版没限定，结果打开状态也被刷成 surface-bright，`color="primary"` 被
-   `!important` 压掉——开关开了还是灰的（2026-11-17 用户报的第二个问题，
-   是这条规则引入的）。 */
-.v-switch:not(.v-switch--on) .v-switch__track,
+   **必须限定在关闭态。** Vuetify 3 **没有** `v-switch--on` 这个类——状态在
+   `v-selection-control` 上的 `--dirty`（已选）。我第一版写 `.v-switch--on`，
+   匹配不到任何元素，于是这条规则对**打开态也照常生效**，把 `color="primary"`
+   用 `!important` 压掉——开关开了还是灰的（2026-11-17 用户报的第二个问题，
+   就是这条规则引入的）。 */
 .v-selection-control:not(.v-selection-control--dirty) .v-switch__track {
   opacity: 1 !important;
   border: 1.5px solid rgb(var(--v-theme-outline)) !important;
@@ -29,7 +29,6 @@
 /* 打开态的滑块与轨道交给 Vuetify 的 `color` 槽，不加任何覆盖。 */
 
 /* 关闭态的滑块：默认与轨道同色，看不出「这是个可以拨的东西」。 */
-.v-switch:not(.v-switch--on) .v-switch__thumb,
 .v-selection-control:not(.v-selection-control--dirty) .v-switch__thumb {
   background-color: rgb(var(--v-theme-on-surface-variant)) !important;
   opacity: 1 !important;
@@ -46,4 +45,21 @@
 .v-select .v-field--variant-plain .v-field__outline {
   display: block;
   opacity: 0.6;
+}
+
+/*
+ * 打开态的开关轨道：Vuetify 给轨道加了 `bg-primary` 类，但
+ * `.v-switch__track { background-color: surface-variant }` 与它特异性相同、
+ * 且注入更晚，所以**打开态仍是灰的**（2026-11-17 用户报「开了之后也是灰色的」）。
+ *
+ * 这里给 `bg-primary` 提一级特异性。不写死颜色——用 `--v-theme-primary`，
+ * 换主题时跟着走。
+ */
+.v-switch .v-switch__track.bg-primary {
+  background-color: rgb(var(--v-theme-primary)) !important;
+}
+
+/* 打开态的滑块也回到 primary（Vuetify 同样用 bg-primary 标它）。 */
+.v-switch .v-switch__thumb.bg-primary {
+  background-color: rgb(var(--v-theme-primary)) !important;
 }

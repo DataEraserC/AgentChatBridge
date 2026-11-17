@@ -59,16 +59,6 @@ const penalty = useQuery({
   queryFn: () => api.get<PenaltyView>("/api/model-penalty"),
 });
 
-/** 某个模型自己的策略（对话框里查）；`null` = 没配，回落全局。 */
-const modelPolicy = useQuery({
-  queryKey: computed(() => queryKeys.modelPenalty(editingModel.value ?? "")),
-  queryFn: () =>
-    api.get<PenaltyView>(
-      `/api/model-penalty?model=${encodeURIComponent(editingModel.value ?? "")}`,
-    ),
-  enabled: computed(() => !!editingModel.value),
-});
-
 /** 正在编辑策略的模型 id；`null` = 对话框关着。 */
 const editingModel = ref<string | null>(null);
 const modelDraft = ref<PenaltyPolicy>({
@@ -78,6 +68,16 @@ const modelDraft = ref<PenaltyPolicy>({
   penalty_secs: 0,
 });
 const modelNotice = ref("");
+
+/** 某个模型自己的策略（对话框里查）；`null` = 没配，回落全局。 */
+const modelPolicy = useQuery({
+  queryKey: computed(() => queryKeys.modelPenalty(editingModel.value ?? "")),
+  queryFn: () =>
+    api.get<PenaltyView>(
+      `/api/model-penalty?model=${encodeURIComponent(editingModel.value ?? "")}`,
+    ),
+  enabled: computed(() => !!editingModel.value),
+});
 
 watch(
   () => modelPolicy.data.value?.policy,
