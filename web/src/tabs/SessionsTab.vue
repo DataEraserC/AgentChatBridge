@@ -6,8 +6,8 @@
  * 不再需要手写 `≤720px` 的"表格转卡片"媒体查询。
  */
 
-import { computed } from "vue";
-import { useQuery } from "@tanstack/vue-query";
+import { computed, ref } from "vue";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { queryKeys } from "../queryKeys";
@@ -18,6 +18,34 @@ import SubscriptionEditor from "../components/SubscriptionEditor.vue";
 import { icons } from "../icons";
 
 const { t } = useI18n();
+const client = useQueryClient();
+const notice = ref("");
+
+/**
+ * 会话控制：`interrupt` 打断当前轮、`reset` 重置映射（断绑）。
+ *
+ * 后端两条都走 `POST /api/session/:id/<command>`，它转发一个 control 帧给
+ * 管理该会话的 harness。没有 harness 在线时返回 409——那说明这个会话现在没有
+ * 任何进程在管，得先去把组件拉起来，而不是重试。
+ */
+const control = useMutation({
+  mutationFn: ({ session, command }: { session: string; command: "interrupt" | "reset" }) =>
+    api.post<{ ok?: boolean; note?: string; error?: string }>(
+      `/api/session/${encodeURIComponent(session)}/${command}`,
+      {},
+    ),
+  onSuccess: async (reply, vars) => {
+    if (reply?.ok) {
+      notice.value = reply.note ?? t(`console.sessions.${vars.command}Done`);
+      await client.invalidateQueries({ queryKey: queryKeys.sessions });
+      return;
+    }
+    notice.value = reply?.error ?? t("console.sessions.controlFailed");
+  },
+  onError: (error) => {
+    notice.value = error instanceof Error ? error.message : String(error);
+  },
+});
 
 const sessions = useQuery({
   queryKey: queryKeys.sessions,
@@ -40,6 +68,7 @@ const headers = computed(() => [
   { title: t("console.sessions.col.model"), key: "model" },
   { title: t("console.sessions.col.rooms"), key: "roomCount" },
   { title: t("console.sessions.col.state"), key: "state" },
+  { title: "", key: "actions", sortable: false },
 ]);
 </script>
 
@@ -58,6 +87,16 @@ const headers = computed(() => [
       </v-btn>
     </template>
 
+    <v-alert
+      v-if="notice"
+      type="info"
+      variant="tonal"
+      density="compact"
+      closable
+      class="mb-3"
+      :text="notice"
+      @click:close="notice = ''"
+    />
     <QueryState :query="sessions" :empty="!rows.length" empty-key="console.sessions.empty">
       <v-data-table
         :headers="headers"
@@ -88,6 +127,29 @@ const headers = computed(() => [
         </template>
         <template #item.model="{ item }">
           <code class="text-caption">{{ item.model || t("console.deps.none") }}</code>
+        </template>
+        <template #item.actions="{ item }">
+          <v-btn
+            icon
+            size="x-small"
+            variant="text"
+            :aria-label="t('console.sessions.interrupt')"
+            :loading="control.isPending.value"
+            @click.stop="control.mutate({ session: item.id, command: 'interrupt' })"
+          >
+            <v-icon :icon="icons.close" size="small" />
+          </v-btn>
+          <v-btn
+            icon
+            size="x-small"
+            variant="text"
+            color="warning"
+            :aria-label="t('console.sessions.reset')"
+            :loading="control.isPending.value"
+            @click.stop="control.mutate({ session: item.id, command: 'reset' })"
+          >
+            <v-icon :icon="icons.refresh" size="small" />
+          </v-btn>
         </template>
         <template #item.roomCount="{ item }">
           <v-tooltip location="top" max-width="320">
