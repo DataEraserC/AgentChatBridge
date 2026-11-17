@@ -28,7 +28,8 @@ const rows = computed(() =>
     ...session,
     // 表格里要"几个房间"，不是数组本身。
     roomCount: session.subscriptions?.length ?? 0,
-    stuck: (session.stuck_unread ?? []).reduce((sum, room) => sum + room.count, 0),
+    // 后端已聚合好，直接用 `count`，不再自己 reduce（形状是对象不是数组）。
+    stuck: session.stuck_unread?.count ?? 0,
   })),
 );
 

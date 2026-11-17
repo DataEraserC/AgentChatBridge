@@ -64,7 +64,13 @@ export interface DependencyEntry {
 
 /** `GET /api/dependencies` —— `deps.snapshot()`。 */
 export interface DependenciesView {
-  entries: DependencyEntry[];
+  /**
+   * 后端把条目放在 `dependencies`，不是 `entries`。
+   *
+   * 2026-11-17 修：这里原写成 `entries`，于是概览页的「依赖健康」永远显示
+   * 「没有依赖条目」——接口明明返回了 7 条，页面读的是不存在的字段。
+   */
+  dependencies: DependencyEntry[];
   /** 本次启动以来的状态迁移（只增）。 */
   transitions?: Array<{ id: string; from: DependencyState; to: DependencyState; at: number }>;
 }
@@ -93,7 +99,18 @@ export interface SessionView {
   /** 桥 ↔ harness 会话映射。 */
   mapping?: { session_id?: string; harness?: string } | null;
   /** 投过 ≥3 次仍未确认的房间（D7）。 */
-  stuck_unread?: Array<{ room: string; count: number }>;
+  /**
+   * 投过 ≥3 次仍未确认的未读汇总（后端 `console.rs` 的 `stuck_unread`）。
+   *
+   * 是**对象**不是数组：后端已经聚合成 `count`/`max_times`，`rooms` 才是明细。
+   * 2026-11-17 修：这里原写成数组，`SessionsTab` 上跑 `.reduce` 抛
+   * 「stuck_unread.reduce is not a function」，整个会话页渲染中断、只剩加载条。
+   */
+  stuck_unread?: {
+    count: number;
+    max_times: number;
+    rooms: Array<{ room: string; count: number; max_times: number }>;
+  };
   /** 本会话本轮生效的后备链（内存快照，控制台展示以 model-fallbacks 接口为准）。 */
   model_fallbacks?: string[];
 }

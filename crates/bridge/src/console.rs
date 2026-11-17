@@ -63,7 +63,11 @@ const RECENT_FAILURE_WINDOW_SECS: u64 = 900;
 /// 没带 token 打开 `/` 时给的一小块登录页：弹窗要 token，拼进 URL 重进。
 /// 跟旧 Node 版同一招——不让完整页面在未授权时先渲染出来。
 /// 文案全部来自 locale 表，按请求 locale 渲染；登录前拿不到 `/api/i18n`。
-fn login_html(locale: &str) -> String {
+/// 登录页。`next_path` 是登录成功后要回到的路径：`/` 或 `/next`。
+///
+/// 带上它是因为登录页原先硬编码跳 `/?token=`——在 `/next` 上被要求登录的话，
+/// 输完令牌会莫名其妙掉回旧版。
+fn login_html(locale: &str, next_path: &str) -> String {
     let title = acb_i18n::tr_in(locale, "bridge.console.login_title");
     let prompt = acb_i18n::tr_in(locale, "bridge.console.login_prompt");
     let placeholder = acb_i18n::tr_in(locale, "bridge.console.login_placeholder");
@@ -91,7 +95,7 @@ fn login_html(locale: &str) -> String {
 <input id="t" type="password" placeholder="{placeholder}" aria-label="{placeholder}" autocomplete="current-password" autofocus>
 <button type="submit">{enter}</button>
 </form>
-<script>function go(){{var t=document.getElementById('t').value;if(t)location.href='/?token='+encodeURIComponent(t)}}</script>
+<script>function go(){{var t=document.getElementById('t').value;if(t)location.href={next_path:?}+'?token='+encodeURIComponent(t)}}</script>
 </body></html>"#
     )
 }
@@ -521,8 +525,14 @@ impl<S: Store + Send + 'static> Console<S> {
 
             if !authorized {
                 // 页面本身：没 token 时给登录页（不是 JSON），人才能输 token 进来。
-                if method == "GET" && bare_path == "/" {
-                    let html = login_html(acb_i18n::request_locale());
+                //
+                // `/next` 也算「页面本身」。2026-11-17 修：以前只认 `/`，直接打开
+                // `/next` 会拿到一段 JSON 401——浏览器里就是一片空白加一行错误文本，
+                // 而且没有任何入口能输令牌。
+                if method == "GET"
+                    && (bare_path == "/" || crate::console_web::is_next_ui_path(bare_path))
+                {
+                    let html = login_html(acb_i18n::request_locale(), bare_path);
                     return write_response(
                         &mut stream,
                         401,
@@ -3488,5 +3498,25 @@ room = "group/123"
             handle.contains("self.route(&method, &path, &body, peer)"),
             "route 应当收到未遮蔽的 path"
         );
+    }
+    /// 登录页必须能把人送回**他原本要去的路径**。
+    ///
+    /// 2026-11-17 修：登录页原先硬编码跳 `/?token=`，在 `/next` 上被要求登录时，
+    /// 输完令牌会莫名其妙掉回旧版；而且 `/next` 未授权时直接返回 JSON 401，
+    /// 浏览器里是一片空白加一行错误文本，连输令牌的地方都没有。
+    #[test]
+    fn login_page_returns_to_the_requested_path() {
+        let next = login_html("zh-CN", "/next");
+        assert!(
+            next.contains(r#"location.href="/next"+'?token='"#),
+            "登录页应当跳回 /next：{next}"
+        );
+        let root = login_html("zh-CN", "/");
+        assert!(
+            root.contains(r#"location.href="/"+'?token='"#),
+            "登录页应当跳回 /：{root}"
+        );
+        // 目标路径是 Debug 格式化进去的，必须带引号才构成合法的 JS 字符串。
+        assert!(!next.contains("location.href=/next"), "路径必须带引号");
     }
 }

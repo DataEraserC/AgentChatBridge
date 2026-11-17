@@ -64,7 +64,7 @@ function when(at: number | undefined): string {
 }
 
 const downCount = computed(
-  () => (deps.data.value?.entries ?? []).filter((entry) => entry.state === "down").length,
+  () => (deps.data.value?.dependencies ?? []).filter((entry) => entry.state === "down").length,
 );
 
 async function refresh(): Promise<void> {
@@ -114,10 +114,10 @@ async function refresh(): Promise<void> {
       </v-btn>
     </template>
 
-    <QueryState :query="deps" :empty="!(deps.data.value?.entries ?? []).length" empty-key="console.deps.empty">
+    <QueryState :query="deps" :empty="!(deps.data.value?.dependencies ?? []).length" empty-key="console.deps.empty">
       <v-data-table
         :headers="depHeaders"
-        :items="deps.data.value?.entries ?? []"
+        :items="deps.data.value?.dependencies ?? []"
         item-value="id"
         density="comfortable"
         :items-per-page="20"
