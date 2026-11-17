@@ -6,8 +6,8 @@
  * 解释全部进 `PageCard` 的 ⓘ。上一版手写的 pill、section 标题、表格样式全部删掉。
  */
 
-import { computed } from "vue";
-import { useQuery } from "@tanstack/vue-query";
+import { computed, ref } from "vue";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { queryKeys } from "../queryKeys";
@@ -17,6 +17,7 @@ import QueryState from "../components/QueryState.vue";
 import { icons } from "../icons";
 
 const { t } = useI18n();
+const client = useQueryClient();
 
 const policy = useQuery({
   queryKey: queryKeys.policy,
@@ -25,14 +26,119 @@ const policy = useQuery({
 
 // 后端把策略放在 `grants` 里，不摊平在顶层（见 types.ts 的 PolicyView）。
 const grants = computed(() => policy.data.value?.grants ?? {});
+
+/**
+ * 编辑草稿。
+ *
+ * 为什么用本地草稿而不是「每次改动立刻提交」：后端 `POST /api/policy` 收的是
+ * **整份 grants**（它按事务一次落地，避免「规则改了一半」的中间态）。所以页面
+ * 上也该是「改完一次提交」，否则每敲一个字都覆盖全表。
+ *
+ * `draft === null` 表示「没有未保存的改动」，此时显示库里的那份。
+ */
+type Draft = { rules: Array<Record<string, unknown>>; deny: Array<Record<string, unknown>> };
+const draft = ref<Draft | null>(null);
+
+/** 当前显示的行：有草稿用草稿，否则用库里的。 */
+const currentRules = computed<Array<Record<string, unknown>>>(() => {
+  if (draft.value) return draft.value.rules;
+  return (grants.value.rules ?? []) as Array<Record<string, unknown>>;
+});
+const currentDeny = computed<Array<Record<string, unknown>>>(() => {
+  if (draft.value) return draft.value.deny;
+  return (grants.value.deny ?? []) as Array<Record<string, unknown>>;
+});
+
+/** 进入编辑态：把库里的规则拷一份到草稿。 */
+function beginEdit(): void {
+  draft.value = {
+    rules: JSON.parse(JSON.stringify(currentRules.value)),
+    deny: JSON.parse(JSON.stringify(currentDeny.value)),
+  };
+}
+
+function cancelEdit(): void {
+  draft.value = null;
+  notice.value = "";
+}
+
+/** 删一条规则（按 id）。只改草稿，不提交。 */
+function removeRule(effect: "allow" | "deny", id: string): void {
+  if (!draft.value) beginEdit();
+  if (!draft.value) return;
+  const list = effect === "deny" ? draft.value.deny : draft.value.rules;
+  const at = list.findIndex((rule) => String(rule.id) === id);
+  if (at >= 0) list.splice(at, 1);
+}
+
+/** 加一条空白允许规则，让用户在表格里改。 */
+function addRule(): void {
+  if (!draft.value) beginEdit();
+  if (!draft.value) return;
+  draft.value.rules.push({
+    id: `rule-${Date.now()}`,
+    subject: "system_admin",
+    place: "group",
+    scope: "subscribed",
+    capability: ["room_read"],
+    permissions: [],
+    target: null,
+  });
+}
+
+const notice = ref("");
+
+/** 保存：整份 grants 一次提交。 */
+const save = useMutation({
+  mutationFn: (payload: Record<string, unknown>) =>
+    api.post<{
+      ok?: boolean;
+      error?: string;
+      detail?: string;
+      rules?: number;
+      allow?: number;
+      deny?: number;
+      rooms?: number;
+    }>(
+      "/api/policy",
+      payload,
+    ),
+  onSuccess: async (reply) => {
+    if (reply?.error) {
+      notice.value = reply.detail ? `${reply.error}（${reply.detail}）` : reply.error;
+      return;
+    }
+    // 分开报：只说「N 条规则」而页面还有房间/管理员，用户会对不上。
+    notice.value = t("console.policy.savedDetail", {
+      allow: reply?.allow ?? 0,
+      deny: reply?.deny ?? 0,
+      rooms: reply?.rooms ?? 0,
+    });
+    draft.value = null;
+    await client.invalidateQueries({ queryKey: queryKeys.policy });
+  },
+  onError: (error) => {
+    notice.value = error instanceof Error ? error.message : String(error);
+  },
+});
+
+function submit(): void {
+  if (!draft.value) return;
+  const next = {
+    ...grants.value,
+    rules: draft.value.rules,
+    deny: draft.value.deny,
+  };
+  save.mutate({ grants: next });
+}
 /**
  * 全部规则行 = 允许规则 + 拒绝规则，各带 `effect` 标记。
  *
  * 分开算再合并，而不是信任行内字段——效果由来源数组决定（见 `effectLabel`）。
  */
-const rules = computed<Array<Record<string, unknown> & { effect: "allow" | "deny" }>>(() => [
-  ...(grants.value.rules ?? []).map((rule) => ({ ...rule, effect: "allow" as const })),
-  ...(grants.value.deny ?? []).map((rule) => ({ ...rule, effect: "deny" as const })),
+const rows = computed<Array<Record<string, unknown> & { effect: "allow" | "deny" }>>(() => [
+  ...currentRules.value.map((rule) => ({ ...rule, effect: "allow" as const })),
+  ...currentDeny.value.map((rule) => ({ ...rule, effect: "deny" as const })),
 ]);
 interface RoomRow {
   room: string;
@@ -96,6 +202,8 @@ const ruleHeaders = computed(() => [
   { title: t("console.policy.col.place"), key: "place" },
   { title: t("console.policy.col.scope"), key: "scope" },
   { title: t("console.policy.col.target"), key: "target" },
+  // 只有在编辑态才给操作列：平时是只读视图，多一列空按钮只会误导。
+  ...(draft.value ? [{ title: "", key: "actions", sortable: false }] : []),
 ]);
 
 const roomHeaders = computed(() => [
@@ -146,13 +254,53 @@ function joinList(value: unknown): string {
     </template>
 
     <QueryState :query="policy">
-      <h3 class="text-subtitle-2 mb-2">
-        {{ t("console.policy.rules") }}
-        <span class="text-medium-emphasis">（{{ t("console.policy.count", { count: rules.length }) }}）</span>
-      </h3>
+      <div class="d-flex align-center ga-2 mb-2">
+        <h3 class="text-subtitle-2">
+          {{ t("console.policy.rules") }}
+          <span class="text-medium-emphasis">（{{ t("console.policy.count", { count: rows.length }) }}）</span>
+        </h3>
+        <v-spacer />
+        <template v-if="!draft">
+          <v-btn size="small" variant="text" :disabled="save.isPending.value" @click="beginEdit">
+            {{ t("console.policy.edit") }}
+          </v-btn>
+          <v-btn size="small" variant="tonal" :disabled="save.isPending.value" @click="addRule">
+            {{ t("console.policy.addRule") }}
+          </v-btn>
+        </template>
+        <template v-else>
+          <v-btn size="small" variant="text" :disabled="save.isPending.value" @click="cancelEdit">
+            {{ t("console.policy.cancel") }}
+          </v-btn>
+          <v-btn
+            size="small"
+            color="primary"
+            :loading="save.isPending.value"
+            @click="submit"
+          >
+            {{ t("console.policy.save") }}
+          </v-btn>
+        </template>
+      </div>
+      <v-alert
+        v-if="draft"
+        type="warning"
+        variant="tonal"
+        density="compact"
+        class="mb-3"
+        :text="t('console.policy.unsaved')"
+      />
+      <v-alert
+        v-if="notice"
+        type="info"
+        variant="tonal"
+        density="compact"
+        class="mb-3"
+        :text="notice"
+      />
       <v-data-table
         :headers="ruleHeaders"
-        :items="rules"
+        :items="rows"
         density="comfortable"
         :items-per-page="20"
         :no-data-text="t('console.policy.noRules')"
@@ -184,6 +332,18 @@ function joinList(value: unknown): string {
         </template>
         <template #item.target="{ item }">
           <span class="text-caption">{{ describeTarget(item.target) }}</span>
+        </template>
+        <template #item.actions="{ item }">
+          <v-btn
+            icon
+            size="x-small"
+            variant="text"
+            color="error"
+            :aria-label="t('console.policy.remove')"
+            @click="removeRule(item.effect as 'allow' | 'deny', String(item.id))"
+          >
+            <v-icon :icon="icons.remove" size="small" />
+          </v-btn>
         </template>
       </v-data-table>
 

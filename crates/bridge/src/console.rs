@@ -1046,13 +1046,19 @@ impl<S: Store + Send + 'static> Console<S> {
 
         let mut bridge = lock(&self.bridge);
         let rooms = grants.rooms.len();
-        let rules = grants.rules.len() + grants.deny.len();
+        let allow = grants.rules.len();
+        let deny = grants.deny.len();
+        let rules = allow + deny;
         match bridge.replace_policy(&grants) {
             Ok(()) => (
                 200,
                 json!({
                     "ok": true,
+                    // 分开给：只说总数会让人对不上页面（allow 与 deny 在表格里
+                    // 是两段来源，用户数的是行数）。
                     "rules": rules,
+                    "allow": allow,
+                    "deny": deny,
                     "rooms": rooms,
                     // 轮次边界才生效，如实说清楚，免得人去群里试然后怀疑没保存。
                     "pending_reload": true,
