@@ -12,6 +12,7 @@
  */
 
 import { createVuetify } from "vuetify";
+import "./vuetify.css";
 import { aliases, mdi } from "vuetify/iconsets/mdi-svg";
 import { en, zhHans } from "vuetify/locale";
 
