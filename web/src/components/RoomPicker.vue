@@ -102,8 +102,8 @@ const VERIFY = useMutation({
  * 只校验不提交：`known: false` 时由父组件阻止提交，这里不碰任何状态。
  * 在候选里的直接放过——已经在 `seen` 或 `rooms` 里，没必要再查一遍。
  */
-async function checkManual(value: string): Promise<void> {
-  const room = value.trim();
+async function checkManual(input: string): Promise<void> {
+  const room = input.trim();
   if (!room) {
     verify.value = { state: "idle", detail: "" };
     return;
@@ -129,11 +129,30 @@ async function checkManual(value: string): Promise<void> {
   }
 }
 
-/** 值变了：先告诉父组件，再看要不要校验。 */
-function onInput(value: string | null): void {
-  const next = value ?? "";
+/**
+ * 值变了：先把它规约成房间串，再告诉父组件，最后决定要不要校验。
+ *
+ * **为什么不能直接 `value.trim()`**：`v-combobox` 配 `:items` + `item-value`
+ * 时，选中某一项回传的是**整个 item 对象**（`{value, title}`），只有手输时才是
+ * 字符串。直接 trim 会抛 `TypeError: e.trim is not a function`，渲染中断，
+ * 表现为「选完房间后下拉和按钮全消失」（2026-11-17 用户看到的就是这个）。
+ */
+function onInput(value: unknown): void {
+  const next = normalizeRoom(value);
   emit("update:modelValue", next);
   void checkManual(next);
+}
+
+/** 把 `v-combobox` 回传的任意形状压成房间字符串。 */
+function normalizeRoom(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    // 优选用 item-value 那个字段；没有再退到 title（手输新建时 Vuetify 会给这个）。
+    const picked = record.value ?? record.title ?? record.room ?? "";
+    return typeof picked === "string" ? picked.trim() : "";
+  }
+  return "";
 }
 
 defineExpose({ verifyState: verify });

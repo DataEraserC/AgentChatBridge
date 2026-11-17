@@ -28,6 +28,7 @@ import {
   mdiLinkOff,
   mdiPlus,
   mdiRefresh,
+  mdiStopCircleOutline,
   mdiSwapHorizontal,
 } from "@mdi/js";
 
@@ -44,6 +45,14 @@ export const icons = {
   disconnect: mdiLinkOff,
   /** 新增。 */
   add: mdiPlus,
+  /**
+   * 打断 / 停止当前轮。
+   *
+   * 不用 ✕（`mdiClose`）：在会话行里 ✕ 的通行含义是「删除这条会话」，
+   * 而打断只是停掉正在跑的那一轮、会话还在。图标与动作不符会让运维不敢点
+   * （2026-11-17 用户原话：「写个 x 别人会以为是删除」）。
+   */
+  stop: mdiStopCircleOutline,
   /** 「更多信息」的 ⓘ。 */
   info: mdiInformationOutline,
   /** 新旧控制台互跳。 */

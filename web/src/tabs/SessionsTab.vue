@@ -137,7 +137,7 @@ const headers = computed(() => [
             :loading="control.isPending.value"
             @click.stop="control.mutate({ session: item.id, command: 'interrupt' })"
           >
-            <v-icon :icon="icons.close" size="small" />
+            <v-icon :icon="icons.stop" size="small" />
           </v-btn>
           <v-btn
             icon
