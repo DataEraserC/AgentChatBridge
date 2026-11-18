@@ -22,6 +22,15 @@ pub enum EventError {
 #[derive(Debug)]
 pub enum Parsed {
     Record(RecordDraft),
+    /// 一条记录 + 随它一起要下载的附件。
+    ///
+    /// 记录里已经放好**占位元素**（不带 URL），附件下载完成后由
+    /// `patch_element` 把占位换成本地路径。分开返回而不是塞进 draft：
+    /// draft 是要入库的，下载是入库之后的 IO，两者的生命周期不该绑在一起。
+    WithAttachments {
+        draft: RecordDraft,
+        attachments: Vec<crate::attachment::PendingAttachment>,
+    },
     /// 心跳/确认类：直接丢弃。
     Ignored,
 }
@@ -157,22 +166,6 @@ fn message(
     let room = RoomId::new(connection, format!("{scope}/{openid}"))
         .map_err(|error| EventError::BadRoom(error.to_string()))?;
     let content = text_of(payload.get("content")).unwrap_or_default();
-    // attachments：用户随消息发的图片/视频等。平台的下载 URL 需要鉴权头，
-    // agent/harness 拿不到——本轮只把附件标记进正文让 agent 知道有媒体，
-    // 完整的下载落地设计（走 file_relay 之类的通道）留后续轮。
-    let mut attachment_notes = String::new();
-    if let Some(list) = payload.get("attachments").and_then(Value::as_array) {
-        for item in list {
-            let kind = text_of(item.get("content_type")).unwrap_or_default();
-            let filename = text_of(item.get("filename")).unwrap_or_default();
-            let label = if filename.is_empty() {
-                format!("[{kind} 附件]")
-            } else {
-                format!("[{kind} 附件：{filename}]")
-            };
-            attachment_notes.push_str(&format!("\n{label}"));
-        }
-    }
     let msg_id = text_of(payload.get("id")).unwrap_or_default();
     // 被动回复的窗口按 msg_id 计：收到的每条消息都记下，出站才有的回复。
     if !msg_id.is_empty() {
@@ -182,7 +175,7 @@ fn message(
     let sender_id = author
         .and_then(|value| text_of(value.get("id")))
         .unwrap_or_else(|| openid.clone());
-    let content_with_notes = format!("{content}{attachment_notes}");
+
     let at_self = match at_self {
         AtSelf::Always => true,
         AtSelf::FromMentions => payload
@@ -195,6 +188,39 @@ fn message(
                     .any(|item| item.get("is_you").and_then(Value::as_bool).unwrap_or(false))
             }),
     };
+    // 附件：正文里只留文本，媒体各自建成一个**占位元素**（不含 URL）。
+    //
+    // 为什么不把 URL 写进占位：平台 CDN 地址带 `rkey` 预签名，单条 300~400
+    // 字符，每条记录都塞一遍就是拿签名串喂上下文（反馈 #12）。占位只说
+    // 「有什么东西、正在下载」；下载完成后由 `patch_element` 换成
+    // `state_dir/attachments/...` 下的本地路径。
+    let mut elements = vec![Element::Text {
+        text: content.clone(),
+    }];
+    let mut attachments = Vec::new();
+    if let Some(list) = payload.get("attachments").and_then(Value::as_array) {
+        for item in list {
+            let content_type = text_of(item.get("content_type")).unwrap_or_default();
+            let filename = text_of(item.get("filename")).unwrap_or_default();
+            let url = text_of(item.get("url")).unwrap_or_default();
+            // 没有 URL 的附件（平台只给了元信息）没法下载，只留一句占位。
+            let index = elements.len();
+            elements.push(Element::Text {
+                text: crate::attachment::placeholder(&content_type, &filename),
+            });
+            if url.is_empty() || msg_id.is_empty() {
+                continue;
+            }
+            attachments.push(crate::attachment::PendingAttachment {
+                room: room.to_string(),
+                platform_id: msg_id.clone(),
+                index,
+                url,
+                filename,
+                content_type,
+            });
+        }
+    }
     let draft = RecordDraft::message(
         room.clone(),
         Sender {
@@ -203,9 +229,7 @@ fn message(
             role: None,
         },
         at,
-        vec![Element::Text {
-            text: content_with_notes,
-        }],
+        elements,
         at_self,
     )
     .with_room_scope(if scope == "private" {
@@ -214,7 +238,10 @@ fn message(
         RoomScope::MultiParty
     })
     .with_platform_id(msg_id.clone());
-    Ok(Parsed::Record(draft))
+    if attachments.is_empty() {
+        return Ok(Parsed::Record(draft));
+    }
+    Ok(Parsed::WithAttachments { draft, attachments })
 }
 
 /// 群/好友关系变动（入群、退群、加好友、删好友）→ 一条落在**真实房间**里的记录。
@@ -411,24 +438,56 @@ mod tests {
     }
 
     #[test]
-    fn c2c_attachments_become_visible_markers() {
+    fn c2c_attachments_become_placeholder_elements() {
         let parsed = parse_c2c(json!({
             "author": {"id": "author-id", "user_openid": "OPENID_9"},
             "content": "看看这个",
             "id": "msg-9",
             "attachments": [
-                {"content_type": "video", "filename": "demo.mp4"},
-                {"content_type": "image"}
+                {"content_type": "video", "filename": "demo.mp4", "url": "https://cdn/x?rkey=sig"},
+                {"content_type": "image", "filename": "a.png", "url": "https://cdn/y?rkey=sig"}
             ]
         }))
         .expect("带附件应能解析");
-        let Parsed::Record(draft) = parsed else {
-            panic!("应产生记录");
+        let Parsed::WithAttachments { draft, attachments } = parsed else {
+            panic!("带附件时应返回 WithAttachments");
         };
-        let text = acb_proto::element::flatten_text(&draft.elements);
-        assert!(text.contains("看看这个"), "{text}");
-        assert!(text.contains("[video 附件：demo.mp4]"), "{text}");
-        assert!(text.contains("[image 附件]"), "{text}");
+
+        // 正文只有用户说的话；附件各自是一个占位元素。
+        assert!(matches!(&draft.elements[0], Element::Text { text } if text == "看看这个"));
+        assert_eq!(draft.elements.len(), 3, "正文 + 两个附件占位");
+
+        // **占位里不能有 URL**：签名串一个字符都不该进记录（反馈 #12）。
+        let all = acb_proto::element::flatten_text(&draft.elements);
+        assert!(all.contains("video") && all.contains("demo.mp4"), "{all}");
+        assert!(
+            !all.contains("rkey") && !all.contains("https://"),
+            "占位不能带 CDN 地址，实际：{all}"
+        );
+
+        // 待下载列表记下了 URL 与元素下标，下载完成后按它改那条记录。
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].index, 1, "第一个附件在正文之后");
+        assert_eq!(attachments[1].index, 2);
+        assert_eq!(attachments[0].platform_id, "msg-9");
+        assert!(attachments[0].url.contains("rkey=sig"));
+        assert!(attachments[1].content_type == "image");
+    }
+
+    /// 没有 URL 的附件无法下载：只留占位，不产生待下载项（不该白起线程）。
+    #[test]
+    fn attachment_without_url_is_only_a_placeholder() {
+        let parsed = parse_c2c(json!({
+            "author": {"id": "a", "user_openid": "O"},
+            "content": "看图",
+            "id": "msg-1",
+            "attachments": [{"content_type": "image", "filename": "a.png"}]
+        }))
+        .expect("能解析");
+        let Parsed::Record(draft) = parsed else {
+            panic!("没有可下载的附件时走普通 Record");
+        };
+        assert_eq!(draft.elements.len(), 2, "正文 + 一个占位");
     }
 
     #[test]

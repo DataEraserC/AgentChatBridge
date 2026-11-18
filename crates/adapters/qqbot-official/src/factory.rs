@@ -185,6 +185,10 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
                     .join("qqbot")
                     .join("connections.db"),
             );
+            // 附件落盘目录在适配器私有 `state_dir` 下（契约：归适配器所有）。
+            let mut attachment_config = attachment_config_from(&connection);
+            // 落盘根目录钉在适配器私有 state_dir 下（相对名 `attachments`）。
+            attachment_config.dir = host.state_dir.join(&attachment_config.dir);
             supervise(
                 connection,
                 host.shutdown,
@@ -192,6 +196,8 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
                 host.status,
                 token_manager,
                 reply_state,
+                attachment_config,
+                host.patch_element.clone(),
             );
         });
 
@@ -201,6 +207,33 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
             manifest,
         })
     }
+}
+
+/// 从 `connection.options` 读附件策略。**core 不解释这些键**，形状由适配器定义。
+///
+/// 全部可选：没写就用 [`crate::attachment::AttachmentConfig::default`]。
+fn attachment_config_from(connection: &Connection) -> crate::attachment::AttachmentConfig {
+    let mut config = crate::attachment::AttachmentConfig::default();
+    if let Some(value) = option_u64(connection, "attachment_max_bytes") {
+        config.max_bytes = value;
+    }
+    if let Some(value) = option_u64(connection, "attachment_timeout_secs") {
+        config.timeout = std::time::Duration::from_secs(value);
+    }
+    if let Some(value) = option_u64(connection, "attachment_keep_bytes") {
+        config.keep_bytes = value;
+    }
+    if let Some(value) = option_u64(connection, "attachment_keep_days") {
+        config.keep_days = value;
+    }
+    if let Some(value) = option_u64(connection, "attachment_per_room_bytes") {
+        config.per_room_bytes = value;
+    }
+    config
+}
+
+fn option_u64(connection: &Connection, key: &str) -> Option<u64> {
+    connection.options.get(key).and_then(|value| value.as_u64())
 }
 
 fn option_str(connection: &Connection, key: &str) -> Option<String> {

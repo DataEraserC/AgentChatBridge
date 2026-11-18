@@ -55,6 +55,8 @@ pub fn supervise(
     status: AdapterStatus,
     token_manager: TokenManager,
     reply_state: ReplyState,
+    attachments: crate::attachment::AttachmentConfig,
+    patch: Option<std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 ) {
     let id = connection.id.clone();
     let url = connection
@@ -76,6 +78,8 @@ pub fn supervise(
             &status,
             &session,
             &id,
+            &attachments,
+            patch.as_ref(),
         ) {
             Ok(()) => {
                 // 退出信号亮了：正常收工。
@@ -121,6 +125,8 @@ fn run_connection(
     status: &AdapterStatus,
     session: &Arc<Mutex<SessionState>>,
     id: &str,
+    attachments: &crate::attachment::AttachmentConfig,
+    patch: Option<&std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 ) -> Result<(), LinkError> {
     let ws = connect(url)?;
     status.connected();
@@ -138,6 +144,8 @@ fn run_connection(
         events,
         &last_seq,
         session,
+        attachments,
+        patch,
     );
     let _ = status.disconnected("gateway_closed", "read loop ended");
     result
@@ -249,6 +257,8 @@ fn handshake_and_read(
     events: &EventQueue,
     last_seq: &AtomicU64,
     session: &Arc<Mutex<SessionState>>,
+    attachments: &crate::attachment::AttachmentConfig,
+    patch: Option<&std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 ) -> Result<(), LinkError> {
     let heartbeat = handshake(&mut ws, token_manager, session)?;
     let mut next_heartbeat = Instant::now() + heartbeat;
@@ -345,6 +355,33 @@ fn handshake_and_read(
                                             error = error.to_string()
                                         )
                                     );
+                                }
+                            }
+                            Ok(Parsed::WithAttachments {
+                                draft,
+                                attachments: pending,
+                            }) => {
+                                if let Err(error) = events.submit(draft) {
+                                    eprintln!(
+                                        "{}",
+                                        acb_i18n::t!(
+                                            "adapter.qqbot.submit_failed",
+                                            error = error.to_string()
+                                        )
+                                    );
+                                } else if let Some(patch_tx) = patch {
+                                    // 入库成功才下载：提交失败说明桥已经满了，
+                                    // 这时候下载完也没有记录可以改写。
+                                    //
+                                    // 每条附件一个线程：慢下载不能挡住这条连接上
+                                    // 后续消息的处理（热路径不进 IO）。
+                                    for item in pending {
+                                        let config = attachments.clone();
+                                        let patch = patch_tx.clone();
+                                        std::thread::spawn(move || {
+                                            crate::attachment::fetch_one(&config, &item, &patch);
+                                        });
+                                    }
                                 }
                             }
                             Ok(Parsed::Ignored) => {}

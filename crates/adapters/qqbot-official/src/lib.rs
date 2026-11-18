@@ -18,6 +18,7 @@
 //!
 //! 传输只支持 `ws-client`：桥主动连 `wss://api.sgroup.qq.com/websocket`。
 
+pub mod attachment;
 pub mod event;
 pub mod factory;
 pub mod link;
