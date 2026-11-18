@@ -394,14 +394,59 @@ impl DependencyRegistry {
     }
 
     /// 平台适配器上报连接成功（第②步使用）。
+    ///
+    /// 把 `open_connections` 置 **1**（不是 +1）：一条连接对应一个适配器实例，
+    /// 不像 harness 那样会开多路（`dsh` 见过 5）。重连时 `platform_connected`
+    /// 会被再调一次，用 +1 会一直涨上去。
+    ///
+    /// 之前这里**一个字节都不写**，于是平台适配器的 `openConnections` 恒为 0
+    /// ——控制台和探针看到的是「连上了但零连接」这种自相矛盾的状态
+    /// （2026-11-18 实测：qqbot 日志有 `connected to wss://...`，依赖表却是 0）。
     pub fn platform_connected(&self, id: &str, now: i64) {
         self.clear_account_observation(DependencyKind::Platform, id);
-        self.mark_up(DependencyKind::Platform, id, now);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        upsert(&mut inner, DependencyKind::Platform, id, now);
+        let key = Key {
+            kind: DependencyKind::Platform,
+            id: id.to_owned(),
+        };
+        {
+            let entry = inner.entries.get_mut(&key).expect("刚 upsert 过");
+            // 只写连接数：`attempts` / `last_attempt_at` 由 `platform_attempt()`
+            // （即 `AdapterStatus::attempt()`）负责，这里再写一遍会重复计数
+            // （既有测试 `platform_starts_unknown_then_connect_disconnect_reconnect`
+            // 断言 `attempts == 2`，重复加会变成 4）。
+            entry.open_connections = 1;
+        }
+        let notice = mark_up_locked(&mut inner, &key, now);
+        drop(inner);
+        if let Some(event) = notice {
+            self.emit(event);
+        }
     }
 
     /// 平台适配器上报断开（第②步使用）。连接断开是瞬时故障，走阈值。
+    ///
+    /// `open_connections` 归零：单条连接断了就是没了，没有「还剩几条」。
     pub fn platform_disconnected(&self, id: &str, class: &str, detail: &str, now: i64) {
         self.clear_account_observation(DependencyKind::Platform, id);
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            upsert(&mut inner, DependencyKind::Platform, id, now);
+            let key = Key {
+                kind: DependencyKind::Platform,
+                id: id.to_owned(),
+            };
+            if let Some(entry) = inner.entries.get_mut(&key) {
+                entry.open_connections = 0;
+            }
+        }
         self.mark_down(DependencyKind::Platform, id, class, detail, now);
     }
 
@@ -1879,5 +1924,50 @@ mod tests {
             summary["items"].as_array().unwrap()[0]["lastErrorClass"],
             "unreachable"
         );
+    }
+    /// 平台适配器连上时 `openConnections` 必须是 1，重连也不能累加。
+    ///
+    /// 2026-11-18 实测：qqbot 日志里明明有 `connected to wss://...`，依赖表却是
+    /// `openConnections: 0`——因为 `platform_connected()` 只 `mark_up`，从不动
+    /// 这个计数。控制台/探针看到「连上了但零连接」这种自相矛盾的状态。
+    ///
+    /// 用 **置 1** 而不是 `+= 1`：一条连接对应一个适配器实例（不像 harness 会开
+    /// 多路），而重连会重复调这个函数，`+= 1` 会一路涨上去。
+    #[test]
+    fn platform_connections_count_as_one_and_do_not_accumulate() {
+        let config = Config::parse_fixture(
+            r#"
+            [[connections]]
+            id = "qq"
+            platform = "qq"
+            kind = "onebot11"
+            url = "ws://127.0.0.1:3001"
+            account = "bot"
+            "#,
+        )
+        .expect("配置合法");
+        let registry = DependencyRegistry::from_config(&config);
+        let open = |registry: &DependencyRegistry| {
+            registry
+                .snapshot(None)
+                .get("dependencies")
+                .and_then(|list| list.as_array())
+                .and_then(|list| {
+                    list.iter()
+                        .find(|entry| entry.get("id").and_then(|id| id.as_str()) == Some("qq"))
+                })
+                .and_then(|entry| entry.get("openConnections"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(999)
+        };
+
+        registry.platform_connected("qq", 100);
+        assert_eq!(open(&registry), 1, "连上就是 1 条连接");
+
+        // 重连：再调一次不该变成 2。
+        registry.platform_disconnected("qq", "closed", "重连中", 200);
+        assert_eq!(open(&registry), 0, "断开之后是 0");
+        registry.platform_connected("qq", 300);
+        assert_eq!(open(&registry), 1, "重连回来还是 1，不能累加");
     }
 }
