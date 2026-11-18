@@ -249,6 +249,8 @@ pub enum ExtensionPoint {
     /// 插件贡献的上下文片段（声明式、受预算约束）。
     Prompt,
     PlatformAdapter,
+    /// 外部审批后端：接管 `TicketRoute::External`。
+    Ticket,
     Manager,
     Loader,
 }
@@ -270,6 +272,7 @@ impl ExtensionPoint {
             Self::Task => "task",
             Self::Prompt => "prompt",
             Self::PlatformAdapter => "platform_adapter",
+            Self::Ticket => "ticket",
             Self::Manager => "manager",
             Self::Loader => "loader",
         }
@@ -1278,6 +1281,8 @@ pub enum ProviderOptions<'a> {
     Prompt,
     /// 平台适配器：按这条连接的配置实例化。
     PlatformAdapter(&'a Connection),
+    /// 外部审批后端不需要策略配置。
+    Ticket,
     /// 不需要 options 的扩展点（发送钩子）。
     None,
 }
@@ -1298,6 +1303,7 @@ pub enum ProviderInstance {
     ToolAccess(Arc<dyn ToolAccessProvider>),
     Prompt(Arc<dyn PromptProvider>),
     PlatformAdapter(Arc<dyn AdapterFactory>),
+    Ticket(Arc<dyn crate::ticket_policy::TicketBackend>),
 }
 
 impl ProviderInstance {
@@ -1318,6 +1324,7 @@ impl ProviderInstance {
             Self::ToolAccess(_) => ExtensionPoint::ToolAccess,
             Self::Prompt(_) => ExtensionPoint::Prompt,
             Self::PlatformAdapter(_) => ExtensionPoint::PlatformAdapter,
+            Self::Ticket(_) => ExtensionPoint::Ticket,
         }
     }
 }
@@ -1730,6 +1737,7 @@ enum OwnedProviderOptions {
     ToolAccess,
     Prompt,
     PlatformAdapter(Connection),
+    Ticket,
     None,
 }
 
@@ -1751,6 +1759,7 @@ impl OwnedProviderOptions {
             ProviderOptions::PlatformAdapter(connection) => {
                 Self::PlatformAdapter(connection.clone())
             }
+            ProviderOptions::Ticket => Self::Ticket,
             ProviderOptions::None => Self::None,
         }
     }
@@ -1770,6 +1779,7 @@ impl OwnedProviderOptions {
             Self::ToolAccess => ProviderOptions::ToolAccess,
             Self::Prompt => ProviderOptions::Prompt,
             Self::PlatformAdapter(connection) => ProviderOptions::PlatformAdapter(connection),
+            Self::Ticket => ProviderOptions::Ticket,
             Self::None => ProviderOptions::None,
         }
     }
@@ -3096,6 +3106,41 @@ impl PluginManager {
             .insert(descriptor.id.clone(), descriptor.clone());
         self.prompt_providers.insert(descriptor.id, provider);
         Ok(())
+    }
+
+    /// 按 provider id 取外部审批后端。
+    ///
+    /// 只在票据的路由是 `TicketRoute::External { backend }` 时调用。
+    pub fn ticket_backend(
+        &self,
+        id: &ProviderId,
+    ) -> Option<Arc<dyn crate::ticket_policy::TicketBackend>> {
+        let descriptor = self.descriptors.get(id)?;
+        if descriptor.extension_point != ExtensionPoint::Ticket {
+            return None;
+        }
+        let manager = self.managers.get(id.namespace())?;
+        match self.instantiate_safe(manager, id, ProviderOptions::Ticket) {
+            Ok(ProviderInstance::Ticket(backend)) => Some(backend),
+            Ok(other) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "kernel.plugin.prompt_wrong_kind",
+                        id = id,
+                        found = format!("{:?}", other.extension_point())
+                    )
+                );
+                None
+            }
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!("kernel.plugin.provider_load_failed", id = id, error = error)
+                );
+                None
+            }
+        }
     }
 
     /// 按 provider id 取上下文注入 provider。只有会话配置显式引用的才会被调用。

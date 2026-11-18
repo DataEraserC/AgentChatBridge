@@ -243,6 +243,11 @@ pub struct AccessTickets {
     expired_unreported: Vec<AccessTicket>,
     /// pending 票据的有效期；`i64::MAX` 表示不自动过期。
     pending_ttl_ms: i64,
+    /// 票据 id → 外部审批后端名。
+    ///
+    /// 只留在内存：票据本身也不持久化（`tickets` 是 `HashMap`），桥重启后所有
+    /// pending 票都会消失，把这份映射单独落盘没有意义。
+    external_backends: HashMap<String, String>,
     #[cfg(test)]
     audit_log: Vec<String>,
 }
@@ -257,6 +262,7 @@ impl Default for AccessTickets {
             nonce_failures: HashMap::new(),
             expired_unreported: Vec::new(),
             pending_ttl_ms: PENDING_TTL_MS,
+            external_backends: HashMap::new(),
             #[cfg(test)]
             audit_log: Vec::new(),
         }
@@ -508,6 +514,9 @@ impl AccessTickets {
         let mut pending: Vec<AccessTicket> = self
             .tickets
             .values()
+            // 交给外部后端的票不往房间投递：它们本来就没有房间路由，
+            // 混进来会被当成 `route_unavailable`（配置漏了），而那是正常状态。
+            .filter(|ticket| !self.external_backends.contains_key(&ticket.id))
             .filter(|ticket| ticket.state == TicketState::PendingApproval && !ticket.announced)
             .cloned()
             .collect();
@@ -544,6 +553,52 @@ impl AccessTickets {
     /// 票据不动，否则管理员正在看的那条消息会指向一个不再生效的目的地。
     ///
     /// 返回是否真的改了。
+    /// 记下这张票交给了哪个外部后端。
+    pub fn bind_external(&mut self, id: &str, backend: &str) {
+        self.external_backends
+            .insert(id.to_owned(), backend.to_owned());
+    }
+
+    /// 还在等外部后端答复的票（pending + 已绑定后端 + 尚未通知）。
+    ///
+    /// 与 [`Self::pending_unannounced`] 分开：那些票要往房间投递，这些票只轮询。
+    /// 混在一起会让「没有房间路由」的外部票被当成 `route_unavailable`。
+    pub fn pending_external(&mut self, now: i64) -> Vec<(AccessTicket, String)> {
+        self.sweep(now);
+        let mut pending: Vec<(AccessTicket, String)> = self
+            .tickets
+            .values()
+            .filter(|ticket| ticket.state == TicketState::PendingApproval && !ticket.announced)
+            .filter_map(|ticket| {
+                self.external_backends
+                    .get(&ticket.id)
+                    .map(|backend| (ticket.clone(), backend.clone()))
+            })
+            .collect();
+        pending.sort_by_key(|(ticket, _)| (ticket.created_at, ticket.seq));
+        pending
+    }
+
+    /// 外部后端已给出终态：把票推进到 active 或 denied。
+    ///
+    /// 返回 `false` 表示票不在 pending（过期了、已被处理）——调用方不该再动作。
+    pub fn settle_external(&mut self, id: &str, approved: bool) -> bool {
+        let Some(ticket) = self.tickets.get_mut(id) else {
+            return false;
+        };
+        if ticket.state != TicketState::PendingApproval {
+            return false;
+        }
+        ticket.state = if approved {
+            TicketState::Active
+        } else {
+            TicketState::Denied
+        };
+        ticket.announced = true;
+        self.external_backends.remove(id);
+        true
+    }
+
     pub fn retarget(&mut self, id: &str, route: Vec<String>) -> bool {
         let Some(ticket) = self.tickets.get_mut(id) else {
             return false;
@@ -2029,5 +2084,75 @@ mod tests {
         let expires_at = tickets.get(&expired.id).expect("还在簿上").expires_at;
         tickets.sweep(expires_at + 1);
         assert!(!tickets.retarget(&expired.id, vec!["qq:private/9".to_owned()]));
+    }
+    /// 绑定了外部后端的票，不能出现在「往房间投递」的清单里。
+    ///
+    /// 两者混在一起会让外部票掉进 `route_unavailable` 分支——它们本来就没有
+    /// 房间路由，那是正常的，不该被当成「配置漏了」。
+    #[test]
+    fn external_tickets_are_not_room_deliveries() {
+        let mut tickets = AccessTickets::new();
+        let reply = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("建票");
+        assert!(reply.state == TicketState::PendingApproval);
+
+        assert_eq!(
+            tickets.pending_unannounced(1000).len(),
+            1,
+            "绑定之前是普通待投递票"
+        );
+        tickets.bind_external(&reply.id, "acme.oa");
+
+        assert!(
+            tickets.pending_unannounced(1000).is_empty(),
+            "绑定之后不该再往房间投递"
+        );
+        let external = tickets.pending_external(1000);
+        assert_eq!(external.len(), 1, "应该出现在待轮询清单里");
+        assert_eq!(external[0].1, "acme.oa");
+    }
+
+    /// 后端给出终态之后，票离开待轮询清单。
+    #[test]
+    fn settled_external_ticket_leaves_the_poll_list() {
+        let mut tickets = AccessTickets::new();
+        let reply = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("建票");
+        tickets.bind_external(&reply.id, "acme.oa");
+
+        assert!(tickets.settle_external(&reply.id, true), "pending 时能结算");
+        assert!(
+            tickets.pending_external(1000).is_empty(),
+            "结算后不该再轮询"
+        );
+        assert_eq!(
+            tickets.get(&reply.id).expect("还在簿上").state,
+            TicketState::Active,
+            "批准后进 active"
+        );
+    }
+
+    /// 已经过期的票，后端再答「批了」也不能生效。
+    ///
+    /// 这是「TTL 归 core、后端不能延长」的落点：票过期之后
+    /// `settle_external` 必须返回 false。
+    #[test]
+    fn expired_ticket_cannot_be_settled_by_a_late_backend_answer() {
+        let mut tickets = AccessTickets::new();
+        tickets.set_pending_ttl_ms(100);
+        let reply = tickets
+            .request(request(1000, &["send_message_to"]))
+            .expect("建票");
+        tickets.bind_external(&reply.id, "acme.oa");
+
+        // 推过 TTL，让 `sweep` 把它置为 Expired。
+        let _ = tickets.pending_external(2000);
+
+        assert!(
+            !tickets.settle_external(&reply.id, true),
+            "过期之后后端说批准也不能生效"
+        );
     }
 }

@@ -421,3 +421,58 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 外部审批后端（插件实现）
+// ---------------------------------------------------------------------------
+
+/// 交给外部后端的票据快照。**只读**：不含 Store、不含状态机。
+#[derive(Debug, Clone)]
+pub struct ExternalTicket {
+    pub id: String,
+    /// 幂等键。后端重复收到同一张票时靠它去重。
+    ///
+    /// 用 `nonce` 而不是 `id`：`nonce` 不可预测，外部系统即使拿到 id 也伪造不出
+    /// 一张合法票据。
+    pub nonce: String,
+    pub request_room: String,
+    pub target: String,
+    pub ops: Vec<String>,
+    pub capabilities: Vec<String>,
+    /// 申请理由（已清洗）。
+    pub reason: Option<String>,
+    /// 申请人。
+    pub origin_sender: Option<String>,
+    /// 票据过期时刻（Unix 毫秒）。**后端不能延长它**——TTL 是 core 的规则。
+    pub expires_at: i64,
+}
+
+/// 后端对「这张票现在什么状态」的回答。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalVerdict {
+    /// 还没人处理。
+    Pending,
+    /// 批准了。`approver` 是可选的展示名（谁批的）。
+    Approved { approver: Option<String> },
+    /// 拒绝了。
+    Denied { reason: String },
+}
+
+/// 外部审批后端。插件实现它就能接管 `TicketRoute::External`。
+///
+/// ## 契约
+///
+/// - **core 只调一次 `submit`**：不重试。要「至少一次」的保证由后端自己用
+///   [`ExternalTicket::nonce`] 做幂等，而不是让 core 反复推。
+/// - **`poll` 会被周期调用**，直到票进入终态或过期。实现应当是廉价的查询。
+/// - **超时由 core 管**：票的 `expires_at` 到了就变 `Expired`，后端返回
+///   `Approved` 也无效。后端不该自己实现票据 TTL。
+/// - **实现卡住会连累 core**：core 用 `[provider_calls].timeout_ms` 兜底，
+///   超时按「没响应」处理，不会无限等。
+pub trait TicketBackend: Send + Sync {
+    /// 提交一张票。返回 `Err` 时 core 记日志并按「没送出去」处理。
+    fn submit(&self, ticket: &ExternalTicket) -> Result<(), String>;
+
+    /// 查这张票现在什么状态。
+    fn poll(&self, ticket: &ExternalTicket) -> Result<ExternalVerdict, String>;
+}

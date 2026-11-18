@@ -7123,11 +7123,19 @@ impl<S: Store> Bridge<S> {
         self.access_tickets
             .set_pending_ttl_ms(ctx.config.tickets.pending_ttl_ms());
         // 路由交给可替换的 `TicketPolicy`；默认实现就是原来那套三级回退。
-        let approval_route: Vec<String> = self
-            .ticket_route(&ctx.config, &ctx.room)
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        // 先拿完整路由：`External` 要走外部后端，`Rooms` 走房间投递。
+        let route_plan = self.resolve_route(&ctx.config, &ctx.room);
+        let external_backend = match &route_plan {
+            crate::ticket_policy::TicketRoute::External { backend, .. } => Some(backend.clone()),
+            crate::ticket_policy::TicketRoute::Rooms(_) => None,
+        };
+        let approval_route: Vec<String> = match &route_plan {
+            crate::ticket_policy::TicketRoute::Rooms(rooms) => {
+                rooms.iter().map(ToString::to_string).collect()
+            }
+            // 外部后端的票没有「房间路由」，投递由后端负责。
+            crate::ticket_policy::TicketRoute::External { .. } => Vec::new(),
+        };
         let now = now_millis();
         let cooldown_ms = i64::try_from(ctx.config.tickets.request_cooldown_secs)
             .unwrap_or(i64::MAX)
@@ -7279,17 +7287,50 @@ impl<S: Store> Bridge<S> {
 
         if requests.len() == 1 {
             let request = requests.remove(0);
-            let reachable = !approval_route.is_empty();
+            let reachable = !approval_route.is_empty() || external_backend.is_some();
             let reply = self.access_tickets.request(request).map_err(|reason| {
                 ToolError::new(ErrorCode::BadRequest, format!("[access_request] {reason}"))
             })?;
+            // 外部后端：建票之后提交一次。**不重试**——要「至少一次」由后端用
+            // nonce 做幂等，core 反复推只会造成重复审批。
+            let external_state = external_backend.as_deref().map(|backend| {
+                let outcome = self.submit_external(&reply.id, backend);
+                if outcome.is_ok() {
+                    // 绑定成功才记：提交失败的票没有后端可轮询，让它按无路由过期，
+                    // 而不是每轮都去问一个没收到票的后端。
+                    self.access_tickets.bind_external(&reply.id, backend);
+                }
+                outcome
+            });
+            if let Some(Err(reason)) = &external_state {
+                eprintln!(
+                    "[access-ticket] external submit failed for {}: {reason}",
+                    reply.id
+                );
+            }
+            let queued = reachable && !matches!(external_state, Some(Err(_)));
             return Ok(json!({
                 "ok": true,
                 "batch_id": serde_json::Value::Null,
                 "tickets": [ticket_reply_json(&reply)],
                 "duplicate": reply.duplicate,
-                "approval_queued": reachable,
-                "note": if reachable {
+                "approval_queued": queued,
+                "external_backend": external_backend,
+                "note": if let Some(Err(reason)) = &external_state {
+                    return Ok(json!({
+                        "ok": true,
+                        "batch_id": serde_json::Value::Null,
+                        "tickets": [ticket_reply_json(&reply)],
+                        "duplicate": reply.duplicate,
+                        "approval_queued": false,
+                        "external_backend": external_backend,
+                        "note": format!(
+                            "the external approval backend could not be reached ({reason}), so nobody will see this ticket; it will expire unapproved. Do not wait for it"
+                        ),
+                    }));
+                } else if external_backend.is_some() {
+                    "the ticket was submitted to the external approval backend; poll its state with access_ticket_get. Do not retry the target action until it is approved"
+                } else if reachable {
                     "approval messages for this session are aggregated and sent when the turn ends; do not retry the target action until the admin approves"
                 } else {
                     // 没有审批人时**当场说清**，别让 agent 干等。
@@ -8295,6 +8336,9 @@ impl<S: Store> Bridge<S> {
     /// 收工时把本轮/本会话积攒的 pending 票据聚合成一条私信发给 system admin。
     /// 发送失败就保持未通知状态，下一次收工再试。
     fn flush_ticket_approvals(&mut self, config: &Config, now: i64) {
+        // 先轮询外部后端。放在投递之前：外部票没有房间路由，不能掉进下面的
+        // `route_unavailable` 分支。
+        self.poll_external_approvals(now);
         let mut pending = self.access_tickets.pending_unannounced(now);
         if pending.is_empty() {
             return;
@@ -8462,7 +8506,72 @@ impl<S: Store> Bridge<S> {
     /// `External` 目前**没有消费方**（dispatch 只投递房间），所以按「没有路由」
     /// 处理——票会走 `route_unavailable` 并在 pending TTL 后过期。这样比假装
     /// 投递成功诚实：申请人会看到「没人收到」。
-    fn ticket_route(&self, config: &Config, room: &RoomId) -> Vec<RoomId> {
+    /// 把一张票提交给外部审批后端。**只提交一次，不重试。**
+    ///
+    /// 返回 `Err` 时调用方应当把「没人会批」如实告诉申请人，而不是假装排上了队。
+    /// 问一遍外部后端「我交的票怎么样了」。
+    ///
+    /// 每轮结束调一次（与审批投递同一时机）。**不是**独立定时器：票据本身就
+    /// 跟着轮次节奏走，另开一个线程去轮询只会多一份状态。
+    ///
+    /// 超时语义跟 core 的 TTL 走：票在 `sweep` 里过期之后，后端再答「批了」也没用
+    /// ——`settle_external` 会返回 `false`，这里就不再动作。
+    fn poll_external_approvals(&mut self, now: i64) {
+        for (ticket, backend) in self.access_tickets.pending_external(now) {
+            let Ok(id) = crate::plugin::ProviderId::parse(&backend) else {
+                eprintln!("[access-ticket] invalid external backend id {backend:?}; unbinding");
+                self.access_tickets.settle_external(&ticket.id, false);
+                continue;
+            };
+            let Some(provider) = self.plugins.ticket_backend(&id) else {
+                // 后端没加载：不解绑，下一轮再试（插件可能正在重载）。
+                continue;
+            };
+            match provider.poll(&external_snapshot(&ticket)) {
+                Ok(crate::ticket_policy::ExternalVerdict::Pending) => {}
+                Ok(crate::ticket_policy::ExternalVerdict::Approved { approver }) => {
+                    if self.access_tickets.settle_external(&ticket.id, true) {
+                        eprintln!(
+                            "[access-ticket] external backend {backend:?} approved {} ({})",
+                            ticket.id,
+                            approver.as_deref().unwrap_or("unknown")
+                        );
+                    }
+                }
+                Ok(crate::ticket_policy::ExternalVerdict::Denied { reason }) => {
+                    if self.access_tickets.settle_external(&ticket.id, false) {
+                        eprintln!(
+                            "[access-ticket] external backend {backend:?} denied {}: {reason}",
+                            ticket.id
+                        );
+                    }
+                }
+                Err(error) => {
+                    // 后端暂时不可用：不解绑，下一轮再问。真过期了 `sweep` 会收拾。
+                    eprintln!(
+                        "[access-ticket] poll failed for {} on {backend:?}: {error}",
+                        ticket.id
+                    );
+                }
+            }
+        }
+    }
+
+    fn submit_external(&self, ticket_id: &str, backend: &str) -> Result<(), String> {
+        let Ok(id) = crate::plugin::ProviderId::parse(backend) else {
+            return Err(format!("invalid backend id {backend:?}"));
+        };
+        let Some(provider) = self.plugins.ticket_backend(&id) else {
+            return Err(format!("approval backend {backend:?} is not loaded"));
+        };
+        let Some(ticket) = self.access_tickets.get(ticket_id) else {
+            return Err(format!("ticket {ticket_id:?} vanished after creation"));
+        };
+        provider.submit(&external_snapshot(ticket))
+    }
+
+    /// 完整路由：房间版留给投递用，`External` 版交给外部后端。
+    fn resolve_route(&self, config: &Config, room: &RoomId) -> crate::ticket_policy::TicketRoute {
         let account = config.account_of_room(room);
         let direct = self.outbound.direct_room(&room.connection);
         let query = crate::ticket_policy::RouteQuery {
@@ -8473,19 +8582,20 @@ impl<S: Store> Bridge<S> {
             policy_version: self.config_version as i64,
         };
         match self.ticket_policy.route(&query) {
-            Ok(crate::ticket_policy::TicketRoute::Rooms(rooms)) => rooms,
-            Ok(crate::ticket_policy::TicketRoute::External { backend, .. }) => {
-                eprintln!(
-                    "[access-ticket] external approval backend {backend:?} is not wired yet; \
-                     treating the ticket as having no route"
-                );
-                Vec::new()
-            }
+            Ok(route) => route,
             Err(error) => {
                 // fail-closed：判定不出来就当没有路由，别把票发到猜出来的地方。
                 eprintln!("[access-ticket] route decision failed ({error:?}); no route");
-                Vec::new()
+                crate::ticket_policy::TicketRoute::Rooms(Vec::new())
             }
+        }
+    }
+
+    /// 只需房间列表的场合（投递、重算）：`External` 没有房间，返回空。
+    fn ticket_route(&self, config: &Config, room: &RoomId) -> Vec<RoomId> {
+        match self.resolve_route(config, room) {
+            crate::ticket_policy::TicketRoute::Rooms(rooms) => rooms,
+            crate::ticket_policy::TicketRoute::External { .. } => Vec::new(),
         }
     }
 
@@ -13093,6 +13203,31 @@ fn cap_op_index(item: &Value) -> Value {
         "reason": item["reason"],
         "verification": item["verification"],
     })
+}
+
+/// 把内部票据摊成外部后端要看的快照。
+///
+/// 只给**外部系统需要知道的**字段：不要塞 `approval_route`（那是 core 的投递
+/// 概念）、不要塞 `announced` 之类的内部标志。外部后端越少依赖 core 的内部结构，
+/// 换实现就越自由。
+fn external_snapshot(ticket: &AccessTicket) -> crate::ticket_policy::ExternalTicket {
+    crate::ticket_policy::ExternalTicket {
+        id: ticket.id.clone(),
+        // `nonce` 才是幂等键：它不可预测，外部系统拿到 id 也伪造不出一张合法票。
+        nonce: ticket.nonce.clone(),
+        request_room: ticket.request_room.to_string(),
+        target: ticket.target.display(),
+        ops: ticket.ops.clone(),
+        capabilities: ticket
+            .capabilities
+            .iter()
+            .map(|capability| capability.as_str().to_owned())
+            .collect(),
+        reason: ticket.reason.clone(),
+        origin_sender: ticket.origin_sender.clone(),
+        // 原样给：TTL 是 core 的规则，后端不能延长。
+        expires_at: ticket.expires_at,
+    }
 }
 
 fn access_error_code(error: ToolError) -> &'static str {
