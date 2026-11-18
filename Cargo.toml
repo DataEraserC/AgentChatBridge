@@ -6,6 +6,7 @@ members = [
     "crates/proto",
     "crates/adapter-api",
     "crates/kernel",
+    "crates/adapters/attachment",
     "crates/adapters/onebot-snowluma",
     "crates/adapters/qqbot-official",
     "crates/adapters/process",

@@ -211,9 +211,9 @@ impl AdapterFactory for QqBotOfficialAdapterFactory {
 
 /// 从 `connection.options` 读附件策略。**core 不解释这些键**，形状由适配器定义。
 ///
-/// 全部可选：没写就用 [`crate::attachment::AttachmentConfig::default`]。
-fn attachment_config_from(connection: &Connection) -> crate::attachment::AttachmentConfig {
-    let mut config = crate::attachment::AttachmentConfig::default();
+/// 全部可选：没写就用 [`acb_adapter_attachment::AttachmentConfig::default`]。
+fn attachment_config_from(connection: &Connection) -> acb_adapter_attachment::AttachmentConfig {
+    let mut config = acb_adapter_attachment::AttachmentConfig::default();
     if let Some(value) = option_u64(connection, "attachment_max_bytes") {
         config.max_bytes = value;
     }

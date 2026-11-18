@@ -20,6 +20,14 @@ use crate::segment;
 pub enum Parsed {
     /// 值得记进流水的一条。
     Record(RecordDraft),
+    /// 一条记录 + 随它一起要下载的附件。
+    ///
+    /// 记录里的图片位置已经换成**占位**（不带 URL），下载完成后由
+    /// `patch_element` 换成本地路径。
+    WithAttachments {
+        draft: RecordDraft,
+        attachments: Vec<acb_adapter_attachment::PendingAttachment>,
+    },
     /// 账号上下线。它是连接级信号，不是房间内容；不能伪装成 `private/<self_id>`
     /// 的私聊消息，否则会凭空造出一个房间并可能触发订阅唤醒。
     AccountStatus { online: bool, detail: String },
@@ -107,7 +115,7 @@ fn message(
         _ => return Err(EventError::Missing("message_type")),
     };
 
-    let (elements, at_self) = segment::from_onebot(
+    let (mut elements, at_self) = segment::from_onebot(
         event
             .get("message")
             .or_else(|| event.get("raw_message"))
@@ -115,20 +123,29 @@ fn message(
         self_id,
     );
 
+    // 图片先换占位、收集待下载。URL 不进记录（反馈 #12），下载完成后补（#13）。
+    let platform_id = id_of(event.get("message_id"));
+    let pending = segment::prepare_attachments(&mut elements, &room.to_string(), &platform_id);
+
     let scope = room_scope(&room);
-    Ok(Parsed::Record(
-        RecordDraft::message(
-            room,
-            sender_of(event, &sender_id, admin_qqs),
-            at,
-            elements,
-            at_self,
-        )
-        // 适配器声明结构事实；core 不再从 `private/` / `group/` 路径猜场所。
-        .with_room_scope(scope)
-        // 平台消息编号留着：别人引用了某条消息时，桥要靠它反查「被引用的是谁发的」。
-        .with_platform_id(id_of(event.get("message_id"))),
-    ))
+    let draft = RecordDraft::message(
+        room,
+        sender_of(event, &sender_id, admin_qqs),
+        at,
+        elements,
+        at_self,
+    )
+    // 适配器声明结构事实；core 不再从 `private/` / `group/` 路径猜场所。
+    .with_room_scope(scope)
+    // 平台消息编号留着：别人引用了某条消息时，桥要靠它反查「被引用的是谁发的」。
+    .with_platform_id(platform_id);
+    if pending.is_empty() {
+        return Ok(Parsed::Record(draft));
+    }
+    Ok(Parsed::WithAttachments {
+        draft,
+        attachments: pending,
+    })
 }
 
 fn notice(
@@ -242,7 +259,14 @@ fn notice(
             "reaction".to_owned(),
             notice_type.to_owned(),
         ];
-        tags.push(if added { "reaction_add" } else { "reaction_remove" }.to_owned());
+        tags.push(
+            if added {
+                "reaction_add"
+            } else {
+                "reaction_remove"
+            }
+            .to_owned(),
+        );
 
         let mut draft = RecordDraft::event(room, sender, at, notice_type, elements, false)
             .with_room_scope(scope)
@@ -973,7 +997,10 @@ mod tests {
             panic!("反应要记下来");
         };
 
-        assert_eq!(draft.room, RoomId::new("qq", "group/769843907").expect("合法"));
+        assert_eq!(
+            draft.room,
+            RoomId::new("qq", "group/769843907").expect("合法")
+        );
         assert_eq!(draft.target_platform_id.as_deref(), Some("592852179"));
         assert_eq!(draft.target_labels, vec!["reaction".to_owned()]);
         assert!(!draft.at_self, "反应不算 @");
@@ -1026,10 +1053,7 @@ mod tests {
         };
 
         assert_eq!(draft.target_platform_id.as_deref(), Some("592852179"));
-        assert!(
-            draft.target_labels.is_empty(),
-            "撤销不给目标消息打持久标签"
-        );
+        assert!(draft.target_labels.is_empty(), "撤销不给目标消息打持久标签");
         assert!(matches!(
             &draft.kind,
             acb_proto::RecordKind::Event { tags, summary, .. }

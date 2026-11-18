@@ -141,6 +141,10 @@ stage_fmt() {
   local -a bad=()
   local f
   for f in "${files[@]}"; do
+    # 文件可能已经不存在：`git diff --name-only` 对**重命名**会同时列出新旧路径，
+    # 而新路径才是活的。不判存在就会拿旧路径去跑 rustfmt，报
+    # "file does not exist" 而不是格式问题（2026-11-18 实测踩到）。
+    [ -f "$f" ] || continue
     # 逐个文件跑：rustfmt 一次传多个文件时会在第一个 diff 处就退出，统计不准。
     # `skip_children`：rustfmt 默认会顺着 `mod` 声明递归检查子模块，于是「改了
     # main.rs」会把同目录的历史遗留文件一起算到这个文件头上（假红）。门禁只该

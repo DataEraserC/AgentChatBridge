@@ -59,7 +59,7 @@ impl Default for AttachmentConfig {
 }
 
 /// 一个待下载的附件。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAttachment {
     pub room: String,
     pub platform_id: String,
@@ -369,6 +369,55 @@ fn remove_empty_dirs(root: &Path) {
         }
     }
 }
+
+/// 起一个落盘清理线程：启动后等 5 分钟、之后每小时跑一次。
+///
+/// 抽到共享 crate 是因为两个适配器都要用，而这段逻辑与平台无关。
+///
+/// **先等再跑**：进程刚起时正忙着连网关，不该抢 IO。睡眠分片，shutdown 时能及时
+/// 退出而不是等满一个周期。
+pub fn spawn_prune(
+    config: AttachmentConfig,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    label: String,
+) {
+    if config.keep_bytes == 0 && config.keep_days == 0 && config.per_room_bytes == 0 {
+        return;
+    }
+    std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+        let mut waited = 0u64;
+        while waited < PRUNE_FIRST_DELAY_SECS && !shutdown.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            waited += 1;
+        }
+        while !shutdown.load(Ordering::Relaxed) {
+            let report = prune(&config);
+            if report.removed_files > 0 {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "adapter.qqbot.attachment_pruned",
+                        id = label,
+                        files = report.removed_files,
+                        bytes = report.removed_bytes,
+                        kept = report.kept_bytes
+                    )
+                );
+            }
+            let mut slept = 0u64;
+            while slept < PRUNE_INTERVAL_SECS && !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                slept += 1;
+            }
+        }
+    });
+}
+
+/// 清理线程第一次跑之前等多久（秒）。
+const PRUNE_FIRST_DELAY_SECS: u64 = 300;
+/// 清理周期（秒）。
+const PRUNE_INTERVAL_SECS: u64 = 3600;
 
 #[cfg(test)]
 mod tests {

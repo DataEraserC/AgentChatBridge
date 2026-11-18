@@ -254,6 +254,10 @@ struct PumpContext<'a> {
     admin_qqs: &'a [String],
     status: &'a AdapterStatus,
     dedup: &'a Arc<Mutex<EventDedup>>,
+    /// 附件下载落盘策略（目录已钉在适配器私有 state_dir 下）。
+    attachments: &'a acb_adapter_attachment::AttachmentConfig,
+    /// 下载完成后改写已入库记录的通道。`None` = 这个载体不支持，只留占位。
+    patch: Option<&'a std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 }
 
 /// 昵称补查线程要带着走的一组 owned 上下文。
@@ -263,6 +267,8 @@ struct PokeContext {
     admin_qqs: Vec<String>,
     status: AdapterStatus,
     dedup: Arc<Mutex<EventDedup>>,
+    attachments: Arc<acb_adapter_attachment::AttachmentConfig>,
+    patch: Option<std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 }
 
 /// 一条下载流的累计状态。只记元信息与分块数量，不把 chunk 的 base64 攒进内存。
@@ -527,6 +533,8 @@ fn handle_text(
                 admin_qqs: ctx.admin_qqs.to_vec(),
                 status: ctx.status.clone(),
                 dedup: ctx.dedup.clone(),
+                attachments: Arc::new(ctx.attachments.clone()),
+                patch: ctx.patch.cloned(),
             },
             group,
             user,
@@ -562,6 +570,31 @@ fn submit_event(ctx: &PumpContext<'_>, value: &Value) {
                         reason = error
                     )
                 );
+            }
+        }
+        Ok(Parsed::WithAttachments {
+            draft,
+            attachments: pending,
+        }) => {
+            if let Err(error) = ctx.events.submit(draft) {
+                eprintln!(
+                    "{}",
+                    acb_i18n::t!(
+                        "adapter.onebot11.inbound_queue_rejected",
+                        connection = ctx.connection,
+                        reason = error
+                    )
+                );
+            } else if let Some(patch) = ctx.patch {
+                // 入库成功才下载：提交失败说明桥满了，这时候下载也没记录可改。
+                // 每个附件一个线程：慢下载不能挡住这条连接上后续消息。
+                for item in pending {
+                    let config = (*ctx.attachments).clone();
+                    let patch = patch.clone();
+                    std::thread::spawn(move || {
+                        acb_adapter_attachment::fetch_one(&config, &item, &patch);
+                    });
+                }
             }
         }
         Ok(Parsed::Ignored(reason)) => {
@@ -633,6 +666,8 @@ fn spawn_poke_lookup(raw: Value, slot: LinkSlot, ctx: PokeContext, group: String
             admin_qqs: &ctx.admin_qqs,
             status: &ctx.status,
             dedup: &ctx.dedup,
+            attachments: &ctx.attachments,
+            patch: ctx.patch.as_ref(),
         };
         submit_event(&pump_ctx, &enriched);
     });
@@ -661,13 +696,48 @@ pub fn supervise(
     shutdown: Arc<AtomicBool>,
     events: EventQueue,
     status: AdapterStatus,
+    attachments: acb_adapter_attachment::AttachmentConfig,
+    patch: Option<std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 ) {
     let dedup = Arc::new(Mutex::new(EventDedup::default()));
-    spawn_http_events(&connection, &shutdown, &events, &status, &dedup);
+    let attachments = Arc::new(attachments);
+    // 落盘清理线程：独立、按小时。没有执行者的话 `keep_*` 就只是纸面参数。
+    acb_adapter_attachment::spawn_prune(
+        (*attachments).clone(),
+        Arc::clone(&shutdown),
+        connection.id.clone(),
+    );
+    spawn_http_events(
+        &connection,
+        &shutdown,
+        &events,
+        &status,
+        &dedup,
+        Arc::clone(&attachments),
+        patch.clone(),
+    );
     if connection.transport.as_str() == "ws-server" {
-        supervise_server(slot, connection, shutdown, events, status, dedup);
+        supervise_server(
+            slot,
+            connection,
+            shutdown,
+            events,
+            status,
+            dedup,
+            attachments,
+            patch,
+        );
     } else {
-        supervise_client(slot, connection, shutdown, events, status, dedup);
+        supervise_client(
+            slot,
+            connection,
+            shutdown,
+            events,
+            status,
+            dedup,
+            attachments,
+            patch,
+        );
     }
 }
 
@@ -679,6 +749,8 @@ fn supervise_client(
     events: EventQueue,
     status: AdapterStatus,
     dedup: Arc<Mutex<EventDedup>>,
+    attachments: Arc<acb_adapter_attachment::AttachmentConfig>,
+    patch: Option<std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 ) {
     let url = connection.url.clone().unwrap_or_default();
     let token = connection.token.clone();
@@ -707,6 +779,8 @@ fn supervise_client(
                         events: &events,
                         status: &status,
                         dedup: &dedup,
+                        attachments: &attachments,
+                        patch: patch.as_ref(),
                     },
                     &shutdown,
                 );
@@ -771,6 +845,8 @@ struct HttpEventContext {
     status: AdapterStatus,
     dedup: Arc<Mutex<EventDedup>>,
     token: String,
+    attachments: Arc<acb_adapter_attachment::AttachmentConfig>,
+    patch: Option<std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 }
 
 /// 可选 HTTP 事件上报（SnowLuma 的 `httpClients`）。
@@ -783,6 +859,8 @@ fn spawn_http_events(
     events: &EventQueue,
     status: &AdapterStatus,
     dedup: &Arc<Mutex<EventDedup>>,
+    attachments: Arc<acb_adapter_attachment::AttachmentConfig>,
+    patch: Option<std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 ) {
     let Some(listen) = connection
         .options
@@ -815,6 +893,8 @@ fn spawn_http_events(
         status: status.clone(),
         dedup: dedup.clone(),
         token,
+        attachments,
+        patch,
     };
     let shutdown = shutdown.clone();
     std::thread::spawn(move || run_http_listener(&listen, &ctx, &shutdown));
@@ -938,6 +1018,8 @@ fn handle_http_event(mut stream: TcpStream, ctx: &HttpEventContext) {
         admin_qqs: &ctx.admin_qqs,
         status: &ctx.status,
         dedup: &ctx.dedup,
+        attachments: &ctx.attachments,
+        patch: ctx.patch.as_ref(),
     };
     submit_event(&pump_ctx, &value);
     respond(&mut stream, 204);
@@ -1092,6 +1174,8 @@ fn supervise_server(
     events: EventQueue,
     status: AdapterStatus,
     dedup: Arc<Mutex<EventDedup>>,
+    attachments: Arc<acb_adapter_attachment::AttachmentConfig>,
+    patch: Option<std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 ) {
     let Some(listen) = server_listen(&connection) else {
         status.failed("config", "ws-server requires options.listen");
@@ -1176,6 +1260,8 @@ fn supervise_server(
                                 events: &events,
                                 status: &status,
                                 dedup: &dedup,
+                                attachments: &attachments,
+                                patch: patch.as_ref(),
                             },
                             &shutdown,
                         );
@@ -1240,6 +1326,8 @@ struct DriveContext<'a> {
     events: &'a EventQueue,
     status: &'a AdapterStatus,
     dedup: &'a Arc<Mutex<EventDedup>>,
+    attachments: &'a Arc<acb_adapter_attachment::AttachmentConfig>,
+    patch: Option<&'a std::sync::mpsc::Sender<acb_kernel::adapter::PatchElement>>,
 }
 
 /// 连接建立后的公共部分：安装发送槽、探测身份、跑 pump。
@@ -1271,6 +1359,8 @@ fn drive_ws(
         admin_qqs: ctx.admin_qqs,
         status: ctx.status,
         dedup: ctx.dedup,
+        attachments: ctx.attachments,
+        patch: ctx.patch,
     };
     let outcome = pump(ws, actions, pump_ctx, slot, shutdown);
     slot.clear();
@@ -1982,12 +2072,15 @@ mod tests {
         let (events, _receiver) = EventQueue::channel();
         let dedup = Arc::new(Mutex::new(EventDedup::default()));
         let admin_qqs: Vec<String> = Vec::new();
+        let attachments = Arc::new(acb_adapter_attachment::AttachmentConfig::default());
         let ctx = PumpContext {
             events: &events,
             connection: "qq",
             admin_qqs: &admin_qqs,
             status: &status,
             dedup: &dedup,
+            attachments: &attachments,
+            patch: None,
         };
         let slot = LinkSlot::new();
         let mut waiting = HashMap::new();

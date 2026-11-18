@@ -304,7 +304,18 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
                     );
                 }
             }
-            supervise(slot, connection, host.shutdown, host.events, host.status);
+            // 附件落盘根目录钉在适配器私有 state_dir 下（契约：归适配器所有）。
+            let mut attachment_config = attachment_config_from(&connection);
+            attachment_config.dir = host.state_dir.join(&attachment_config.dir);
+            supervise(
+                slot,
+                connection,
+                host.shutdown,
+                host.events,
+                host.status,
+                attachment_config,
+                host.patch_element.clone(),
+            );
         });
 
         Ok(AdapterInstance {
@@ -313,6 +324,28 @@ impl AdapterFactory for OneBotSnowLumaAdapterFactory {
             manifest,
         })
     }
+}
+
+/// 从 `connection.options` 读附件策略。**core 不解释这些键**，形状由适配器定义。
+fn attachment_config_from(connection: &Connection) -> acb_adapter_attachment::AttachmentConfig {
+    let mut config = acb_adapter_attachment::AttachmentConfig::default();
+    let get = |key: &str| connection.options.get(key).and_then(|value| value.as_u64());
+    if let Some(value) = get("attachment_max_bytes") {
+        config.max_bytes = value;
+    }
+    if let Some(value) = get("attachment_timeout_secs") {
+        config.timeout = std::time::Duration::from_secs(value);
+    }
+    if let Some(value) = get("attachment_keep_bytes") {
+        config.keep_bytes = value;
+    }
+    if let Some(value) = get("attachment_keep_days") {
+        config.keep_days = value;
+    }
+    if let Some(value) = get("attachment_per_room_bytes") {
+        config.per_room_bytes = value;
+    }
+    config
 }
 
 #[cfg(test)]

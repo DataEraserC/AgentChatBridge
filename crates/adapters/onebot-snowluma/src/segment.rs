@@ -401,3 +401,46 @@ mod tests {
         );
     }
 }
+
+/// 把元素里的图片换成本地下载占位，并收集待下载项。
+///
+/// 为什么是后处理而不是改 `from_onebot` 本身：那个函数是纯函数（无 IO、易测），
+/// 保持它干净；下载是入库之后的 IO，单独一层。
+///
+/// **平台中立**：这里只知道「某个位置的元素是带 URL 的图片」，不知道 SnowLuma
+/// 怎么给 URL、CDN 长什么样。
+pub fn prepare_attachments(
+    elements: &mut [Element],
+    room: &str,
+    platform_id: &str,
+) -> Vec<acb_adapter_attachment::PendingAttachment> {
+    // 没有平台编号就没法在下载完成后定位记录，只能保留原始 URL。
+    if platform_id.is_empty() {
+        return Vec::new();
+    }
+    let mut pending = Vec::new();
+    for (index, element) in elements.iter_mut().enumerate() {
+        let Element::Image { url, alt } = element else {
+            continue;
+        };
+        // 已经是本地路径（别的环节处理过）就不重复下载。
+        if url.is_empty() || !url.starts_with("http") {
+            continue;
+        }
+        let filename = alt.clone().unwrap_or_default();
+        pending.push(acb_adapter_attachment::PendingAttachment {
+            room: room.to_owned(),
+            platform_id: platform_id.to_owned(),
+            index,
+            url: url.clone(),
+            filename: filename.clone(),
+            // OneBot 的 image 段不带 MIME：按图片处理。
+            content_type: "image".to_owned(),
+        });
+        // 占位里不能带 URL（签名串很长，反馈 #12）。
+        *element = Element::Text {
+            text: acb_adapter_attachment::placeholder("image", &filename),
+        };
+    }
+    pending
+}

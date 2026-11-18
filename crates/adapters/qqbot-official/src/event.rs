@@ -29,7 +29,7 @@ pub enum Parsed {
     /// draft 是要入库的，下载是入库之后的 IO，两者的生命周期不该绑在一起。
     WithAttachments {
         draft: RecordDraft,
-        attachments: Vec<crate::attachment::PendingAttachment>,
+        attachments: Vec<acb_adapter_attachment::PendingAttachment>,
     },
     /// 心跳/确认类：直接丢弃。
     Ignored,
@@ -206,12 +206,12 @@ fn message(
             // 没有 URL 的附件（平台只给了元信息）没法下载，只留一句占位。
             let index = elements.len();
             elements.push(Element::Text {
-                text: crate::attachment::placeholder(&content_type, &filename),
+                text: acb_adapter_attachment::placeholder(&content_type, &filename),
             });
             if url.is_empty() || msg_id.is_empty() {
                 continue;
             }
-            attachments.push(crate::attachment::PendingAttachment {
+            attachments.push(acb_adapter_attachment::PendingAttachment {
                 room: room.to_string(),
                 platform_id: msg_id.clone(),
                 index,

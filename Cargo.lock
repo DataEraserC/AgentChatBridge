@@ -41,6 +41,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "acb-adapter-attachment"
+version = "0.1.0"
+dependencies = [
+ "acb-i18n",
+ "acb-kernel",
+ "acb-proto",
+ "ureq 2.12.1",
+]
+
+[[package]]
 name = "acb-adapter-dynamic"
 version = "0.1.0"
 dependencies = [
@@ -68,6 +78,7 @@ name = "acb-adapter-onebot-snowluma"
 version = "0.1.0"
 dependencies = [
  "acb-adapter-api",
+ "acb-adapter-attachment",
  "acb-i18n",
  "acb-kernel",
  "acb-proto",
@@ -93,6 +104,7 @@ dependencies = [
 name = "acb-adapter-qqbot-official"
 version = "0.1.0"
 dependencies = [
+ "acb-adapter-attachment",
  "acb-i18n",
  "acb-kernel",
  "acb-proto",
