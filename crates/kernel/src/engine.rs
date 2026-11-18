@@ -697,6 +697,11 @@ pub struct Bridge<S: Store> {
     config: Config,
     /// 唯一判定入口。默认是内置 `CorePolicy`；后续可替换为插件实现。
     policy: Arc<dyn Policy>,
+    /// 审批判定实现。默认 `CoreTicketPolicy`（就是原来那套规则）。
+    ///
+    /// 与 `policy` 分开：`policy` 回答「此刻能不能做某个动作」（高频、无状态），
+    /// 这里只在 `/approve` 时跑一次，且输入要带整张票。
+    ticket_policy: Arc<dyn crate::ticket_policy::TicketPolicy>,
     store: S,
     outbound: Outbounds,
     /// 扩展宿主（ADR-0026）。Phase 1 只承载 wake provider。
@@ -1033,9 +1038,13 @@ impl<S: Store> Bridge<S> {
             crate::relay::FileRelay::new(&cfg.dir, &cfg.public_base, cfg.max_publish_bytes)
         });
         let policy: Arc<dyn Policy> = Arc::new(CorePolicy::new());
+        let ticket_policy: Arc<dyn crate::ticket_policy::TicketPolicy> = Arc::new(
+            crate::ticket_policy::CoreTicketPolicy::new(Arc::clone(&policy)),
+        );
         let mut bridge = Self {
             config,
             policy,
+            ticket_policy,
             store,
             outbound,
             plugins,
@@ -2472,6 +2481,11 @@ impl<S: Store> Bridge<S> {
             self.config = config;
             // P1 默认实现无状态；策略快照随 GrantQuery 进来，轮次内冻结。
             self.policy = Arc::new(CorePolicy::new());
+            // 审批判定持有 `policy` 的 Arc，换实现时要一起换：否则它还指着旧
+            // 那一份，两边判定依据会分叉。
+            self.ticket_policy = Arc::new(crate::ticket_policy::CoreTicketPolicy::new(Arc::clone(
+                &self.policy,
+            )));
             audit_grants_config(Some(&previous), &self.config.grants);
             self.config_version += 1;
             // 暂存配置同样走过注入：提供者库在这期间可能变过，基线跟着重算。
@@ -4469,66 +4483,23 @@ impl<S: Store> Bridge<S> {
         sender: &str,
         ticket: &AccessTicket,
     ) -> Result<(), String> {
+        // 判定本身交给可替换的 `TicketPolicy`；core 只负责组输入和把结果翻成
+        // 「能不能批」。默认实现 `CoreTicketPolicy` 就是原来这套规则，行为不变。
         let subject = config.grants.subject_for(&room.connection, Some(sender));
         let place = self.room_place(room, true);
-        let actor = crate::grants::Actor {
-            connection: &room.connection,
-            account: Some(sender),
-            room: Some(room),
-            member: Some(sender),
+        let query = crate::ticket_policy::ApproveQuery {
+            approver: sender,
+            room,
+            subject,
+            place,
+            ticket,
+            grants: &config.grants,
+            policy_version: self.config_version as i64,
         };
-        let subscriptions: Vec<RoomId> = Vec::new();
-        let run = |capability| {
-            let query = crate::grants::GrantQuery {
-                subject,
-                place,
-                capability,
-                actor: Some(&actor),
-                target: &ticket.target,
-                subscriptions: &subscriptions,
-                origin: Some(room),
-                platform_op: None,
-                permissions: &[],
-                policy_version: self.config_version as i64,
-                grants: &config.grants,
-            };
-            policy_decision(self.policy.as_ref(), &query)
-        };
-
-        if !run(GrantCapability::AccessApprove).allow {
-            return Err("审批人没有 access_approve 权限".to_owned());
+        match crate::ticket_policy::approve_decision(self.ticket_policy.as_ref(), &query) {
+            crate::ticket_policy::ApproveVerdict::Allow => Ok(()),
+            crate::ticket_policy::ApproveVerdict::Deny { reason } => Err(reason),
         }
-        for capability in &ticket.capabilities {
-            // 票据专属能力（account_secret）无法被任何人长期持有：只允许 system_admin
-            // 以 break-glass 方式批准，不再要求「持有该能力」。
-            if capability.is_ticket_only() {
-                if subject != GrantSubject::SystemAdmin {
-                    return Err(format!("{} 只能由 system_admin 批准", capability.as_str()));
-                }
-                continue;
-            }
-            if matches!(
-                capability,
-                GrantCapability::Destructive
-                    | GrantCapability::Critical
-                    | GrantCapability::PolicyWrite
-                    | GrantCapability::PluginAdmin
-            ) && subject != GrantSubject::SystemAdmin
-            {
-                return Err(format!(
-                    "高危能力 {} 只能由 system_admin 批准",
-                    capability.as_str()
-                ));
-            }
-            if !run(*capability).allow {
-                return Err(format!(
-                    "审批人缺少 {} 权限，或范围不覆盖目标 {}",
-                    capability.as_str(),
-                    ticket.target.display()
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// 批准/拒绝后通知其余路由目标，避免第二个目标再做一次动作。
@@ -6476,7 +6447,7 @@ impl<S: Store> Bridge<S> {
                     policy_version: self.config_version as i64,
                     grants: &ctx.config.grants,
                 };
-                let decision = policy_decision(self.policy.as_ref(), &query);
+                let decision = crate::policy::policy_decision(self.policy.as_ref(), &query);
                 if decision.should_audit() {
                     self.audit_grant(&ctx.session, subject, place, capability, &target, &decision);
                 }
@@ -6979,7 +6950,7 @@ impl<S: Store> Bridge<S> {
             policy_version: self.config_version as i64,
             grants: &ctx.config.grants,
         };
-        let decision = policy_decision(self.policy.as_ref(), &query);
+        let decision = crate::policy::policy_decision(self.policy.as_ref(), &query);
         if decision.should_audit() {
             self.audit_grant(
                 &ctx.session,
@@ -7239,7 +7210,7 @@ impl<S: Store> Bridge<S> {
                 policy_version: self.config_version as i64,
                 grants: &ctx.config.grants,
             };
-            let decision = policy_decision(self.policy.as_ref(), &query);
+            let decision = crate::policy::policy_decision(self.policy.as_ref(), &query);
             if !decision.allow {
                 self.audit_ticket_denied(ctx, &target, "access_request_denied", &decision.reason);
                 return Err(ToolError::new(
@@ -8937,7 +8908,7 @@ impl<S: Store> Bridge<S> {
                     policy_version: self.config_version as i64,
                     grants: &config.grants,
                 };
-                let decision = policy_decision(self.policy.as_ref(), &query);
+                let decision = crate::policy::policy_decision(self.policy.as_ref(), &query);
                 (decision.allow, decision.basis.clone(), Some(decision))
             } else {
                 let provider = match self
@@ -9210,7 +9181,7 @@ impl<S: Store> Bridge<S> {
             policy_version: self.config_version as i64,
             grants: &ctx.config.grants,
         };
-        let decision = policy_decision(self.policy.as_ref(), &query);
+        let decision = crate::policy::policy_decision(self.policy.as_ref(), &query);
         self.write_management_audit(ctx, subject, place, capability, target, &decision)?;
         if decision.allow {
             return Ok(());
@@ -13121,25 +13092,6 @@ fn cap_op_index(item: &Value) -> Value {
     })
 }
 
-/// 判定失败一律 deny；错误原因进 basis，便于审计。
-fn policy_decision(policy: &dyn Policy, query: &grants::GrantQuery<'_>) -> GrantDecision {
-    let decision = policy.decide(query).unwrap_or_else(|error: PolicyError| {
-        GrantDecision::deny(
-            format!("policy:error:{error:?}"),
-            "policy provider failed; fail-closed",
-        )
-        .at_version(query.policy_version)
-    });
-    if decision.rule_id.trim().is_empty() || decision.policy_version != query.policy_version {
-        return GrantDecision::deny(
-            "policy:invalid_decision",
-            "policy decision is missing a traceable rule_id or carries a stale policy_version",
-        )
-        .at_version(query.policy_version);
-    }
-    decision
-}
-
 fn access_error_code(error: ToolError) -> &'static str {
     match error.code {
         ErrorCode::RoomNotSubscribed => "not_subscribed",
@@ -13228,7 +13180,7 @@ impl<S: Store> Bridge<S> {
             policy_version: self.config_version as i64,
             grants: &config.grants,
         };
-        Some(policy_decision(self.policy.as_ref(), &query).allow)
+        Some(crate::policy::policy_decision(self.policy.as_ref(), &query).allow)
     }
 }
 

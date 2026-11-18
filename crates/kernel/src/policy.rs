@@ -30,6 +30,32 @@ pub trait Policy: Send + Sync {
     fn decide(&self, request: &GrantQuery<'_>) -> Result<GrantDecision, PolicyError>;
 }
 
+/// 判定失败一律 deny；错误原因进 basis，便于审计。
+///
+/// 公开是因为 `ticket_policy` 也要跑同一套判定——两处各写一遍 fail-closed
+/// 迟早会漂。
+pub fn policy_decision(
+    policy: &dyn Policy,
+    query: &crate::grants::GrantQuery<'_>,
+) -> crate::grants::GrantDecision {
+    use crate::grants::GrantDecision;
+    let decision = policy.decide(query).unwrap_or_else(|error| {
+        GrantDecision::deny(
+            format!("policy:error:{error:?}"),
+            "policy provider failed; fail-closed",
+        )
+        .at_version(query.policy_version)
+    });
+    if decision.rule_id.trim().is_empty() || decision.policy_version != query.policy_version {
+        return GrantDecision::deny(
+            "policy:invalid_decision",
+            "policy decision is missing a traceable rule_id or carries a stale policy_version",
+        )
+        .at_version(query.policy_version);
+    }
+    decision
+}
+
 /// 默认实现：今天的 RBAC，但按新语义求值。
 ///
 /// 无状态：策略快照随 `GrantQuery` 进来，保证一轮内冻结；替换成插件实现时

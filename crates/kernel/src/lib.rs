@@ -32,6 +32,7 @@ pub mod sanitize;
 pub mod secrets_db;
 pub mod storage;
 mod task;
+pub mod ticket_policy;
 pub mod tickets;
 pub mod tools;
 pub mod wire;
