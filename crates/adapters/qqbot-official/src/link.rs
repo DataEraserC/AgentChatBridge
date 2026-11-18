@@ -48,6 +48,11 @@ pub enum LinkError {
 }
 
 /// 网关连接循环。断线按指数退避重连；退出信号随时打断。
+/// 清理线程第一次跑之前等多久（秒）。进程刚起时先让网关连接站稳。
+const PRUNE_FIRST_DELAY_SECS: u64 = 300;
+/// 清理周期（秒）。
+const PRUNE_INTERVAL_SECS: u64 = 3600;
+
 pub fn supervise(
     connection: Connection,
     shutdown: Arc<AtomicBool>,
@@ -64,6 +69,50 @@ pub fn supervise(
         .clone()
         .unwrap_or_else(|| DEFAULT_WS_URL.to_owned());
     let mut backoff = Duration::from_secs(1);
+    // 落盘清理：独立线程，按小时跑一次。
+    //
+    // 为什么要有个定期执行者：`keep_bytes` / `keep_days` 这些配置放着不执行就是
+    // 纸面参数，附件目录会一直涨到磁盘满。
+    //
+    // 只删**文件**、只按策略删：没有引用计数，所以不判断「这条记录还在不在」
+    // ——保留策略的语义就是「超过这些条件就丢」，与 core 的记录保留无关
+    // （记录那边有自己的 `RetentionConfig`）。
+    {
+        let config = attachments.clone();
+        let shutdown = Arc::clone(&shutdown);
+        let id = id.clone();
+        if config.keep_bytes > 0 || config.keep_days > 0 || config.per_room_bytes > 0 {
+            std::thread::spawn(move || {
+                // 启动先等一会：刚起来的进程正忙着连网关，别抢 IO。
+                let mut waited = 0u64;
+                while waited < PRUNE_FIRST_DELAY_SECS && !shutdown.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_secs(1));
+                    waited += 1;
+                }
+                while !shutdown.load(Ordering::Relaxed) {
+                    let report = crate::attachment::prune(&config);
+                    if report.removed_files > 0 {
+                        eprintln!(
+                            "{}",
+                            acb_i18n::t!(
+                                "adapter.qqbot.attachment_pruned",
+                                id = id,
+                                files = report.removed_files,
+                                bytes = report.removed_bytes,
+                                kept = report.kept_bytes
+                            )
+                        );
+                    }
+                    // 分片睡：shutdown 时能及时退出，不用等满一个周期。
+                    let mut slept = 0u64;
+                    while slept < PRUNE_INTERVAL_SECS && !shutdown.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_secs(1));
+                        slept += 1;
+                    }
+                }
+            });
+        }
+    }
     // 会话状态跨重连保留：Resume 失败（InvalidSession）时清掉重新 Identify。
     let session = Arc::new(Mutex::new(SessionState::default()));
     while !shutdown.load(Ordering::Relaxed) {

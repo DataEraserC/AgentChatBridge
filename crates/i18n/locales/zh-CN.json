@@ -1609,6 +1609,7 @@
   "bridge.main.patch_element_failed": "补下载：改写元素失败（{room}）：{error}",
   "adapter.qqbot.secret_key_missing": "连接 {id}：存在加密密文但没有可用密钥，跳过该行",
   "adapter.qqbot.secret_decrypt_failed": "连接 {id}：密文解密失败：{error}；跳过该行",
+  "adapter.qqbot.attachment_pruned": "附件落盘清理：删 {files} 个文件共 {bytes} 字节，剩余 {kept} 字节（{id}）",
   "adapter.onebot11.secret_key_missing": "连接 {id}：存在加密令牌但没有可用密钥，跳过该行",
   "adapter.onebot11.secret_decrypt_failed": "连接 {id}：令牌解密失败：{error}；跳过该行",
   "adapter.onebot11.state_open_failed": "onebot 连接库打开失败：{error}",
