@@ -27,6 +27,7 @@ static MEMBER_PARAMS: &[ParamSpec] = &[
 ];
 
 static KICK_PARAMS: &[ParamSpec] = &[ParamSpec::required("user_id", "要踢的人")];
+static RECALL_PARAMS: &[ParamSpec] = &[ParamSpec::required("message_id", "要撤回的消息 id")];
 
 static IMAGE_PARAMS: &[ParamSpec] = &[ParamSpec::required("file", "图片")];
 
@@ -122,6 +123,17 @@ fn methods() -> Arc<[MethodSpec]> {
             FILE_PARAMS,
             GROUP_TARGETS,
             Effect::Read,
+            RecordMode::None,
+        ),
+        spec(
+            "msg.recall",
+            "撤回一条消息",
+            &[tags::MESSAGE],
+            Risk::Destructive,
+            Scope::Room,
+            RECALL_PARAMS,
+            GROUP_TARGETS,
+            Effect::Write,
             RecordMode::None,
         ),
         spec(
@@ -227,7 +239,9 @@ impl Outbound for Platformy {
                 "nickname": "老王",
                 "role": "member"
             }))),
-            "member.kick" | "group.mute" => Ok(CallOutcome::value(json!({"done": true}))),
+            "member.kick" | "group.mute" | "msg.recall" => {
+                Ok(CallOutcome::value(json!({"done": true})))
+            }
             "friend.list" => Ok(CallOutcome::value(json!({
                 "friends": [{"user_id": "10001", "nickname": "老王"}]
             }))),
@@ -426,7 +440,7 @@ fn describe_plugins_shows_effective_session_providers() {
     );
 
     assert_eq!(session["adapter"]["kind"], "onebot11");
-    assert_eq!(session["adapter"]["method_count"], 8);
+    assert_eq!(session["adapter"]["method_count"], 9);
     assert_eq!(session["adapter"]["platform"], "qq");
     // 多平台会话：另一个订阅连接也要列出来，不能只给当前轮次那个平台。
     let adapters = session["adapters"].as_array().expect("有连接列表");
@@ -494,7 +508,7 @@ fn list_rooms_reports_platform_and_method_count() {
         .expect("有 qq 房间");
     assert_eq!(qq["platform"], "qq");
     assert_eq!(qq["kind"], "onebot11");
-    assert_eq!(qq["method_count"], 8);
+    assert_eq!(qq["method_count"], 9);
 
     let dc = rooms
         .iter()
@@ -522,7 +536,7 @@ fn platform_list_can_target_a_connection_and_summarize_all() {
         .iter()
         .find(|connection| connection["connection"] == "qq")
         .expect("有 qq");
-    assert_eq!(qq["method_count"], 8);
+    assert_eq!(qq["method_count"], 9);
     assert_eq!(qq["supports_at"], true);
     assert_eq!(qq["supports_reply"], true);
     assert!(
@@ -550,7 +564,7 @@ fn platform_list_can_target_a_connection_and_summarize_all() {
         .expect("能查 qq 那条连接");
     assert_eq!(qq_methods["connection"], "qq");
     assert_eq!(qq_methods["platform"], "qq");
-    assert_eq!(qq_methods["total"], 8);
+    assert_eq!(qq_methods["total"], 9);
     assert_eq!(qq_methods["room"], "qq:group/123");
 
     let filtered = bridge
@@ -616,10 +630,10 @@ fn catalog_lists_every_method_without_dumping_params() {
         .expect("能查目录");
 
     assert_eq!(result["platform"], "qq");
-    assert_eq!(result["total"], 8);
+    assert_eq!(result["total"], 9);
 
     let methods = result["ops"].as_array().expect("有清单");
-    assert_eq!(methods.len(), 8);
+    assert_eq!(methods.len(), 9);
     assert_eq!(methods[0]["op"], "msg.forward");
     assert_eq!(methods[0]["tags"][0], "forward");
     assert_eq!(methods[2]["risk"], "write");
@@ -1557,4 +1571,115 @@ fn 平台调用的http路径原样透传() {
         json!("https://elsewhere.example/a.png"),
         "http(s) 路径不依赖本地命名空间，不该动"
     );
+}
+
+/// 撤回**自己发的**消息：降为 write，直调放行。
+///
+/// 2026-11-19 用户实测的痛点：`msg.recall` 声明成 `Destructive` 之后，
+/// 「发一条再撤掉」这种测试循环每撤一次都要一张审批票据，流程走不通。
+///
+/// 判据是记录里的 `outgoing`，不是 sender 比对——平台侧与我们自己的 sender
+/// 可能是同一个 bot 账号，只有落库时的标记分得清。
+#[test]
+fn recalling_our_own_message_is_not_destructive() {
+    let (mut bridge, calls) = setup();
+    let ticket = open_turn(&mut bridge);
+    let room = RoomId::parse("qq:group/123").expect("房间合法");
+
+    // 一条「我们自己发出去的」记录，带平台编号。
+    bridge
+        .ingest(
+            RecordDraft::message(
+                room,
+                Sender {
+                    id: "bot".to_owned(),
+                    name: "bot".to_owned(),
+                    role: None,
+                },
+                1,
+                vec![Element::text("我刚才发的")],
+                false,
+            )
+            .with_platform_id("MSG-OURS")
+            .outgoing(),
+        )
+        .expect("能入库");
+
+    bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"async": false, "op": "msg.recall", "params": {"message_id": "MSG-OURS"}}),
+        )
+        .expect("撤自己的不该要票据");
+
+    assert_eq!(
+        calls.lock().expect("没被毒死").len(),
+        1,
+        "确实交到了适配器手上"
+    );
+}
+
+/// 撤回**别人的**消息：仍然是 destructive，直调被拒。
+///
+/// 这条是上一条的反面，防止「降级」被写成「一律降级」。
+#[test]
+fn recalling_someone_elses_message_still_needs_a_ticket() {
+    let (mut bridge, calls) = setup();
+    let ticket = open_turn(&mut bridge);
+    let room = RoomId::parse("qq:group/123").expect("房间合法");
+
+    // 别人发的：不带 `.outgoing()`。
+    bridge
+        .ingest(
+            RecordDraft::message(
+                room,
+                Sender {
+                    id: "20002".to_owned(),
+                    name: "别人".to_owned(),
+                    role: None,
+                },
+                1,
+                vec![Element::text("别人说的")],
+                false,
+            )
+            .with_platform_id("MSG-THEIRS"),
+        )
+        .expect("能入库");
+
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"async": false, "op": "msg.recall", "params": {"message_id": "MSG-THEIRS"}}),
+        )
+        .expect_err("撤别人的要票据");
+
+    assert!(error.message.contains("forbidden"), "{}", error.message);
+    assert!(
+        calls.lock().expect("没被毒死").is_empty(),
+        "根本没交到适配器手上"
+    );
+}
+
+/// 查不到那条消息时保守处理：仍然要票据。
+///
+/// 记录可能被清理、或对面没给编号。猜「可能是自己的」会让护栏失效。
+#[test]
+fn recalling_an_unknown_message_stays_destructive() {
+    let (mut bridge, _calls) = setup();
+    let ticket = open_turn(&mut bridge);
+
+    let error = bridge
+        .tool_call(
+            &ticket,
+            &sessions(),
+            "platform_call",
+            json!({"async": false, "op": "msg.recall", "params": {"message_id": "MSG-GONE"}}),
+        )
+        .expect_err("不知道是谁的就按别人的处理");
+
+    assert!(error.message.contains("forbidden"), "{}", error.message);
 }

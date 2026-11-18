@@ -26,6 +26,7 @@ fn record(id: u64, text: &str) -> Record {
         at: 1_793_000_000_000 + id as i64,
         elements: vec![Element::text(text)],
         at_self: false,
+        outgoing: false,
         reply_to_self: false,
         platform_id: None,
         quote_ref: None,

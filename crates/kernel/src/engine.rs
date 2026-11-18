@@ -6415,7 +6415,9 @@ impl<S: Store> Bridge<S> {
                     .config
                     .grants
                     .subject_for(&ctx.room.connection, ctx.origin_sender.as_deref());
-                let capability = platform_capability(spec);
+                // 实际风险：`msg.recall` 撤自己的算 `Write`，不走票据。
+                let actual_risk = self.effective_risk(&ctx.room, spec, &args.params);
+                let capability = platform_capability(spec, actual_risk);
                 let subscriptions: Vec<RoomId> = session
                     .subscriptions
                     .iter()
@@ -7231,7 +7233,7 @@ impl<S: Store> Bridge<S> {
                 ));
             }
             let capabilities = self
-                .ticket_capabilities(&target, &ops)
+                .ticket_capabilities(&target, &ops, item.params.as_ref(), &room.connection)
                 .map_err(|error| batch_item_error(index, &error.message))?;
             let methods = self.outbound.catalog(&room.connection);
             let mut unverified = Vec::new();
@@ -7656,7 +7658,9 @@ impl<S: Store> Bridge<S> {
         let ops: Vec<Value> = methods
             .iter()
             .map(|spec| {
-                let granted = self.high_risk_grant(config, session, subject, place, room, spec);
+                // 清单展示没有具体调用参数：用空对象，适配器会按声明风险回答。
+                let granted =
+                    self.high_risk_grant(config, session, subject, place, room, spec, &Value::Null);
                 cap_op_json(spec, read_reason, send_reason, connection_reason, granted)
             })
             .collect();
@@ -7731,7 +7735,15 @@ impl<S: Store> Bridge<S> {
             read_reason,
             send_reason,
             connection_reason,
-            self.high_risk_grant(config, session, subject, place, &ctx.room, spec),
+            self.high_risk_grant(
+                config,
+                session,
+                subject,
+                place,
+                &ctx.room,
+                spec,
+                &Value::Null,
+            ),
         );
         value["scope"] = json!("tool");
         value["kind"] = json!("op");
@@ -8144,10 +8156,46 @@ impl<S: Store> Bridge<S> {
 
     /// 从 op 列表推导票据能力集。平台方法必须能在目标连接的目录里查到，
     /// 且 catalog 声明的目标种类必须与票据的 typed target 一致。
+    /// 这次平台调用的**实际**风险。
+    ///
+    /// 声明是静态的，而有些操作的风险取决于「这条消息是谁发的」——最典型的是
+    /// `msg.recall`：撤自己发的只要 `write`，撤别人的要 `destructive` + 审批。
+    ///
+    /// 判据是落库时的 `outgoing` 标记，**不是** sender 比对：平台侧与我们自己的
+    /// sender 可能是同一个 bot 账号（同账号手机端发言也算），只有 `outgoing` 分得清。
+    ///
+    /// 查不到记录时保持声明的风险（保守）。记录被清理、或对面没给编号，都不能瞎猜。
+    fn effective_risk(&self, room: &RoomId, spec: &MethodSpec, params: &Value) -> Risk {
+        // 只有「撤回」这一类会因归属而降级；别的方法照声明走。
+        if !is_recall_op(spec.name.as_ref()) {
+            return spec.risk;
+        }
+        if spec.risk != Risk::Destructive {
+            return spec.risk;
+        }
+        let Some(message_id) = params.get("message_id").and_then(Value::as_str) else {
+            return spec.risk;
+        };
+        match self.store.outgoing_of(room, message_id) {
+            Ok(Some(true)) => Risk::Write,
+            // 别人的、或查不到：保持 destructive。
+            Ok(_) => spec.risk,
+            Err(error) => {
+                eprintln!(
+                    "[platform] cannot tell who sent {message_id:?} ({error}); keeping {}",
+                    spec.risk.as_str()
+                );
+                spec.risk
+            }
+        }
+    }
+
     fn ticket_capabilities(
         &self,
         target: &AccessTarget,
         ops: &[String],
+        params: Option<&serde_json::Value>,
+        connection: &str,
     ) -> Result<BTreeSet<GrantCapability>, ToolError> {
         let mut capabilities = BTreeSet::new();
         for op in ops {
@@ -8210,7 +8258,18 @@ impl<S: Store> Bridge<S> {
                             capabilities.insert(GrantCapability::AccountSecret);
                         }
                     } else {
-                        match spec.risk {
+                        // 实际风险可以比声明低：`msg.recall` 撤自己的算 `Write`，
+                        // 撤别人的才是 `Destructive`。
+                        let effective = match RoomId::parse(&format!("{connection}:{}", target.id))
+                        {
+                            Ok(target_room) => self.effective_risk(
+                                &target_room,
+                                &spec,
+                                params.unwrap_or(&Value::Null),
+                            ),
+                            Err(_) => spec.risk,
+                        };
+                        match effective {
                             Risk::Critical => {
                                 capabilities.insert(GrantCapability::Critical);
                                 // 账号级 critical = 取凭证，能力表里单独记 account_secret。
@@ -10808,12 +10867,15 @@ impl<S: Store> Bridge<S> {
             role: None,
         };
         let at = record.at.unwrap_or_else(now_millis);
+        // `.outgoing()`：这是**本程序发出去的**，不是从平台收进来的。
+        // 撤回判定要靠它区分「撤自己的」与「撤别人的」——两者的 sender 可能相同。
         let mut draft = match record.kind {
             OutgoingKind::Message => {
-                RecordDraft::message(room.clone(), sender, at, record.elements, false)
+                RecordDraft::message(room.clone(), sender, at, record.elements, false).outgoing()
             }
             OutgoingKind::Event(event) => {
                 RecordDraft::event(room.clone(), sender, at, event, record.elements, false)
+                    .outgoing()
             }
         };
         if let Some(platform_id) = record.platform_id {
@@ -13240,8 +13302,18 @@ fn access_error_code(error: ToolError) -> &'static str {
 }
 
 /// 风险等级 → 授权能力。风险只负责「查哪个 capability」，不参与 allow/deny。
-fn platform_capability(spec: &MethodSpec) -> GrantCapability {
-    match spec.risk {
+/// 这个方法是不是「撤回某条消息」。
+///
+/// 只认这一个：撤回的风险取决于归属，别的方法的声明风险就是实际风险。
+/// 用后缀匹配而不是硬编码 `msg.recall`：不同平台的命名可能不同
+/// （`msg.recall` / `message.delete` …），但语义都以 recall/delete 收尾的形状出现。
+fn is_recall_op(name: &str) -> bool {
+    let tail = name.rsplit('.').next().unwrap_or(name);
+    matches!(tail, "recall" | "delete_message" | "revoke")
+}
+
+fn platform_capability(spec: &MethodSpec, risk: Risk) -> GrantCapability {
+    match risk {
         Risk::Destructive => GrantCapability::Destructive,
         Risk::Critical => GrantCapability::Critical,
         // 账号资料读与连接读分开：账号级 op 不能靠 connection_read 顺手放行。
@@ -13276,8 +13348,11 @@ impl<S: Store> Bridge<S> {
         place: Place,
         room: &RoomId,
         spec: &MethodSpec,
+        params: &serde_json::Value,
     ) -> Option<bool> {
-        let capability = platform_capability(spec);
+        // 用实际风险：撤自己的不算高危，不该要求显式授予。
+        let actual_risk = self.effective_risk(room, spec, params);
+        let capability = platform_capability(spec, actual_risk);
         if !matches!(
             capability,
             GrantCapability::Destructive | GrantCapability::Critical
@@ -14411,6 +14486,7 @@ mod empty_wake_tests {
                 message_id: "m-1".to_owned(),
             }],
             at_self: false,
+            outgoing: false,
             reply_to_self: false,
             platform_id: None,
             quote_ref: None,
@@ -14454,6 +14530,7 @@ mod wake_reason_tests {
                 })
                 .unwrap_or_default(),
             at_self: false,
+            outgoing: false,
             reply_to_self: false,
             platform_id: platform_id.map(str::to_owned),
             quote_ref: None,
@@ -14656,6 +14733,7 @@ mod membership_ingest_tests {
                 text: "机器人被加入群聊".to_owned(),
             }],
             at_self: false,
+            outgoing: false,
             platform_id: None,
             reply_to_self: false,
             target_platform_id: None,

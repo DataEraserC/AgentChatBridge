@@ -138,6 +138,9 @@ impl From<WireRecord> for RecordDraft {
             at: record.at,
             elements: record.elements,
             at_self: record.at_self,
+            // 线上来的一律是平台侧事实：适配器不该、也没办法声明「这条是我发的」。
+            // 那个区分由 core 在写自己的出站记录时置位（见 engine.rs 的 record_outgoing）。
+            outgoing: false,
             platform_id: record.platform_id,
             reply_to_self: record.reply_to_self,
             target_platform_id: record.target_platform_id,

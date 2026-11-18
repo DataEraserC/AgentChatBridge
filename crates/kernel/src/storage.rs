@@ -48,7 +48,17 @@ pub struct RecordDraft {
     pub sender: Sender,
     pub at: i64,
     pub elements: Vec<Element>,
+    /// 这条消息 **@ 了机器人**（不是「机器人发的」——那个是 `outgoing`）。
     pub at_self: bool,
+    /// 这条记录是**本程序自己发出去的**，不是从平台收进来的。
+    ///
+    /// 为什么需要这个区分：平台推来的消息和桥发出去的消息，`sender_id` 都可能是
+    /// 同一个 bot 账号（同账号的手机端发言也算）。只看 sender 分不出「是谁发的」，
+    /// 而有些判定必须分——最典型的是撤回：撤自己发的只要 `write`，撤别人的要
+    /// `destructive` + 审批。
+    ///
+    /// 由 `record_outgoing()` 置 `true`；适配器从平台收进来的一律 `false`。
+    pub outgoing: bool,
     /// 平台自己的消息编号；事件没有，留 `None`。
     pub platform_id: Option<String>,
     /// 是不是引用了我发的某条消息。由调度层在入库前填（要查库才判得出）。
@@ -83,6 +93,7 @@ impl RecordDraft {
             at,
             elements,
             at_self,
+            outgoing: false,
             platform_id: None,
             reply_to_self: false,
             target_platform_id: None,
@@ -91,6 +102,12 @@ impl RecordDraft {
             room_scope: None,
             room_labels: Vec::new(),
         }
+    }
+
+    /// 这条草稿是桥自己发出去的。
+    pub fn outgoing(mut self) -> Self {
+        self.outgoing = true;
+        self
     }
 
     /// 声明房间结构事实。缺省不调用 = 未声明，core 按 MultiParty 处理。
@@ -127,6 +144,7 @@ impl RecordDraft {
             at,
             elements,
             at_self,
+            outgoing: false,
             platform_id: None,
             reply_to_self: false,
             target_platform_id: None,
@@ -274,6 +292,20 @@ pub trait Transcript {
     /// 也可能对面没给编号，两种情况都不能瞎猜。
     fn sender_of(&self, room: &RoomId, platform_id: &str) -> Result<Option<Sender>, StorageError> {
         Ok(self.located(room, platform_id)?.map(|record| record.sender))
+    }
+
+    /// 房间里那条平台编号为 `platform_id` 的记录是不是**我们自己发的**。
+    ///
+    /// 用途：撤回的授权分级。撤自己发的只要 `write`，撤别人的要 `destructive` +
+    /// 审批。不能靠 `sender_of` 比对账号——平台侧与我们自己的 sender 可能是同一个
+    /// bot 账号（同账号手机端发言也算），只有落库时记下的 `outgoing` 分得清。
+    ///
+    /// 查不到给 `None`：记录被清理了、或对面没给编号、或那条本来就不在流水里。
+    /// 调用方必须把 `None` 当「不知道」处理，保守地按别人的处理。
+    fn outgoing_of(&self, room: &RoomId, platform_id: &str) -> Result<Option<bool>, StorageError> {
+        Ok(self
+            .located(room, platform_id)?
+            .map(|record| record.outgoing))
     }
 
     /// 按平台消息编号找回那条记录（要它的水位编号，也要它的原话）。
@@ -1278,6 +1310,7 @@ impl Transcript for MemoryStore {
             at: draft.at,
             elements: draft.elements,
             at_self: draft.at_self,
+            outgoing: draft.outgoing,
             reply_to_self: draft.reply_to_self,
             platform_id: draft.platform_id,
             // 引用对齐是投递时算的（要查库），流水里只留事实本身。

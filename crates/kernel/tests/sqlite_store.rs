@@ -1294,3 +1294,56 @@ fn patch_element_persists_across_reopen() {
         assert!(matches!(&record.elements[0], Element::Text { text } if text == "看图"));
     }
 }
+
+/// `outgoing` 要真的落库并读回：它是撤回授权分级的唯一依据。
+///
+/// 2026-11-19 实测：平台的 sender 和桥自己的 sender 可能是同一个 bot 账号，
+/// 只看 `sender_id` 分不出「撤自己的」还是「撤别人的」。这个标记就是那个区分。
+///
+/// 顺带钉住默认值：从平台收进来的草稿（`RecordDraft::message` 不调 `.outgoing()`）
+/// 必须是 `false`，否则所有收到的消息都会被当成自己发的。
+#[test]
+fn outgoing_flag_persists_and_defaults_to_false() {
+    let db = TempDb::new("outgoing");
+    let room = RoomId::new("qq", "group/9").expect("合法");
+    let sender = Sender {
+        id: "bot".into(),
+        name: "bot".into(),
+        role: None,
+    };
+
+    {
+        let mut store = acb_kernel::SqliteStore::open(db.path()).expect("能打开");
+        // 收进来的：默认 false。
+        store
+            .append(RecordDraft::message(
+                room.clone(),
+                sender.clone(),
+                AT,
+                vec![Element::text("收到")],
+                false,
+            ))
+            .expect("入库");
+        // 我们发出去的：`.outgoing()` 置位。
+        store
+            .append(
+                RecordDraft::message(
+                    room.clone(),
+                    sender.clone(),
+                    AT + 1,
+                    vec![Element::text("发出")],
+                    false,
+                )
+                .outgoing(),
+            )
+            .expect("入库");
+    }
+
+    {
+        let store = acb_kernel::SqliteStore::open(db.path()).expect("重开");
+        let records = store.since(&room, 0, 10).expect("能读");
+        assert_eq!(records.len(), 2);
+        assert!(!records[0].outgoing, "平台收进来的一律 false");
+        assert!(records[1].outgoing, "自己发出去的必须是 true");
+    }
+}

@@ -68,10 +68,17 @@ use crate::plugin_registry::{
 ///          全局默认 + 每会话覆盖。同上一张表的先例：只新增一张旧程序根本不碰的表，
 ///          不抬版本是安全的；等 acbl 跟着换代时再一起抬。
 ///
-/// 为什么不把 `SCHEMA_VERSION` 抬到 18：版本号是一道硬门，装着的旧
+/// 17 → 18：`records` 加 `outgoing`——标记「本程序自己发出去的」。撤回的授权分级
+/// 靠它区分「撤自己的」（write）与「撤别人的」（destructive + 审批）：两者的
+/// `sender_id` 可能是同一个 bot 账号，只有这个标记分得清。
+///
+/// **这次必须抬版本**：`records` 是旧程序会写的表，加列后旧 `acbl` 的 `INSERT`
+/// 会缺列。所以 `acbl` 要跟着换代（用户已确认）。
+///
+/// 为什么之前不把 `SCHEMA_VERSION` 抬到 18：版本号是一道硬门，装着的旧
 /// acbl（acbctl）会拒绝打开「比自己新」的库。这次只新增一张旧程序
 /// 根本不碰的表，不抬版本是安全的；等 acbl 跟着换代时再一起抬。
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// 建表语句。`IF NOT EXISTS`：新库建、老库不动。
 const SCHEMA: &str = r#"
@@ -98,6 +105,7 @@ CREATE TABLE IF NOT EXISTS records (
     event_meta  TEXT,               -- 仅 kind = event：{tags, payload, summary} JSON
     labels      TEXT,               -- 记录级通用标签 JSON 数组（如 ["recall"]）
     suppressed  INTEGER NOT NULL DEFAULT 0, -- 0 / 1：只进流水，不投递/不唤醒/不计未读
+    outgoing    INTEGER NOT NULL DEFAULT 0, -- 0 / 1：本程序自己发出去的
     PRIMARY KEY (connection, room_key, record_id)
 );
 
@@ -637,6 +645,9 @@ impl SqliteStore {
         // 9 → 10：被抑制的记录。
         if version < 10 {
             self.add_column_if_missing("records", "suppressed", "INTEGER NOT NULL DEFAULT 0")?;
+            // 18：`records` 加 `outgoing`——标记「本程序自己发出去的」，
+            // 撤回的授权分级靠它区分撤自己的与撤别人的。老记录一律 0（收进来的）。
+            self.add_column_if_missing("records", "outgoing", "INTEGER NOT NULL DEFAULT 0")?;
         }
 
         // 10 → 11：反馈回复。老反馈没有回复，默认空数组。
@@ -823,8 +834,9 @@ impl Transcript for SqliteStore {
                 "INSERT INTO records
                  (connection, room_key, room_json, record_id, kind, event, sender_id, sender_name,
                   sender_role, at, at_self, reply_to_self, platform_id, elements, event_meta, labels,
-                  suppressed)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL, ?16)",
+                  suppressed,
+                  outgoing)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     draft.room.connection,
                     draft.room.key(),
@@ -841,7 +853,10 @@ impl Transcript for SqliteStore {
                     draft.platform_id,
                     elements,
                     event_meta,
+                    // labels：入库时为空，之后由 `add_labels` 追加。
+                    Option::<String>::None,
                     if draft.suppressed { 1 } else { 0 },
+                    if draft.outgoing { 1 } else { 0 },
                 ],
             )
             .map_err(io_error)?;
@@ -860,6 +875,7 @@ impl Transcript for SqliteStore {
             quote_ref: None,
             labels: Vec::new(),
             suppressed: draft.suppressed,
+            outgoing: draft.outgoing,
             // 流水里只有原话；重投的旁白由投递时补（见 engine::open_turn）。
             redelivery: None,
             note: None,
@@ -871,7 +887,8 @@ impl Transcript for SqliteStore {
             .conn
             .prepare(
                 "SELECT record_id, kind, event, sender_id, sender_name, sender_role, at, at_self,
-                        reply_to_self, platform_id, elements, event_meta, labels, suppressed
+                        reply_to_self, platform_id, elements, event_meta, labels, suppressed,
+                        outgoing
                  FROM records
                  WHERE connection = ?1 AND room_key = ?2 AND record_id > ?3
                  ORDER BY record_id
@@ -898,6 +915,7 @@ impl Transcript for SqliteStore {
                         event_meta: row.get(11)?,
                         labels: row.get(12)?,
                         suppressed: row.get::<_, i64>(13)? != 0,
+                        outgoing: row.get::<_, i64>(14)? != 0,
                     })
                 },
             )
@@ -936,7 +954,8 @@ impl Transcript for SqliteStore {
             .conn
             .prepare(
                 "SELECT record_id, kind, event, sender_id, sender_name, sender_role, at, at_self,
-                        reply_to_self, platform_id, elements, event_meta, labels, suppressed
+                        reply_to_self, platform_id, elements, event_meta, labels, suppressed,
+                        outgoing
                  FROM records
                  WHERE connection = ?1 AND room_key = ?2 AND record_id < ?3
                  ORDER BY record_id DESC
@@ -963,6 +982,7 @@ impl Transcript for SqliteStore {
                         event_meta: row.get(11)?,
                         labels: row.get(12)?,
                         suppressed: row.get::<_, i64>(13)? != 0,
+                        outgoing: row.get::<_, i64>(14)? != 0,
                     })
                 },
             )
@@ -1072,7 +1092,8 @@ impl Transcript for SqliteStore {
                 // 于是引用一条很老的消息时要一条条往回扫。这里相等条件命中的通常只有
                 // 一行，多一次微小的排序换「不扫全房间」是划算的。
                 "SELECT record_id, kind, event, sender_id, sender_name, sender_role, at, at_self,
-                        reply_to_self, platform_id, elements, event_meta, labels, suppressed
+                        reply_to_self, platform_id, elements, event_meta, labels, suppressed,
+                        outgoing
                  FROM records INDEXED BY records_platform
                  WHERE connection = ?1 AND room_key = ?2 AND platform_id = ?3
                  ORDER BY record_id DESC
@@ -1094,6 +1115,7 @@ impl Transcript for SqliteStore {
                         event_meta: row.get(11)?,
                         labels: row.get(12)?,
                         suppressed: row.get::<_, i64>(13)? != 0,
+                        outgoing: row.get::<_, i64>(14)? != 0,
                     })
                 },
             )
@@ -1363,6 +1385,7 @@ struct RawRow {
     event_meta: Option<String>,
     labels: Option<String>,
     suppressed: bool,
+    outgoing: bool,
 }
 
 impl RawRow {
@@ -1433,6 +1456,7 @@ impl RawRow {
             quote_ref: None,
             labels,
             suppressed: self.suppressed,
+            outgoing: self.outgoing,
             redelivery: None,
             note: None,
         })

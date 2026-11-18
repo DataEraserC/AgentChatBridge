@@ -129,6 +129,15 @@ pub struct Record {
     /// 是不是冲本账号来的（@ 到我、拍我）。
     #[serde(default)]
     pub at_self: bool,
+    /// 这条记录是**本程序自己发出去的**，不是从平台收进来的。
+    ///
+    /// 与 [`Record::at_self`] 无关：那个是「冲本账号来的（@/拍）」。
+    /// 两者可能同时为真（自己发了条 @ 自己的测试消息），也可能都不真。
+    ///
+    /// 存在的理由：平台的 sender 与我们自己的 sender 可能是同一个账号，
+    /// 只有这个标记能区分「谁发的」。撤回的授权分级要用它。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub outgoing: bool,
     /// 这条是不是「引用了我发的某条消息」的回复。
     ///
     /// 和 `at_self` 分开记：引用和 @ 是两种不同的动作，有人会只想要其中一种叫醒。
@@ -218,6 +227,7 @@ mod tests {
             at: 1_793_000_000_000,
             elements: vec![Element::text("在吗")],
             at_self: false,
+            outgoing: false,
             reply_to_self: false,
             platform_id: None,
             quote_ref: None,

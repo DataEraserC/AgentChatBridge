@@ -422,6 +422,7 @@ mod tests {
                 at: 1_793_000_000_000,
                 elements: vec![Element::text("在吗")],
                 at_self: true,
+                outgoing: false,
                 reply_to_self: false,
                 platform_id: None,
                 quote_ref: None,
