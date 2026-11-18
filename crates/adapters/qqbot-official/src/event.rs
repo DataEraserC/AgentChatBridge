@@ -27,6 +27,18 @@ pub enum Parsed {
 }
 
 /// 网关 dispatch（`op == 0`）的入口。`event_type` 是 `t`，`payload` 是 `d`。
+/// 这条消息算不算「冲机器人来的」（`at_self`）。
+///
+/// 为什么不是 bool：`GROUP_AT_MESSAGE_CREATE` 天然是 @ 版本，恒为真；而
+/// `GROUP_MESSAGE_CREATE`（全量模式）每条群消息都会来，必须看 `mentions`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtSelf {
+    /// 事件本身保证是冲机器人来的（@ 版本、私聊）。
+    Always,
+    /// 看 `mentions[].is_you`（全量模式）。
+    FromMentions,
+}
+
 pub fn parse(
     connection: &str,
     event_type: &str,
@@ -42,7 +54,27 @@ pub fn parse(
             at,
             "group",
             "group_openid",
-            true,
+            AtSelf::Always,
+        ),
+        // 群消息**全量模式**：机器人在群设置里开了「接收全部消息」后，平台改推
+        // 这个事件（不再推 `GROUP_AT_MESSAGE_CREATE`）。字段与 @ 版本完全一致
+        // （官方文档原文：「各字段含义与 GROUP_AT_MESSAGE_CREATE 完全一致」）。
+        //
+        // 2026-11-18 实测：用户打开全量后 @ 机器人不再有回复——事件掉进了兜底
+        // `notice()`，房间被写成 `group/GROUP_MESSAGE_CREATE`（事件名，不是 openid），
+        // 于是「没有订阅这个房间」被丢弃。
+        //
+        // `at_self` 不能写死 true：全量模式下每条群消息都会来，只有 `mentions`
+        // 里 `is_you = true` 的那条才是冲机器人来的。写死会让 `at_mention`
+        // 唤醒策略失效（每条消息都当 @）。
+        "GROUP_MESSAGE_CREATE" => message(
+            connection,
+            payload,
+            reply_state,
+            at,
+            "group",
+            "group_openid",
+            AtSelf::FromMentions,
         ),
         "C2C_MESSAGE_CREATE" => message(
             connection,
@@ -52,7 +84,7 @@ pub fn parse(
             "private",
             "user_openid",
             // 私聊消息天然「冲我来」：唤醒策略的 at_mention 才能在单聊里工作。
-            true,
+            AtSelf::Always,
         ),
         // 机器人被加入/移出群聊。
         //
@@ -102,7 +134,7 @@ fn message(
     at: i64,
     scope: &str,
     openid_field: &'static str,
-    at_self: bool,
+    at_self: AtSelf,
 ) -> Result<Parsed, EventError> {
     // OpenID 的位置文档内外的形态都有：GROUP 在顶层（group_openid），C2C 在
     // author.user_openid / author.id。三种都试，读不到就把真实键名留在错误里
@@ -151,6 +183,18 @@ fn message(
         .and_then(|value| text_of(value.get("id")))
         .unwrap_or_else(|| openid.clone());
     let content_with_notes = format!("{content}{attachment_notes}");
+    let at_self = match at_self {
+        AtSelf::Always => true,
+        AtSelf::FromMentions => payload
+            .get("mentions")
+            .and_then(Value::as_array)
+            // `is_you` 是官方给的「是否是@的当前bot」；`<@all>`（@全体）也算
+            // 冲机器人来的一次提醒，但**不算** @ 到它——两者在唤醒策略里不同。
+            .is_some_and(|list| {
+                list.iter()
+                    .any(|item| item.get("is_you").and_then(Value::as_bool).unwrap_or(false))
+            }),
+    };
     let draft = RecordDraft::message(
         room.clone(),
         Sender {
@@ -478,5 +522,127 @@ mod tests {
             panic!("退群应当产生一条记录");
         };
         assert_eq!(record.room.to_string(), "qqbot-official:group/G1");
+    }
+    /// 全量模式（`GROUP_MESSAGE_CREATE`）必须解析成**真实群房间**。
+    ///
+    /// 2026-11-18 实测事故：用户在群设置里打开「接收全部消息」后，平台改推
+    /// `GROUP_MESSAGE_CREATE`，适配器没有这个分支 → 掉进 `notice()` 兜底 →
+    /// 房间被写成 `group/GROUP_MESSAGE_CREATE` → 被当「未订阅房间」丢弃，
+    /// **连 @ 机器人也不回**（全量模式下平台不再推 @ 版本）。
+    #[test]
+    fn full_group_message_lands_in_the_real_room() {
+        let payload = json!({
+            "id": "ROBOT1.0_xxx",
+            "author": {
+                "id": "AUTHOR_ID",
+                "member_openid": "MEMBER_ID",
+                "username": "小明",
+                "bot": false
+            },
+            "content": "大家早上好呀",
+            "group_openid": "B2C3D4E5F6",
+            "message_type": 0,
+            "timestamp": "2026-07-21T08:00:00+08:00"
+        });
+        let parsed = parse(
+            "qqbot-official",
+            "GROUP_MESSAGE_CREATE",
+            &payload,
+            &ReplyState::new(),
+            1,
+        )
+        .expect("能解析");
+        let Parsed::Record(record) = parsed else {
+            panic!("应当产生一条消息记录");
+        };
+        assert_eq!(
+            record.room.to_string(),
+            "qqbot-official:group/B2C3D4E5F6",
+            "必须落到真实群房间，不是 group/GROUP_MESSAGE_CREATE 这种兜底位"
+        );
+    }
+
+    /// 全量模式下 `at_self` 要看 `mentions[].is_you`，不能恒为真。
+    ///
+    /// 恒为真的后果：`at_mention` 唤醒策略失效——群里每一句闲聊都会被当成
+    /// 「有人在叫机器人」并叫醒 agent。
+    #[test]
+    fn full_group_message_at_self_follows_mentions() {
+        let base = |mentions: Value| {
+            json!({
+                "id": "ROBOT1.0_xxx",
+                "author": { "id": "AUTHOR_ID", "username": "小明", "bot": false },
+                "content": "内容",
+                "group_openid": "G1",
+                "message_type": 0,
+                "mentions": mentions
+            })
+        };
+
+        // 没 @ 我 → 不算冲我来
+        let parsed = parse(
+            "qqbot-official",
+            "GROUP_MESSAGE_CREATE",
+            &base(json!([])),
+            &ReplyState::new(),
+            1,
+        )
+        .expect("能解析");
+        let Parsed::Record(record) = parsed else {
+            panic!("记录");
+        };
+        assert!(!record.at_self, "没 @ 我的群消息不该标 at_self");
+
+        // @ 了别人 → 还是不算
+        let parsed = parse(
+            "qqbot-official",
+            "GROUP_MESSAGE_CREATE",
+            &base(json!([{ "id": "OTHER", "is_you": false }])),
+            &ReplyState::new(),
+            1,
+        )
+        .expect("能解析");
+        let Parsed::Record(record) = parsed else {
+            panic!("记录");
+        };
+        assert!(!record.at_self, "@ 别人不算冲我来");
+
+        // @ 了我 → 算
+        let parsed = parse(
+            "qqbot-official",
+            "GROUP_MESSAGE_CREATE",
+            &base(json!([{ "id": "ME", "is_you": true }])),
+            &ReplyState::new(),
+            1,
+        )
+        .expect("能解析");
+        let Parsed::Record(record) = parsed else {
+            panic!("记录");
+        };
+        assert!(record.at_self, "@ 我必须标 at_self，否则唤醒策略收不到");
+    }
+
+    /// `GROUP_AT_MESSAGE_CREATE` 仍然恒为 at_self（@ 版本本身就是冲机器人来的）。
+    #[test]
+    fn at_mention_event_is_always_at_self() {
+        let payload = json!({
+            "id": "ROBOT1.0_xxx",
+            "author": { "id": "A1", "username": "小明", "bot": false },
+            "content": "@机器人 你好",
+            "group_openid": "G2",
+            "message_type": 0
+        });
+        let parsed = parse(
+            "qqbot-official",
+            "GROUP_AT_MESSAGE_CREATE",
+            &payload,
+            &ReplyState::new(),
+            1,
+        )
+        .expect("能解析");
+        let Parsed::Record(record) = parsed else {
+            panic!("记录");
+        };
+        assert!(record.at_self);
     }
 }
