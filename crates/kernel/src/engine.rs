@@ -7122,8 +7122,9 @@ impl<S: Store> Bridge<S> {
         // 由 flush 记录 route_unavailable 并走 pending TTL 自然过期。
         self.access_tickets
             .set_pending_ttl_ms(ctx.config.tickets.pending_ttl_ms());
+        // 路由交给可替换的 `TicketPolicy`；默认实现就是原来那套三级回退。
         let approval_route: Vec<String> = self
-            .approval_route(&ctx.config, &ctx.room)
+            .ticket_route(&ctx.config, &ctx.room)
             .iter()
             .map(ToString::to_string)
             .collect();
@@ -8308,7 +8309,7 @@ impl<S: Store> Bridge<S> {
                 continue;
             }
             let fresh: Vec<String> = self
-                .approval_route(config, &ticket.request_room)
+                .ticket_route(config, &ticket.request_room)
                 .iter()
                 .map(|room| room.to_string())
                 .collect();
@@ -8456,34 +8457,36 @@ impl<S: Store> Bridge<S> {
 
     /// 解析审批路由：房间级 > 账号级 > 适配器提供的全局默认。
     /// 永远不回退到申请房间。
-    fn approval_route(&self, config: &Config, room: &RoomId) -> Vec<RoomId> {
-        let room_route = config.grants.room_approval_route(room);
+    /// 问 `TicketPolicy` 要路由，把 `TicketRoute` 翻成房间列表。
+    ///
+    /// `External` 目前**没有消费方**（dispatch 只投递房间），所以按「没有路由」
+    /// 处理——票会走 `route_unavailable` 并在 pending TTL 后过期。这样比假装
+    /// 投递成功诚实：申请人会看到「没人收到」。
+    fn ticket_route(&self, config: &Config, room: &RoomId) -> Vec<RoomId> {
         let account = config.account_of_room(room);
-        let route: &[String] = if !room_route.is_empty() {
-            room_route
-        } else if !account.is_empty() {
-            config
-                .grants
-                .account_approval_route(&room.connection, &account)
-        } else {
-            &[]
+        let direct = self.outbound.direct_room(&room.connection);
+        let query = crate::ticket_policy::RouteQuery {
+            request_room: room,
+            account: &account,
+            adapter_direct: direct.as_deref(),
+            grants: &config.grants,
+            policy_version: self.config_version as i64,
         };
-        let mut targets = Vec::new();
-        for target in route {
-            if let Ok(room) = RoomId::parse(target) {
-                if !targets.contains(&room) {
-                    targets.push(room);
-                }
+        match self.ticket_policy.route(&query) {
+            Ok(crate::ticket_policy::TicketRoute::Rooms(rooms)) => rooms,
+            Ok(crate::ticket_policy::TicketRoute::External { backend, .. }) => {
+                eprintln!(
+                    "[access-ticket] external approval backend {backend:?} is not wired yet; \
+                     treating the ticket as having no route"
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                // fail-closed：判定不出来就当没有路由，别把票发到猜出来的地方。
+                eprintln!("[access-ticket] route decision failed ({error:?}); no route");
+                Vec::new()
             }
         }
-        if targets.is_empty() {
-            if let Some(direct) = self.outbound.direct_room(&room.connection) {
-                if let Ok(room) = RoomId::parse(&direct) {
-                    targets.push(room);
-                }
-            }
-        }
-        targets
     }
 
     /// 审批目标必须真的可达：连接在配置里、载体在位。

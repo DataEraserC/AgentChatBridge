@@ -68,6 +68,41 @@ pub enum ApproveVerdict {
     Deny { reason: String },
 }
 
+/// 审批要到哪儿去。由 [`TicketPolicy::route`] 决定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TicketRoute {
+    /// 发到这些房间（内建实现走这条）。
+    ///
+    /// 空 = 没有路由：票仍会建，但 `flush` 会记 `route_unavailable` 并让它在
+    /// pending TTL 后自然过期。
+    Rooms(Vec<RoomId>),
+    /// 交给外部后端（OA、OAuth、工单系统…），core 不投递。
+    ///
+    /// **尚未接通**：`flush` 目前只处理 `Rooms`；收到 `External` 会记一条
+    /// `route_unavailable`（原因注明「外部后端未接」），票按 pending 过期。
+    /// 留着这个变体是为了先定下形状——真要接的时候不用再改 trait 签名，
+    /// 只需在 dispatch 处加分支。
+    External {
+        /// 后端标识，如 `acme.oa`。
+        backend: String,
+        /// 后端自定义载荷，core 不解释。
+        payload: serde_json::Value,
+    },
+}
+
+/// 一次路由判定的输入。比 [`ApproveQuery`] 少（还没有票）：建票时就要算路由。
+pub struct RouteQuery<'a> {
+    /// 申请从哪个房间发起。
+    pub request_room: &'a RoomId,
+    /// 这条连接的 bot 账号（`connection.account`）。
+    pub account: &'a str,
+    /// 适配器自报的直连房间（可能没有）。
+    pub adapter_direct: Option<&'a str>,
+    /// 全部授权配置。
+    pub grants: &'a crate::grants::GrantsConfig,
+    pub policy_version: i64,
+}
+
 /// 「谁能批这张票」的可替换实现。
 ///
 /// 与 [`Policy`] 分离而不是合并：`Policy` 回答的是「此刻能不能做某个动作」，
@@ -75,6 +110,12 @@ pub enum ApproveVerdict {
 /// 合并会让 `Policy` 的实现被迫处理它不关心的票据结构。
 pub trait TicketPolicy: Send + Sync {
     fn can_approve(&self, query: &ApproveQuery<'_>) -> Result<ApproveVerdict, TicketPolicyError>;
+
+    /// 这张票该发到哪。
+    ///
+    /// 与 [`Self::can_approve`] 分开是因为调用时机不同：路由在**建票时**就要算
+    /// （票上要存快照），而审批判定在 `/approve` 时才算。
+    fn route(&self, query: &RouteQuery<'_>) -> Result<TicketRoute, TicketPolicyError>;
 }
 
 /// 默认实现：今天这套规则，原样搬过来。
@@ -156,6 +197,41 @@ impl TicketPolicy for CoreTicketPolicy {
         }
         Ok(ApproveVerdict::Allow)
     }
+
+    /// 默认路由：房间级 → 账号级 → 适配器默认，三级回退。
+    ///
+    /// 这套规则原样来自 `engine.rs`，搬过来时行为不变：
+    /// - 房间级**覆盖**账号级（有就不看账号级，不合并）
+    /// - 解析不出合法 `RoomId` 的条目直接丢弃（配置里写错不该让整条路由失效）
+    /// - 一个都没有时才问适配器要 `direct_room`
+    fn route(&self, query: &RouteQuery<'_>) -> Result<TicketRoute, TicketPolicyError> {
+        let room_route = query.grants.room_approval_route(query.request_room);
+        let route: &[String] = if !room_route.is_empty() {
+            room_route
+        } else if !query.account.is_empty() {
+            query
+                .grants
+                .account_approval_route(&query.request_room.connection, query.account)
+        } else {
+            &[]
+        };
+        let mut targets = Vec::new();
+        for target in route {
+            if let Ok(room) = RoomId::parse(target) {
+                if !targets.contains(&room) {
+                    targets.push(room);
+                }
+            }
+        }
+        if targets.is_empty() {
+            if let Some(direct) = query.adapter_direct {
+                if let Ok(room) = RoomId::parse(direct) {
+                    targets.push(room);
+                }
+            }
+        }
+        Ok(TicketRoute::Rooms(targets))
+    }
 }
 
 /// core 侧的统一入口：跑实现、**任何异常都变成拒绝**。
@@ -179,6 +255,10 @@ mod tests {
     impl TicketPolicy for AlwaysDeny {
         fn can_approve(&self, _: &ApproveQuery<'_>) -> Result<ApproveVerdict, TicketPolicyError> {
             Err(TicketPolicyError::Unavailable)
+        }
+
+        fn route(&self, _: &RouteQuery<'_>) -> Result<TicketRoute, TicketPolicyError> {
+            Ok(TicketRoute::Rooms(Vec::new()))
         }
     }
 
@@ -248,6 +328,96 @@ mod tests {
             failure_reason: None,
             audit_ref: None,
             expire_reason: None,
+        }
+    }
+    fn core_with_grants() -> (CoreTicketPolicy, crate::grants::GrantsConfig) {
+        let grants = crate::grants::GrantsConfig::default();
+        let policy: std::sync::Arc<dyn Policy> =
+            std::sync::Arc::new(crate::policy::CorePolicy::new());
+        (CoreTicketPolicy::new(policy), grants)
+    }
+
+    fn route_rooms(
+        policy: &CoreTicketPolicy,
+        grants: &crate::grants::GrantsConfig,
+        room: &str,
+    ) -> Vec<String> {
+        let room = RoomId::parse(room).expect("合法");
+        let query = RouteQuery {
+            request_room: &room,
+            account: "bot",
+            adapter_direct: None,
+            grants,
+            policy_version: 1,
+        };
+        match policy.route(&query).expect("能算") {
+            TicketRoute::Rooms(rooms) => rooms.iter().map(ToString::to_string).collect(),
+            TicketRoute::External { .. } => panic!("默认实现不该返回 External"),
+        }
+    }
+
+    /// 房间级**覆盖**账号级：两个都配了也只用房间级。
+    ///
+    /// 这条容易写错成「合并」，合并会让审批发给一个管理员没预期的地方。
+    #[test]
+    fn room_route_overrides_account_route() {
+        let (policy, mut grants) = core_with_grants();
+        grants.accounts.insert(
+            "qq:bot".to_owned(),
+            crate::grants::AccountGrant {
+                approval_route: vec!["qq:private/account-admin".to_owned()],
+            },
+        );
+        grants.rooms.insert(
+            "qq:group/1".to_owned(),
+            crate::grants::RoomGrant {
+                approval_route: vec!["qq:private/room-admin".to_owned()],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            route_rooms(&policy, &grants, "qq:group/1"),
+            vec!["qq:private/room-admin".to_owned()],
+            "房间级有就用它，账号级完全不看"
+        );
+        // 没配房间级的房间才轮到账号级。
+        assert_eq!(
+            route_rooms(&policy, &grants, "qq:group/2"),
+            vec!["qq:private/account-admin".to_owned()],
+            "房间级空时才回落到账号级"
+        );
+    }
+
+    /// 一个都没配 = 空路由（不是「随便找个地方发」）。
+    #[test]
+    fn no_config_means_no_route() {
+        let (policy, grants) = core_with_grants();
+        assert!(
+            route_rooms(&policy, &grants, "qq:group/1").is_empty(),
+            "没配就不该凭空造出目的地"
+        );
+    }
+
+    /// 适配器的 `direct_room` 只在前两级都空时才用。
+    #[test]
+    fn adapter_direct_is_the_last_resort() {
+        let (policy, grants) = core_with_grants();
+        let room = RoomId::parse("qq:group/1").expect("合法");
+        let query = RouteQuery {
+            request_room: &room,
+            account: "bot",
+            adapter_direct: Some("qq:private/adapter-default"),
+            grants: &grants,
+            policy_version: 1,
+        };
+        match policy.route(&query).expect("能算") {
+            TicketRoute::Rooms(rooms) => assert_eq!(
+                rooms.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                vec!["qq:private/adapter-default".to_owned()],
+                "配置都没有时才用适配器默认"
+            ),
+            TicketRoute::External { .. } => panic!("不该是 External"),
         }
     }
 }
