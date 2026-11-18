@@ -121,12 +121,18 @@ pub struct AdapterHost {
     pub patch_element: Option<std::sync::mpsc::Sender<PatchElement>>,
 }
 
-/// 一条「把某记录的第 N 个元素换掉」的请求。
+/// 一条「把某条记录的第 N 个元素换掉」的请求。
 #[derive(Debug, Clone)]
 pub struct PatchElement {
     /// 房间全名（`connection:group/...`）。
     pub room: String,
-    pub record_id: u64,
+    /// 平台自己的消息编号（QQ 的 `msg_id`）。
+    ///
+    /// **用平台编号而不是 record_id**：适配器 `submit(draft)` 之后拿不到自增
+    /// 编号（`EventQueue::submit` 只回 `()`），而平台编号它本来就有——就在
+    /// draft 的 `platform_id` 里。用平台编号也让这个接口保持平台中立：
+    /// core 的自增编号是内部实现，不该泄露给适配器。
+    pub platform_id: String,
     /// 元素在 `elements` 数组里的下标。
     pub index: usize,
     pub element: acb_proto::Element,

@@ -1187,10 +1187,13 @@ impl Transcript for SqliteStore {
     fn patch_element(
         &mut self,
         room: &RoomId,
-        record_id: u64,
+        platform_id: &str,
         index: usize,
         element: &Element,
     ) -> Result<bool, StorageError> {
+        if platform_id.is_empty() {
+            return Ok(false);
+        }
         // 先把当前 elements 读出来、换掉第 index 个、再整体写回。
         //
         // 为什么整列重写而不是 SQL 里做 JSON 手术：`elements` 存的是 JSON 数组，
@@ -1200,8 +1203,9 @@ impl Transcript for SqliteStore {
             .conn
             .query_row(
                 "SELECT elements FROM records
-                 WHERE connection = ?1 AND room_key = ?2 AND record_id = ?3",
-                params![room.connection, room.key(), record_id],
+                 WHERE connection = ?1 AND room_key = ?2 AND platform_id = ?3
+                 ORDER BY record_id DESC LIMIT 1",
+                params![room.connection, room.key(), platform_id],
                 |row| row.get(0),
             )
             .optional()
@@ -1234,8 +1238,8 @@ impl Transcript for SqliteStore {
             .conn
             .execute(
                 "UPDATE records SET elements = ?4
-                 WHERE connection = ?1 AND room_key = ?2 AND record_id = ?3",
-                params![room.connection, room.key(), record_id, text],
+                 WHERE connection = ?1 AND room_key = ?2 AND platform_id = ?3",
+                params![room.connection, room.key(), platform_id, text],
             )
             .map_err(io_error)?;
         Ok(changed > 0)

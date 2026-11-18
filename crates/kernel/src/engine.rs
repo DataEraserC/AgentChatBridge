@@ -3048,11 +3048,13 @@ impl<S: Store> Bridge<S> {
     pub fn patch_element(
         &mut self,
         room: &RoomId,
-        record_id: u64,
+        platform_id: &str,
         index: usize,
         element: &Element,
     ) -> Result<bool, BridgeError> {
-        Ok(self.store.patch_element(room, record_id, index, element)?)
+        Ok(self
+            .store
+            .patch_element(room, platform_id, index, element)?)
     }
 
     /// 记一次模型失败（带 class 的那种）。到阈值就进入惩罚期。

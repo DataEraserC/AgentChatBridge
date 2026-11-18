@@ -325,7 +325,7 @@ pub trait Transcript {
     fn patch_element(
         &mut self,
         room: &RoomId,
-        record_id: u64,
+        platform_id: &str,
         index: usize,
         element: &Element,
     ) -> Result<bool, StorageError>;
@@ -1437,14 +1437,23 @@ impl Transcript for MemoryStore {
     fn patch_element(
         &mut self,
         room: &RoomId,
-        record_id: u64,
+        platform_id: &str,
         index: usize,
         element: &Element,
     ) -> Result<bool, StorageError> {
+        if platform_id.is_empty() {
+            return Ok(false);
+        }
         let Some(records) = self.records.get_mut(room) else {
             return Ok(false);
         };
-        let Some(record) = records.iter_mut().find(|record| record.id == record_id) else {
+        // 取**最新**一条同平台编号的记录：撤回/编辑会产生多条同 id 的流水，
+        // 附件属于最新那条。
+        let Some(record) = records
+            .iter_mut()
+            .rev()
+            .find(|record| record.platform_id.as_deref() == Some(platform_id))
+        else {
             return Ok(false);
         };
         let Some(slot) = record.elements.get_mut(index) else {
@@ -2758,7 +2767,8 @@ mod tests {
                 Element::text("尾巴"),
             ],
             false,
-        );
+        )
+        .with_platform_id("MSG1");
         let record = store.append(draft).expect("入库");
 
         let ready = Element::Image {
@@ -2766,9 +2776,7 @@ mod tests {
             alt: Some("a.jpg".to_owned()),
         };
         assert!(
-            store
-                .patch_element(&room, record.id, 1, &ready)
-                .expect("能改"),
+            store.patch_element(&room, "MSG1", 1, &ready).expect("能改"),
             "命中时返回 true"
         );
 
@@ -2799,20 +2807,22 @@ mod tests {
     fn patch_element_returns_false_when_it_cannot_apply() {
         let mut store = MemoryStore::new();
         let room = room("qq", "group/2");
-        let record = store.append(draft(room.clone(), "只有一段")).expect("入库");
+        let record = store
+            .append(draft(room.clone(), "只有一段").with_platform_id("MSG2"))
+            .expect("入库");
         let element = Element::Image {
             url: "/x".to_owned(),
             alt: None,
         };
         assert!(
             !store
-                .patch_element(&room, record.id, 5, &element)
+                .patch_element(&room, "MSG2", 5, &element)
                 .expect("不报错"),
             "下标越界返回 false"
         );
         assert!(
             !store
-                .patch_element(&room, 999_999, 0, &element)
+                .patch_element(&room, "NOPE", 0, &element)
                 .expect("不报错"),
             "记录不存在返回 false"
         );

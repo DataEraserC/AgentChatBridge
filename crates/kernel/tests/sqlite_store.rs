@@ -1260,7 +1260,8 @@ fn patch_element_persists_across_reopen() {
             AT,
             vec![Element::text("看图"), Element::text("[图片 下载中]")],
             false,
-        );
+        )
+        .with_platform_id("MSG9");
         let record = store.append(draft).expect("入库");
         record_id = record.id;
 
@@ -1269,9 +1270,7 @@ fn patch_element_persists_across_reopen() {
             alt: Some("a.jpg".to_owned()),
         };
         assert!(
-            store
-                .patch_element(&room, record_id, 1, &ready)
-                .expect("能改"),
+            store.patch_element(&room, "MSG9", 1, &ready).expect("能改"),
             "命中时返回 true"
         );
     }

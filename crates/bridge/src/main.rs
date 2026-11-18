@@ -445,9 +445,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 let mut guard = bridge
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Err(error) =
-                    guard.patch_element(&room, request.record_id, request.index, &request.element)
-                {
+                if let Err(error) = guard.patch_element(
+                    &room,
+                    &request.platform_id,
+                    request.index,
+                    &request.element,
+                ) {
                     eprintln!(
                         "{}",
                         acb_i18n::t!(
