@@ -42,13 +42,15 @@ pub fn available() -> bool {
     {
         return false;
     }
-    Command::new("systemd-run")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    run_with_deadline(
+        Command::new("systemd-run")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        Duration::from_secs(5),
+    )
+    .map(|output| output.status.success())
+    .unwrap_or(false)
 }
 
 /// 一次组件启动的完整参数。
@@ -78,16 +80,28 @@ pub fn start(spec: &Spec<'_>) -> Result<String, String> {
     // 不加这一步会失败在 `Unit ... was already loaded`：组件的重启路径
     // （崩溃后 `Restarting` → 再 spawn）必然撞到自己；`--collect` 只在
     // unit 退出后清理，停止到清理之间有个窗口。
-    let _ = Command::new("systemctl")
-        .args(["--user", "stop", &unit])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    let _ = Command::new("systemctl")
-        .args(["--user", "reset-failed", &unit])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    // 三处调用都必须有上限。`Command::status()` / `output()` 是阻塞的：
+    // `systemd-run` 卡住（bus 忙、unit 带着挂起的 job）时整个 `start` 停在这里，
+    // 而 launcher 的主循环也就此停转——systemd 的 `WatchdogSec=2min` 到点直接
+    // 给 launcher 发 SIGABRT（2026-11-19 02:32 实测，栈顶是
+    // `component_unit::start` → `Command::status` → `wait4`）。
+    //
+    // 超时按「这一步没成功」处理：宁可让组件重启失败一次，也别让整个 launcher
+    // 被 watchdog 打死（那样所有组件都会失去归属）。
+    let _ = run_with_deadline(
+        Command::new("systemctl")
+            .args(["--user", "stop", &unit])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        Duration::from_secs(10),
+    );
+    let _ = run_with_deadline(
+        Command::new("systemctl")
+            .args(["--user", "reset-failed", &unit])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        Duration::from_secs(10),
+    );
     let log = spec.log_path.display().to_string();
 
     let mut command = Command::new("systemd-run");
@@ -119,8 +133,7 @@ pub fn start(spec: &Spec<'_>) -> Result<String, String> {
     // program 是 nix store 绝对路径（配置里给的），不需要 PATH 解析。
     command.arg("--").arg(spec.program).args(spec.args);
 
-    let output = command
-        .output()
+    let output = run_with_deadline(&mut command, Duration::from_secs(30))
         .map_err(|error| format!("systemd-run {unit}: {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -161,7 +174,7 @@ pub fn wait_main_pid(unit: &str, timeout: Duration) -> Option<u32> {
 /// 标准库没有 `wait_timeout`，所以自己轮询 `try_wait`。轮询间隔 20ms：这个
 /// 函数只在停机路径上跑，几十毫秒的延迟无所谓，而 `systemctl` 通常几十毫秒
 /// 就返回了。
-fn run_with_deadline(
+pub fn run_with_deadline(
     command: &mut Command,
     budget: Duration,
 ) -> Result<std::process::Output, String> {
@@ -349,5 +362,35 @@ mod tests {
             unit_name("dsh-presets"),
             "acb-component-dsh-presets.service"
         );
+    }
+    /// 卡住的命令必须被上限截断，不能一直等下去。
+    ///
+    /// 2026-11-19 02:32 实测事故：`component_unit::start()` 里的
+    /// `Command::status()` 没有上限，`systemd-run` 卡住时整个 launcher 停转，
+    /// systemd 的 `WatchdogSec=2min` 到点直接 SIGABRT（core dump 栈顶就是
+    /// `start` → `Command::status` → `wait4`）。
+    ///
+    /// 这条测试盯住机制本身：给一个睡 60 秒的命令一个 1 秒上限，它必须在大约
+    /// 1 秒返回 `Err`，而不是等满 60 秒。
+    #[test]
+    fn run_with_deadline_kills_a_stuck_command() {
+        let started = Instant::now();
+        let outcome =
+            run_with_deadline(&mut Command::new("sleep").arg("60"), Duration::from_secs(1));
+        let elapsed = started.elapsed();
+
+        assert!(outcome.is_err(), "超时必须返回错误，不能假装成功");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "必须在 ~1 秒返回，实际 {elapsed:?}——上限没生效的话 launcher 会被 watchdog 打死"
+        );
+    }
+
+    /// 正常返回的命令不该被误杀。
+    #[test]
+    fn run_with_deadline_returns_output_for_a_fast_command() {
+        let outcome = run_with_deadline(&mut Command::new("true"), Duration::from_secs(10));
+        let output = outcome.expect("能跑完");
+        assert!(output.status.success());
     }
 }

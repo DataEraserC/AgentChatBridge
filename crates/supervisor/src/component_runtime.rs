@@ -1115,7 +1115,13 @@ impl ComponentManager {
         {
             command.current_dir(cwd);
         }
-        match command.status() {
+        // `compose down` 也要有上限：容器停不下来时它会一直等，而这条路径
+        // 在 launcher 主循环里——卡住就是 watchdog SIGABRT。
+        let waited = crate::component_unit::run_with_deadline(
+            &mut command,
+            std::time::Duration::from_secs(30),
+        );
+        match waited.map(|output| output.status) {
             Ok(status) if status.success() => eprintln!(
                 "acb components: {} compose down ok",
                 self.components[index].entry.name
