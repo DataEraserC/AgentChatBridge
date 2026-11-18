@@ -36,3 +36,4 @@ config.toml
 .envrc
 .idea/
 .vscode/
+.box-agent/
