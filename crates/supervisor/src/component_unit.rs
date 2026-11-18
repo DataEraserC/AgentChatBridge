@@ -156,6 +156,41 @@ pub fn wait_main_pid(unit: &str, timeout: Duration) -> Option<u32> {
     }
 }
 
+/// 跑一条命令，最多等 `budget`。超时杀掉子进程并返回原因。
+///
+/// 标准库没有 `wait_timeout`，所以自己轮询 `try_wait`。轮询间隔 20ms：这个
+/// 函数只在停机路径上跑，几十毫秒的延迟无所谓，而 `systemctl` 通常几十毫秒
+/// 就返回了。
+fn run_with_deadline(
+    command: &mut Command,
+    budget: Duration,
+) -> Result<std::process::Output, String> {
+    use std::process::Stdio;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("无法启动：{error}"))?;
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("读取输出失败：{error}"));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                // 杀不掉也要往下走：留下僵尸比让 launcher 被 SIGKILL 好。
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("超过 {} 秒未返回，已终止", budget.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => return Err(format!("等待失败：{error}")),
+        }
+    }
+}
+
 /// 停掉一个组件 unit。返回它是否确实进入非 active 状态。
 pub fn stop(unit: &str, timeout_secs: u64) -> Result<(), String> {
     // `systemctl` **没有** `--timeout` 选项（那是 `systemd-run` 的）。写了会得到
@@ -163,16 +198,29 @@ pub fn stop(unit: &str, timeout_secs: u64) -> Result<(), String> {
     // stdout 上，于是停止静默失败、`systemctl stop` 之后组件还活着（实测）。
     //
     // 所以超时由我们自己管：发 stop，然后按 `timeout_secs` 轮询 ActiveState。
-    let output = Command::new("systemctl")
-        .args(["--user", "stop", unit])
-        .output()
-        .map_err(|error| format!("systemctl stop {unit}: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "systemctl stop {unit} failed: {}",
-            stderr.trim().replace('\n', "; ")
-        ));
+    // `systemctl stop` **必须有独立上限**：它是阻塞调用，unit 停得慢时
+    // `Command::output()` 会一直等下去。而 launcher 的停机总预算是 45 秒
+    //（unit 的 `TimeoutStopSec`），预算用完之后 systemd 直接 SIGKILL launcher
+    // ——于是组件和 bridge 都留在原地变成孤儿，下次换代报
+    // `no_restart_owner`（2026-11-18 实测两次）。
+    //
+    // 这里给 stop 留 `timeout_secs` 的一半（至少 3 秒），剩下的时间用来确认
+    // ActiveState。超时就杀掉 systemctl 子进程并按「没能停住」处理：比让整个
+    // launcher 被 SIGKILL 好。
+    let wait_budget = Duration::from_secs((timeout_secs / 2).max(3));
+    match run_with_deadline(
+        Command::new("systemctl").args(["--user", "stop", unit]),
+        wait_budget,
+    ) {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "systemctl stop {unit} failed: {}",
+                stderr.trim().replace('\n', "; ")
+            ));
+        }
+        Err(reason) => return Err(format!("systemctl stop {unit}: {reason}")),
     }
 
     // 等它真的不再是 active。`stop` 返回不等于进程已经退出。
@@ -194,16 +242,18 @@ pub fn stop(unit: &str, timeout_secs: u64) -> Result<(), String> {
 /// 里消失（dsh 就是：`dsh_nix.sh` 内部 `exec node ...`）。而我们在
 /// `--setenv` 里注入的 `ACB_COMPONENT_NAME` 是 unit 的属性，`exec` 抹不掉。
 pub fn component_name_of(unit: &str) -> Option<String> {
-    let output = Command::new("systemctl")
-        .args([
+    // 同样有界：这个函数在 adopt 探测里调用，卡住会拖死整个 reconcile。
+    let output = run_with_deadline(
+        Command::new("systemctl").args([
             "--user",
             "show",
             unit,
             "--property=Environment",
             "--no-pager",
-        ])
-        .output()
-        .ok()?;
+        ]),
+        Duration::from_secs(5),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -230,17 +280,21 @@ pub struct UnitState {
 
 /// 查一个组件 unit 的状态。unit 不存在时返回 `None`。
 pub fn state(unit: &str) -> Option<UnitState> {
-    let output = Command::new("systemctl")
-        .args([
+    // 有界：这个函数在停机轮询里每 50ms 调一次。一旦 `systemctl` 卡住（bus 忙、
+    // unit 状态迁移中），无超时的 `output()` 会把整条停机路径拖死，最后被
+    // systemd SIGKILL（2026-11-18 实测两次）。5 秒足够正常返回。
+    let output = run_with_deadline(
+        Command::new("systemctl").args([
             "--user",
             "show",
             unit,
             "--property=ActiveState",
             "--property=MainPID",
             "--no-pager",
-        ])
-        .output()
-        .ok()?;
+        ]),
+        Duration::from_secs(5),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
