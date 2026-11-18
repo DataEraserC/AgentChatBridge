@@ -1563,3 +1563,47 @@ fn no_route_notice_and_retarget_after_route_configured() {
     let dm = approval_dm(&sends);
     assert!(dm.contains(&id), "补完路由后旧票应出现在审批私信里: {dm}");
 }
+
+/// 没有审批路由的房间：票仍然建（事后配路由还能补批），但**当场**告诉申请人
+/// 「没人会批」。
+///
+/// 2026-11-19 实测事故：`tk-58f01aca1aae3b0c-1` 停在 `pending_approval`，而
+/// 「没人收到审批」的提示要靠平台发送——那条通道当时正好 401。结果 agent 卡死
+/// 等一张永远不会被批的票，申请人什么都不知道。
+///
+/// 所以：不改成直接拒绝（那会丢掉「事后补配路由再批」的能力），而是把这个事实
+/// 放进**申请的回执**里——回执走工具返回，不依赖平台发送，一定送得到。
+#[test]
+fn ticket_without_approval_route_says_nobody_will_see_it() {
+    let (mut bridge, _sends) = bridge();
+    // `qq:group/456` 没有配 `[grants.rooms]`，账号级没有，适配器也没给默认。
+    bridge
+        .ingest(message("qq:group/456", "user1", "给我开个票", true))
+        .expect("能记下来");
+    let turn = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    let reply = bridge
+        .tool_call(
+            &turn,
+            &sessions(),
+            "access_request",
+            json!({"items": [{
+                "target": "qq:group/999",
+                "ops": ["send_message_to"],
+                "params": {"elements": [{"type": "text", "text": "x"}]}
+            }]}),
+        )
+        .expect("票仍然建：事后配了路由可以补批");
+
+    assert_eq!(
+        reply["approval_queued"], false,
+        "没有审批人时必须如实说「没排队」，不能骗 agent 去等"
+    );
+    let note = reply["note"].as_str().unwrap_or_default();
+    assert!(
+        note.contains("NO approval route") && note.contains("Do not wait"),
+        "回执要说清没人会批、且不要干等，实际：{note}"
+    );
+    // 票本身还在，状态是 pending——保留补批能力。
+    assert_eq!(reply["tickets"][0]["state"], "pending_approval");
+}

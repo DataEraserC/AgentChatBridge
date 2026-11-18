@@ -117,7 +117,13 @@ pub fn fetch_one(
         .dir
         .join(sanitize(&attachment.room))
         .join(sanitize(&attachment.platform_id))
-        .join(sanitize_file(&attachment.filename));
+        // 带上元素下标：同一条消息里多张图的 `filename` 可能完全相同
+        // （OneBot 的 image 段经常带 `summary = "[图片]"`），只用文件名会互相覆盖，
+        // 后下的那张顶掉前一张——静默丢图，且记录里的本地路径指向错的文件。
+        //
+        // 用 `index` 而不是时间戳/随机数：同一个元素重复下载应当落在同一个位置
+        // （幂等），这对重试友好。
+        .join(unique_name(&attachment.filename, attachment.index));
 
     let outcome = download(&attachment.url, config.max_bytes, config.timeout, &target);
     let element = match outcome {
@@ -177,6 +183,24 @@ fn sanitize(value: &str) -> String {
         "unnamed".to_owned()
     } else {
         cleaned
+    }
+}
+
+/// 附件落盘的文件名：`<元素下标>-<清洗过的原名>`。
+///
+/// 原名常常不可用（`[图片]`、空串、纯占位符），所以下标是必需的——它保证
+/// 同一条消息里的多个附件不会撞名。
+fn unique_name(filename: &str, index: usize) -> String {
+    let cleaned = sanitize_file(filename);
+    // 只有占位符（`[图片]` 之类）或空串时，退回一个中性名；下标仍然是前缀，
+    // 唯一性由它保证。
+    let usable = cleaned
+        .chars()
+        .any(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_');
+    if usable {
+        format!("{index}-{cleaned}")
+    } else {
+        format!("{index}-attachment")
     }
 }
 
@@ -602,5 +626,25 @@ mod tests {
             .unwrap_or_default();
         assert!(leftovers.is_empty(), "不该留空目录，实际 {leftovers:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+    /// 同一条消息里多个附件必须落到不同文件。
+    ///
+    /// 2026-11-19 实测：OneBot 的 image 段常带 `summary = "[图片]"`，落盘路径就成了
+    /// `.../<msg_id>/[图片]`。一条消息里两张图会互相覆盖——后下的顶掉前一张，
+    /// 记录里两条路径指向同一个文件，**静默丢图**。
+    #[test]
+    fn attachments_in_one_message_get_distinct_paths() {
+        let names: Vec<String> = (0..3).map(|index| unique_name("[图片]", index)).collect();
+        assert_eq!(
+            names,
+            vec!["0-attachment", "1-attachment", "2-attachment"],
+            "纯占位符要退回中性名，靠下标保证唯一"
+        );
+
+        // 有真实文件名的照常保留原意，下标仍然前缀。
+        assert_eq!(unique_name("a.jpg", 1), "1-a.jpg");
+        // 路径分隔符还是要清掉。
+        assert!(!unique_name("../x/y.png", 0).contains('/'));
+        assert!(!unique_name("..", 0).starts_with('.'));
     }
 }

@@ -7307,6 +7307,7 @@ impl<S: Store> Bridge<S> {
 
         if requests.len() == 1 {
             let request = requests.remove(0);
+            let reachable = !approval_route.is_empty();
             let reply = self.access_tickets.request(request).map_err(|reason| {
                 ToolError::new(ErrorCode::BadRequest, format!("[access_request] {reason}"))
             })?;
@@ -7315,11 +7316,23 @@ impl<S: Store> Bridge<S> {
                 "batch_id": serde_json::Value::Null,
                 "tickets": [ticket_reply_json(&reply)],
                 "duplicate": reply.duplicate,
-                "approval_queued": true,
-                "note": "approval messages for this session are aggregated and sent when the turn ends; do not retry the target action until the admin approves",
+                "approval_queued": reachable,
+                "note": if reachable {
+                    "approval messages for this session are aggregated and sent when the turn ends; do not retry the target action until the admin approves"
+                } else {
+                    // 没有审批人时**当场说清**，别让 agent 干等。
+                    //
+                    // 票仍然建（事后配了路由还能补批），但必须让申请人立刻知道
+                    // 「现在没人会批这张票」。2026-11-19 实测：票停在
+                    // pending_approval，提示又要靠平台发送（而那正是挂掉的那条
+                    // 通道），结果 agent 卡死、申请人什么都不知道。
+                    "this room has NO approval route (room/account/adapter default all empty), so nobody will see this ticket and it will expire unapproved; ask an admin to configure approval_route, or use another room. Do not wait for it"
+                },
             }));
         }
 
+        // 整批里只要有一张没路由，就按「没人会批」告知（宁可多说一句）。
+        let reachable = !approval_route.is_empty();
         let batch: BatchReply =
             self.access_tickets
                 .request_batch(requests, now)
@@ -7330,8 +7343,12 @@ impl<S: Store> Bridge<S> {
             "ok": true,
             "batch_id": batch.batch_id,
             "tickets": batch.tickets.iter().map(ticket_reply_json).collect::<Vec<_>>(),
-            "approval_queued": true,
-            "note": "approval messages for this session are aggregated and sent when the turn ends; approve the whole batch with /approve <batch_id> or each ticket with /approve <id> <nonce>",
+            "approval_queued": reachable,
+            "note": if reachable {
+                "approval messages for this session are aggregated and sent when the turn ends; approve the whole batch with /approve <batch_id> or each ticket with /approve <id> <nonce>"
+            } else {
+                "this room has NO approval route (room/account/adapter default all empty), so nobody will see these tickets and they will expire unapproved; ask an admin to configure approval_route, or use another room. Do not wait for them"
+            },
         }))
     }
 
