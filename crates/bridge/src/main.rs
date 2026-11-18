@@ -422,6 +422,44 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // 这条通道，转发线程在锁内落进 engine 的运行时注册表。注册可能来自多个
     // 适配器实例（同一种类的每条连接共享一个提供者库），通道是汇聚点。
     let (connections_tx, connections_rx) = std::sync::mpsc::channel::<ProviderConnections>();
+    // 异步补下载：适配器下载完附件后，把已入库记录里的占位元素换掉。
+    //
+    // 为什么走通道而不是让适配器直接拿 Bridge：适配器不该持有全局锁，
+    // 一次慢写会挡住所有消息流。转发线程在锁内做那一件事，锁外的下载照常并行。
+    let (patch_tx, patch_rx) = std::sync::mpsc::channel::<acb_kernel::adapter::PatchElement>();
+    {
+        let bridge = Arc::clone(&bridge);
+        let shutdown = Arc::clone(&shutdown);
+        std::thread::spawn(move || {
+            while let Ok(request) = patch_rx.recv() {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Ok(room) = request.room.parse::<acb_proto::RoomId>() else {
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("bridge.main.patch_room_invalid", room = request.room)
+                    );
+                    continue;
+                };
+                let mut guard = bridge
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Err(error) =
+                    guard.patch_element(&room, request.record_id, request.index, &request.element)
+                {
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!(
+                            "bridge.main.patch_element_failed",
+                            room = request.room,
+                            error = error.to_string()
+                        )
+                    );
+                }
+            }
+        });
+    }
     {
         let bridge = Arc::clone(&bridge);
         let shutdown = Arc::clone(&shutdown);
@@ -455,6 +493,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             status: AdapterStatus::new(connection_id.clone(), deps.clone()),
             state_dir,
             connections: Some(connections_tx.clone()),
+            patch_element: Some(patch_tx.clone()),
         };
         std::thread::spawn(move || run_adapter(host, launch));
     }

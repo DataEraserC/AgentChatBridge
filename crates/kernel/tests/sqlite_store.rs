@@ -1237,3 +1237,61 @@ fn before_and_stuck_unread_work_on_sqlite() {
         "确认之后不该还算卡住"
     );
 }
+
+/// `patch_element` 在 SQLite 上真的落到库：关掉重开读到的必须是新元素。
+///
+/// 这是「异步补下载」的持久化保证——适配器在锁外下载完、发一条 patch 请求，
+/// bridge 的转发线程改库。如果只在内存里改了没落盘，重启后附件就永远停在占位。
+#[test]
+fn patch_element_persists_across_reopen() {
+    let db = TempDb::new("patch-element");
+    let room = RoomId::new("qq", "group/9").expect("合法");
+    let record_id;
+
+    {
+        let mut store = acb_kernel::SqliteStore::open(db.path()).expect("能打开");
+        let draft = RecordDraft::message(
+            room.clone(),
+            Sender {
+                id: "u1".into(),
+                name: "老王".into(),
+                role: None,
+            },
+            AT,
+            vec![Element::text("看图"), Element::text("[图片 下载中]")],
+            false,
+        );
+        let record = store.append(draft).expect("入库");
+        record_id = record.id;
+
+        let ready = Element::Image {
+            url: "/data/attachments/9/a.jpg".to_owned(),
+            alt: Some("a.jpg".to_owned()),
+        };
+        assert!(
+            store
+                .patch_element(&room, record_id, 1, &ready)
+                .expect("能改"),
+            "命中时返回 true"
+        );
+    }
+
+    {
+        let store = acb_kernel::SqliteStore::open(db.path()).expect("重开");
+        let records = store.since(&room, 0, 10).expect("能读");
+        let record = records
+            .iter()
+            .find(|item| item.id == record_id)
+            .expect("还在");
+        assert_eq!(record.elements.len(), 2);
+        assert!(
+            matches!(
+                &record.elements[1],
+                Element::Image { url, .. } if url == "/data/attachments/9/a.jpg"
+            ),
+            "重开之后仍是替换后的元素，实际：{:?}",
+            record.elements[1]
+        );
+        assert!(matches!(&record.elements[0], Element::Text { text } if text == "看图"));
+    }
+}

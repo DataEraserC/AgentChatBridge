@@ -108,6 +108,28 @@ pub struct AdapterHost {
     /// 转成这里；core 的运行时注册表消费。`None` = 这个载体不参与注册
     /// （动态库等），消息照旧不会丢——载体侧会打日志。
     pub connections: Option<std::sync::mpsc::Sender<ProviderConnections>>,
+    /// 改写已入库记录里某个元素的通道（异步补下载用）。
+    ///
+    /// 适配器收到带附件的消息时，先把附件写成占位元素立即入库（不阻塞消息流）；
+    /// 下载完成后通过这里把那个元素换成真实内容。
+    ///
+    /// **平台无关**：这里只有「哪个房间、哪条记录、第几个元素、换成什么」，
+    /// 不知道是图片还是别的，也不知道 URL 从哪来。
+    ///
+    /// `None` = 这个载体不支持（外置进程/动态库暂未接），调用方看到 `None`
+    /// 应当放弃改写而不是报错——记录里的占位仍在，信息不丢。
+    pub patch_element: Option<std::sync::mpsc::Sender<PatchElement>>,
+}
+
+/// 一条「把某记录的第 N 个元素换掉」的请求。
+#[derive(Debug, Clone)]
+pub struct PatchElement {
+    /// 房间全名（`connection:group/...`）。
+    pub room: String,
+    pub record_id: u64,
+    /// 元素在 `elements` 数组里的下标。
+    pub index: usize,
+    pub element: acb_proto::Element,
 }
 
 /// 适配器推来的一批连接注册（`AdapterMessage::Connections` 的载体侧形状）。
@@ -577,6 +599,7 @@ mod tests {
             status: AdapterStatus::new(id, deps),
             state_dir: std::path::PathBuf::from("/tmp/acb-test-state"),
             connections: None,
+            patch_element: None,
         }
     }
 

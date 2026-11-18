@@ -1605,6 +1605,8 @@
   "bridge.main.adapter_state_dir_failed": "failed to create adapter state dir {dir}: {error}",
   "adapter.qqbot.state_open_failed": "failed to open adapter state db: {error}",
   "bridge.main.duplicate_connection_skipped": "duplicate connection id {id} from an adapter library skipped (config wins)",
+  "bridge.main.patch_room_invalid": "late download: invalid room, dropping this patch ({room})",
+  "bridge.main.patch_element_failed": "late download: patch failed ({room}): {error}",
   "adapter.qqbot.secret_key_missing": "connection {id}: encrypted secret present but no ACB key; row skipped",
   "adapter.qqbot.secret_decrypt_failed": "connection {id}: secret decrypt failed: {error}; row skipped",
   "adapter.onebot11.secret_key_missing": "connection {id}: encrypted token present but no ACB key; row skipped",

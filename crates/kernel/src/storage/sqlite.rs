@@ -1184,6 +1184,63 @@ impl Transcript for SqliteStore {
         Ok(true)
     }
 
+    fn patch_element(
+        &mut self,
+        room: &RoomId,
+        record_id: u64,
+        index: usize,
+        element: &Element,
+    ) -> Result<bool, StorageError> {
+        // 先把当前 elements 读出来、换掉第 index 个、再整体写回。
+        //
+        // 为什么整列重写而不是 SQL 里做 JSON 手术：`elements` 存的是 JSON 数组，
+        // SQLite 的 JSON 函数要按版本可用性判断，而这条写只发生在「附件下载完成」
+        // 时（低频），读改写更直白也更好测。
+        let current: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT elements FROM records
+                 WHERE connection = ?1 AND room_key = ?2 AND record_id = ?3",
+                params![room.connection, room.key(), record_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                backend(acb_i18n::t!(
+                    "kernel.storage.read_elements_failed",
+                    error = error
+                ))
+            })?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let mut elements: Vec<Element> = serde_json::from_str(&current).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.read_elements_failed",
+                error = error
+            ))
+        })?;
+        if index >= elements.len() {
+            return Ok(false);
+        }
+        elements[index] = element.clone();
+        let text = serde_json::to_string(&elements).map_err(|error| {
+            backend(acb_i18n::t!(
+                "kernel.storage.store_elements_failed",
+                error = error
+            ))
+        })?;
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE records SET elements = ?4
+                 WHERE connection = ?1 AND room_key = ?2 AND record_id = ?3",
+                params![room.connection, room.key(), record_id, text],
+            )
+            .map_err(io_error)?;
+        Ok(changed > 0)
+    }
+
     fn prune(&mut self, room: &RoomId, plan: &PrunePlan) -> Result<u64, StorageError> {
         let keep = plan.keep_newest.max(MIN_KEPT) as i64;
         let transaction = self.conn.transaction().map_err(io_error)?;

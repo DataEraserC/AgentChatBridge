@@ -3039,6 +3039,22 @@ impl<S: Store> Bridge<S> {
         Ok(())
     }
 
+    /// 把某条已入库记录的第 `index` 个元素换掉（异步补下载的落点）。
+    ///
+    /// 平台无关：只知道「换个元素」，不知道它是哪家的媒体。
+    ///
+    /// 返回 `false` 不是错误——记录可能已被保留策略清掉、或适配器算错了下标。
+    /// 调用方记一条日志就够，不该因此重试或回滚。
+    pub fn patch_element(
+        &mut self,
+        room: &RoomId,
+        record_id: u64,
+        index: usize,
+        element: &Element,
+    ) -> Result<bool, BridgeError> {
+        Ok(self.store.patch_element(room, record_id, index, element)?)
+    }
+
     /// 记一次模型失败（带 class 的那种）。到阈值就进入惩罚期。
     ///
     /// 用**这个模型自己**的策略（没配就回落全局默认）来判阈值。

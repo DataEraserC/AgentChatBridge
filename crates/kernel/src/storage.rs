@@ -309,6 +309,26 @@ pub trait Transcript {
         platform_id: &str,
         labels: &[String],
     ) -> Result<bool, StorageError>;
+
+    /// 替换一条**已入库**记录里的第 `index` 个元素。
+    ///
+    /// 为「异步补下载」而存在：适配器收到消息时先把附件写成占位元素立即入库
+    /// （不阻塞消息流），下载完成后再把这个元素换成真实内容。
+    ///
+    /// 为什么是「按索引替换一个元素」而不是「整条重写」：
+    /// - 记录一旦入库，水位、投递、标签都挂在它上面；整条重写要处理这些字段的
+    ///   并发，容易把水位或标签冲掉。
+    /// - 调用方只关心「那个附件就绪了」，不该有能力改发送者、时间、标签。
+    ///
+    /// **平台无关**：这里只知道「有个元素要换」，不知道它是 QQ 的图片还是别的
+    /// 平台的什么。`index` 越界、记录不存在都返回 `false`，调用方不当作错误。
+    fn patch_element(
+        &mut self,
+        room: &RoomId,
+        record_id: u64,
+        index: usize,
+        element: &Element,
+    ) -> Result<bool, StorageError>;
 }
 
 /// 一次清理的判据。三条**同时**成立才删——这是「宁可少删」的意思。
@@ -1412,6 +1432,26 @@ impl Transcript for MemoryStore {
             }
         }
         Ok(records[index].labels.len() > before)
+    }
+
+    fn patch_element(
+        &mut self,
+        room: &RoomId,
+        record_id: u64,
+        index: usize,
+        element: &Element,
+    ) -> Result<bool, StorageError> {
+        let Some(records) = self.records.get_mut(room) else {
+            return Ok(false);
+        };
+        let Some(record) = records.iter_mut().find(|record| record.id == record_id) else {
+            return Ok(false);
+        };
+        let Some(slot) = record.elements.get_mut(index) else {
+            return Ok(false);
+        };
+        *slot = element.clone();
+        Ok(true)
     }
 }
 
@@ -2694,6 +2734,87 @@ mod tests {
             store.stuck_unread(&main, 3).expect("可读").count,
             0,
             "已确认的不该再提示"
+        );
+    }
+    /// `patch_element` 把占位元素换成真实内容，其余元素与记录本身不动。
+    ///
+    /// 这是「异步补下载」的落点：适配器先把附件写成占位立即入库（不阻塞消息流），
+    /// 下载完成后再改这一个元素。水位、发送者、标签都不能被这次改写碰到。
+    #[test]
+    fn patch_element_replaces_only_the_targeted_slot() {
+        let mut store = MemoryStore::new();
+        let room = room("qq", "group/1");
+        let draft = RecordDraft::message(
+            room.clone(),
+            Sender {
+                id: "u1".into(),
+                name: "老王".into(),
+                role: None,
+            },
+            1,
+            vec![
+                Element::text("看图"),
+                Element::text("[图片 下载中]"),
+                Element::text("尾巴"),
+            ],
+            false,
+        );
+        let record = store.append(draft).expect("入库");
+
+        let ready = Element::Image {
+            url: "/data/attachments/a.jpg".to_owned(),
+            alt: Some("a.jpg".to_owned()),
+        };
+        assert!(
+            store
+                .patch_element(&room, record.id, 1, &ready)
+                .expect("能改"),
+            "命中时返回 true"
+        );
+
+        let after = store
+            .since(&room, 0, 10)
+            .expect("能读")
+            .into_iter()
+            .find(|item| item.id == record.id)
+            .expect("还在");
+        assert_eq!(after.elements.len(), 3, "元素个数不变");
+        assert!(matches!(&after.elements[0], Element::Text { text } if text == "看图"));
+        assert!(
+            matches!(&after.elements[1], Element::Image { url, .. } if url == "/data/attachments/a.jpg"),
+            "目标位置换成了真实内容，实际：{:?}",
+            after.elements[1]
+        );
+        assert!(matches!(&after.elements[2], Element::Text { text } if text == "尾巴"));
+        // 记录本体不该被动过。
+        assert_eq!(after.sender.id, "u1");
+        assert_eq!(after.at, 1);
+    }
+
+    /// 记录不存在、下标越界都返回 `false`，不报错。
+    ///
+    /// 这不是异常路径：记录可能已被保留策略清掉，适配器也可能算错下标。
+    /// 调用方记一条日志就够了，不该因此重试或回滚。
+    #[test]
+    fn patch_element_returns_false_when_it_cannot_apply() {
+        let mut store = MemoryStore::new();
+        let room = room("qq", "group/2");
+        let record = store.append(draft(room.clone(), "只有一段")).expect("入库");
+        let element = Element::Image {
+            url: "/x".to_owned(),
+            alt: None,
+        };
+        assert!(
+            !store
+                .patch_element(&room, record.id, 5, &element)
+                .expect("不报错"),
+            "下标越界返回 false"
+        );
+        assert!(
+            !store
+                .patch_element(&room, 999_999, 0, &element)
+                .expect("不报错"),
+            "记录不存在返回 false"
         );
     }
 }

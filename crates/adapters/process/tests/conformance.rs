@@ -106,6 +106,7 @@ fn process_adapter_speaks_the_wire_protocol() {
         status: acb_kernel::AdapterStatus::new("proc", acb_kernel::DependencyRegistry::new()),
         state_dir: std::path::PathBuf::from("/tmp/acb-conformance-state"),
         connections: None,
+        patch_element: None,
     };
     thread::spawn(move || launch(host));
 
@@ -179,6 +180,7 @@ fn process_adapter_restarts_after_child_exits() {
         status: acb_kernel::AdapterStatus::new("proc", acb_kernel::DependencyRegistry::new()),
         state_dir: std::path::PathBuf::from("/tmp/acb-conformance-state"),
         connections: None,
+        patch_element: None,
     };
     thread::spawn(move || launch(host));
 
@@ -269,6 +271,7 @@ fn process_adapter_enumerates_rooms_over_the_wire() {
             ),
             state_dir: std::env::temp_dir(),
             connections: None,
+            patch_element: None,
         })
     });
     thread::sleep(Duration::from_millis(120));

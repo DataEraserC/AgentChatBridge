@@ -1605,6 +1605,8 @@
   "bridge.main.adapter_state_dir_failed": "适配器状态目录创建失败 {dir}：{error}",
   "adapter.qqbot.state_open_failed": "适配器状态库打开失败：{error}",
   "bridge.main.duplicate_connection_skipped": "适配器自有库的连接 {id} 与 config 冲突，已跳过（config 优先）",
+  "bridge.main.patch_room_invalid": "补下载：房间串不合法，丢弃这次改写（{room}）",
+  "bridge.main.patch_element_failed": "补下载：改写元素失败（{room}）：{error}",
   "adapter.qqbot.secret_key_missing": "连接 {id}：存在加密密文但没有可用密钥，跳过该行",
   "adapter.qqbot.secret_decrypt_failed": "连接 {id}：密文解密失败：{error}；跳过该行",
   "adapter.onebot11.secret_key_missing": "连接 {id}：存在加密令牌但没有可用密钥，跳过该行",
