@@ -653,6 +653,11 @@ pub struct StoredSession {
     pub id: String,
     /// `connection:room`，如 `qq:group/158296748`。
     pub subscriptions: Vec<String>,
+    /// 每个房间的唤醒策略原文（`wake` 表的键值，没配就是空表）。
+    ///
+    /// 控制台的订阅条目要显示「什么情况下会叫醒它」，读内存会拿到轮次边界之前的
+    /// 旧值（同 `subscriptions` 的理由）。
+    pub wakes: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -670,6 +675,9 @@ struct StoredSessionSubsEntry {
 struct StoredSubscription {
     connection: String,
     room: String,
+    /// 唤醒策略原样收下：控制台要看它，但不需要在这里解释每个字段。
+    #[serde(default)]
+    wake: Option<serde_json::Value>,
 }
 
 /// 这条记录是不是「房间关系变动」事件（入群/退群/加好友/删好友）。
@@ -2755,14 +2763,23 @@ impl<S: Store> Bridge<S> {
                     continue;
                 }
             };
+            let mut subscriptions = Vec::new();
+            let mut wakes = std::collections::BTreeMap::new();
+            for sub in parsed
+                .sessions
+                .into_iter()
+                .flat_map(|entry| entry.subscriptions)
+            {
+                let room = format!("{}:{}", sub.connection, sub.room);
+                if let Some(wake) = sub.wake {
+                    wakes.insert(room.clone(), wake);
+                }
+                subscriptions.push(room);
+            }
             sessions.push(StoredSession {
                 id: object.id.clone(),
-                subscriptions: parsed
-                    .sessions
-                    .into_iter()
-                    .flat_map(|entry| entry.subscriptions)
-                    .map(|sub| format!("{}:{}", sub.connection, sub.room))
-                    .collect(),
+                subscriptions,
+                wakes,
             });
         }
         Some(sessions)

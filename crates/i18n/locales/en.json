@@ -1635,5 +1635,20 @@
   "console.rooms.checking": "Verifying…",
   "console.rooms.verified": "Verified: this room has {count} messages",
   "console.rooms.unknown": "No message history for this room; check the room id",
-  "console.rooms.cannotSubmit": "This room has no message history in the database; not submitted"
+  "console.rooms.cannotSubmit": "This room has no message history in the database; not submitted",
+  "console.rooms.editWake": "Wake policy",
+  "console.rooms.wakeTitle": "Wake policy: {room}",
+  "console.rooms.wakeHint": "Decides when the agent is woken. With nothing checked, messages are stored but never wake it.",
+  "console.rooms.wakeAt": "When @-mentioned",
+  "console.rooms.wakeReply": "When replying to the bot",
+  "console.rooms.wakeName": "By name ({names})",
+  "console.rooms.wakeNameNoList": "By name (no names configured)",
+  "console.rooms.wakeNameLabel": "When called by name",
+  "console.rooms.wakeNames": "Names",
+  "console.rooms.wakeNamesHint": "Comma separated; any match in the text wakes the agent",
+  "console.rooms.wakeAccumulate": "After {count} unread",
+  "console.rooms.wakeAccumulateLabel": "Accumulate threshold",
+  "console.rooms.wakeAccumulateHint": "Empty = ignore message count",
+  "console.rooms.wakeNever": "Stored only, never wakes",
+  "console.rooms.wakeInherit": "Inherits session default"
 }

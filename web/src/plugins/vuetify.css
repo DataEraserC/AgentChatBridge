@@ -16,3 +16,26 @@
 .v-overlay .v-card {
   background-color: rgb(var(--v-theme-surface)) !important;
 }
+
+/*
+ * 弹窗里的文字是白底白字，看不见。
+ *
+ * 根因：`.v-overlay-container` 挂在 **`body` 下、`.v-application` 外面**，所以它
+ * 继承不到应用主题的 `on-surface`，继承的是 Vuetify 给 `body` 的默认白字。
+ * 而 `v-theme--light` 的类只会给出 CSS 变量，不会自己设 `color`。
+ *
+ * 2026-11-18 实测：`.v-application` 的 color = `rgba(42,48,57,0.87)`（深灰，
+ * 正确），而 `.v-overlay` 及其所有后代都是 `rgb(255,255,255)`。
+ *
+ * 给 overlay 容器补上同一份主题色，其下的卡片/开关/输入框就都正常了。
+ */
+.v-overlay-container {
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+  --v-theme-on-surface: 42, 48, 57;
+}
+
+/* 深色主题下要反过来。用 Vuetify 自己的主题类判断，不写死。 */
+.v-theme--dark.v-overlay-container,
+.v-overlay-container .v-theme--dark {
+  --v-theme-on-surface: 223, 227, 234;
+}

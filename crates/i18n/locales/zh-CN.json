@@ -1635,5 +1635,20 @@
   "console.rooms.checking": "确认中…",
   "console.rooms.verified": "确认：这个房间有 {count} 条消息",
   "console.rooms.unknown": "库里没有这个房间的消息记录，不能添加；确认群号/房间 id 是否正确",
-  "console.rooms.cannotSubmit": "这个房间在库里没有消息记录，未提交（确认后重试）"
+  "console.rooms.cannotSubmit": "这个房间在库里没有消息记录，未提交（确认后重试）",
+  "console.rooms.editWake": "唤醒策略",
+  "console.rooms.wakeTitle": "唤醒策略：{room}",
+  "console.rooms.wakeHint": "决定什么情况下才叫醒 agent。不勾任何一项 = 这个房间的消息只入库、不唤醒。",
+  "console.rooms.wakeAt": "@ 机器人时唤醒",
+  "console.rooms.wakeReply": "回复机器人的消息时唤醒",
+  "console.rooms.wakeName": "叫名字（{names}）",
+  "console.rooms.wakeNameNoList": "叫名字（未配置名字）",
+  "console.rooms.wakeNameLabel": "叫名字时唤醒",
+  "console.rooms.wakeNames": "名字",
+  "console.rooms.wakeNamesHint": "逗号分隔，文本里出现任意一个就唤醒",
+  "console.rooms.wakeAccumulate": "攒满 {count} 条时唤醒",
+  "console.rooms.wakeAccumulateLabel": "攒满多少条唤醒",
+  "console.rooms.wakeAccumulateHint": "留空 = 不看条数",
+  "console.rooms.wakeNever": "只入库，不唤醒",
+  "console.rooms.wakeInherit": "继承会话默认"
 }

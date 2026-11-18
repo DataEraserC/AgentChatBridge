@@ -874,6 +874,12 @@ impl<S: Store + Send + 'static> Console<S> {
     fn config_view(&self) -> String {
         let bridge = lock(&self.bridge);
         let config = bridge.config();
+        // 订阅读库里的那一份（理由同 `sessions()`：`config_patch` 只写库 + 暂存，
+        // 内存要到下一个消息/轮次才换）。这里要 wake 策略，所以用 `wakes` 而不是
+        // 只拿房间串。
+        //
+        // 读库失败时 `None`，各处回落内存快照——宁可显示旧值，也不要这一页 500。
+        let stored = bridge.stored_sessions();
         json!({
             "personas": config.personas.iter().map(|p| json!({
                 "id": p.id, "name": p.name, "text": p.text,
@@ -892,24 +898,49 @@ impl<S: Store + Send + 'static> Console<S> {
                 "model": s.model,
                 "memories": s.memories,
                 "token": mask_secret(&s.token),
-                "subscriptions": s.subscriptions.iter().map(|sub| json!({
+                "subscriptions": s.subscriptions.iter().map(|sub| {
+                    // 库里有这个房间的 wake 就用库里的，否则用内存快照。
+                    let stored_wake = stored
+                        .as_ref()
+                        .and_then(|all| all.iter().find(|item| item.id == s.id))
+                        .and_then(|item| item.wakes.get(&sub.room.to_string()))
+                        .and_then(|value| value.as_object())
+                        .cloned();
+                    let from_store = |key: &str, fallback: serde_json::Value| {
+                        stored_wake
+                            .as_ref()
+                            .and_then(|map| map.get(key))
+                            .cloned()
+                            .unwrap_or(fallback)
+                    };
+                    json!({
                     "room": sub.room.to_string(),
                     "wake": json!({
-                        "provider": sub.wake.provider.to_string(),
-                        "at_mention": sub.wake.at_mention,
-                        "reply": sub.wake.reply,
-                        "name_mention": sub.wake.name_mention,
-                        "names": sub.wake.names,
-                        "accumulate": sub.wake.accumulate,
+                        "provider": from_store("provider", json!(sub.wake.provider.to_string())),
+                        "at_mention": from_store("at_mention", json!(sub.wake.at_mention)),
+                        "reply": from_store("reply", json!(sub.wake.reply)),
+                        "name_mention": from_store("name_mention", json!(sub.wake.name_mention)),
+                        "names": from_store("names", json!(sub.wake.names)),
+                        "accumulate": from_store("accumulate", json!(sub.wake.accumulate)),
                         // 「被拍醒」是旧开关：现在等价于没有把 poke 放进忽略标签。
-                        "poke": !sub.wake.ignore_event_tags.iter().any(|tag| tag == "poke"),
-                        "event_tags": sub.wake.event_tags,
-                        "ignore_event_tags": sub.wake.ignore_event_tags,
-                        "events": sub.wake.events,
-                        "keywords": sub.wake.keywords,
-                        "ignore_speakers": sub.wake.ignore_speakers,
+                        "poke": from_store(
+                            "poke",
+                            json!(!sub.wake.ignore_event_tags.iter().any(|tag| tag == "poke")),
+                        ),
+                        "event_tags": from_store("event_tags", json!(sub.wake.event_tags)),
+                        "ignore_event_tags": from_store(
+                            "ignore_event_tags",
+                            json!(sub.wake.ignore_event_tags),
+                        ),
+                        "events": from_store("events", json!(sub.wake.events)),
+                        "keywords": from_store("keywords", json!(sub.wake.keywords)),
+                        "ignore_speakers": from_store(
+                            "ignore_speakers",
+                            json!(sub.wake.ignore_speakers),
+                        ),
                     }),
-                })).collect::<Vec<_>>(),
+                    })
+                }).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "connections": config.connections.iter().map(|c| json!({
                 "id": c.id,
