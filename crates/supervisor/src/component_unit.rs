@@ -197,20 +197,31 @@ pub fn stop(unit: &str, timeout_secs: u64) -> Result<(), String> {
     // "unrecognized option '--timeout'"；更糟的是它退出码仍是 0，错误只出现在
     // stdout 上，于是停止静默失败、`systemctl stop` 之后组件还活着（实测）。
     //
-    // 所以超时由我们自己管：发 stop，然后按 `timeout_secs` 轮询 ActiveState。
-    // `systemctl stop` **必须有独立上限**：它是阻塞调用，unit 停得慢时
-    // `Command::output()` 会一直等下去。而 launcher 的停机总预算是 45 秒
-    //（unit 的 `TimeoutStopSec`），预算用完之后 systemd 直接 SIGKILL launcher
-    // ——于是组件和 bridge 都留在原地变成孤儿，下次换代报
-    // `no_restart_owner`（2026-11-18 实测两次）。
+    // 所以超时由我们自己管：发 stop，然后按预算轮询 ActiveState。
     //
-    // 这里给 stop 留 `timeout_secs` 的一半（至少 3 秒），剩下的时间用来确认
-    // ActiveState。超时就杀掉 systemctl 子进程并按「没能停住」处理：比让整个
-    // launcher 被 SIGKILL 好。
-    let wait_budget = Duration::from_secs((timeout_secs / 2).max(3));
+    // ## 预算是**一次性的**，不是每步各给一份
+    //
+    // `timeout_secs` 是调用方给的总预算（`stop_one` 已经把它压到「距离全局
+    // deadline 还剩多少秒」）。这里必须把它当成**整段**的花费上限：
+    //
+    //     发出 stop 与等它返回  +  轮询 ActiveState   ≤  timeout_secs
+    //
+    // 早先的写法给 systemctl 切一半、剩下又完整用一遍 `timeout_secs` 轮询，
+    // 实际最多花 1.5 倍预算。组件是串行停的，几个加起来就吃穿了 launcher 的
+    // 40 秒，于是 systemd 在 `TimeoutStopSec=45s` 处 SIGKILL launcher，bridge
+    // 和组件全留下来变孤儿（2026-11-18 实测两次 `no_restart_owner`）。
+    //
+    // 另一个坑：`.max(3)` 这种「保底」会把小预算偷偷抬高。剩余 2 秒时它给 3 秒，
+    // 多花的 1 秒正是压垮骆驼的那一秒。这里只给下限 1 秒——`Duration` 不接受 0，
+    // 而 0 秒预算本来就意味着「已经没时间了，发一下就返回」。
+    let total = Duration::from_secs(timeout_secs.max(1));
+    let started = Instant::now();
+    // stop 拿总预算的一半（但不超过 10 秒：`systemctl stop` 正常情况下几十毫秒
+    // 就返回，给它几十秒毫无意义，只是在卡住时白等）。
+    let stop_budget = (total / 2).min(Duration::from_secs(10));
     match run_with_deadline(
         Command::new("systemctl").args(["--user", "stop", unit]),
-        wait_budget,
+        stop_budget,
     ) {
         Ok(output) if output.status.success() => {}
         Ok(output) => {
@@ -224,7 +235,9 @@ pub fn stop(unit: &str, timeout_secs: u64) -> Result<(), String> {
     }
 
     // 等它真的不再是 active。`stop` 返回不等于进程已经退出。
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    //
+    // 用**总预算剩下的部分**，不再另给一份。
+    let deadline = started + total;
     while Instant::now() < deadline {
         match state(unit) {
             // `--collect` 生效后 unit 会整个消失，也算停住了。
@@ -233,7 +246,7 @@ pub fn stop(unit: &str, timeout_secs: u64) -> Result<(), String> {
             Some(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
-    Err(format!("{unit} still active after {timeout_secs}s"))
+    Err(format!("{unit} still active after {}s", total.as_secs()))
 }
 
 /// 查一个组件 unit 的 `ACB_COMPONENT_NAME`，用来确认它确实是这个组件。

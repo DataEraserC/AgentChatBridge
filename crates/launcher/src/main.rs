@@ -337,6 +337,17 @@ fn converge_shutdown(
     component_manager: &mut Option<ComponentManager>,
     supervisor: &mut Supervisor,
 ) {
+    // 分段计时：停机超时（systemd 45s SIGKILL）排查时，唯一有用的问题就是
+    // 「卡在哪一段、卡了多久」。不带时间戳的 `eprintln!` 在 journal 里只能看到
+    // 顺序，看不出哪一段吃掉了几十秒（2026-11-18 两次事故都无法定位就是这原因）。
+    let started = Instant::now();
+    let mut mark = |stage: &str| {
+        eprintln!(
+            "acb-launcher: shutdown[{stage}] at +{}ms",
+            started.elapsed().as_millis()
+        );
+    };
+    mark("begin");
     let deadline = Instant::now() + SHUTDOWN_BUDGET;
     let mut roots = vec![std::process::id()];
     if let Some(pid) = supervisor.child_pid() {
@@ -344,7 +355,9 @@ fn converge_shutdown(
     }
     // 后代树之外再反查 unit cgroup：组件崩掉后 sidecar 会被 reparent 到 systemd，
     // 但不会离开 unit cgroup（见 proctree 模块注释）。
+    mark("roots-collected");
     let snapshot = proctree::Snapshot::capture_unit(&roots);
+    mark("snapshot-captured");
     // `leave_running` 的 oneshot 是使用者明确要求保留的，不能兜底误杀。
     let protect = component_manager
         .as_ref()
@@ -356,10 +369,13 @@ fn converge_shutdown(
     if let Some(manager) = component_manager.as_mut() {
         manager.stop_all_within(now_ms(), deadline);
     }
+    mark("components-stopped");
     if let Err(error) = supervisor.stop_child_within(deadline) {
         eprintln!("acb-launcher: cannot stop bridge: {error}");
     }
+    mark("bridge-stopped");
     snapshot.terminate_leftovers(&protect, deadline, "launcher shutdown");
+    mark("leftovers-terminated");
 }
 
 fn config_path() -> Option<PathBuf> {

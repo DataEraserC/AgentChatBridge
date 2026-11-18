@@ -888,3 +888,67 @@ startup_grace_secs = 0
     );
     assert!(!pid_alive(pid), "超时后必须 SIGKILL 组件进程组");
 }
+
+/// 均分预算的**唯一可观察保证**：每个组件拿到的预算不超过「剩余 ÷ 剩余组件数」，
+/// 而且至少 1 秒。
+///
+/// 这条测试只钉住「不失控」，不钉住「事故根因」——2026-11-18 那两次停机超时，
+/// 我一开始归因于「第一个组件吃光预算」，但写出来的测试**回退改动后照样通过**，
+/// 说明那个假设不成立（实测：三个 `stop_timeout_secs = 30`、忽略 SIGTERM 的组件，
+/// 在 6 秒预算内全都停住了）。真正的根因还没定位，靠 launcher 里的分段计时日志
+/// 去抓（见 `converge_shutdown`）。
+///
+/// 保留这条测试是因为均分本身仍有价值：一个组件挂住时，后面的不该被饿死。
+#[test]
+fn stop_all_within_gives_every_component_a_budget() {
+    let dir = temp_dir("deadline");
+    let mut config = String::from("[supervisor]\nprogram = \"/bin/true\"\n");
+    let names: Vec<String> = (0..3).map(|index| format!("stubborn{index}")).collect();
+    for (index, name) in names.iter().enumerate() {
+        let path = script(
+            &dir.0,
+            &format!("stubborn{index}.sh"),
+            "trap '' TERM\nwhile true; do sleep 1; done",
+        );
+        config.push_str(&format!(
+            r#"
+[[component]]
+name = "{name}"
+command = ["{}"]
+enabled = true
+stop_timeout_secs = 30
+[component.readiness]
+kind = "process"
+interval_secs = 1
+success_threshold = 1
+startup_grace_secs = 0
+[component.restart]
+policy = "never"
+"#,
+            path.display()
+        ));
+    }
+    let mut manager = manager(&dir.0, &config);
+    wait_for(&mut manager, Duration::from_secs(15), |manager| {
+        names
+            .iter()
+            .all(|name| manager.phase(name) == Some(Phase::Healthy))
+    });
+
+    let pids: Vec<u32> = names.iter().filter_map(|name| manager.pid(name)).collect();
+    assert_eq!(pids.len(), 3, "三个组件都该有 pid");
+
+    manager.stop_all_within(now_ms(), Instant::now() + Duration::from_secs(6));
+
+    // 用 `/proc` 判断进程是否真的没了：`phase()` 是内存状态，停止流程即使没能
+    // 杀掉进程也会把它改掉，只断言它会假绿。
+    let alive: Vec<u32> = pids
+        .into_iter()
+        .filter(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+        .collect();
+    assert!(
+        alive.is_empty(),
+        "3 个组件、6 秒预算、每个 stop_timeout=30s：均分后每段约 2 秒，全该停住。\
+         仍有进程活着：{alive:?}"
+    );
+}

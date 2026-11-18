@@ -402,8 +402,39 @@ impl ComponentManager {
     }
 
     fn stop_all_until(&mut self, now: i64, deadline: Option<Instant>) {
+        // 组件是**串行**停的，而每个的 `stop_timeout_secs` 默认 45 秒——比 launcher
+        // 的停机总预算（40 秒）还大。只把每步压到「剩余预算」的话，第一个组件
+        // 就能吃光全部时间，后面的 bridge 收敛与残留清理一秒都拿不到，最终
+        // systemd 在 45 秒处 SIGKILL launcher（2026-11-18 实测两次）。
+        //
+        // 所以按组件数均分剩余预算：每个组件拿到 fair share，谁也别想独占。
+        // 停得快的组件会把没用完的时间留给后面的（每步重算剩余再除）。
         for index in (0..self.components.len()).rev() {
-            self.stop_one(index, now, deadline);
+            let fair = deadline.map(|deadline| {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                // 还剩几个要停（含当前这个）。
+                let count = (0..=index)
+                    .filter(|slot| self.components[*slot].phase != Phase::Failed)
+                    .count()
+                    .max(1) as u32;
+                remaining
+                    .checked_div(count)
+                    .unwrap_or(remaining)
+                    .max(Duration::from_secs(1))
+            });
+            let name = self.components[index].entry.name.clone();
+            let started = Instant::now();
+            let budget_secs = fair.map(|budget| budget.as_secs()).unwrap_or(0);
+            self.stop_one(index, now, fair);
+            // 每个组件的实际停止耗时：停机超时时，这行能直接指出是谁吃掉了预算。
+            // 只在超过 1 秒时打——正常停止几十毫秒，每条都打会淹掉 journal。
+            let elapsed = started.elapsed();
+            if elapsed >= Duration::from_secs(1) {
+                eprintln!(
+                    "acb-component: stop {name} took {}ms (budget {budget_secs}s)",
+                    elapsed.as_millis()
+                );
+            }
         }
         self.flush(now);
     }
@@ -1101,20 +1132,18 @@ impl ComponentManager {
         }
     }
 
-    fn stop_one(&mut self, index: usize, _now: i64, deadline: Option<Instant>) {
+    /// `budget` = 这一段的预算（已由调用方按剩余组件数均分），不是全局 deadline。
+    fn stop_one(&mut self, index: usize, _now: i64, budget: Option<Duration>) {
         if self.components[index].phase == Phase::Failed {
             return;
         }
         self.components[index].stop_requested = true;
         // 独立 unit 最干净：交给 systemctl 停，它会按 unit 的 KillMode 收敛整组。
         if let Some(unit) = self.components[index].unit.take() {
-            let timeout = self.components[index].entry.stop_timeout_secs;
-            let timeout = match deadline {
-                Some(deadline) => deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_secs()
-                    .min(timeout),
-                None => timeout,
+            let configured = self.components[index].entry.stop_timeout_secs;
+            let timeout = match budget {
+                Some(budget) => budget.as_secs().clamp(1, configured),
+                None => configured,
             };
             if let Err(error) = crate::component_unit::stop(&unit, timeout) {
                 eprintln!(
@@ -1128,11 +1157,8 @@ impl ComponentManager {
         if let Some(pid) = self.components[index].adopted_pid.take() {
             let token = crate::instance::process_start_token(pid);
             let configured = self.components[index].entry.stop_timeout_secs;
-            let timeout = match deadline {
-                Some(deadline) => deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_secs()
-                    .min(configured),
+            let timeout = match budget {
+                Some(budget) => budget.as_secs().clamp(1, configured),
                 None => configured,
             };
             let stop_deadline = Instant::now() + Duration::from_secs(timeout);
@@ -1147,11 +1173,8 @@ impl ComponentManager {
         }
         if let Some(mut child) = self.components[index].child.take() {
             let configured = self.components[index].entry.stop_timeout_secs;
-            let timeout = match deadline {
-                Some(deadline) => deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_secs()
-                    .min(configured),
+            let timeout = match budget {
+                Some(budget) => budget.as_secs().clamp(1, configured),
                 None => configured,
             };
             let exit = terminate_child(
