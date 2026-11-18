@@ -629,6 +629,41 @@ fn http_ok(url: &str, timeout: Duration, token: Option<&str>) -> bool {
     line.starts_with("HTTP/1.") && line.contains(" 200")
 }
 
+/// 发一个 GET，返回响应体。探针要解析 JSON 时用它（[`http_ok`] 只读 64 字节响应头）。
+fn http_get_body(url: &str, timeout: Duration, token: Option<&str>) -> Option<String> {
+    let rest = url.strip_prefix("http://")?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_owned()),
+    };
+    let mut stream = TcpStream::connect_timeout(&authority.parse().ok()?, timeout).ok()?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let auth = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\n{auth}Connection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut raw = Vec::new();
+    // 响应体很小（依赖表），但有界：读满 256 KiB 就停，别被异常对端耗到超时。
+    let mut chunk = [0u8; 8192];
+    while raw.len() < 256 * 1024 {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => raw.extend_from_slice(&chunk[..count]),
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    // 切掉响应头。`Connection: close` 保证 body 读到 EOF 就完整。
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)?
+        .to_owned();
+    Some(body)
+}
+
 pub trait Policy: Send + Sync {
     fn id(&self) -> &str;
     fn evaluate(&self, snapshot: &Snapshot, options: &PolicyConfig) -> Result<Decision, String>;

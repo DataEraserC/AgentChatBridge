@@ -181,6 +181,11 @@ pub(crate) fn probe_url(entry: &ResolvedComponent) -> Option<String> {
             entry.readiness.path
         )),
         ReadinessKind::Tcp => Some(format!("tcp://{}", entry.readiness.endpoint())),
+        // `bridge` 探的是 bridge 的依赖表，不是组件自己的端点。
+        ReadinessKind::Bridge => Some(format!(
+            "{}/api/dependencies",
+            entry.readiness.bridge_url.trim_end_matches('/')
+        )),
         // `exit` 只看退出码，没有可探测的端点。
         ReadinessKind::Process | ReadinessKind::Exit => None,
     }

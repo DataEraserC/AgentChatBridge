@@ -867,6 +867,56 @@ impl ComponentManager {
                 let url = format!("http://{}{}", readiness.endpoint(), readiness.path);
                 crate::http_ok(&url, PROBE_TIMEOUT, None)
             }
+            // 问 bridge「这个 harness 现在有没有连着」。
+            //
+            // 判据是依赖表的 `openConnections`：插件连上时 > 0，卸载后 = 0。
+            // 这是**应用层**事实——进程活着、端口在听都不代表插件还在（2026-11-18
+            // opencode 掉线 7 小时，tcp 探针全程判健康）。
+            //
+            // 拿不到 token 或连不上 bridge 时返回 `true`（**不判死**）：
+            // 控制台挂掉不该引发组件批量重启，那会把一次控制面故障放大成数据面雪崩。
+            ReadinessKind::Bridge => {
+                let Some(harness) = readiness.harness.as_deref() else {
+                    return true;
+                };
+                // token 先看环境变量；没有就读 bridge 写的健康令牌文件
+                // （`$XDG_RUNTIME_DIR/acb-health.token`）。控制台的 token 是密钥库
+                // 里的 secret 引用，环境里通常没有；而那个文件就在同一台机器上，
+                // 权限由 runtime dir 保证。
+                let token = std::env::var(&readiness.bridge_token_env).ok().or_else(|| {
+                    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?;
+                    std::fs::read_to_string(dir.join("acb-health.token"))
+                        .ok()
+                        .map(|text| text.trim().to_owned())
+                        .filter(|text| !text.is_empty())
+                });
+                let url = format!(
+                    "{}/api/dependencies",
+                    readiness.bridge_url.trim_end_matches('/')
+                );
+                let Some(body) = crate::http_get_body(&url, PROBE_TIMEOUT, token.as_deref()) else {
+                    return true;
+                };
+                let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
+                    return true;
+                };
+                let Some(entry) = json
+                    .get("dependencies")
+                    .and_then(|value| value.as_array())
+                    .and_then(|list| {
+                        list.iter()
+                            .find(|item| item.get("id").and_then(|id| id.as_str()) == Some(harness))
+                    })
+                else {
+                    // 依赖表里没有这个 harness：可能还没注册，不据此判死。
+                    return true;
+                };
+                let open = entry
+                    .get("openConnections")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                open > 0
+            }
             // `probe()` 对 exit 直接跳过；这里是穷尽匹配的兜底。
             ReadinessKind::Exit => true,
         }

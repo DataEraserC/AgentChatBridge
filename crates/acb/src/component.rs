@@ -88,10 +88,7 @@ pub fn command(args: &[String]) -> Result<ExitCode, Failure> {
 fn run_list(args: &[String]) -> Result<ExitCode, Failure> {
     let (config, _rest, explicit) = parse_arguments(args, false)?;
     if !explicit && !config.exists() {
-        println!(
-            "components: 0 declared (no config at {})",
-            config.display()
-        );
+        println!("components: 0 declared (no config at {})", config.display());
         return Ok(ExitCode::SUCCESS);
     }
     let (_config, table) = load(config)?;
@@ -100,7 +97,11 @@ fn run_list(args: &[String]) -> Result<ExitCode, Failure> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let enabled = table.components.iter().filter(|entry| entry.enabled).count();
+    let enabled = table
+        .components
+        .iter()
+        .filter(|entry| entry.enabled)
+        .count();
     println!(
         "components: {} declared ({enabled} enabled)",
         table.components.len()
@@ -140,7 +141,7 @@ fn run_status(args: &[String]) -> Result<ExitCode, Failure> {
         _ => {
             return Err(Failure::usage(
                 "component status accepts at most one component name",
-            ))
+            ));
         }
     };
 
@@ -191,7 +192,7 @@ fn run_reset(args: &[String]) -> Result<ExitCode, Failure> {
         _ => {
             return Err(Failure::usage(
                 "component reset accepts exactly one component name",
-            ))
+            ));
         }
     };
     if table.get(name).next().is_none() {
@@ -405,6 +406,11 @@ fn readiness_label(entry: &ResolvedComponent) -> String {
         ReadinessKind::Tcp => format!("tcp {}", readiness.endpoint()),
         ReadinessKind::Http => format!("http {}{}", readiness.endpoint(), readiness.path),
         ReadinessKind::Process => "process".to_owned(),
+        // 问 bridge「这个 harness 有没有连着」——判的是应用层，不是端口。
+        ReadinessKind::Bridge => format!(
+            "bridge {}",
+            readiness.harness.as_deref().unwrap_or("(未配置)")
+        ),
         // oneshot 专属：只看退出码，没有端点。
         ReadinessKind::Exit => "exit".to_owned(),
     }

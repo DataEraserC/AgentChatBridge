@@ -116,6 +116,14 @@ pub enum ReadinessKind {
     Process,
     /// `oneshot` 专用：只看退出码，零即完成、非零按 `restart` 策略处理。
     Exit,
+    /// 问 bridge「这个 harness 现在有没有连着」。
+    ///
+    /// 为什么需要它：`tcp` 只看端口在不在监听。opencode 那种「进程活着、端口在听、
+    /// 但插件已经卸载」的状态下，tcp 探针恒为健康，supervisor 永远不会重启它
+    /// （2026-11-18 实测：opencode 掉线 7 小时无人发现，`openConnections = 0`）。
+    ///
+    /// 判据用 bridge 依赖表的 `openConnections`：它是**应用层**事实，不是端口。
+    Bridge,
 }
 
 impl fmt::Display for ReadinessKind {
@@ -125,6 +133,7 @@ impl fmt::Display for ReadinessKind {
             Self::Http => "http",
             Self::Process => "process",
             Self::Exit => "exit",
+            Self::Bridge => "bridge",
         })
     }
 }
@@ -249,6 +258,17 @@ pub struct Readiness {
     pub path: String,
     #[serde(default = "default_probe_interval")]
     pub interval_secs: u64,
+    /// `kind = "bridge"` 时要查哪个 harness（bridge 依赖表里的 id）。
+    #[serde(default)]
+    pub harness: Option<String>,
+    /// `kind = "bridge"` 时 bridge 的 console 地址与 token 环境变量名。
+    ///
+    /// token 只从**环境变量**读，不写进配置文件：组件声明文件是可提交的，
+    /// 放进去就等于把控制台凭据写进版本库。
+    #[serde(default = "default_bridge_url")]
+    pub bridge_url: String,
+    #[serde(default = "default_bridge_token_env")]
+    pub bridge_token_env: String,
     #[serde(default = "default_failures_threshold")]
     pub failures_threshold: u32,
     #[serde(default = "default_success_threshold")]
@@ -265,6 +285,9 @@ impl Default for Readiness {
             port: None,
             path: default_probe_path(),
             interval_secs: default_probe_interval(),
+            harness: None,
+            bridge_url: default_bridge_url(),
+            bridge_token_env: default_bridge_token_env(),
             failures_threshold: default_failures_threshold(),
             success_threshold: default_success_threshold(),
             startup_grace_secs: default_startup_grace(),
@@ -513,6 +536,10 @@ pub struct ResolvedReadiness {
     pub port: Option<u16>,
     pub path: String,
     pub interval_secs: u64,
+    /// `kind = "bridge"` 时要查的 harness id。
+    pub harness: Option<String>,
+    pub bridge_url: String,
+    pub bridge_token_env: String,
     pub failures_threshold: u32,
     pub success_threshold: u32,
     pub startup_grace_secs: u64,
@@ -526,6 +553,10 @@ impl ResolvedReadiness {
             }
             ReadinessKind::Process => "process".to_owned(),
             ReadinessKind::Exit => "exit".to_owned(),
+            ReadinessKind::Bridge => format!(
+                "bridge:{}",
+                self.harness.as_deref().unwrap_or("(未配置 harness)")
+            ),
         }
     }
 }
@@ -712,11 +743,9 @@ fn resolve_component(
         .or_else(|| preset.map(|preset| preset.kind))
         .unwrap_or_default();
 
-    let mut enabled = component.enabled.unwrap_or_else(|| {
-        preset
-            .map(|preset| preset.default_enabled)
-            .unwrap_or(false)
-    });
+    let mut enabled = component
+        .enabled
+        .unwrap_or_else(|| preset.map(|preset| preset.default_enabled).unwrap_or(false));
     let readiness = resolve_readiness(
         index,
         kind,
@@ -865,6 +894,15 @@ fn resolve_readiness(
             format!("kind = `{resolved_kind}` 必须声明 port"),
         ));
     }
+    // `bridge` 探针必须知道问哪个 harness；没有它探针无从判断。
+    if resolved_kind == ReadinessKind::Bridge && raw.harness.as_deref().unwrap_or("").is_empty() {
+        return Err(field_error(
+            index,
+            "readiness.harness",
+            "component_readiness_invalid",
+            "kind = \"bridge\" 必须声明 harness（要查哪个 harness 的连接）",
+        ));
+    }
 
     Ok(ResolvedReadiness {
         kind: resolved_kind,
@@ -872,6 +910,9 @@ fn resolve_readiness(
         port: raw.port,
         path: raw.path,
         interval_secs: raw.interval_secs,
+        harness: raw.harness,
+        bridge_url: raw.bridge_url,
+        bridge_token_env: raw.bridge_token_env,
         failures_threshold: raw.failures_threshold,
         success_threshold: raw.success_threshold,
         startup_grace_secs: raw.startup_grace_secs,
@@ -1036,9 +1077,7 @@ fn check_cycles(components: &[ResolvedComponent]) -> Result<(), ComponentError> 
     Ok(())
 }
 
-fn dependency_lists<'a>(
-    component: &'a ResolvedComponent,
-) -> [(&'static str, &'a Vec<String>); 4] {
+fn dependency_lists<'a>(component: &'a ResolvedComponent) -> [(&'static str, &'a Vec<String>); 4] {
     [
         ("depends.after", &component.depends.after),
         ("depends.requires", &component.depends.requires),
@@ -1047,9 +1086,7 @@ fn dependency_lists<'a>(
     ]
 }
 
-fn ordering_dependency_lists<'a>(
-    component: &'a ResolvedComponent,
-) -> [&'a Vec<String>; 3] {
+fn ordering_dependency_lists<'a>(component: &'a ResolvedComponent) -> [&'a Vec<String>; 3] {
     [
         &component.depends.after,
         &component.depends.requires,
@@ -1091,6 +1128,14 @@ fn default_probe_host() -> String {
 fn default_probe_path() -> String {
     "/healthz".to_owned()
 }
+fn default_bridge_url() -> String {
+    "http://127.0.0.1:3100".to_owned()
+}
+
+fn default_bridge_token_env() -> String {
+    "ACB_CONSOLE_TOKEN".to_owned()
+}
+
 fn default_probe_interval() -> u64 {
     DEFAULT_COMPONENT_PROBE_INTERVAL_SECS
 }
@@ -1119,6 +1164,8 @@ fn default_preset_schema() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::installed_presets_path_from;
+    use super::{ComponentType, resolve_readiness};
+    use super::{Readiness, ReadinessKind};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -1191,5 +1238,39 @@ mod tests {
         let exe = bin.join("acbctl");
         fs::write(&exe, "").expect("write exe");
         assert_eq!(installed_presets_path_from(&exe), None);
+    }
+    /// `kind = "bridge"` 必须带 `harness`——没有它探针无从判断问谁。
+    #[test]
+    fn bridge_probe_requires_harness() {
+        let raw = Readiness {
+            kind: Some(ReadinessKind::Bridge),
+            harness: None,
+            ..Readiness::default()
+        };
+        let error = resolve_readiness(0, ComponentType::Simple, Some(&raw), None)
+            .expect_err("缺 harness 必须拒绝");
+        assert!(
+            format!("{error}").contains("harness"),
+            "拒绝原因要指出缺的是 harness，实际：{error}"
+        );
+    }
+
+    /// 带 `harness` 的 bridge 探针能解析，且 endpoint 说清楚查的是谁。
+    #[test]
+    fn bridge_probe_resolves_with_harness() {
+        let raw = Readiness {
+            kind: Some(ReadinessKind::Bridge),
+            harness: Some("opencode".to_owned()),
+            ..Readiness::default()
+        };
+        let resolved =
+            resolve_readiness(0, ComponentType::Simple, Some(&raw), None).expect("能解析");
+        assert_eq!(resolved.kind, ReadinessKind::Bridge);
+        assert_eq!(resolved.harness.as_deref(), Some("opencode"));
+        assert!(
+            resolved.endpoint().contains("opencode"),
+            "endpoint 要能看出查的是哪个 harness，实际：{}",
+            resolved.endpoint()
+        );
     }
 }

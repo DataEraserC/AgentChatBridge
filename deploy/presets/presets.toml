@@ -91,9 +91,18 @@ script = "opencode/opencode_nix.sh"
 description = "opencode2 serve（nix 安装）：首次初始化慢，宽限放大"
 default_enabled = false
 
+# 探的是**应用层**：问 bridge「opencode 这个 harness 现在有没有连着」。
+#
+# 换掉 `tcp` 的原因：进程活着、端口在听，但插件可能已经卸载（2026-11-18 实测
+# 掉线 7 小时）。tcp 探针在这种情况下恒为健康，supervisor 永远不会重启它。
+#
+# 阈值放宽到 12 次 × 5 秒 = 60 秒：插件自己会指数退避重连，别在它重连成功前
+# 就把组件杀掉。
 [preset.readiness]
-kind = "tcp"
-port = 4097
+kind = "bridge"
+harness = "opencode"
+interval_secs = 5
+failures_threshold = 12
 startup_grace_secs = 120
 
 # 脚本内部 `serve &` 再等就绪，停止时必须整组回收。
