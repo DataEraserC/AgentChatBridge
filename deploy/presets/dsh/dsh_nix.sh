@@ -26,6 +26,17 @@ PATCH=${ACB_DSH_PATCH:-}
 [[ -n $PATCH ]] || fail "没有 dsh patch（用 ACB_DSH_PATCH 指定）"
 [[ -f $PATCH ]] || fail "dsh patch 不存在：$PATCH"
 
+# 走包装器（`dsh` → `dsh-seed-profile` → `dsh-real`）时不传 `--patch`：
+# 包装器自己会把 `$DSH_HOME/cordis.patch.yml` 软链好再启动，
+# `--patch` 是 `dsh-real` 的选项，包装器不认。
+#
+# 判据：`ACB_DSH_BIN` 的文件名不是 `dsh-real` 就按包装器处理。
+# 不靠「包装器一定叫 dsh」这种猜测——store 路径里的名字是可验证的事实。
+USE_WRAPPER=0
+if [[ -n ${ACB_DSH_BIN:-} && $(basename "$ACB_DSH_BIN") != "dsh-real" ]]; then
+  USE_WRAPPER=1
+fi
+
 PROFILE=${ACB_DSH_PROFILE:-nix-web-acb}
 PORT=${ACB_DSH_PORT:-3080}
 
@@ -59,4 +70,8 @@ if [[ -z $DSH_BIN ]]; then
 fi
 [[ -x $DSH_BIN ]] || fail "找不到可执行的 dsh-real：$DSH_BIN"
 
+if [[ $USE_WRAPPER -eq 1 ]]; then
+  # 包装器：patch 由它自己从 $DSH_HOME/cordis.patch.yml 读，不传 --patch。
+  exec "$DSH_BIN" --profile "$PROFILE" --no-open --port "$PORT"
+fi
 exec "$DSH_BIN" --profile "$PROFILE" --patch "$PATCH" --no-open --port "$PORT"
