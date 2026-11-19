@@ -71,19 +71,20 @@
       '';
 
       # payload：会随迭代换代的内容。口径与 B-12 的 validate_payload 对齐：
-      # bin/acb-bridge、harnesses/、deploy/start-drivers.sh、acb-contract.json。
+      # bin/acb-bridge、harnesses/、deploy/components/drivers/start-drivers.sh、acb-contract.json。
       # examples/lua 也属于 payload：unit 的 ACB_LUA_DIR 指向 profile 的
       # examples/lua，缺了这一代就启动失败（2026-11-09 升级事故）。
       acb-payload = pkgs.runCommand "acb-payload-${version}" {
         nativeBuildInputs = [ pkgs.makeWrapper ];
       } ''
-        mkdir -p $out/bin $out/harnesses $out/deploy $out/examples
+        mkdir -p $out/bin $out/harnesses $out/deploy/components/drivers $out/examples
         install -m755 ${workspace}/bin/acb-bridge $out/bin/acb-bridge
         install -m755 ${workspace}/bin/acb-notifier $out/bin/acb-notifier
         cp -r ${./harnesses}/. $out/harnesses/
         cp -r ${./examples/lua} $out/examples/lua
-        install -m755 ${./deploy/start-drivers.sh} $out/deploy/start-drivers.sh
-        install -m644 ${./deploy/acb-contract.json} $out/acb-contract.json
+        install -m755 ${./deploy/components/drivers/start-drivers.sh} \
+          $out/deploy/components/drivers/start-drivers.sh
+        install -m644 ${./deploy/ops/acb-contract.json} $out/acb-contract.json
         # 构建身份随 payload 走：桥在 /api/status 里回这个值，控制台头部显示。
         wrapProgram $out/bin/acb-bridge --set ACB_BUILD_VERSION ${buildVersion}
       '';
