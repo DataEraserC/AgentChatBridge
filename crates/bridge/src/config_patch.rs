@@ -281,6 +281,33 @@ fn session_op(
                     value = number
                 ));
             }
+            // 驱动端口：不给就按会话索引分配（3101、3102…），会话顺序一变端口就变，
+            // 驱动重启后可能撞车。固定下来让会话与端口绑定。
+            //
+            // 校验与 kernel 的 `Config::parse` 保持一致：>= 1024（非特权端口）。
+            // 重复端口的检查交给 kernel——patch 这一层看不到其它会话的最终取值。
+            "driver_port" => match val {
+                serde_json::Value::Null => {
+                    table.remove("driver_port");
+                    changes.push(msg!("bridge.patch.session_driver_port_cleared", id = &id));
+                }
+                _ => {
+                    let port = val
+                        .as_u64()
+                        .ok_or(msg!("bridge.patch.field_must_be_uint", key = key))?;
+                    if !(1024..=65535).contains(&port) {
+                        return Err(
+                            msg!("bridge.patch.driver_port_out_of_range", value = port).into()
+                        );
+                    }
+                    table.insert("driver_port", value(port as i64));
+                    changes.push(msg!(
+                        "bridge.patch.session_driver_port_set",
+                        id = &id,
+                        value = port
+                    ));
+                }
+            },
             // 排除已读上下文：默认 false。开了之后，触发消息上下 N 条里
             // 已经读过的那些不再投递（未读正文不受影响）。
             "exclude_read" => {
@@ -1405,5 +1432,56 @@ path = "state/acb.db"
             "{}",
             error_en(&error)
         );
+    }
+
+    /// `driver_port` 能通过 patch 固定下来。
+    ///
+    /// 不给就按会话索引分配（3101、3102…），会话顺序一变端口就变——驱动重启后
+    /// 可能撞车。固定后会话与端口绑定。
+    #[test]
+    fn session_driver_port_is_patchable() {
+        let ops = parse_ops(serde_json::json!([
+            {"op": "session", "id": "main", "patch": {"driver_port": 3111}}
+        ]));
+        let (text, changes) = apply_patch(&base(), &ops).expect("补丁合法");
+        assert!(text.contains("driver_port = 3111"), "\n{text}");
+        assert!(
+            changes_en(&changes)
+                .iter()
+                .any(|line| line.contains("driver_port")),
+            "变更记录要提到 driver_port"
+        );
+    }
+
+    /// 低于 1024 或超过 65535 要拒绝。
+    #[test]
+    fn session_driver_port_rejects_out_of_range() {
+        for bad in [80u64, 70000] {
+            let ops = parse_ops(serde_json::json!([
+                {"op": "session", "id": "main", "patch": {"driver_port": bad}}
+            ]));
+            let error = apply_patch(&base(), &ops).expect_err("超范围");
+            assert!(
+                error_en(&error).contains("out of range"),
+                "{bad} → {}",
+                error_en(&error)
+            );
+        }
+    }
+
+    /// `null` = 清除，回到按索引分配。
+    #[test]
+    fn session_driver_port_null_clears_it() {
+        let ops = parse_ops(serde_json::json!([
+            {"op": "session", "id": "main", "patch": {"driver_port": 3112}}
+        ]));
+        let (with_port, _) = apply_patch(&base(), &ops).expect("先设上");
+        assert!(with_port.contains("driver_port = 3112"));
+
+        let ops = parse_ops(serde_json::json!([
+            {"op": "session", "id": "main", "patch": {"driver_port": null}}
+        ]));
+        let (cleared, _) = apply_patch(&with_port, &ops).expect("能清除");
+        assert!(!cleared.contains("driver_port"), "\n{cleared}");
     }
 }
