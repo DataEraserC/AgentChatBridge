@@ -74,9 +74,9 @@ impl TokenManager {
             .cached
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let fresh = cached.as_ref().is_some_and(|cached| {
-            remaining(cached.fetched_at, cached.expires_in) > REFRESH_MARGIN
-        });
+        let fresh = cached
+            .as_ref()
+            .is_some_and(|cached| remaining(cached.fetched_at, cached.expires_in) > REFRESH_MARGIN);
         if fresh {
             return Ok(cached.as_ref().expect("刚判过非空").token.clone());
         }
@@ -102,6 +102,21 @@ impl TokenManager {
         }
     }
 
+    /// 丢掉缓存的 token，下次 `access_token()` 必然重新获取。
+    ///
+    /// 从 401 触发：平台在 token 有效期内提前作废（轮换、风控、多实例互踢）时，
+    /// 我们本地还认为它「新鲜」，于是**每次发送都拿同一个坏 token，一直 401 到
+    /// 进程重启**（2026-11-19 实测两次，间隔 17 小时，都在 qqbot-official 的
+    /// 发送侧）。收到 401 就该失效缓存重取一次，而不是把坏 token 用到过期。
+    pub fn invalidate(&self) {
+        let mut cached = self
+            .inner
+            .cached
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *cached = None;
+    }
+
     /// `QQBot <token>` 形式的 Authorization 头值（REST 与网关 identify 通用）。
     pub fn auth_header(&self) -> Result<String, TokenError> {
         Ok(format!("QQBot {}", self.access_token()?))
@@ -122,7 +137,10 @@ impl TokenManager {
             return Ok(token.to_owned());
         }
         Err(TokenError::Rejected {
-            code: body.get("code").and_then(|value| value.as_i64()).unwrap_or(0),
+            code: body
+                .get("code")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
             message: body
                 .get("message")
                 .and_then(|value| value.as_str())
@@ -140,6 +158,37 @@ fn remaining(fetched_at: Instant, expires_in: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `invalidate()` 之后必须重新去取，而不是继续用缓存。
+    ///
+    /// 这条对着 2026-11-19 的事故：平台在 token 有效期内提前作废，我们本地仍认为
+    /// 它新鲜，于是每次发送都用同一个坏 token —— 一直 401 到进程重启。修法就是
+    /// 收到 401 时失效缓存，所以失效必须真的清空。
+    #[test]
+    fn invalidate_forces_a_refetch() {
+        let manager = TokenManager::with_token_url("http://127.0.0.1:1/app", "appid", "secret");
+        // 第一次拿不到（没有服务），确认基线。
+        assert!(manager.access_token().is_err());
+
+        // 塞一个假缓存进去，模拟「刚取到好 token」。
+        {
+            let mut cached = manager
+                .inner
+                .cached
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            *cached = Some(Cached {
+                token: "STALE".to_owned(),
+                fetched_at: Instant::now(),
+                expires_in: Duration::from_secs(7200),
+            });
+        }
+        assert_eq!(manager.access_token().expect("缓存新鲜"), "STALE");
+
+        manager.invalidate();
+        // 失效之后缓存空了，会去重新 fetch；没有服务可连，因此报错而不是给 STALE。
+        assert!(manager.access_token().is_err(), "失效后不该再返回旧 token");
+    }
 
     #[test]
     fn auth_header_prefixes_qqbot_scheme() {

@@ -431,19 +431,38 @@ impl Outbound for QqBotOfficialOutbound {
                 }),
             )
         };
-        let auth = self
-            .token_manager
-            .auth_header()
-            .map_err(|error| OutboundError::Unavailable(error.to_string()))?;
-        let response = ureq::post(&url)
-            .set("Authorization", &auth)
-            .set("Content-Type", "application/json")
-            .send_json(body)
-            .map_err(|error| {
-                // ureq 的错误里带 HTTP 状态码；平台的业务错误码在响应体里，
-                // 这里只透传状态与文本，够运维定位。
-                OutboundError::Rejected(error.to_string())
-            })?;
+        // 401 要能自愈：平台可能在 token 有效期内提前作废（轮换、风控、多实例
+        // 互踢），而我们本地还认为它「新鲜」。不失效缓存的话，每次发送都用同一个
+        // 坏 token —— 一直 401 直到进程重启（2026-11-19 实测两次，间隔 17 小时，
+        // 都只在 qqbot-official 的发送侧，收消息全程正常）。
+        //
+        // 只重试一次：真凭证错了就得停，反复推只会触发平台风控。
+        let mut attempt = 0;
+        let response = loop {
+            let auth = self
+                .token_manager
+                .auth_header()
+                .map_err(|error| OutboundError::Unavailable(error.to_string()))?;
+            let result = ureq::post(&url)
+                .set("Authorization", &auth)
+                .set("Content-Type", "application/json")
+                .send_json(body.clone());
+            match result {
+                Ok(response) => break response,
+                Err(error) => {
+                    // ureq 的错误里带 HTTP 状态码；平台的业务错误码在响应体里，
+                    // 这里只透传状态与文本，够运维定位。
+                    let text = error.to_string();
+                    if attempt == 0 && text.contains("status code 401") {
+                        eprintln!("{}", acb_i18n::t!("adapter.qqbot.token_rejected_retrying"));
+                        self.token_manager.invalidate();
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(OutboundError::Rejected(text));
+                }
+            }
+        };
         let payload: serde_json::Value = response
             .into_json()
             .map_err(|error| OutboundError::Rejected(error.to_string()))?;
