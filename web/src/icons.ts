@@ -26,6 +26,7 @@ import {
   mdiInformationOutline,
   mdiKeyOutline,
   mdiLinkOff,
+  mdiPencil,
   mdiPlus,
   mdiRefresh,
   mdiStopCircleOutline,
@@ -57,6 +58,7 @@ export const icons = {
   info: mdiInformationOutline,
   /** 新旧控制台互跳。 */
   swap: mdiSwapHorizontal,
+  edit: mdiPencil,
   /** 密钥/凭据。 */
   key: mdiKeyOutline,
   /** 只读/查看。 */

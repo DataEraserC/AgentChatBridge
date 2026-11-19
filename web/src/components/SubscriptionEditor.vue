@@ -257,7 +257,7 @@ function remove(room: string): void {
             :aria-label="t('console.rooms.editWake')"
             @click="openWake(room)"
           >
-            <v-icon :icon="icons.swap" size="small" />
+            <v-icon :icon="icons.edit" size="small" />
           </v-btn>
           <v-btn
             icon
