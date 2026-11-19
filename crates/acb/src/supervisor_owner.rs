@@ -112,7 +112,7 @@ pub fn render_owned(
     }
     // 预设表可能不存在（测试环境、精简安装）：拿不到就按「全都没有」处理，
     // 组件整段不渲染，配置仍是合法的。
-    let available_presets = load_available_presets(state_dir);
+    let available_presets = load_available_presets(&owned_config_path(state_dir));
     let inputs = RenderInputs {
         presets: &available_presets,
         program: &program,
@@ -127,23 +127,23 @@ pub fn render_owned(
 
 /// 读出本机已注册的预设 id。
 ///
-/// 找不到 presets.toml 时返回空表：宁可少渲染几个组件，也不要渲染出一份
-/// 解析不了的配置（`component_preset_unknown` 会让整条链启动失败）。
-fn load_available_presets(state_dir: &Path) -> Vec<String> {
-    // 与 supervisor 自己找 presets 的规则保持一致：先看配置同目录，再看安装前缀。
-    let candidates = [
-        state_dir.join("presets.toml"),
-        state_dir.join("../presets.toml"),
-    ];
-    for candidate in candidates {
-        if !candidate.exists() {
-            continue;
-        }
-        if let Ok(registry) = acb_supervisor::component::PresetRegistry::load(&candidate) {
-            return registry.iter().map(|preset| preset.id.clone()).collect();
+/// **直接复用 supervisor 的 `load_presets_for`**，不自己猜路径。我第一版猜的是
+/// `state_dir/presets.toml` 和 `state_dir/../presets.toml`——两个都不存在，于是
+/// 预设表为空、六个组件全被跳过，线上 supervisor.toml 只剩注释，`acbctl component
+/// list` 报 `0 declared`（2026-11-19 现场）。
+///
+/// 真正的查找规则是：`ACB_PRESETS_FILE` → 配置同目录的 `presets.toml` →
+/// 安装前缀 `<prefix>/share/acb/presets/presets.toml`（从可执行文件位置推导）。
+fn load_available_presets(config_path: &Path) -> Vec<String> {
+    match acb_supervisor::component::load_presets_for(config_path) {
+        Ok(registry) => registry.iter().map(|preset| preset.id.clone()).collect(),
+        Err(error) => {
+            // 拿不到预设就不渲染组件：渲染出 `component_preset_unknown` 的配置
+            // 比没有组件更糟——那份配置根本解析不了。
+            eprintln!("acb-config: cannot load presets ({error}); components will be omitted");
+            Vec::new()
         }
     }
-    Vec::new()
 }
 
 struct RenderInputs<'a> {
@@ -930,5 +930,88 @@ state_dir = "/state"
             "{differences:?}"
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 预设可用时**必须**渲染出组件段。
+    ///
+    /// 2026-11-19 事故：我第一版自己猜预设路径（`state_dir/presets.toml`），
+    /// 猜错了 → 预设表为空 → 六个组件全被跳过 → 线上 `supervisor.toml` 只剩注释，
+    /// `acbctl component list` 报 `0 declared`，dsh 起不来。
+    ///
+    /// 这条测试钉住「有预设就一定有组件」，防止再犯同一个错。
+    #[test]
+    fn presets_present_means_components_are_rendered() {
+        let args = vec!["--config".to_string(), "/tmp/x.toml".to_string()];
+        let state_dir = Path::new("/tmp/acb-components-test");
+        let all: Vec<String> = COMPONENT_PRESETS
+            .iter()
+            .map(|(_, preset)| preset.to_string())
+            .collect();
+        let inputs = RenderInputs {
+            presets: &all,
+            program: "/bin/acb-bridge",
+            args: &args,
+            health_url: None,
+            health_token_file: None,
+            state_dir,
+            generation: None,
+        };
+        let text = render_text(&inputs, None);
+        for (name, _) in COMPONENT_PRESETS {
+            assert!(
+                text.contains(&format!("name = \"{name}\"")),
+                "预设齐全时必须渲染 {name}：\n{text}"
+            );
+        }
+    }
+
+    /// 预设缺失时该组件整段不出现——渲染出 `component_preset_unknown` 的配置
+    /// 比少几个组件更糟（那份配置根本解析不了）。
+    #[test]
+    fn missing_presets_omit_the_component_entirely() {
+        let args: Vec<String> = Vec::new();
+        let state_dir = Path::new("/tmp/acb-components-test");
+        let inputs = RenderInputs {
+            presets: &[],
+            program: "/bin/acb-bridge",
+            args: &args,
+            health_url: None,
+            health_token_file: None,
+            state_dir,
+            generation: None,
+        };
+        let text = render_text(&inputs, None);
+        for (name, _) in COMPONENT_PRESETS {
+            assert!(
+                !text.contains(&format!("name = \"{name}\"")),
+                "预设缺失时不该出现 {name}：\n{text}"
+            );
+        }
+    }
+
+/// 用**真实安装前缀**的预设表验证渲染（不是猜的路径）。
+    ///
+    /// 这条只在预设表真实存在时跑；找不到就跳过（CI 上没有 acbl 安装）。
+    #[test]
+    fn real_installed_presets_render_the_six_components() {
+        let preset_file = std::env::var_os("ACB_TEST_PRESETS_FILE")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                // 从当前可执行文件推导：<prefix>/bin/<exe> → <prefix>/share/acb/presets/
+                let exe = std::env::current_exe().ok()?;
+                let prefix = exe.parent()?.parent()?;
+                let path = prefix.join("share/acb/presets/presets.toml");
+                path.is_file().then_some(path)
+            });
+        let Some(preset_file) = preset_file else {
+            eprintln!("跳过：找不到真实预设表");
+            return;
+        };
+        let available: Vec<String> = load_available_presets(Path::new("/tmp/supervisor.toml"));
+        assert!(
+            !available.is_empty(),
+            "预设表存在却没读到任何 id：{}",
+            preset_file.display()
+        );
     }
 }
