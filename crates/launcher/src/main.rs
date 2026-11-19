@@ -33,7 +33,73 @@ use acb_supervisor::{
 /// launcher 停机总预算：unit 的 `TimeoutStopSec=45s`，留 5s 给 systemd 收尾。
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(40);
 
+/// 本地（非托管）acbl 的存在位置：`<数据根>/unmanaged-acbl/bin/acb-launcher`。
+///
+/// 放这里而不是 `ACB_LOCAL_ACBL` 环境变量：环境变量得写进 systemd unit，而 unit
+/// 由 Nix 生成——改它就要 rebuild，违背「用本地 acbl 减少 rebuild」的初衷。
+/// 约定路径则是「放进去就生效、删掉就回到系统版」，零 rebuild。
+///
+/// `ACB_LOCAL_ACBL` 仍然认（覆盖整个 bin 目录），只为测试与临时排查方便。
+pub fn unmanaged_acbl_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("ACB_LOCAL_ACBL").filter(|value| !value.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    acb::profile::root().join("unmanaged-acbl")
+}
+
+/// 若存在本地 acbl，就 `exec` 成它，永不返回。
+///
+/// **用 `execv` 而不是 spawn**：PID 不变，systemd 的 `MainPID` 与 watchdog
+/// 仍然盯着同一个进程；spawn 一个子进程会让 watchdog/停止信号对错目标。
+///
+/// 不做契约校验：被换上去的那个 launcher 自己会在 `payload_contract_error`
+/// 里校验 payload 契约，不兼容时自己 78 退出。外层再判一遍只会让两处规则漂移。
+fn exec_unmanaged_acbl_if_present() {
+    let candidate = unmanaged_acbl_dir().join("bin").join("acb-launcher");
+    if !candidate.is_file() {
+        return;
+    }
+    let path = match std::ffi::CString::new(candidate.to_string_lossy().as_bytes()) {
+        Ok(path) => path,
+        Err(_) => {
+            eprintln!(
+                "acb-launcher: unmanaged acbl path contains NUL, ignoring: {}",
+                candidate.display()
+            );
+            return;
+        }
+    };
+    // 参数原样转交：`--config` 之类的语义与被替换的那个完全一致。
+    let argv: Vec<std::ffi::CString> = std::env::args_os()
+        .map(|arg| {
+            std::ffi::CString::new(arg.to_string_lossy().as_bytes())
+                .unwrap_or_else(|_| std::ffi::CString::new("").expect("空串合法"))
+        })
+        .collect();
+    let mut pointers: Vec<*const libc::c_char> = argv.iter().map(|arg| arg.as_ptr()).collect();
+    pointers.push(std::ptr::null());
+
+    eprintln!(
+        "acb-launcher: using unmanaged acbl at {} (remove it to fall back to the system one)",
+        candidate.display()
+    );
+    // SAFETY: argv/path 在本进程生命周期内保持存活；`execv` 成功时不返回。
+    unsafe {
+        libc::execv(path.as_ptr(), pointers.as_ptr());
+    }
+    // exec 失败（没执行位、二进制架构不对、动态库缺失…）：
+    // 只报错、**不回退**——与「本地挂了就报错」的既有约定一致。
+    let error = std::io::Error::last_os_error();
+    eprintln!(
+        "acb-launcher: cannot exec unmanaged acbl {}: {error}",
+        candidate.display()
+    );
+    std::process::exit(EXIT_GIVE_UP as i32);
+}
+
 fn main() -> ExitCode {
+    // 最先做的事：有本地 acbl 就换成它（成功时不返回）。
+    exec_unmanaged_acbl_if_present();
     let (path, external_requested) = match config_path() {
         Some(path) => (path, true),
         None => {
@@ -1020,4 +1086,50 @@ mod tests {
         assert!(error.contains("gen-test"), "{error}");
         let _ = std::fs::remove_dir_all(payload.parent().expect("payload parent"));
     }
+}
+
+/// 没有本地 acbl 时，启动检查必须**立刻返回**、不产生副作用。
+///
+/// 这条测试跑在正常进程里：如果实现误把「不存在」也当成「exec」，
+/// 整个测试进程会被替换掉——表现是测试挂住或异常退出，不是断言失败。
+#[test]
+fn missing_unmanaged_acbl_returns_without_side_effects() {
+    let dir = std::env::temp_dir().join(format!(
+        "acb-no-acbl-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).expect("建目录");
+    // SAFETY: 测试进程内设环境变量；Rust 2024 要求显式 unsafe。
+    unsafe { std::env::set_var("ACB_LOCAL_ACBL", &dir) };
+
+    exec_unmanaged_acbl_if_present();
+    assert!(dir.is_dir(), "目录没被动过");
+
+    // SAFETY: 同上，清理环境变量。
+    unsafe { std::env::remove_var("ACB_LOCAL_ACBL") };
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 默认路径是 `<数据根>/unmanaged-acbl`；`ACB_LOCAL_ACBL` 覆盖它。
+#[test]
+fn unmanaged_acbl_dir_is_overridable() {
+    // SAFETY: 测试进程内设环境变量。
+    unsafe { std::env::set_var("ACB_LOCAL_ACBL", "/tmp/custom-acbl") };
+    assert_eq!(
+        unmanaged_acbl_dir(),
+        PathBuf::from("/tmp/custom-acbl"),
+        "环境变量优先"
+    );
+    // SAFETY: 清理。
+    unsafe { std::env::remove_var("ACB_LOCAL_ACBL") };
+
+    assert!(
+        unmanaged_acbl_dir().ends_with("unmanaged-acbl"),
+        "默认路径必须以 unmanaged-acbl 结尾：{:?}",
+        unmanaged_acbl_dir()
+    );
 }
