@@ -14,7 +14,6 @@ SnowLuma 是外部组件，安装与托管仍属用户职责（见 `docs/guide/d
 | `.env` | — | **已废弃**（2026-11-19 删除）：改用显式 `--env-file`，见下方 |
 | `snowluma.sh` | 是 | 手动操作唯一入口 |
 | `verify-snowluma-compose.sh` | 是 | 守卫 |
-| `snowluma-compose.yml` | 是 | 已废弃，仅历史参照 |
 
 `~/Documents/SnowLuma/` 下的软链接（`docker-compose.single.yml` /
 `docker-compose.multi.yml` / `.env`）**已删除**（2026-11-19）。本目录是唯一入口，
