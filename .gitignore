@@ -34,6 +34,9 @@ config.toml
 # SnowLuma 容器真值 env（含 VNC_PASSWD = 能操作 QQ 的远程桌面密码）。
 # 模板是 deploy/snowluma.env.example，真值永不入库。
 /deploy/snowluma.env
+# podman-compose 只认「compose 同目录的 .env」这个文件名。deploy/.env 是指向
+# snowluma.env 的软链接，让 supervisor 自启（只拼 -f，不带 --env-file）也能读到真值。
+/deploy/.env
 
 # 编辑器与本地环境
 .direnv/

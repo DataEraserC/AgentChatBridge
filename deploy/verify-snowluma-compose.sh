@@ -143,6 +143,55 @@ PY
   [ $? -ne 0 ] && failed=1
 done
 
+echo "== supervisor 自启指向（活配置，存在才查）=="
+# 违反后果：launcher 自启拉起废弃 compose 或不存在的文件，桥反复重连。
+SUP=${ACB_SUPERVISOR_FILE:-$HOME/.local/share/acb/state/supervisor/supervisor.toml}
+if [ -f "$SUP" ]; then
+  SUP="$SUP" HERE="$HERE" python3 - <<'PY'
+import os, sys, tomllib
+sup = tomllib.load(open(os.environ['SUP'], 'rb'))
+here = os.environ['HERE']
+bad = []
+comp = next((c for c in sup.get('component', []) if c.get('name') == 'snowluma'), None)
+if comp is None:
+    print('  · 活配置里没有 snowluma 组件（跳过）')
+    sys.exit(0)
+f = comp.get('file') or ''
+if not f:
+    bad.append('snowluma.file 为空 → 组件不启用')
+elif not os.path.isfile(f):
+    bad.append(f'snowluma.file 指向不存在的文件：{f}')
+elif os.path.realpath(f) not in (
+    os.path.realpath(os.path.join(here, 'snowluma-compose.single.yml')),
+    os.path.realpath(os.path.join(here, 'snowluma-compose.multi.yml')),
+):
+    bad.append(f'snowluma.file 未指向仓库内两份权威 compose：{f}')
+# readiness 端口必须是该 compose 真的映射出来的宿主端口
+port = (comp.get('readiness') or {}).get('port')
+if port is not None and str(port) != '53001':
+    bad.append(f'readiness.port={port}，但 ACB 依赖的 WS 宿主端口是 53001')
+for b in bad:
+    print(f'  ✗ {b}')
+if not bad:
+    print(f'  · file 指向 {os.path.basename(f)}，readiness.port={port} 一致')
+sys.exit(1 if bad else 0)
+PY
+  [ $? -ne 0 ] && failed=1
+  # 自启只拼 -f、不带 --env-file，故 deploy/.env 必须存在且指向真值
+  if [ -e "$HERE/.env" ] && [ "$(readlink -f "$HERE/.env")" = "$(readlink -f "$HERE/snowluma.env")" ]; then
+    ok "deploy/.env → snowluma.env（自启不带 --env-file 也能读到真值）"
+  else
+    bad "deploy/.env 缺失或未指向 snowluma.env（自启会退回默认端口切断 ACB）"
+  fi
+  if git -C "$HERE/.." check-ignore -q deploy/.env 2>/dev/null; then
+    ok "deploy/.env 已被忽略"
+  else
+    bad "deploy/.env 未被 .gitignore 忽略"
+  fi
+else
+  ok "未找到活 supervisor 配置（本机未部署，跳过）"
+fi
+
 echo "== 两份形态不得同时 up（同名容器/同端口）=="
 a=$(grep -oE 'container_name:.*' "$single" | head -1)
 b=$(grep -oE 'container_name:.*' "$multi" | head -1)
