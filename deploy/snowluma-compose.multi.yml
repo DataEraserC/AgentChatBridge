@@ -1,0 +1,165 @@
+# SnowLuma 多 QQ 账号 compose —— ACB 依赖的协议端容器（多账号形态）。
+#
+# 权威副本在 ACB 仓库（本文件）。~/Documents/SnowLuma/docker-compose.multi.yml
+# 是指向这里的软链接，两边永远同一份内容。
+#
+# ── 命令（旧命令已废弃）──────────────────────────────────────────────────
+#   废弃：podman-compose -f ~/Documents/SnowLuma/docker-compose.yml down/up -d
+#   现在（推荐用包装脚本，自动带上 env 文件）：
+#     deploy/snowluma.sh multi down
+#     deploy/snowluma.sh multi up
+#   等价原始命令：
+#     podman-compose --env-file ~/Documents/SnowLuma/.env \
+#       -f ~/Documents/code/AgentChatBridge/deploy/snowluma-compose.multi.yml down
+#     podman-compose --env-file ~/Documents/SnowLuma/.env \
+#       -f ~/Documents/code/AgentChatBridge/deploy/snowluma-compose.multi.yml up -d
+#
+#   单账号版见同目录 snowluma-compose.single.yml。两者容器名与三个登录态卷相同，
+#   是同一套栈的两种形态；切换时 down 旧的再 up 新的，登录态不丢。
+#   ⚠️ 不要同时 up 两份 —— 同名容器与同宿主端口会冲突。
+#
+# ── 与单账号版的差异（只有这些）──────────────────────────────────────────
+#   1. shm_size 1gb → 2gb（多个 Electron 实例共享 /dev/shm）
+#   2. 新增 ulimits nofile（防桌面辅助进程遍历天文数字 fd 上限导致握手卡死）
+#   3. 新增两个额外账号卷 + 对应 HOME 开关
+#   4. 新增账号 2/3 的端口预留映射
+#   5. 新增 json-file 日志轮转
+#   容器名、三个既有卷名、四个现网端口 —— 全部不变。
+#
+# ── 现网事实（2026-11-19 实测 ss -ltnp）──────────────────────────────────
+#   53000(HTTP) 53001(WS) 56081(noVNC) 55099(WebUI)，值来自
+#   ~/Documents/SnowLuma/.env。ACB 的 config.active.toml 抬头亦写明
+#   「53001 = WS，53000 = HTTP」。改这四个就切断 ACB。
+#
+# ── 多账号原理 ──────────────────────────────────────────────────────────
+#   入口脚本读 SNOWLUMA_EXTRA_QQ_HOMES（逗号分隔 /app/... 路径），为每个路径
+#   生成 [program:qq-extra-N]，以 snowluma 用户 + 独立 HOME 启动额外 qq 进程，
+#   共用同一个 Xvfb DISPLAY（一个远程桌面里多个 QQ 窗口）。
+#   SnowLuma 按 /proc/<pid>/environ 的 HOME 识别各进程登录的账号，
+#   每个 UIN 独立 Bridge / OneBot 实例 / data/<uin>/ 存储。
+#
+# ── 三条硬约束 ──────────────────────────────────────────────────────────
+#   1. 额外 HOME 必须在 /app/ 下，字符集限 A-Za-z0-9_@%+=:,./-
+#      否则入口脚本跳过并打印 "Skipping extra QQ HOME ..."。
+#   2. 每实例独占自己的 HOME。主账号 HOME=/app（.config + .local/share 两卷）；
+#      额外账号 HOME=/app/qq-acctN，各自一个卷。绝不共享。
+#   3. 每账号 OneBot 监听端口必须不同。配置校验拒绝 host:port 冲突，
+#      且属终态失败不自动重试 —— 见文末第 5 步。
+services:
+  snowluma:
+    image: ${SNOWLUMA_IMAGE:-motricseven7/snowluma:latest}
+    container_name: ${SNOWLUMA_CONTAINER:-snowluma}
+    restart: unless-stopped
+
+    shm_size: ${SNOWLUMA_SHM_SIZE:-2gb}
+
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 1048576
+
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      VNC_PASSWD: ${VNC_PASSWD:-}
+      SNOWLUMA_UID: ${SNOWLUMA_UID:-1000}
+      SNOWLUMA_GID: ${SNOWLUMA_GID:-1000}
+      SNOWLUMA_WEBUI_HOST: ${SNOWLUMA_WEBUI_HOST:-0.0.0.0}
+      SNOWLUMA_WEBUI_PORT: ${SNOWLUMA_WEBUI_PORT:-5099}
+      SNOWLUMA_LOG_LEVEL: ${SNOWLUMA_LOG_LEVEL:-info}
+      SNOWLUMA_SCREEN: ${SNOWLUMA_SCREEN:-1920x1080x24}
+      SNOWLUMA_HOOK_AUTOLOAD: ${SNOWLUMA_HOOK_AUTOLOAD:-1}
+
+      # ★ 多账号开关。默认空 = 行为与单账号版一致。
+      #   开第二个号：.env 写 SNOWLUMA_EXTRA_QQ_HOMES=/app/qq-acct2
+      #   两个号：    SNOWLUMA_EXTRA_QQ_HOMES=/app/qq-acct2,/app/qq-acct3
+      SNOWLUMA_EXTRA_QQ_HOMES: "${SNOWLUMA_EXTRA_QQ_HOMES:-}"
+
+      SNOWLUMA_QQ_FLAGS: "${SNOWLUMA_QQ_FLAGS:---disable-gpu --disable-software-rasterizer --disable-gpu-compositing}"
+
+    ports:
+      - "${NOVNC_PORT:-6081}:6081"
+      - "${SNOWLUMA_WEBUI_HOST_PORT:-5099}:${SNOWLUMA_WEBUI_PORT:-5099}"
+      # 账号 1（主账号，HOME=/app）—— ACB 依赖这两个，不要改
+      - "${ONEBOT_HTTP_PORT:-3000}:3000"
+      - "${ONEBOT_WS_PORT:-3001}:3001"
+      # 账号 2/3 预留映射。容器内无进程监听时映射存在也无害；
+      # 需先在 WebUI 把对应账号 OneBot 端口改成 3020/3021、3030/3031。
+      - "${ACCT2_HTTP_PORT:-53020}:3020"
+      - "${ACCT2_WS_PORT:-53021}:3021"
+      - "${ACCT3_HTTP_PORT:-53030}:3030"
+      - "${ACCT3_WS_PORT:-53031}:3031"
+
+    volumes:
+      # ★ 三个既有卷名一字不改 —— 这就是登录态，换名等于全部重新扫码
+      - qq-gateway-data:/app/data
+      - qq-client-config:/app/.config
+      - qq-client-data:/app/.local/share
+      # 额外账号卷：未启用时是空卷，不影响单账号运行
+      - qq-client-acct2:/app/qq-acct2
+      - qq-client-acct3:/app/qq-acct3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  qq-gateway-data:
+    name: qq-gateway-data
+  qq-client-config:
+    name: qq-client-config
+  qq-client-data:
+    name: qq-client-data
+  qq-client-acct2:
+    name: qq-client-acct2
+  qq-client-acct3:
+    name: qq-client-acct3
+
+# ── 启用步骤 ────────────────────────────────────────────────────────────
+#
+# 1) 备份登录态（三个卷就是全部身家）
+#      podman volume export qq-gateway-data  -o ~/qq-gateway-data.tar
+#      podman volume export qq-client-config -o ~/qq-client-config.tar
+#      podman volume export qq-client-data   -o ~/qq-client-data.tar
+#
+# 2) 切换（down 只删容器不删具名卷，登录态保留）
+#      deploy/snowluma.sh single down
+#      deploy/snowluma.sh multi  up
+#
+# 3) 此时仍是单账号（开关默认空），ACB 侧零改动。确认现网恢复：
+#      ss -ltnp | grep -E '53000|53001'
+#
+# 4) 加号：在 ~/Documents/SnowLuma/.env 追加，然后重跑第 2 步的 up
+#      SNOWLUMA_EXTRA_QQ_HOMES=/app/qq-acct2
+#    验证额外实例真的起来了 —— 唯一硬证据：
+#      podman exec snowluma cat /etc/supervisor/conf.d/extra-qq.conf
+#      podman exec snowluma supervisorctl status
+#    应看到 qq / qq-extra-1 / snowluma。若 extra-qq.conf 不存在，说明该 tag
+#    入口脚本不支持此变量，需换镜像版本；别只看 Running 就当成了。
+#
+# 5) 扫码 + 分配端口（不做这步新号必失败）
+#    http://<host>:56081/ 桌面上逐个 QQ 窗口扫码（额外实例有 10s/20s 错峰
+#    延迟，窗口不同时出现），勾「自动登录」。
+#    http://<host>:55099/ 左侧选中账号 2 → OneBot 协议端点 →
+#    HTTP API 改 3020、WS 服务端改 3021；账号 3 改 3030/3031。
+#    不改则沿用 3000/3001 与主账号撞端口，日志报
+#    「账号启动失败 ... conflicts with ... on server binding」且不自动重试。
+#
+# 6) ACB 接入新号：走控制台，不要改文件。
+#    schema 15 起连接存在库里（config_objects），改磁盘文件无效。
+#    新增 connection：kind=onebot11, transport=ws-client,
+#    url=ws://127.0.0.1:53021, account=<新号>, token 与该账号 accessToken 一致。
+#    写法参考 config.example.toml 的 qq / qq2 两条。
+#
+# ── 注意 ────────────────────────────────────────────────────────────────
+# · 全局项对所有账号生效：视频上传并发、highway 超时、媒体下载上限。
+#   历史回填有进程级串行闸门（普通 300ms / 登录同步 2000ms），账号越多
+#   登录时补齐历史排队越久，属正常。
+# · 风控按账号算但出口 IP 相同会叠加，建议都用小号。
+# · noVNC 等于一台能操作你 QQ 的远程桌面，别裸放公网。

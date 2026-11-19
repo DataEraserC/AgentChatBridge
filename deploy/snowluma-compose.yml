@@ -1,3 +1,11 @@
+# ⚠️ 已废弃（2026-11-19）——保留仅作历史参照，不要再用它 down/up。
+# 拆成两份权威文件（同目录）：
+#   snowluma-compose.single.yml  单账号（内容与本文件等价）
+#   snowluma-compose.multi.yml   多账号（加 EXTRA_QQ_HOMES + 额外卷 + 端口预留）
+# 唯一入口：deploy/snowluma.sh {single|multi} {up|down|status|logs}
+# 该脚本内置 --env-file ~/Documents/SnowLuma/.env —— 真实端口 53000/53001/56081/55099
+# 在那个文件里，直接手敲 -f 会读不到而退回 3000/3001，切断 ACB。
+#
 # snowluma 的真实部署 compose（拷自 ~/Documents/SnowLuma/docker-compose.yml，2026-10-31）。
 # 原样拷贝，未改任何配置——文件中继（ADR-0025）不需要改 compose：
 # 桥在宿主机监听 0.0.0.0，容器里用 http://host.containers.internal:3131 即到宿主
