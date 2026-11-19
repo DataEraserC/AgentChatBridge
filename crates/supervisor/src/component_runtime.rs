@@ -1369,6 +1369,11 @@ fn command_for(entry: &ResolvedComponent) -> Result<(String, Vec<String>), Strin
         args.push(file.to_string());
         args.push("up".to_string());
         args.push("-d".to_string());
+        // 显式重建：容器配置没变时 `up -d` 什么都不做，镜像换了也不会生效。
+        // 具名卷不受影响——重建只换容器，卷还是那些卷。
+        if entry.compose_recreate {
+            args.push("--force-recreate".to_string());
+        }
         return Ok((entry.compose_bin[0].clone(), args));
     }
     if let Some(script) = entry.script.as_deref().filter(|script| !script.is_empty()) {
@@ -1506,5 +1511,73 @@ fn build_state(
         last_result: comp.last_result.clone(),
         probe_url: component_state::probe_url(&comp.entry),
         updated_at_ms: now,
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    fn compose_entry(recreate: bool) -> ResolvedComponent {
+        // 最小的 container 预设：组件只需声明 preset，不用写 command。
+        let presets = crate::component::PresetRegistry::from_toml(
+            r#"
+[[preset]]
+id = "test_container"
+component = "snow"
+type = "oneshot"
+source = "container"
+script = "/bin/true"
+"#,
+        )
+        .expect("presets");
+        let text = format!(
+            r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "snow"
+enabled = true
+type = "oneshot"
+preset = "test_container"
+file = "/tmp/x.yml"
+compose_bin = ["podman-compose"]
+compose_recreate = {recreate}
+[component.readiness]
+kind = "tcp"
+port = 1
+"#
+        );
+        let (_file, table) =
+            crate::component::parse_config_file(&text, &presets).expect("配置合法");
+        table
+            .components
+            .into_iter()
+            .find(|entry| entry.name == "snow")
+            .expect("有 snow")
+    }
+
+    /// 打开 `compose_recreate` 时，`up -d` 后面必须带 `--force-recreate`。
+    ///
+    /// 为什么需要它：容器配置没变时 `up -d` 什么都不做，镜像是 `latest` 也不会
+    /// 换——「重启组件」看着成功了，实际跑的还是旧容器。
+    #[test]
+    fn compose_recreate_adds_force_recreate() {
+        let (_program, args) = command_for(&compose_entry(true)).expect("能拼");
+        assert!(
+            args.contains(&"--force-recreate".to_string()),
+            "要显式重建，实际参数：{args:?}"
+        );
+    }
+
+    /// 默认不带：`up -d` 本身是幂等的，没必要每次换一个新容器。
+    #[test]
+    fn compose_recreate_is_off_by_default() {
+        let (_program, args) = command_for(&compose_entry(false)).expect("能拼");
+        assert!(
+            !args.contains(&"--force-recreate".to_string()),
+            "默认不该重建，实际参数：{args:?}"
+        );
     }
 }

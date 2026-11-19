@@ -368,6 +368,13 @@ pub struct Component {
     /// 仅 `type = "oneshot"`：目标机实际可用的 compose 工具。
     #[serde(default)]
     pub compose_bin: Vec<String>,
+    /// 仅 `type = "oneshot"`：每次拉起都重建容器（`--force-recreate`），卷保留。
+    ///
+    /// 默认 false：容器配置没变时 `up -d` 是幂等的，没必要每次换一个新的。
+    /// 对「镜像是 latest、要跟上上游」或「配置改了但 compose 认为没变」的组件
+    /// 才需要打开——重建会丢容器内的临时状态，但具名卷不受影响。
+    #[serde(default)]
+    pub compose_recreate: bool,
     #[serde(default)]
     pub stop_action: StopAction,
     #[serde(default)]
@@ -577,6 +584,7 @@ pub struct ResolvedComponent {
     pub env: BTreeMap<String, String>,
     pub file: Option<String>,
     pub compose_bin: Vec<String>,
+    pub compose_recreate: bool,
     pub stop_action: StopAction,
     pub process: Process,
     pub readiness: ResolvedReadiness,
@@ -827,6 +835,7 @@ fn resolve_component(
         env: component.env.clone(),
         file: component.file.clone(),
         compose_bin: component.compose_bin.clone(),
+        compose_recreate: component.compose_recreate,
         stop_action: component.stop_action,
         process,
         readiness,
