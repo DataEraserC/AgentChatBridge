@@ -256,6 +256,44 @@ fn session_op(
                     list = list.join(", ")
                 ));
             }
+            // 投递窗口（会话级默认值；订阅没写这些字段时用它）。
+            // 上限与 kernel 的 `validate_window` 保持一致：3 个计数 0..=50，
+            // `batch_head` 至少 1（投 0 条等于永远不叫醒）。
+            "context_before" | "context_after" | "batch_head" => {
+                let number = val
+                    .as_u64()
+                    .ok_or(msg!("bridge.patch.field_must_be_uint", key = key))?;
+                let minimum = if key == "batch_head" { 1 } else { 0 };
+                if number < minimum || number > acb_kernel::config::MAX_CONTEXT_RECORDS as u64 {
+                    return Err(msg!(
+                        "bridge.patch.window_out_of_range",
+                        key = key,
+                        min = minimum,
+                        max = acb_kernel::config::MAX_CONTEXT_RECORDS
+                    )
+                    .into());
+                }
+                table.insert(key.as_str(), value(number as i64));
+                changes.push(msg!(
+                    "bridge.patch.session_window_set",
+                    id = &id,
+                    key = key,
+                    value = number
+                ));
+            }
+            // 排除已读上下文：默认 false。开了之后，触发消息上下 N 条里
+            // 已经读过的那些不再投递（未读正文不受影响）。
+            "exclude_read" => {
+                let flag = val
+                    .as_bool()
+                    .ok_or(msg!("bridge.patch.field_must_be_bool", key = key))?;
+                table.insert("exclude_read", value(flag));
+                changes.push(msg!(
+                    "bridge.patch.session_exclude_read_set",
+                    id = &id,
+                    value = flag
+                ));
+            }
             other => {
                 return Err(msg!("bridge.patch.session_unknown_field", field = other).into());
             }
@@ -1285,6 +1323,87 @@ path = "state/acb.db"
             session_ids(&final_text),
             vec!["a", "b"],
             "delete 后不该丢掉别的会话"
+        );
+    }
+
+    /// 投递窗口四个字段能通过 patch 写进会话（会话级默认值）。
+    ///
+    /// 用户要求「以后尽量只写 DB」，而写 DB 的唯一正规入口就是 `config_patch`。
+    /// 这四个字段原来根本不在 patch 白名单里，导致 `exclude_read` 这种
+    /// 「排除已读上下文」的配置**只能靠改文件或直接动库**，改完还得重启。
+    #[test]
+    fn session_delivery_window_fields_are_patchable() {
+        let ops = parse_ops(serde_json::json!([
+            {"op": "session", "id": "main", "patch": {
+                "context_before": 5,
+                "context_after": 2,
+                "batch_head": 4,
+                "exclude_read": true
+            }}
+        ]));
+        let (text, changes) = apply_patch(&base(), &ops).expect("补丁合法");
+
+        for expected in [
+            "context_before = 5",
+            "context_after = 2",
+            "batch_head = 4",
+            "exclude_read = true",
+        ] {
+            assert!(text.contains(expected), "缺 {expected}：\n{text}");
+        }
+        let rendered = changes_en(&changes);
+        assert!(
+            rendered.iter().any(|line| line.contains("exclude_read")),
+            "变更记录要提到 exclude_read：{rendered:?}"
+        );
+    }
+
+    /// 超出 kernel 的 `MAX_CONTEXT_RECORDS` 要拒绝，不能写出让配置解析失败的值。
+    #[test]
+    fn session_delivery_window_rejects_out_of_range() {
+        let ops = parse_ops(serde_json::json!([
+            {"op": "session", "id": "main", "patch": {"context_before": 51}}
+        ]));
+        let error = apply_patch(&base(), &ops).expect_err("51 超上限");
+        assert!(
+            error_en(&error).contains("out of range"),
+            "{}",
+            error_en(&error)
+        );
+
+        // batch_head 至少 1：投 0 条等于永远不叫醒。
+        let ops = parse_ops(serde_json::json!([
+            {"op": "session", "id": "main", "patch": {"batch_head": 0}}
+        ]));
+        let error = apply_patch(&base(), &ops).expect_err("0 非法");
+        assert!(
+            error_en(&error).contains("out of range"),
+            "{}",
+            error_en(&error)
+        );
+    }
+
+    /// 类型不对要拒绝（`exclude_read` 只收 bool，窗口字段只收无符号整数）。
+    #[test]
+    fn session_delivery_window_rejects_wrong_types() {
+        let ops = parse_ops(serde_json::json!([
+            {"op": "session", "id": "main", "patch": {"exclude_read": "yes"}}
+        ]));
+        let error = apply_patch(&base(), &ops).expect_err("字符串不是 bool");
+        assert!(
+            error_en(&error).contains("true or false"),
+            "{}",
+            error_en(&error)
+        );
+
+        let ops = parse_ops(serde_json::json!([
+            {"op": "session", "id": "main", "patch": {"context_before": -1}}
+        ]));
+        let error = apply_patch(&base(), &ops).expect_err("负数非法");
+        assert!(
+            error_en(&error).contains("non-negative integer"),
+            "{}",
+            error_en(&error)
         );
     }
 }
