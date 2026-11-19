@@ -8,12 +8,12 @@
 #   3. 不联网、不写仓库内文件（日志落在 target/verify/，target/ 已被忽略）。
 #
 # 用法：
-#   deploy/verify.sh                  # 全部门禁
-#   deploy/verify.sh --quick          # 只跑 fmt + guards（提交前用，秒级）
-#   deploy/verify.sh --test-only      # 只跑 cargo test
-#   deploy/verify.sh --clippy         # 额外跑 clippy（当前不阻断，仅记警告数）
-#   deploy/verify.sh --update-baseline  # 把当前失败写成新的白名单（谨慎！见文件头注释）
-#   deploy/verify.sh --help
+#   deploy/gate/verify.sh                  # 全部门禁
+#   deploy/gate/verify.sh --quick          # 只跑 fmt + guards（提交前用，秒级）
+#   deploy/gate/verify.sh --test-only      # 只跑 cargo test
+#   deploy/gate/verify.sh --clippy         # 额外跑 clippy（当前不阻断，仅记警告数）
+#   deploy/gate/verify.sh --update-baseline  # 把当前失败写成新的白名单（谨慎！见文件头注释）
+#   deploy/gate/verify.sh --help
 #
 # 环境变量：
 #   ACB_VERIFY_NODE=<path>       指定 node（默认取 PATH 里的 node）
@@ -25,7 +25,7 @@
 # 退出码：0 全绿；1 有红；2 用法错误。
 set -uo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root" || exit 2
 
 artifact_dir="${ACB_VERIFY_ARTIFACTS:-$repo_root/target/verify}"
@@ -373,12 +373,12 @@ stage_guards() {
 # 那种漂移只有真机点一遍才发现。这里真跑一次构建再逐字节比对。
 stage_web() {
   stage_begin "前端产物（console_web 与 web/ 一致）"
-  if [ ! -x deploy/verify-console-web.sh ]; then
-    record web SKIP "没有 deploy/verify-console-web.sh"
+  if [ ! -x deploy/gate/verify-console-web.sh ]; then
+    record web SKIP "没有 deploy/gate/verify-console-web.sh"
     return
   fi
   local log="$artifact_dir/console-web.log"
-  ./deploy/verify-console-web.sh >"$log" 2>&1
+  ./deploy/gate/verify-console-web.sh >"$log" 2>&1
   local status=$?
   # SKIP 必须先判：跳过的退出码也是 0，若先判 `if 成功` 会把「没检查」记成
   # 「检查通过」——全新克隆没有 web/node_modules 时正是这种情况，那条 OK 是假的。

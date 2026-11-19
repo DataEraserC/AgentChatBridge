@@ -12,7 +12,7 @@ set -uo pipefail
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO=$(cd "$HERE/.." && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
 LOGDIRS=("$REPO/state/logs" "$HOME/.local/state/acb" "$HOME/.local/share/acb/state/logs")
 QUIET=0
 [[ ${1:-} == --quiet ]] && QUIET=1

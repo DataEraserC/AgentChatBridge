@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# SnowLuma compose 守卫：盯住「改了会切断 ACB」的几件事。
+#
+# 为什么需要它：compose 权威文件在 ACB/deploy/，真实端口值却在
+# ~/Documents/SnowLuma/.env。podman-compose 只读 compose 同目录的 .env，
+# 一旦有人绕过 snowluma.sh 直接手敲 -f，端口会静默退回 3000/3001，
+# 而 ACB 按 53000/53001 访问 —— 桥连不上，且没有任何报错提示端口错了。
+# 这个脚本把该事故变成可复现的红。
+#
+# 用法：deploy/verify-snowluma-compose.sh
+# 退出码：0 全部通过；1 有约束被违反；2 环境缺依赖（跳过，不算失败）
+set -uo pipefail
+
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# 与 snowluma.sh 同一套解析顺序：显式覆盖 > 仓库内真值 > 旧位置回退
+if [[ -n ${SNOWLUMA_ENV_FILE:-} ]]; then
+  ENV_FILE=$SNOWLUMA_ENV_FILE
+elif [[ -f $HERE/snowluma.env ]]; then
+  ENV_FILE=$HERE/snowluma.env
+else
+  ENV_FILE=$HOME/Documents/SnowLuma/.env
+fi
+failed=0
+
+ok()   { printf '  · %s\n' "$*"; }
+bad()  { printf '  ✗ %s\n' "$*"; failed=1; }
+skip() { printf 'SKIP: %s\n' "$*" >&2; exit 2; }
+
+command -v python3 >/dev/null 2>&1 || skip "缺少 python3"
+[ -f "$ENV_FILE" ] || skip "env 文件不存在：$ENV_FILE（本机未部署 SnowLuma）"
+
+single=$HERE/snowluma-compose.single.yml
+multi=$HERE/snowluma-compose.multi.yml
+wrapper=#!/usr/bin/env bash
+# SnowLuma compose 守卫：盯住「改了会切断 ACB」的几件事。
+#
+# 为什么需要它：compose 权威文件在 ACB/deploy/，真实端口值却在
+# ~/Documents/SnowLuma/.env。podman-compose 只读 compose 同目录的 .env，
+# 一旦有人绕过 snowluma.sh 直接手敲 -f，端口会静默退回 3000/3001，
+# 而 ACB 按 53000/53001 访问 —— 桥连不上，且没有任何报错提示端口错了。
+# 这个脚本把该事故变成可复现的红。
+#
+# 用法：deploy/verify-snowluma-compose.sh
+# 退出码：0 全部通过；1 有约束被违反；2 环境缺依赖（跳过，不算失败）
+set -uo pipefail
+
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# 与 snowluma.sh 同一套解析顺序：显式覆盖 > 仓库内真值 > 旧位置回退
+if [[ -n ${SNOWLUMA_ENV_FILE:-} ]]; then
+  ENV_FILE=$SNOWLUMA_ENV_FILE
+elif [[ -f $HERE/snowluma.env ]]; then
+  ENV_FILE=$HERE/snowluma.env
+else
+  ENV_FILE=$HOME/Documents/SnowLuma/.env
+fi
+failed=0
+
+ok()   { printf '  · %s\n' "$*"; }
+bad()  { printf '  ✗ %s\n' "$*"; failed=1; }
+skip() { printf 'SKIP: %s\n' "$*" >&2; exit 2; }
+
+command -v python3 >/dev/null 2>&1 || skip "缺少 python3"
+[ -f "$ENV_FILE" ] || skip "env 文件不存在：$ENV_FILE（本机未部署 SnowLuma）"
+
+single=$HERE/snowluma-compose.single.yml
+multi=$HERE/snowluma-compose.multi.yml
+wrapper=$HERE/snowluma.sh
+
+echo "== 文件存在性 =="
+for f in "$single" "$multi" "$wrapper"; do
+  [ -f "$f" ] && ok "$(basename "$f")" || bad "缺少 $f"
+done
+[ -x "$wrapper" ] && ok "snowluma.sh 可执行" || bad "snowluma.sh 没有可执行位"
+
+echo "== env 真值不得入库（含 VNC_PASSWD = 能操作 QQ 的桌面密码）=="
+# 违反后果：远程桌面密码进 git 历史，等于把账号交出去，且删不干净。
+if git -C "$HERE/../../.." ls-files --error-unmatch deploy/components/snowluma/snowluma.env >/dev/null 2>&1; then
+  bad "deploy/components/snowluma/snowluma.env 被 git 跟踪（密钥入库！立即 git rm --cached）"
+else
+  ok "deploy/components/snowluma/snowluma.env 未被跟踪"
+fi
+if git -C "$HERE/../../.." check-ignore -q deploy/components/snowluma/snowluma.env 2>/dev/null; then
+  ok "deploy/components/snowluma/snowluma.env 已被 .gitignore 忽略"
+else
+  bad "deploy/components/snowluma/snowluma.env 未被 .gitignore 忽略（迟早误提交）"
+fi
+[ -f "$HERE/snowluma.env.example" ] && ok "模板 snowluma.env.example 存在" \
+  || bad "缺少 deploy/components/snowluma/snowluma.env.example（新机器无从部署）"
+# 模板里不许出现真密码形状的值
+if [ -f "$HERE/snowluma.env.example" ] && \
+   grep -qE '^VNC_PASSWD=(CHANGE_ME|$)' "$HERE/snowluma.env.example"; then
+  ok "模板 VNC_PASSWD 是占位符/空"
+else
+  bad "模板 VNC_PASSWD 疑似写了真值"
+fi
+# 真值文件权限：含密码，不该组/其他人可读
+if [ -f "$HERE/snowluma.env" ]; then
+  perm=$(stat -c '%a' "$HERE/snowluma.env" 2>/dev/null || echo '')
+  if [ "$perm" = "600" ] || [ "$perm" = "400" ]; then
+    ok "snowluma.env 权限 $perm"
+  else
+    bad "snowluma.env 权限 $perm（含密码，应 600）"
+  fi
+fi
+
+echo "== 包装脚本必须固化 --env-file =="
+# 违反后果：从 ACB 目录跑会读不到真实端口，静默切断 ACB。
+if grep -q -- '--env-file' "$wrapper"; then
+  ok "含 --env-file"
+else
+  bad "snowluma.sh 未传 --env-file（会退回默认端口切断 ACB）"
+fi
+# env 缺失必须失败，不能静默继续
+if SNOWLUMA_ENV_FILE=/nonexistent-acb-guard "$wrapper" multi config >/dev/null 2>&1; then
+  bad "env 文件缺失时仍然继续（应 fail-closed）"
+else
+  ok "env 缺失时 fail-closed"
+fi
+
+echo "== 解析后的端口与卷（加载真实 .env）=="
+for mode in single multi; do
+  out=$("$wrapper" "$mode" config 2>/dev/null) || { bad "$mode config 解析失败"; continue; }
+  MODE=$mode OUT=$out python3 - <<'PY'
+import os, sys, yaml
+mode = os.environ['MODE']
+doc = yaml.safe_load(os.environ['OUT'])
+s = doc['services']['snowluma']
+ports = [str(p) for p in s['ports']]
+host = [p.split(':')[0] for p in ports]
+vols = {v.split(':')[1]: v.split(':')[0] for v in s['volumes']}
+# 顶层 volumes 的 name: 才是真正挂到哪个具名卷。service 里的引用名不变、
+# 只改顶层 name 同样会挂到空卷并丢登录态 —— 必须查解析后的实际 name。
+top = doc.get('volumes') or {}
+bad = []
+
+# ACB 依赖这两个宿主端口（config.active.toml: 53001=WS, 53000=HTTP）
+for p in ('53000', '53001'):
+    if p not in host:
+        bad.append(f'{mode}: 缺少 ACB 依赖的宿主端口 {p}')
+# 登录态三卷改名 = 全部重新扫码
+for mount, name in (('/app/data', 'qq-gateway-data'),
+                    ('/app/.config', 'qq-client-config'),
+                    ('/app/.local/share', 'qq-client-data')):
+    ref = vols.get(mount)
+    if ref != name:
+        bad.append(f'{mode}: {mount} 引用名应为 {name}，实为 {ref}')
+    # 引用名对了还不够：顶层 name 决定实际挂哪个卷
+    actual = (top.get(ref) or {}).get('name', ref) if ref else None
+    if actual != name:
+        bad.append(f'{mode}: {mount} 实际卷名为 {actual}（应为 {name}）——会挂到空卷丢登录态')
+# 容器名变了会让 podman exec snowluma / supervisor readiness 失效
+if s['container_name'] != 'snowluma':
+    bad.append(f"{mode}: container_name 应为 snowluma，实为 {s['container_name']}")
+if len(set(host)) != len(host):
+    bad.append(f'{mode}: 宿主端口重复')
+
+if mode == 'multi':
+    import re
+    homes = [h.strip() for h in (s['environment'].get('SNOWLUMA_EXTRA_QQ_HOMES') or '').split(',') if h.strip()]
+    for h in homes:
+        if not h.startswith('/app/'):
+            bad.append(f'multi: HOME {h} 不在 /app/ 下（入口脚本会跳过）')
+        if not re.fullmatch(r'[A-Za-z0-9_@%+=:,./-]+', h):
+            bad.append(f'multi: HOME {h} 含非法字符')
+        if h not in vols:
+            bad.append(f'multi: HOME {h} 没有对应卷（登录态无处存）')
+    if len(set(homes + ['/app'])) != len(homes) + 1:
+        bad.append('multi: HOME 之间或与主账号 /app 重叠')
+
+for b in bad:
+    print(f'  ✗ {b}')
+if not bad:
+    print(f'  · {mode}: 端口/卷名/容器名' + ('/HOME 约束' if mode == 'multi' else '') + ' 全部正确')
+sys.exit(1 if bad else 0)
+PY
+  [ $? -ne 0 ] && failed=1
+done
+
+echo "== supervisor 自启指向（活配置，存在才查）=="
+# 违反后果：launcher 自启拉起废弃 compose 或不存在的文件，桥反复重连。
+SUP=${ACB_SUPERVISOR_FILE:-$HOME/.local/share/acb/state/supervisor/supervisor.toml}
+if [ -f "$SUP" ]; then
+  SUP="$SUP" HERE="$HERE" python3 - <<'PY'
+import os, sys, tomllib
+sup = tomllib.load(open(os.environ['SUP'], 'rb'))
+here = os.environ['HERE']
+bad = []
+comp = next((c for c in sup.get('component', []) if c.get('name') == 'snowluma'), None)
+if comp is None:
+    print('  · 活配置里没有 snowluma 组件（跳过）')
+    sys.exit(0)
+f = comp.get('file') or ''
+if not f:
+    bad.append('snowluma.file 为空 → 组件不启用')
+elif not os.path.isfile(f):
+    bad.append(f'snowluma.file 指向不存在的文件：{f}')
+elif os.path.realpath(f) not in (
+    os.path.realpath(os.path.join(here, 'snowluma-compose.single.yml')),
+    os.path.realpath(os.path.join(here, 'snowluma-compose.multi.yml')),
+):
+    bad.append(f'snowluma.file 未指向仓库内两份权威 compose：{f}')
+# readiness 端口必须是该 compose 真的映射出来的宿主端口
+port = (comp.get('readiness') or {}).get('port')
+if port is not None and str(port) != '53001':
+    bad.append(f'readiness.port={port}，但 ACB 依赖的 WS 宿主端口是 53001')
+for b in bad:
+    print(f'  ✗ {b}')
+if not bad:
+    print(f'  · file 指向 {os.path.basename(f)}，readiness.port={port} 一致')
+sys.exit(1 if bad else 0)
+PY
+  [ $? -ne 0 ] && failed=1
+  # 自启显式传 --env-file（管理内核读组件的 process.env_file）。
+  # 旧办法是 deploy/.env 软链接让 podman-compose 自己找到——已废弃：
+  # 隐式兼容会在换目录/换文件名时静默失效，退回默认端口切断 ACB。
+  if grep -q "env_file" "$SUP" 2>/dev/null; then
+    ok "组件配置里有 process.env_file（自启会显式传 --env-file）"
+  else
+    bad "组件配置缺 process.env_file（自启不会传 --env-file，会退回默认端口切断 ACB）"
+  fi
+  # 显式传能不能真的解析出正确端口：这才是「读得到真值」的证据。
+  if env_file=$(grep -oE 'env_file[[:space:]]*=[[:space:]]*"[^"]+"' "$SUP" 2>/dev/null \
+      | head -1 | sed -E 's/.*"([^"]+)".*/\1/'); then
+    if [[ ! -f $env_file ]]; then
+      bad "process.env_file 指向的文件不存在：${env_file:-<空>}"
+    elif command -v podman-compose >/dev/null 2>&1; then
+      compose_file=$(grep -oE '^file[[:space:]]*=[[:space:]]*"[^"]+"' "$SUP" 2>/dev/null \
+        | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+      if [[ -f $compose_file ]] && podman-compose --env-file "$env_file" -f "$compose_file" config 2>/dev/null | grep -q '53001:3001'; then
+        ok "显式 --env-file 解析出 53001:3001"
+      else
+        bad "显式 --env-file 未能解析出 53001:3001（端口会错）"
+      fi
+    fi
+  fi
+else
+  ok "未找到活 supervisor 配置（本机未部署，跳过）"
+fi
+
+echo "== 两份形态不得同时 up（同名容器/同端口）=="
+a=$(grep -oE 'container_name:.*' "$single" | head -1)
+b=$(grep -oE 'container_name:.*' "$multi" | head -1)
+if [ "$a" = "$b" ]; then
+  ok "容器名一致（属同一套栈的两种形态，切换需先 down）"
+else
+  bad "两份 container_name 不一致，切换时会留下孤儿容器"
+fi
+
+if [ "$failed" -eq 0 ]; then
+  echo "OK: SnowLuma compose 约束全部通过"
+else
+  echo "FAIL: 见上方 ✗ 条目"
+fi
+exit "$failed"
+
+echo "== 文件存在性 =="
+for f in "$single" "$multi" "$wrapper"; do
+  [ -f "$f" ] && ok "$(basename "$f")" || bad "缺少 $f"
+done
+[ -x "$wrapper" ] && ok "snowluma.sh 可执行" || bad "snowluma.sh 没有可执行位"
+
+echo "== env 真值不得入库（含 VNC_PASSWD = 能操作 QQ 的桌面密码）=="
+# 违反后果：远程桌面密码进 git 历史，等于把账号交出去，且删不干净。
+if git -C "$HERE/../../.." ls-files --error-unmatch deploy/components/snowluma/snowluma.env >/dev/null 2>&1; then
+  bad "deploy/components/snowluma/snowluma.env 被 git 跟踪（密钥入库！立即 git rm --cached）"
+else
+  ok "deploy/components/snowluma/snowluma.env 未被跟踪"
+fi
+if git -C "$HERE/../../.." check-ignore -q deploy/components/snowluma/snowluma.env 2>/dev/null; then
+  ok "deploy/components/snowluma/snowluma.env 已被 .gitignore 忽略"
+else
+  bad "deploy/components/snowluma/snowluma.env 未被 .gitignore 忽略（迟早误提交）"
+fi
+[ -f "$HERE/snowluma.env.example" ] && ok "模板 snowluma.env.example 存在" \
+  || bad "缺少 deploy/components/snowluma/snowluma.env.example（新机器无从部署）"
+# 模板里不许出现真密码形状的值
+if [ -f "$HERE/snowluma.env.example" ] && \
+   grep -qE '^VNC_PASSWD=(CHANGE_ME|$)' "$HERE/snowluma.env.example"; then
+  ok "模板 VNC_PASSWD 是占位符/空"
+else
+  bad "模板 VNC_PASSWD 疑似写了真值"
+fi
+# 真值文件权限：含密码，不该组/其他人可读
+if [ -f "$HERE/snowluma.env" ]; then
+  perm=$(stat -c '%a' "$HERE/snowluma.env" 2>/dev/null || echo '')
+  if [ "$perm" = "600" ] || [ "$perm" = "400" ]; then
+    ok "snowluma.env 权限 $perm"
+  else
+    bad "snowluma.env 权限 $perm（含密码，应 600）"
+  fi
+fi
+
+echo "== 包装脚本必须固化 --env-file =="
+# 违反后果：从 ACB 目录跑会读不到真实端口，静默切断 ACB。
+if grep -q -- '--env-file' "$wrapper"; then
+  ok "含 --env-file"
+else
+  bad "snowluma.sh 未传 --env-file（会退回默认端口切断 ACB）"
+fi
+# env 缺失必须失败，不能静默继续
+if SNOWLUMA_ENV_FILE=/nonexistent-acb-guard "$wrapper" multi config >/dev/null 2>&1; then
+  bad "env 文件缺失时仍然继续（应 fail-closed）"
+else
+  ok "env 缺失时 fail-closed"
+fi
+
+echo "== 解析后的端口与卷（加载真实 .env）=="
+for mode in single multi; do
+  out=$("$wrapper" "$mode" config 2>/dev/null) || { bad "$mode config 解析失败"; continue; }
+  MODE=$mode OUT=$out python3 - <<'PY'
+import os, sys, yaml
+mode = os.environ['MODE']
+doc = yaml.safe_load(os.environ['OUT'])
+s = doc['services']['snowluma']
+ports = [str(p) for p in s['ports']]
+host = [p.split(':')[0] for p in ports]
+vols = {v.split(':')[1]: v.split(':')[0] for v in s['volumes']}
+# 顶层 volumes 的 name: 才是真正挂到哪个具名卷。service 里的引用名不变、
+# 只改顶层 name 同样会挂到空卷并丢登录态 —— 必须查解析后的实际 name。
+top = doc.get('volumes') or {}
+bad = []
+
+# ACB 依赖这两个宿主端口（config.active.toml: 53001=WS, 53000=HTTP）
+for p in ('53000', '53001'):
+    if p not in host:
+        bad.append(f'{mode}: 缺少 ACB 依赖的宿主端口 {p}')
+# 登录态三卷改名 = 全部重新扫码
+for mount, name in (('/app/data', 'qq-gateway-data'),
+                    ('/app/.config', 'qq-client-config'),
+                    ('/app/.local/share', 'qq-client-data')):
+    ref = vols.get(mount)
+    if ref != name:
+        bad.append(f'{mode}: {mount} 引用名应为 {name}，实为 {ref}')
+    # 引用名对了还不够：顶层 name 决定实际挂哪个卷
+    actual = (top.get(ref) or {}).get('name', ref) if ref else None
+    if actual != name:
+        bad.append(f'{mode}: {mount} 实际卷名为 {actual}（应为 {name}）——会挂到空卷丢登录态')
+# 容器名变了会让 podman exec snowluma / supervisor readiness 失效
+if s['container_name'] != 'snowluma':
+    bad.append(f"{mode}: container_name 应为 snowluma，实为 {s['container_name']}")
+if len(set(host)) != len(host):
+    bad.append(f'{mode}: 宿主端口重复')
+
+if mode == 'multi':
+    import re
+    homes = [h.strip() for h in (s['environment'].get('SNOWLUMA_EXTRA_QQ_HOMES') or '').split(',') if h.strip()]
+    for h in homes:
+        if not h.startswith('/app/'):
+            bad.append(f'multi: HOME {h} 不在 /app/ 下（入口脚本会跳过）')
+        if not re.fullmatch(r'[A-Za-z0-9_@%+=:,./-]+', h):
+            bad.append(f'multi: HOME {h} 含非法字符')
+        if h not in vols:
+            bad.append(f'multi: HOME {h} 没有对应卷（登录态无处存）')
+    if len(set(homes + ['/app'])) != len(homes) + 1:
+        bad.append('multi: HOME 之间或与主账号 /app 重叠')
+
+for b in bad:
+    print(f'  ✗ {b}')
+if not bad:
+    print(f'  · {mode}: 端口/卷名/容器名' + ('/HOME 约束' if mode == 'multi' else '') + ' 全部正确')
+sys.exit(1 if bad else 0)
+PY
+  [ $? -ne 0 ] && failed=1
+done
+
+echo "== supervisor 自启指向（活配置，存在才查）=="
+# 违反后果：launcher 自启拉起废弃 compose 或不存在的文件，桥反复重连。
+SUP=${ACB_SUPERVISOR_FILE:-$HOME/.local/share/acb/state/supervisor/supervisor.toml}
+if [ -f "$SUP" ]; then
+  SUP="$SUP" HERE="$HERE" python3 - <<'PY'
+import os, sys, tomllib
+sup = tomllib.load(open(os.environ['SUP'], 'rb'))
+here = os.environ['HERE']
+bad = []
+comp = next((c for c in sup.get('component', []) if c.get('name') == 'snowluma'), None)
+if comp is None:
+    print('  · 活配置里没有 snowluma 组件（跳过）')
+    sys.exit(0)
+f = comp.get('file') or ''
+if not f:
+    bad.append('snowluma.file 为空 → 组件不启用')
+elif not os.path.isfile(f):
+    bad.append(f'snowluma.file 指向不存在的文件：{f}')
+elif os.path.realpath(f) not in (
+    os.path.realpath(os.path.join(here, 'snowluma-compose.single.yml')),
+    os.path.realpath(os.path.join(here, 'snowluma-compose.multi.yml')),
+):
+    bad.append(f'snowluma.file 未指向仓库内两份权威 compose：{f}')
+# readiness 端口必须是该 compose 真的映射出来的宿主端口
+port = (comp.get('readiness') or {}).get('port')
+if port is not None and str(port) != '53001':
+    bad.append(f'readiness.port={port}，但 ACB 依赖的 WS 宿主端口是 53001')
+for b in bad:
+    print(f'  ✗ {b}')
+if not bad:
+    print(f'  · file 指向 {os.path.basename(f)}，readiness.port={port} 一致')
+sys.exit(1 if bad else 0)
+PY
+  [ $? -ne 0 ] && failed=1
+  # 自启显式传 --env-file（管理内核读组件的 process.env_file）。
+  # 旧办法是 deploy/.env 软链接让 podman-compose 自己找到——已废弃：
+  # 隐式兼容会在换目录/换文件名时静默失效，退回默认端口切断 ACB。
+  if grep -q "env_file" "$SUP" 2>/dev/null; then
+    ok "组件配置里有 process.env_file（自启会显式传 --env-file）"
+  else
+    bad "组件配置缺 process.env_file（自启不会传 --env-file，会退回默认端口切断 ACB）"
+  fi
+  # 显式传能不能真的解析出正确端口：这才是「读得到真值」的证据。
+  if env_file=$(grep -oE 'env_file[[:space:]]*=[[:space:]]*"[^"]+"' "$SUP" 2>/dev/null \
+      | head -1 | sed -E 's/.*"([^"]+)".*/\1/'); then
+    if [[ ! -f $env_file ]]; then
+      bad "process.env_file 指向的文件不存在：${env_file:-<空>}"
+    elif command -v podman-compose >/dev/null 2>&1; then
+      compose_file=$(grep -oE '^file[[:space:]]*=[[:space:]]*"[^"]+"' "$SUP" 2>/dev/null \
+        | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+      if [[ -f $compose_file ]] && podman-compose --env-file "$env_file" -f "$compose_file" config 2>/dev/null | grep -q '53001:3001'; then
+        ok "显式 --env-file 解析出 53001:3001"
+      else
+        bad "显式 --env-file 未能解析出 53001:3001（端口会错）"
+      fi
+    fi
+  fi
+else
+  ok "未找到活 supervisor 配置（本机未部署，跳过）"
+fi
+
+echo "== 两份形态不得同时 up（同名容器/同端口）=="
+a=$(grep -oE 'container_name:.*' "$single" | head -1)
+b=$(grep -oE 'container_name:.*' "$multi" | head -1)
+if [ "$a" = "$b" ]; then
+  ok "容器名一致（属同一套栈的两种形态，切换需先 down）"
+else
+  bad "两份 container_name 不一致，切换时会留下孤儿容器"
+fi
+
+if [ "$failed" -eq 0 ]; then
+  echo "OK: SnowLuma compose 约束全部通过"
+else
+  echo "FAIL: 见上方 ✗ 条目"
+fi
+exit "$failed"

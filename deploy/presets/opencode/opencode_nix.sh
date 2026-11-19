@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# opencode_nix.sh —— opencode 组件的 nix 预设脚本（搬自 deploy/opencode-serve.sh）。
+# opencode_nix.sh —— opencode 组件的 nix 预设脚本（搬自 deploy/components/opencode/opencode-serve.sh）。
 #
 # 与旧脚本的差别：
 #   1. 不再有明文默认密码：密码必须来自 ACB_ENV_FILE 或显式环境，缺失即失败；

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dsh_nix.sh —— dsh 组件的 nix 预设脚本（搬自 deploy/start-dsh.sh）。
+# dsh_nix.sh —— dsh 组件的 nix 预设脚本（搬自 deploy/components/dsh/start-dsh.sh）。
 #
 # 与旧 systemd 入口的差别：
 #   1. 不写死 nix store 路径：DSH_BIN 优先取 ACB_DSH_BIN，否则用 PATH 里的

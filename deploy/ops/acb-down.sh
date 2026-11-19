@@ -5,7 +5,7 @@ set -uo pipefail
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO=$(cd "$HERE/.." && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
 STATE=$REPO/state
 
 if [[ -f $STATE/acb.db ]]; then

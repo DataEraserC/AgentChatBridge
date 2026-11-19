@@ -36,8 +36,8 @@ deploy/verify-snowluma-compose.sh # 守卫
 首次部署：
 
 ```bash
-cp deploy/snowluma.env.example deploy/snowluma.env
-chmod 600 deploy/snowluma.env     # 含远程桌面密码
+cp deploy/components/snowluma/snowluma.env.example deploy/components/snowluma/snowluma.env
+chmod 600 deploy/components/snowluma/snowluma.env     # 含远程桌面密码
 # 填好端口与 VNC_PASSWD 后再 up
 ```
 
@@ -104,7 +104,7 @@ startup_grace_secs = 120
 1. `snowluma.env` 里写 `SNOWLUMA_EXTRA_QQ_HOMES=/app/qq-acct2`（两个号用逗号分隔）。
    路径必须在 `/app/` 下、字符集限 `A-Za-z0-9_@%+=:,./-`，且各自独占卷
    （compose 已备好 `qq-acct2` / `qq-acct3`）。
-2. `deploy/snowluma.sh multi down && deploy/snowluma.sh multi up`
+2. `deploy/snowluma.sh multi down && deploy/components/snowluma/snowluma.sh multi up`
 3. **验证额外实例真的起来了**（唯一硬证据）：
    ```bash
    podman exec snowluma cat /etc/supervisor/conf.d/extra-qq.conf

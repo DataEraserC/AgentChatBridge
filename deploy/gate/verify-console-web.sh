@@ -12,7 +12,7 @@
 # 不算红——`deploy/verify.sh` 已经把「环境不具备」与「代码不对」分开对待。
 set -uo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root" || exit 2
 
 web_dir=web

@@ -76,7 +76,10 @@ fn payload(root: &Path, name: &str) -> PathBuf {
     .expect("shared tools");
     // payload 不包含 acbl 自己的 launcher / supervisor / unit 模板，夹具也不放，
     // 用来保证校验范围确实收窄到 payload。
-    common::write_script(&dir.join("deploy/start-drivers.sh"), "exit 0\n");
+    common::write_script(
+        &dir.join("deploy/components/drivers/start-drivers.sh"),
+        "exit 0\n",
+    );
     for bin in ["acb-bridge", "acb-launcher"] {
         common::write_script(&dir.join("bin").join(bin), "exit 0\n");
     }
@@ -531,7 +534,10 @@ fn render_falls_back_without_profile() {
         "{text}"
     );
     assert!(
-        text.contains(&format!("{}/deploy/start-dsh.sh", repo.display())),
+        text.contains(&format!(
+            "{}/deploy/components/dsh/start-dsh.sh",
+            repo.display()
+        )),
         "{text}"
     );
     assert!(
@@ -568,15 +574,19 @@ fn render_prefers_profile_current_bin() {
         "{text}"
     );
     assert!(
-        text.contains(&format!("{current}/deploy/start-dsh.sh")),
+        text.contains(&format!("{current}/deploy/components/dsh/start-dsh.sh")),
         "{text}"
     );
     assert!(
-        text.contains(&format!("{current}/deploy/start-drivers.sh")),
+        text.contains(&format!(
+            "{current}/deploy/components/drivers/start-drivers.sh"
+        )),
         "{text}"
     );
     assert!(
-        text.contains(&format!("{current}/deploy/opencode-serve.sh")),
+        text.contains(&format!(
+            "{current}/deploy/components/opencode/opencode-serve.sh"
+        )),
         "{text}"
     );
     assert!(
@@ -584,7 +594,10 @@ fn render_prefers_profile_current_bin() {
         "{text}"
     );
     assert!(
-        !text.contains(&format!("{}/deploy/start-dsh.sh", repo.display())),
+        !text.contains(&format!(
+            "{}/deploy/components/dsh/start-dsh.sh",
+            repo.display()
+        )),
         "{text}"
     );
     assert!(
@@ -1100,7 +1113,8 @@ fn add_names_the_missing_payload_entry() {
     let config = temp.path().join("config.toml");
     fs::write(&config, "[endpoint]\n").expect("config");
     let source = payload(temp.path(), "missing-entry");
-    fs::remove_file(source.join("deploy/start-drivers.sh")).expect("drop drivers script");
+    fs::remove_file(source.join("deploy/components/drivers/start-drivers.sh"))
+        .expect("drop drivers script");
     let env = profile_env(&profile, &config);
 
     let output = run_acb(
@@ -1117,7 +1131,10 @@ fn add_names_the_missing_payload_entry() {
     );
     assert_eq!(output.status.code(), Some(78), "{}", stderr(&output));
     let text = stderr(&output);
-    assert!(text.contains("deploy/start-drivers.sh (file)"), "{text}");
+    assert!(
+        text.contains("deploy/components/drivers/start-drivers.sh (file)"),
+        "{text}"
+    );
 }
 
 #[test]

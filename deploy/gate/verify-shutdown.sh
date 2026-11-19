@@ -16,10 +16,10 @@
 #     进程子树里、又不属于 leave_running 容器，就判 FAIL（第 5 项）。
 #
 # 用法（把 unit 停掉之后再跑）：
-#   deploy/verify-shutdown.sh                       # 默认 acb-bridge.service（现场 launcher unit 名）
-#   deploy/verify-shutdown.sh acb-launcher.service
-#   SINCE="2026-11-08 20:00:00" deploy/verify-shutdown.sh acb-bridge.service
-#   SUPERVISOR_FILE=/path/to/supervisor.toml deploy/verify-shutdown.sh
+#   deploy/gate/verify-shutdown.sh                       # 默认 acb-bridge.service（现场 launcher unit 名）
+#   deploy/gate/verify-shutdown.sh acb-launcher.service
+#   SINCE="2026-11-08 20:00:00" deploy/gate/verify-shutdown.sh acb-bridge.service
+#   SUPERVISOR_FILE=/path/to/supervisor.toml deploy/gate/verify-shutdown.sh
 #
 # 退出码：0 全部通过；1 有残留；2 环境缺依赖。
 set -uo pipefail

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # snowluma.sh —— SnowLuma 容器的唯一入口（旧命令已废弃）。
 #
-#   deploy/snowluma.sh single up      # 单账号形态
-#   deploy/snowluma.sh multi  up      # 多账号形态
-#   deploy/snowluma.sh multi  down
-#   deploy/snowluma.sh multi  status
-#   deploy/snowluma.sh multi  logs
+#   deploy/components/snowluma/snowluma.sh single up      # 单账号形态
+#   deploy/components/snowluma/snowluma.sh multi  up      # 多账号形态
+#   deploy/components/snowluma/snowluma.sh multi  down
+#   deploy/components/snowluma/snowluma.sh multi  status
+#   deploy/components/snowluma/snowluma.sh multi  logs
 #
-# 为什么需要这个脚本：真实端口值在 deploy/snowluma.env（gitignore，含密码），
+# 为什么需要这个脚本：真实端口值在 deploy/components/snowluma/snowluma.env（gitignore，含密码），
 # 而 podman-compose 默认只读 compose 同目录的「.env」这个文件名。
 # 直接手敲 -f 会读不到那些值、静默退回 3000/3001/6081/5099，从而切断 ACB
 # （ACB 按 53000/53001 访问）。这里把 --env-file 固化，杜绝该事故。
 #
-# env 真值：deploy/snowluma.env      模板：deploy/snowluma.env.example
+# env 真值：deploy/components/snowluma/snowluma.env      模板：deploy/components/snowluma/snowluma.env.example
 # 覆盖位置：SNOWLUMA_ENV_FILE=<path>（旧位置 ~/Documents/SnowLuma/.env 仍作回退）
 #
 # 两种形态共用容器名与三个登录态卷，是同一套栈的两种形态：
@@ -22,8 +22,8 @@ set -euo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 COMPOSE_BIN=${SNOWLUMA_COMPOSE_BIN:-podman-compose}
 
-# env 真值已搬进仓库：deploy/snowluma.env（gitignore，含 VNC_PASSWD）。
-# 模板是 deploy/snowluma.env.example。旧位置仅作回退，便于过渡。
+# env 真值已搬进仓库：deploy/components/snowluma/snowluma.env（gitignore，含 VNC_PASSWD）。
+# 模板是 deploy/components/snowluma/snowluma.env.example。旧位置仅作回退，便于过渡。
 if [[ -n ${SNOWLUMA_ENV_FILE:-} ]]; then
   ENV_FILE=$SNOWLUMA_ENV_FILE
 elif [[ -f $HERE/snowluma.env ]]; then
@@ -56,7 +56,7 @@ command -v "$COMPOSE_BIN" >/dev/null 2>&1 || fail "找不到 compose 工具：$C
 [[ -f $ENV_FILE ]] || fail "env 文件不存在：$ENV_FILE
 真实端口值在该文件里（53000/53001/56081/55099）。
 缺了会退回默认端口并切断 ACB，故此处直接失败。
-首次部署：cp deploy/snowluma.env.example deploy/snowluma.env && chmod 600 deploy/snowluma.env
+首次部署：cp deploy/components/snowluma/snowluma.env.example deploy/components/snowluma/snowluma.env && chmod 600 deploy/components/snowluma/snowluma.env
 也可用 SNOWLUMA_ENV_FILE=<path> 指定其他位置。"
 
 run() { "$COMPOSE_BIN" --env-file "$ENV_FILE" -f "$FILE" "$@"; }

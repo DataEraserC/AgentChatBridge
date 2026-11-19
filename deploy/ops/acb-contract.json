@@ -12,7 +12,7 @@
     "harnesses/opencode/plugin/index.js",
     "harnesses/opencode/plugin/acb-wire.mjs",
     "harnesses/shared/tools.mjs",
-    "deploy/start-drivers.sh"
+    "deploy/components/drivers/start-drivers.sh"
   ],
   "commands": [
     {

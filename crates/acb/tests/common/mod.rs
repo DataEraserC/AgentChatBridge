@@ -32,6 +32,10 @@ pub fn bash_path() -> PathBuf {
 pub fn write_script(path: &Path, body: &str) {
     let bash = bash_path();
     let content = format!("#!{}\n{}", bash.display(), body.trim_start_matches('\n'));
+    // 父目录可能还不存在（payload 布局有嵌套目录，如 deploy/components/drivers/）。
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create script dir");
+    }
     fs::write(path, content).expect("write test script");
     let mut permissions = fs::metadata(path).expect("metadata").permissions();
     permissions.set_mode(0o755);

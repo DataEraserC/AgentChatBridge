@@ -1613,7 +1613,7 @@ fn validate_payload(source: &Path) -> Result<(), Failure> {
     let dirs = ["bin", "harnesses", "examples/lua"];
     let files = [
         "bin/acb-bridge",
-        "deploy/start-drivers.sh",
+        "deploy/components/drivers/start-drivers.sh",
         "harnesses/dsh/src/driver.mjs",
         "harnesses/dsh/dsh-mcp.patch.yml",
         "harnesses/opencode/plugin/index.js",

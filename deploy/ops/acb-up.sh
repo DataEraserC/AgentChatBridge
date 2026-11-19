@@ -13,7 +13,7 @@ set -uo pipefail
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO=$(cd "$HERE/.." && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
 ACB_DATA=${ACB_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/acb}
 CONFIG=${ACB_CONFIG_FILE:-$ACB_DATA/config/config.toml}
 LOGDIR=${ACB_LOG_DIR:-$REPO/state/logs}
@@ -31,9 +31,9 @@ fail() { echo "✗ $*" >&2; exit 1; }
 [[ -x $BRIDGE ]] || fail "没有 $BRIDGE，先跑：nix build .#acb-bridge"
 [[ -f $REPO/harnesses/dsh/dsh-mcp.patch.yml ]] || fail "没有 dsh-mcp.patch.yml"
 [[ -f $CONFIG ]] || fail "没有 $CONFIG（用 ACB_CONFIG_FILE 指定运行配置）"
-[[ -f $HERE/start-dsh.sh ]] || fail "没有 deploy/start-dsh.sh"
-[[ -f $HERE/start-drivers.sh ]] || fail "没有 deploy/start-drivers.sh"
-[[ -f $HERE/opencode-serve.sh ]] || fail "没有 deploy/opencode-serve.sh"
+[[ -f $REPO/deploy/components/dsh/start-dsh.sh ]] || fail "没有 deploy/components/dsh/start-dsh.sh"
+[[ -f $REPO/deploy/components/drivers/start-drivers.sh ]] || fail "没有 deploy/components/drivers/start-drivers.sh"
+[[ -f $REPO/deploy/components/opencode/opencode-serve.sh ]] || fail "没有 deploy/components/opencode/opencode-serve.sh"
 
 # dsh-real 不是 dsh：`dsh` 是 dsh-seed-profile 的包装器，会按模板重建 profile，
 # 把 --patch 注入的东西洗掉；dsh-real 才是直连二进制。这里只做前置检查，
@@ -61,7 +61,7 @@ done
 
 echo "→ 链接仓库单元到 $UNITDIR"
 for unit in "${UNITS[@]}"; do
-  ln -sf "$HERE/systemd/$unit" "$UNITDIR/$unit"
+  ln -sf "$REPO/deploy/systemd/$unit" "$UNITDIR/$unit"
 done
 systemctl --user daemon-reload
 
@@ -111,4 +111,4 @@ curl -s --max-time 5 -H "Authorization: Bearer $("$ACBCTL" secrets resolve --con
   http://127.0.0.1:3100/api/status || echo "（取不到，看日志）"
 echo
 echo "日志目录：$LOGDIR"
-echo "单元文件：$HERE/systemd/（systemd 侧是 $UNITDIR 的符号链接）"
+echo "单元文件：$REPO/deploy/systemd/（systemd 侧是 $UNITDIR 的符号链接）"

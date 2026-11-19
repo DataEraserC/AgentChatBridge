@@ -5,7 +5,7 @@
 # 依赖：cargo、systemd（user bus）、journalctl。
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 launcher="$repo_root/target/debug/acb-launcher"
 # 有些 user systemd 看不到 /tmp（PrivateTmp / 命名空间），临时目录放在 $HOME 下。
 mkdir -p "$HOME/.cache"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # opencode-keeper.sh —— **旧方案**（保留备用，不再默认启用）。
 #
-# 新方案是 deploy/opencode-serve.sh：systemd 直接跑 `opencode2 serve`，再用
+# 新方案是 deploy/components/opencode/opencode-serve.sh：systemd 直接跑 `opencode2 serve`，再用
 # `/api/plugin` 触发插件加载，连接常驻。这个 keeper 只是用 `opencode2 run`
 # 反复踢一脚，run 退出后连接会断，已经不再使用。
 #
