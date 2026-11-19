@@ -646,13 +646,35 @@ impl fmt::Display for ComponentError {
     }
 }
 
+/// 把组件里声明的路径解析成绝对路径。
+///
+/// **相对路径按配置文件的父目录解析**（不是进程 cwd）：配置和它引用的脚本
+/// 通常在一起，按 cwd 解析会让「从哪个目录启动」变成隐含依赖——测试里能过、
+/// 线上换个启动目录就找不到文件。
+///
+/// 绝对路径原样返回：不强行改写用户明确写下的东西。
+///
+/// 为什么需要这个：`supervisor.toml` 是要能跟着仓库走的（不绑 Nix、不绑
+/// systemd 部署），写死 `/home/<user>/...` 的绝对路径一换位置就失效。
+fn resolve_path(base: &Path, declared: &str) -> String {
+    if declared.is_empty() {
+        return String::new();
+    }
+    let path = Path::new(declared);
+    if path.is_absolute() {
+        return declared.to_owned();
+    }
+    base.join(path).to_string_lossy().into_owned()
+}
+
 /// 解析 `supervisor.toml` 并校验组件表。
 pub fn parse_config_file(
     text: &str,
     presets: &PresetRegistry,
+    base: &Path,
 ) -> Result<(ConfigFile, ComponentTable), ComponentError> {
     let file: ConfigFile = toml::from_str(text).map_err(map_toml_error)?;
-    let table = resolve_components(&file.components, presets)?;
+    let table = resolve_components_at(&file.components, presets, base)?;
     Ok((file, table))
 }
 
@@ -661,9 +683,21 @@ pub fn resolve_components(
     components: &[Component],
     presets: &PresetRegistry,
 ) -> Result<ComponentTable, ComponentError> {
+    // 没有配置文件上下文时按进程 cwd 解析：这是 `resolve_components` 的老行为，
+    // 保留给「只做校验、不读文件」的调用方（测试与 CLI 检查）。
+    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_components_at(components, presets, &base)
+}
+
+/// 同 [`resolve_components`]，但相对路径按 `base` 解析（通常是配置文件的父目录）。
+pub fn resolve_components_at(
+    components: &[Component],
+    presets: &PresetRegistry,
+    base: &Path,
+) -> Result<ComponentTable, ComponentError> {
     let mut resolved = Vec::with_capacity(components.len());
     for (index, component) in components.iter().enumerate() {
-        resolved.push(resolve_component(index, component, presets)?);
+        resolved.push(resolve_component(index, component, presets, base)?);
     }
 
     check_duplicates_and_sources(&resolved)?;
@@ -679,6 +713,7 @@ fn resolve_component(
     index: usize,
     component: &Component,
     presets: &PresetRegistry,
+    base: &Path,
 ) -> Result<ResolvedComponent, ComponentError> {
     validate_name(index, &component.name)?;
 
@@ -797,11 +832,20 @@ fn resolve_component(
         .clone()
         .or_else(|| preset.and_then(|preset| preset.restart.clone()))
         .unwrap_or_default();
-    let process = component
+    let mut process = component
         .process
         .clone()
         .or_else(|| preset.and_then(|preset| preset.process.clone()))
         .unwrap_or_default();
+    // `cwd` 与 `env_file` 同样按配置文件目录解析：配置可跟着仓库走。
+    if let Some(cwd) = process.cwd.take() {
+        let resolved = resolve_path(base, &cwd);
+        process.cwd = (!resolved.is_empty()).then_some(resolved);
+    }
+    if let Some(env_file) = process.env_file.take() {
+        let resolved = resolve_path(base, &env_file);
+        process.env_file = (!resolved.is_empty()).then_some(resolved);
+    }
     let source = preset
         .map(|preset| ComponentSource::Preset(preset.source))
         .unwrap_or(ComponentSource::Custom);
@@ -833,7 +877,12 @@ fn resolve_component(
         script,
         args: component.args.clone(),
         env: component.env.clone(),
-        file: component.file.clone(),
+        // 相对路径按配置文件目录解析，配置可跟着仓库走。
+        file: component
+            .file
+            .as_deref()
+            .map(|path| resolve_path(base, path))
+            .filter(|path| !path.is_empty()),
         compose_bin: component.compose_bin.clone(),
         compose_recreate: component.compose_recreate,
         stop_action: component.stop_action,
@@ -1281,5 +1330,88 @@ mod tests {
             "endpoint 要能看出查的是哪个 harness，实际：{}",
             resolved.endpoint()
         );
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    fn presets() -> PresetRegistry {
+        PresetRegistry::from_toml(
+            r#"
+[[preset]]
+id = "c"
+component = "snow"
+type = "oneshot"
+source = "container"
+script = "/bin/true"
+"#,
+        )
+        .expect("presets")
+    }
+
+    fn parse(base: &Path) -> ComponentTable {
+        let text = r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "snow"
+type = "oneshot"
+preset = "c"
+enabled = true
+file = "compose/x.yml"
+compose_bin = ["podman-compose"]
+[component.process]
+cwd = "work"
+env_file = "secrets/dev.env"
+[component.readiness]
+kind = "tcp"
+port = 1
+"#;
+        parse_config_file(text, &presets(), base)
+            .expect("配置合法")
+            .1
+    }
+
+    /// 相对路径按**配置文件的父目录**解析，不是进程 cwd。
+    ///
+    /// 这是「配置可跟着仓库走」的前提：写死 `/home/<user>/...` 一换位置就失效，
+    /// 而按 cwd 解析会让「从哪个目录启动」变成隐含依赖。
+    #[test]
+    fn relative_paths_resolve_against_the_config_dir() {
+        let table = parse(Path::new("/srv/acb"));
+        let entry = &table.components[0];
+        assert_eq!(entry.file.as_deref(), Some("/srv/acb/compose/x.yml"));
+        assert_eq!(entry.process.cwd.as_deref(), Some("/srv/acb/work"));
+        assert_eq!(
+            entry.process.env_file.as_deref(),
+            Some("/srv/acb/secrets/dev.env")
+        );
+    }
+
+    /// 绝对路径原样保留：不强行改写用户明确写下的东西。
+    #[test]
+    fn absolute_paths_are_left_alone() {
+        let text = r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "snow"
+type = "oneshot"
+preset = "c"
+enabled = true
+file = "/abs/x.yml"
+compose_bin = ["podman-compose"]
+[component.readiness]
+kind = "tcp"
+port = 1
+"#;
+        let table = parse_config_file(text, &presets(), Path::new("/srv/acb"))
+            .expect("配置合法")
+            .1;
+        assert_eq!(table.components[0].file.as_deref(), Some("/abs/x.yml"));
     }
 }

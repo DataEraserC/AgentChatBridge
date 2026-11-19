@@ -67,9 +67,12 @@ fn manager(dir: &Path, text: &str) -> ComponentManager {
     // 所有测试都从 `manager()` 进来，在这里统一钉住「回退路径」，
     // 免得 16 个测试各写一遍。
     use_child_process_path();
-    let (_file, table) =
-        acb_supervisor::component::parse_config_file(text, &PresetRegistry::empty())
-            .expect("parse config");
+    let (_file, table) = acb_supervisor::component::parse_config_file(
+        text,
+        &PresetRegistry::empty(),
+        std::path::Path::new("/tmp"),
+    )
+    .expect("parse config");
     ComponentManager::new(
         &state_dir(dir),
         &table,

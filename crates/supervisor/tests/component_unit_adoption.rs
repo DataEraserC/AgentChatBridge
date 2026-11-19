@@ -67,9 +67,12 @@ fn unit_mode_available() -> bool {
 }
 
 fn manager(dir: &Path, text: &str) -> ComponentManager {
-    let (_file, table) =
-        acb_supervisor::component::parse_config_file(text, &PresetRegistry::empty())
-            .expect("parse config");
+    let (_file, table) = acb_supervisor::component::parse_config_file(
+        text,
+        &PresetRegistry::empty(),
+        std::path::Path::new("/tmp"),
+    )
+    .expect("parse config");
     ComponentManager::new(
         &state_dir(dir),
         &table,

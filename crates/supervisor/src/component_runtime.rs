@@ -1563,7 +1563,8 @@ port = 1
 "#
         );
         let (_file, table) =
-            crate::component::parse_config_file(&text, &presets).expect("配置合法");
+            crate::component::parse_config_file(&text, &presets, std::path::Path::new("/tmp"))
+                .expect("配置合法");
         table
             .components
             .into_iter()
@@ -1604,7 +1605,8 @@ port = 1
 "#
         );
         let (_file, table) =
-            crate::component::parse_config_file(&text, &presets).expect("配置合法");
+            crate::component::parse_config_file(&text, &presets, std::path::Path::new("/tmp"))
+                .expect("配置合法");
         table
             .components
             .into_iter()

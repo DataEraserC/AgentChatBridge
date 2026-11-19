@@ -47,9 +47,7 @@ pub fn render_owned(
     let current = load_current(state_dir)?;
     let profile_root = crate::profile::root();
     let meta = crate::profile::active_meta()?;
-    let meta_generation = meta
-        .as_ref()
-        .map(|meta| meta.generation_ref(&profile_root));
+    let meta_generation = meta.as_ref().map(|meta| meta.generation_ref(&profile_root));
 
     let (program, args, program_source) = match &current {
         Some(spec) => (spec.program.clone(), spec.args.clone(), "current.json"),
@@ -170,10 +168,7 @@ fn render_text(inputs: &RenderInputs<'_>, existing: Option<&str>) -> String {
 }
 
 /// 保证 `state_dir/supervisor.toml` 存在并与派生结果一致；返回其路径。
-pub fn ensure_owned_config(
-    state_dir: &Path,
-    state_dir_source: &str,
-) -> Result<PathBuf, String> {
+pub fn ensure_owned_config(state_dir: &Path, state_dir_source: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(state_dir)
         .map_err(|error| format!("create {}: {error}", state_dir.display()))?;
     let path = owned_config_path(state_dir);
@@ -209,7 +204,7 @@ pub fn seed_if_missing(
     )?;
     let presets = acb_supervisor::component::load_presets_for(external_path)
         .map_err(|error| error.to_string())?;
-    let (owned_file, _table) = parse_owned(&text, &presets)?;
+    let (owned_file, _table) = parse_owned(&text, &presets, state_dir)?;
     let differences = differences(&owned_file.supervisor, external);
     if !differences.is_empty() {
         return Ok(SeedOutcome::Skipped { differences });
@@ -229,8 +224,9 @@ pub fn seed_if_missing(
 fn parse_owned(
     text: &str,
     presets: &PresetRegistry,
+    base: &std::path::Path,
 ) -> Result<(ConfigFile, ComponentTable), String> {
-    parse_config_file(text, presets).map_err(|error| error.to_string())
+    parse_config_file(text, presets, base).map_err(|error| error.to_string())
 }
 
 /// 外部配置与自有配置的语义差异；空表表示等价。
@@ -312,7 +308,10 @@ fn derive_from_profile(
     profile_root: &Path,
 ) -> Result<(String, Vec<String>, &'static str), String> {
     let (bin_dir, source) = match meta {
-        Some(meta) => (meta.payload_path(profile_root).join("bin"), "active profile"),
+        Some(meta) => (
+            meta.payload_path(profile_root).join("bin"),
+            "active profile",
+        ),
         None => {
             let fallback = std::env::var_os("ACB_UNIT_BIN_DIR")
                 .filter(|value| !value.is_empty())
@@ -323,10 +322,7 @@ fn derive_from_profile(
             )
         }
     };
-    let program = bin_dir
-        .join("acb-bridge")
-        .to_string_lossy()
-        .into_owned();
+    let program = bin_dir.join("acb-bridge").to_string_lossy().into_owned();
     let args = match default_bridge_config() {
         Some(path) => {
             eprintln!(
@@ -336,9 +332,7 @@ fn derive_from_profile(
             vec!["--config".to_string(), path.to_string_lossy().into_owned()]
         }
         None => {
-            eprintln!(
-                "acb-config: no known bridge config; starting acb-bridge without --config"
-            );
+            eprintln!("acb-config: no known bridge config; starting acb-bridge without --config");
             Vec::new()
         }
     };
@@ -389,7 +383,7 @@ fn derive_health_url(
                     return (
                         Some(url),
                         format!("{} [console].listen = {:?}", path.display(), listen),
-                    )
+                    );
                 }
                 None => eprintln!(
                     "acb-config: cannot parse [console].listen {:?} in {}",
@@ -404,16 +398,23 @@ fn derive_health_url(
         }
     }
     if let Some(url) = external.and_then(|config| config.health_url.clone()) {
-        return (Some(url), "external config health_url (console listen unavailable)".to_string());
+        return (
+            Some(url),
+            "external config health_url (console listen unavailable)".to_string(),
+        );
     }
-    if let Some(port) = std::env::var_os("ACB_UNIT_CONSOLE_PORT").filter(|value| !value.is_empty()) {
+    if let Some(port) = std::env::var_os("ACB_UNIT_CONSOLE_PORT").filter(|value| !value.is_empty())
+    {
         let port = port.to_string_lossy();
         return (
             Some(format!("http://127.0.0.1:{port}/healthz")),
             "ACB_UNIT_CONSOLE_PORT".to_string(),
         );
     }
-    (None, "no console listen, external health_url, or port".to_string())
+    (
+        None,
+        "no console listen, external health_url, or port".to_string(),
+    )
 }
 
 fn read_console_listen(path: &Path) -> Option<String> {
@@ -579,9 +580,7 @@ mod tests {
         assert_eq!(first, render_text(&inputs, None), "二次渲染必须逐字节一致");
 
         // 手工加的组件声明不能在下次启动时被重渲染清掉。
-        let edited = format!(
-            "{first}\n[[component]]\nname = \"dsh\"\ncommand = [\"/bin/dsh\"]\n"
-        );
+        let edited = format!("{first}\n[[component]]\nname = \"dsh\"\ncommand = [\"/bin/dsh\"]\n");
         let third = render_text(&inputs, Some(&edited));
         assert_eq!(third, edited);
         assert!(third.contains("name = \"dsh\""), "{third}");
@@ -711,7 +710,9 @@ state_dir = "/state"
         let owned = acb_supervisor::load_config(&owned_path).unwrap();
         let differences = differences(&owned, &external);
         assert!(
-            differences.iter().any(|difference| difference.contains("health_url")),
+            differences
+                .iter()
+                .any(|difference| difference.contains("health_url")),
             "{differences:?}"
         );
         fs::remove_dir_all(&dir).ok();

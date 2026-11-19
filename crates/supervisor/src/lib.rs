@@ -247,7 +247,10 @@ fn load_config_parts(path: &Path) -> Result<(ConfigFile, ComponentTable), Compon
         )
     })?;
     let presets = component::load_presets_for(path)?;
-    let (file, components) = component::parse_config_file(&text, &presets)?;
+    // 相对路径按配置文件所在目录解析——配置和它引用的脚本通常在一起，
+    // 按进程 cwd 解析会让启动目录变成隐含依赖。
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let (file, components) = component::parse_config_file(&text, &presets, base)?;
     if file.supervisor.program.trim().is_empty() {
         return Err(ComponentError::new(
             "supervisor_program_empty",

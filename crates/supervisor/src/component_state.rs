@@ -251,7 +251,9 @@ mod tests {
     }
 
     fn table(text: &str) -> ComponentTable {
-        let (_file, table) = parse_config_file(text, &PresetRegistry::empty()).expect("parse");
+        let (_file, table) =
+            parse_config_file(text, &PresetRegistry::empty(), std::path::Path::new("/tmp"))
+                .expect("parse");
         table
     }
 

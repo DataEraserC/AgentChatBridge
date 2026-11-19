@@ -47,14 +47,8 @@ fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
 fn parse(
     text: &str,
     presets: &PresetRegistry,
-) -> Result<
-    (
-        acb_supervisor::ConfigFile,
-        acb_supervisor::ComponentTable,
-    ),
-    ComponentError,
-> {
-    parse_config_file(text, presets)
+) -> Result<(acb_supervisor::ConfigFile, acb_supervisor::ComponentTable), ComponentError> {
+    parse_config_file(text, presets, std::path::Path::new("/tmp"))
 }
 
 fn error_code(text: &str, presets: &PresetRegistry) -> &'static str {
@@ -153,10 +147,7 @@ enabled = true
     assert_eq!(table.len(), 1);
     let component = &table.components[0];
     assert_eq!(component.kind, ComponentType::Simple, "type 继承预设");
-    assert_eq!(
-        component.source,
-        ComponentSource::Preset(PresetSource::Nix)
-    );
+    assert_eq!(component.source, ComponentSource::Preset(PresetSource::Nix));
     assert_eq!(component.readiness.kind, ReadinessKind::Tcp);
     assert_eq!(component.readiness.port, Some(3080), "探针继承预设");
     assert!(component.enabled);
@@ -247,10 +238,7 @@ name = \"snowluma\"
 preset = \"snowluma_oneshot\"
 "
     );
-    assert_eq!(
-        error_code(&text, &registry),
-        "component_readiness_required"
-    );
+    assert_eq!(error_code(&text, &registry), "component_readiness_required");
 }
 
 #[test]
@@ -309,10 +297,7 @@ after = [\"nope\"]
 "
     );
     let registry = PresetRegistry::empty();
-    assert_eq!(
-        error_code(&text, &registry),
-        "component_dependency_unknown"
-    );
+    assert_eq!(error_code(&text, &registry), "component_dependency_unknown");
 }
 
 #[test]
@@ -342,10 +327,7 @@ preset = \"dsh_nix\"
 "
     );
     let registry = PresetRegistry::empty();
-    assert_eq!(
-        error_code(&text, &registry),
-        "component_preset_unknown"
-    );
+    assert_eq!(error_code(&text, &registry), "component_preset_unknown");
 }
 
 #[test]
@@ -364,10 +346,7 @@ preset = \"dsh_npm\"
 enabled = true
 "
     );
-    assert_eq!(
-        error_code(&text, &registry),
-        "component_multiple_sources"
-    );
+    assert_eq!(error_code(&text, &registry), "component_multiple_sources");
 }
 
 #[test]
@@ -384,10 +363,7 @@ name = \"dsh\"
 preset = \"dsh_nix\"
 "
     );
-    assert_eq!(
-        error_code(&text, &registry),
-        "component_duplicate_name"
-    );
+    assert_eq!(error_code(&text, &registry), "component_duplicate_name");
 }
 
 #[test]
@@ -408,10 +384,7 @@ after = [\"a\"]
 "
     );
     let registry = PresetRegistry::empty();
-    assert_eq!(
-        error_code(&text, &registry),
-        "component_dependency_cycle"
-    );
+    assert_eq!(error_code(&text, &registry), "component_dependency_cycle");
 }
 
 #[test]
@@ -486,10 +459,7 @@ kind = \"exit\"
 "
     );
     let registry = PresetRegistry::empty();
-    assert_eq!(
-        error_code(&text, &registry),
-        "component_readiness_invalid"
-    );
+    assert_eq!(error_code(&text, &registry), "component_readiness_invalid");
 }
 
 #[test]
