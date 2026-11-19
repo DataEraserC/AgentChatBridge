@@ -31,6 +31,10 @@ config.toml
 # 部署层密钥（deploy/acb.env.example 是模板，真值不入库）
 /deploy/acb.env
 
+# SnowLuma 容器真值 env（含 VNC_PASSWD = 能操作 QQ 的远程桌面密码）。
+# 模板是 deploy/snowluma.env.example，真值永不入库。
+/deploy/snowluma.env
+
 # 编辑器与本地环境
 .direnv/
 .envrc

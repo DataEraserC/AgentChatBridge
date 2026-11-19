@@ -7,18 +7,30 @@
 #   deploy/snowluma.sh multi  status
 #   deploy/snowluma.sh multi  logs
 #
-# 为什么需要这个脚本：compose 文件在 ACB/deploy/，而真实端口值在
-# ~/Documents/SnowLuma/.env。podman-compose 默认只读 compose 同目录的 .env，
+# 为什么需要这个脚本：真实端口值在 deploy/snowluma.env（gitignore，含密码），
+# 而 podman-compose 默认只读 compose 同目录的「.env」这个文件名。
 # 直接手敲 -f 会读不到那些值、静默退回 3000/3001/6081/5099，从而切断 ACB
 # （ACB 按 53000/53001 访问）。这里把 --env-file 固化，杜绝该事故。
+#
+# env 真值：deploy/snowluma.env      模板：deploy/snowluma.env.example
+# 覆盖位置：SNOWLUMA_ENV_FILE=<path>（旧位置 ~/Documents/SnowLuma/.env 仍作回退）
 #
 # 两种形态共用容器名与三个登录态卷，是同一套栈的两种形态：
 # 切换 = down 旧的 + up 新的，登录态不丢。不要同时 up 两份。
 set -euo pipefail
 
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-ENV_FILE=${SNOWLUMA_ENV_FILE:-$HOME/Documents/SnowLuma/.env}
 COMPOSE_BIN=${SNOWLUMA_COMPOSE_BIN:-podman-compose}
+
+# env 真值已搬进仓库：deploy/snowluma.env（gitignore，含 VNC_PASSWD）。
+# 模板是 deploy/snowluma.env.example。旧位置仅作回退，便于过渡。
+if [[ -n ${SNOWLUMA_ENV_FILE:-} ]]; then
+  ENV_FILE=$SNOWLUMA_ENV_FILE
+elif [[ -f $HERE/snowluma.env ]]; then
+  ENV_FILE=$HERE/snowluma.env
+else
+  ENV_FILE=$HOME/Documents/SnowLuma/.env
+fi
 
 fail() { echo "snowluma: $*" >&2; exit 1; }
 
@@ -44,7 +56,8 @@ command -v "$COMPOSE_BIN" >/dev/null 2>&1 || fail "找不到 compose 工具：$C
 [[ -f $ENV_FILE ]] || fail "env 文件不存在：$ENV_FILE
 真实端口值在该文件里（53000/53001/56081/55099）。
 缺了会退回默认端口并切断 ACB，故此处直接失败。
-可用 SNOWLUMA_ENV_FILE=<path> 指定其他位置。"
+首次部署：cp deploy/snowluma.env.example deploy/snowluma.env && chmod 600 deploy/snowluma.env
+也可用 SNOWLUMA_ENV_FILE=<path> 指定其他位置。"
 
 run() { "$COMPOSE_BIN" --env-file "$ENV_FILE" -f "$FILE" "$@"; }
 

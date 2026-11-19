@@ -14,14 +14,19 @@
 #   ⚠️ 不要同时 up 两份 —— 同名容器与同宿主端口会冲突。
 #
 # ── 环境变量从哪来 ──────────────────────────────────────────────────────
-#   podman-compose 默认读取「compose 文件所在目录」的 .env。本文件在 ACB/deploy/，
-#   而真实端口值在 ~/Documents/SnowLuma/.env，因此必须显式指定 env 文件：
-#     podman-compose --env-file ~/Documents/SnowLuma/.env -f <本文件> up -d
+#   env 真值：deploy/snowluma.env（.gitignore 忽略，含 VNC_PASSWD，权限 600）
+#   env 模板：deploy/snowluma.env.example（入库，只有占位符）
+#   首次部署：cp deploy/snowluma.env.example deploy/snowluma.env && chmod 600 …
+#   ~/Documents/SnowLuma/.env 现在是指向真值的软链接，两处同一份内容。
+#
+#   podman-compose 默认只读「compose 同目录的 .env」这个文件名，
+#   而真值叫 snowluma.env，因此必须显式指定 env 文件：
+#     podman-compose --env-file deploy/snowluma.env -f <本文件> up -d
 #   为免每次手打，用同目录的 snowluma.sh 包装脚本（已内置该参数）。
 #
 # ── 现网事实（2026-11-19 实测 ss -ltnp，不是推断）────────────────────────
 #   容器正在监听 53000(HTTP) 53001(WS) 56081(noVNC) 55099(WebUI)。
-#   这些值来自 ~/Documents/SnowLuma/.env；下面的 3000/3001/6081/5099 是
+#   这些值来自 deploy/snowluma.env；下面的 3000/3001/6081/5099 是
 #   容器内端口与 fallback 默认值，不是宿主端口。
 #   ACB 侧 ~/.local/share/acb/config/config.active.toml 抬头写明
 #   「OneBot：snowluma 容器，53001 = WS，53000 = HTTP」。

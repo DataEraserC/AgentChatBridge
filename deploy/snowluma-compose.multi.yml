@@ -9,9 +9,9 @@
 #     deploy/snowluma.sh multi down
 #     deploy/snowluma.sh multi up
 #   等价原始命令：
-#     podman-compose --env-file ~/Documents/SnowLuma/.env \
+#     podman-compose --env-file deploy/snowluma.env \
 #       -f ~/Documents/code/AgentChatBridge/deploy/snowluma-compose.multi.yml down
-#     podman-compose --env-file ~/Documents/SnowLuma/.env \
+#     podman-compose --env-file deploy/snowluma.env \
 #       -f ~/Documents/code/AgentChatBridge/deploy/snowluma-compose.multi.yml up -d
 #
 #   单账号版见同目录 snowluma-compose.single.yml。两者容器名与三个登录态卷相同，
@@ -28,7 +28,7 @@
 #
 # ── 现网事实（2026-11-19 实测 ss -ltnp）──────────────────────────────────
 #   53000(HTTP) 53001(WS) 56081(noVNC) 55099(WebUI)，值来自
-#   ~/Documents/SnowLuma/.env。ACB 的 config.active.toml 抬头亦写明
+#   deploy/snowluma.env。ACB 的 config.active.toml 抬头亦写明
 #   「53001 = WS，53000 = HTTP」。改这四个就切断 ACB。
 #
 # ── 多账号原理 ──────────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ volumes:
 # 3) 此时仍是单账号（开关默认空），ACB 侧零改动。确认现网恢复：
 #      ss -ltnp | grep -E '53000|53001'
 #
-# 4) 加号：在 ~/Documents/SnowLuma/.env 追加，然后重跑第 2 步的 up
+# 4) 加号：在 deploy/snowluma.env 追加，然后重跑第 2 步的 up
 #      SNOWLUMA_EXTRA_QQ_HOMES=/app/qq-acct2
 #    验证额外实例真的起来了 —— 唯一硬证据：
 #      podman exec snowluma cat /etc/supervisor/conf.d/extra-qq.conf

@@ -12,7 +12,14 @@
 set -uo pipefail
 
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-ENV_FILE=${SNOWLUMA_ENV_FILE:-$HOME/Documents/SnowLuma/.env}
+# 与 snowluma.sh 同一套解析顺序：显式覆盖 > 仓库内真值 > 旧位置回退
+if [[ -n ${SNOWLUMA_ENV_FILE:-} ]]; then
+  ENV_FILE=$SNOWLUMA_ENV_FILE
+elif [[ -f $HERE/snowluma.env ]]; then
+  ENV_FILE=$HERE/snowluma.env
+else
+  ENV_FILE=$HOME/Documents/SnowLuma/.env
+fi
 failed=0
 
 ok()   { printf '  · %s\n' "$*"; }
@@ -31,6 +38,37 @@ for f in "$single" "$multi" "$wrapper"; do
   [ -f "$f" ] && ok "$(basename "$f")" || bad "缺少 $f"
 done
 [ -x "$wrapper" ] && ok "snowluma.sh 可执行" || bad "snowluma.sh 没有可执行位"
+
+echo "== env 真值不得入库（含 VNC_PASSWD = 能操作 QQ 的桌面密码）=="
+# 违反后果：远程桌面密码进 git 历史，等于把账号交出去，且删不干净。
+if git -C "$HERE/.." ls-files --error-unmatch deploy/snowluma.env >/dev/null 2>&1; then
+  bad "deploy/snowluma.env 被 git 跟踪（密钥入库！立即 git rm --cached）"
+else
+  ok "deploy/snowluma.env 未被跟踪"
+fi
+if git -C "$HERE/.." check-ignore -q deploy/snowluma.env 2>/dev/null; then
+  ok "deploy/snowluma.env 已被 .gitignore 忽略"
+else
+  bad "deploy/snowluma.env 未被 .gitignore 忽略（迟早误提交）"
+fi
+[ -f "$HERE/snowluma.env.example" ] && ok "模板 snowluma.env.example 存在" \
+  || bad "缺少 deploy/snowluma.env.example（新机器无从部署）"
+# 模板里不许出现真密码形状的值
+if [ -f "$HERE/snowluma.env.example" ] && \
+   grep -qE '^VNC_PASSWD=(CHANGE_ME|$)' "$HERE/snowluma.env.example"; then
+  ok "模板 VNC_PASSWD 是占位符/空"
+else
+  bad "模板 VNC_PASSWD 疑似写了真值"
+fi
+# 真值文件权限：含密码，不该组/其他人可读
+if [ -f "$HERE/snowluma.env" ]; then
+  perm=$(stat -c '%a' "$HERE/snowluma.env" 2>/dev/null || echo '')
+  if [ "$perm" = "600" ] || [ "$perm" = "400" ]; then
+    ok "snowluma.env 权限 $perm"
+  else
+    bad "snowluma.env 权限 $perm（含密码，应 600）"
+  fi
+fi
 
 echo "== 包装脚本必须固化 --env-file =="
 # 违反后果：从 ACB 目录跑会读不到真实端口，静默切断 ACB。
