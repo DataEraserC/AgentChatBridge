@@ -14,6 +14,9 @@ use acb_supervisor::component::{ComponentTable, PresetRegistry, parse_config_fil
 use acb_supervisor::{Config, ConfigFile, GenerationRef, load_current};
 
 const SUPERVISOR_TEMPLATE: &str = include_str!("../../../deploy/run/supervisor.toml.tmpl");
+/// 组件清单模板：结构归仓库，`env` 从旧配置继承（部署专属，不能进仓库）。
+const COMPONENTS_TEMPLATE: &str =
+    include_str!("../../../deploy/run/supervisor.components.toml.tmpl");
 const OWNED_FILE: &str = "supervisor.toml";
 
 /// 组件声明从这一行开始；重渲染时必须原样保留，不能被 supervisor 段覆盖。
@@ -107,7 +110,11 @@ pub fn render_owned(
             suffix.matches(COMPONENT_HEADER).count()
         );
     }
+    // 预设表可能不存在（测试环境、精简安装）：拿不到就按「全都没有」处理，
+    // 组件整段不渲染，配置仍是合法的。
+    let available_presets = load_available_presets(state_dir);
     let inputs = RenderInputs {
+        presets: &available_presets,
         program: &program,
         args: &args,
         health_url: health_url.as_deref(),
@@ -118,13 +125,196 @@ pub fn render_owned(
     Ok(render_text(&inputs, existing))
 }
 
+/// 读出本机已注册的预设 id。
+///
+/// 找不到 presets.toml 时返回空表：宁可少渲染几个组件，也不要渲染出一份
+/// 解析不了的配置（`component_preset_unknown` 会让整条链启动失败）。
+fn load_available_presets(state_dir: &Path) -> Vec<String> {
+    // 与 supervisor 自己找 presets 的规则保持一致：先看配置同目录，再看安装前缀。
+    let candidates = [
+        state_dir.join("presets.toml"),
+        state_dir.join("../presets.toml"),
+    ];
+    for candidate in candidates {
+        if !candidate.exists() {
+            continue;
+        }
+        if let Ok(registry) = acb_supervisor::component::PresetRegistry::load(&candidate) {
+            return registry.iter().map(|preset| preset.id.clone()).collect();
+        }
+    }
+    Vec::new()
+}
+
 struct RenderInputs<'a> {
+    /// 已注册的预设 id。缺失的组件整段不渲染——否则配置解析失败。
+    presets: &'a [String],
     program: &'a str,
     args: &'a [String],
     health_url: Option<&'a str>,
     health_token_file: Option<&'a str>,
     state_dir: &'a Path,
     generation: Option<&'a GenerationRef>,
+}
+
+/// 从已有配置里抽某个组件的 `env = { ... }` 行。
+///
+/// **为什么不进仓库**：这些 env 里是 `/nix/store/<hash>/bin/...` 和
+/// `/home/<user>/...`——机器专属，换台机器或换一代就失效。模板只该放
+/// 「哪些组件、什么类型、怎么探活」，不该放「装在哪」。
+fn inherited_env(existing: Option<&str>, component: &str) -> String {
+    let Some(existing) = existing else {
+        return String::new();
+    };
+    let mut current: Option<String> = None;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("name = ") {
+            current = Some(rest.trim().trim_matches('"').to_owned());
+            continue;
+        }
+        if current.as_deref() == Some(component) && trimmed.starts_with("env = ") {
+            return line.trim_end().to_owned();
+        }
+        // 下一个组件开始了，别再往后找。
+        if trimmed.starts_with("[[component]]") {
+            current = None;
+        }
+    }
+    String::new()
+}
+
+/// 模板认识的组件名。已有配置里**不在这份清单里**的组件会原样追加——
+/// 运维自己加的组件不能被模板渲染悄悄抹掉。
+const TEMPLATE_COMPONENTS: &[&str] = &[
+    "dsh",
+    "dsh-presets",
+    "drivers",
+    "opencode",
+    "snowluma",
+    "acp",
+];
+
+/// 从渲染结果里删掉某个组件的整段（含它的 `[component.*]` 子表）。
+///
+/// 按「段」切而不是按行删：一个组件可能带 `[component.process]`、
+/// `[component.readiness]` 等子表，只删 `name =` 那行会留下孤儿子表。
+fn drop_component_block(text: &str, component: &str) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("[[component]]") && !current.is_empty() {
+            blocks.push(std::mem::take(&mut current));
+        }
+        current.push_str(line);
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+
+    let keep: Vec<String> = blocks
+        .into_iter()
+        .filter(|block| {
+            let is_component = block.trim_start().starts_with("[[component]]");
+            if !is_component {
+                // 不是组件段（模板头部/注释）原样留。
+                return true;
+            }
+            let name = block
+                .lines()
+                .find_map(|line| line.trim_start().strip_prefix("name = "))
+                .map(|rest| rest.trim().trim_matches('"').to_owned());
+            name.as_deref() != Some(component)
+        })
+        .collect();
+    keep.concat()
+}
+
+/// 抽出已有配置里模板不认识的 `[[component]]` 段，原样保留。
+fn unknown_component_blocks(existing: Option<&str>) -> Vec<String> {
+    let Some(existing) = existing else {
+        return Vec::new();
+    };
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current: Option<(String, String)> = None;
+    for line in existing.split_inclusive('\n') {
+        if line.trim_start().starts_with("[[component]]") {
+            if let Some((name, block)) = current.take() {
+                if !TEMPLATE_COMPONENTS.contains(&name.as_str()) {
+                    blocks.push(block);
+                }
+            }
+            current = Some((String::new(), line.to_owned()));
+            continue;
+        }
+        if let Some((name, block)) = current.as_mut() {
+            if name.is_empty()
+                && let Some(rest) = line.trim_start().strip_prefix("name = ")
+            {
+                *name = rest.trim().trim_matches('"').to_owned();
+            }
+            block.push_str(line);
+        }
+    }
+    if let Some((name, block)) = current
+        && !TEMPLATE_COMPONENTS.contains(&name.as_str())
+    {
+        blocks.push(block);
+    }
+    blocks
+}
+
+/// 组件 → 它依赖的预设 id。
+///
+/// 预设不在就用不了这个组件（`component_preset_unknown` 会让整份配置解析失败）。
+/// 所以渲染前必须问一句「这个预设装了吗」——测试环境、精简安装都可能没有。
+const COMPONENT_PRESETS: &[(&str, &str)] = &[
+    ("dsh", "dsh_nix"),
+    ("dsh-presets", "dsh_presets_acb"),
+    ("drivers", "drivers_acb"),
+    ("opencode", "opencode_nix"),
+    ("snowluma", "snowluma_container"),
+    ("acp", "acp_driver_acb"),
+];
+
+/// 渲染组件清单：把每个 `@ENV_<name>@` 换成本机已有配置里的 env 行。
+///
+/// `available` 是**已注册的预设 id**；预设缺失的组件整段不输出——否则渲染出的
+/// 配置会解析失败，把整条链拦死。
+fn render_components(existing: Option<&str>, available: &[String]) -> String {
+    let names: Vec<&str> = COMPONENT_PRESETS
+        .iter()
+        .filter(|(_, preset)| available.iter().any(|id| id == preset))
+        .map(|(name, _)| *name)
+        .collect();
+    let mut out = COMPONENTS_TEMPLATE.to_owned();
+    for name in &names {
+        let env = inherited_env(existing, name);
+        out = out.replace(&format!("@ENV_{name}@"), &env);
+    }
+    // 占位换空会留下空白行；收一下，免得每次渲染都产生 diff。
+    let mut text: String = out
+        .lines()
+        .filter(|line| !line.trim().is_empty() || !line.is_empty())
+        .map(|line| format!("{line}\n"))
+        .collect();
+    // 预设缺失的组件整段去掉：留着会让配置解析失败。
+    for (name, _) in COMPONENT_PRESETS {
+        if names.contains(&name) {
+            continue;
+        }
+        text = drop_component_block(&text, name);
+    }
+    // 运维自己加的组件原样追加：模板只该管它认识的那几个。
+    for block in unknown_component_blocks(existing) {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push('\n');
+        text.push_str(block.trim_end());
+        text.push('\n');
+    }
+    text
 }
 
 /// 纯渲染：同样的输入必须逐字节一致，已存在的 `[[component]]` 段原样保留。
@@ -157,13 +347,9 @@ fn render_text(inputs: &RenderInputs<'_>, existing: Option<&str>) -> String {
 
     let mut text = substitute(SUPERVISOR_TEMPLATE, &values)
         .expect("supervisor template placeholders are validated by this module");
-    if let Some(suffix) = component_suffix(existing) {
-        text.push('\n');
-        text.push_str(suffix);
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-    }
+    // 组件清单现在也归仓库管；只有 `env` 从旧配置继承。
+    text.push('\n');
+    text.push_str(&render_components(existing, inputs.presets));
     text
 }
 
@@ -562,7 +748,14 @@ mod tests {
             config_sha256: None,
         };
         let state_dir = Path::new("/home/user/.local/share/acb/state/supervisor");
+        // 测试里的「已装预设」：把模板认识的都算上，这样组件段会被渲染出来，
+        // 才能验证「模板内组件不重复 / 模板外组件保留」。
+        let presets: Vec<String> = COMPONENT_PRESETS
+            .iter()
+            .map(|(_, preset)| preset.to_string())
+            .collect();
         let inputs = RenderInputs {
+            presets: &presets,
             program: "/bin/acb-bridge",
             args: &args,
             health_url: Some("http://127.0.0.1:3100/healthz"),
@@ -579,11 +772,32 @@ mod tests {
         );
         assert_eq!(first, render_text(&inputs, None), "二次渲染必须逐字节一致");
 
-        // 手工加的组件声明不能在下次启动时被重渲染清掉。
-        let edited = format!("{first}\n[[component]]\nname = \"dsh\"\ncommand = [\"/bin/dsh\"]\n");
+        // 模板认识的组件：清单由模板决定，不该因为旧配置里有一份就重复出现。
+        assert_eq!(
+            first.matches("name = \"dsh\"").count(),
+            1,
+            "模板内组件只出现一次"
+        );
+
+        // 运维自己加的组件（模板不认识的名字）：必须原样保留。
+        // 这条是「模板接管组件清单」的安全底线——不能把别人的配置抹掉。
+        let edited =
+            format!("{first}\n[[component]]\nname = \"my-extra\"\ncommand = [\"/bin/extra\"]\n");
         let third = render_text(&inputs, Some(&edited));
-        assert_eq!(third, edited);
-        assert!(third.contains("name = \"dsh\""), "{third}");
+        assert!(
+            third.contains("name = \"my-extra\""),
+            "模板外的组件必须保留：{third}"
+        );
+        assert_eq!(
+            third.matches("name = \"my-extra\"").count(),
+            1,
+            "不能重复追加"
+        );
+        assert_eq!(
+            third,
+            render_text(&inputs, Some(&edited)),
+            "二次渲染仍要幂等"
+        );
     }
 
     #[test]

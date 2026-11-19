@@ -1,0 +1,59 @@
+# 组件清单：结构与部署无关的部分归仓库，机器专属的 env 由渲染时从已有配置继承。
+# 占位符 @ENV_<name>@ 会替换成该组件在旧配置里的 env 行；没有就是空。
+
+[[component]]
+name = "dsh"
+preset = "dsh_nix"
+type = "simple"
+enabled = true
+@ENV_dsh@
+
+[[component]]
+name = "dsh-presets"
+preset = "dsh_presets_acb"
+type = "oneshot"
+enabled = true
+@ENV_dsh-presets@
+
+[[component]]
+name = "drivers"
+preset = "drivers_acb"
+type = "simple"
+enabled = true
+@ENV_drivers@
+
+[[component]]
+name = "opencode"
+preset = "opencode_nix"
+type = "simple"
+enabled = true
+@ENV_opencode@
+
+[[component]]
+name = "snowluma"
+preset = "snowluma_container"
+type = "oneshot"
+enabled = true
+file = "deploy/components/snowluma/snowluma-compose.multi.yml"
+compose_bin = ["podman-compose"]
+compose_recreate = true
+restart = { policy = "never" }
+@ENV_snowluma@
+
+[component.process]
+env_file = "deploy/components/snowluma/snowluma.env"
+
+[component.readiness]
+kind = "tcp"
+port = 53001
+startup_grace_secs = 120
+
+[[component]]
+name = "acp"
+preset = "acp_driver_acb"
+type = "simple"
+enabled = true
+@ENV_acp@
+
+[component.readiness]
+kind = "process"
