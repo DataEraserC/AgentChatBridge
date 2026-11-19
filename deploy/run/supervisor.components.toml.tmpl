@@ -1,5 +1,12 @@
 # 组件清单：结构与部署无关的部分归仓库，机器专属的 env 由渲染时从已有配置继承。
-# 占位符 @ENV_<name>@ 会替换成该组件在旧配置里的 env 行；没有就是空。
+#
+# 占位符：
+#   @ENV_<name>@  该组件在旧配置里的 env 行；没有就是空
+#   @REPO_DIR@    仓库根目录的绝对路径（来自 ACB_REPO_DIR）
+#
+# 为什么路径要渲染成绝对：这份配置落在 `state/supervisor/`，**不在仓库里**，
+# 相对路径按配置目录解析永远指不到仓库（2026-11-20 现场：snowluma 的 compose
+# 文件被解析成 `state/supervisor/deploy/...`，容器起不来）。
 
 [[component]]
 name = "dsh"
@@ -34,14 +41,14 @@ name = "snowluma"
 preset = "snowluma_container"
 type = "oneshot"
 enabled = true
-file = "deploy/components/snowluma/snowluma-compose.multi.yml"
+file = "@REPO_DIR@/deploy/components/snowluma/snowluma-compose.multi.yml"
 compose_bin = ["podman-compose"]
 compose_recreate = true
 restart = { policy = "never" }
 @ENV_snowluma@
 
 [component.process]
-env_file = "deploy/components/snowluma/snowluma.env"
+env_file = "@REPO_DIR@/deploy/components/snowluma/snowluma.env"
 
 [component.readiness]
 kind = "tcp"

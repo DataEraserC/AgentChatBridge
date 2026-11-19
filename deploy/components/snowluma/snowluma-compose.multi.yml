@@ -53,10 +53,13 @@ services:
 
     shm_size: ${SNOWLUMA_SHM_SIZE:-2gb}
 
+    # 只设 soft，不设 hard：rootless podman 提不动硬限制，写死一个大于宿主
+    # 上限的值会让容器起不来（2026-11-20 现场：hard: 1048576 vs 宿主 524288 →
+    # `crun: setrlimit RLIMIT_NOFILE: Operation not permitted`）。
+    # 硬限制继承宿主，换机器不会冲突。
     ulimits:
       nofile:
         soft: 65536
-        hard: 1048576
 
     cap_add:
       - SYS_PTRACE

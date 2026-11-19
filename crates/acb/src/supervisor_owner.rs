@@ -113,7 +113,9 @@ pub fn render_owned(
     // 预设表可能不存在（测试环境、精简安装）：拿不到就按「全都没有」处理，
     // 组件整段不渲染，配置仍是合法的。
     let available_presets = load_available_presets(&owned_config_path(state_dir));
+    let repo_dir = repo_root();
     let inputs = RenderInputs {
+        repo_dir: &repo_dir,
         presets: &available_presets,
         program: &program,
         args: &args,
@@ -123,6 +125,42 @@ pub fn render_owned(
         generation: generation.as_ref(),
     };
     Ok(render_text(&inputs, existing))
+}
+
+/// 仓库根目录的绝对路径。
+///
+/// 来源优先级：
+/// 1. `ACB_REPO_DIR`（nix-config 注入；部署环境靠它）
+/// 2. 从可执行文件推导（开发时 `<repo>/target/debug/acbctl` → 往上找到含
+///    `deploy/` 的那层）
+/// 3. 现为 cwd
+///
+/// 为什么需要它：模板里的组件路径是相对仓库根的片段，而**渲染出的配置落在
+/// `state/supervisor/`（不在仓库里）**，相对路径按配置目录解析永远指不到仓库
+/// （2026-11-20 现场：snowluma 的 compose 被解析成
+/// `state/supervisor/deploy/...`，容器起不来）。
+fn repo_root() -> String {
+    if let Some(dir) = std::env::var_os("ACB_REPO_DIR").filter(|value| !value.is_empty()) {
+        return PathBuf::from(dir).to_string_lossy().into_owned();
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(found) = ancestor_with_deploy(&exe)
+    {
+        return found.to_string_lossy().into_owned();
+    }
+    std::env::current_dir()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_owned())
+}
+
+/// 从可执行文件往上找第一个含 `deploy/` 目录的祖先。
+fn ancestor_with_deploy(exe: &Path) -> Option<PathBuf> {
+    for ancestor in exe.ancestors().skip(1) {
+        if ancestor.join("deploy").is_dir() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 /// 读出本机已注册的预设 id。
@@ -147,6 +185,8 @@ fn load_available_presets(config_path: &Path) -> Vec<String> {
 }
 
 struct RenderInputs<'a> {
+    /// 仓库根目录（绝对）。模板里的 `@REPO_DIR@` 用它替换。
+    repo_dir: &'a str,
     /// 已注册的预设 id。缺失的组件整段不渲染——否则配置解析失败。
     presets: &'a [String],
     program: &'a str,
@@ -281,13 +321,16 @@ const COMPONENT_PRESETS: &[(&str, &str)] = &[
 ///
 /// `available` 是**已注册的预设 id**；预设缺失的组件整段不输出——否则渲染出的
 /// 配置会解析失败，把整条链拦死。
-fn render_components(existing: Option<&str>, available: &[String]) -> String {
+fn render_components(existing: Option<&str>, available: &[String], repo_dir: &str) -> String {
     let names: Vec<&str> = COMPONENT_PRESETS
         .iter()
         .filter(|(_, preset)| available.iter().any(|id| id == preset))
         .map(|(name, _)| *name)
         .collect();
     let mut out = COMPONENTS_TEMPLATE.to_owned();
+    // 仓库根目录：模板只写相对片段，这里拼成绝对路径。配置落在
+    // `state/supervisor/`（不在仓库里），相对路径按配置目录解析永远指不到仓库。
+    out = out.replace("@REPO_DIR@", repo_dir);
     for name in &names {
         let env = inherited_env(existing, name);
         out = out.replace(&format!("@ENV_{name}@"), &env);
@@ -349,7 +392,11 @@ fn render_text(inputs: &RenderInputs<'_>, existing: Option<&str>) -> String {
         .expect("supervisor template placeholders are validated by this module");
     // 组件清单现在也归仓库管；只有 `env` 从旧配置继承。
     text.push('\n');
-    text.push_str(&render_components(existing, inputs.presets));
+    text.push_str(&render_components(
+        existing,
+        inputs.presets,
+        inputs.repo_dir,
+    ));
     text
 }
 
@@ -755,6 +802,7 @@ mod tests {
             .map(|(_, preset)| preset.to_string())
             .collect();
         let inputs = RenderInputs {
+            repo_dir: "/repo",
             presets: &presets,
             program: "/bin/acb-bridge",
             args: &args,
@@ -948,6 +996,7 @@ state_dir = "/state"
             .map(|(_, preset)| preset.to_string())
             .collect();
         let inputs = RenderInputs {
+            repo_dir: "/repo",
             presets: &all,
             program: "/bin/acb-bridge",
             args: &args,
@@ -972,6 +1021,7 @@ state_dir = "/state"
         let args: Vec<String> = Vec::new();
         let state_dir = Path::new("/tmp/acb-components-test");
         let inputs = RenderInputs {
+            repo_dir: "/repo",
             presets: &[],
             program: "/bin/acb-bridge",
             args: &args,
@@ -1013,5 +1063,35 @@ state_dir = "/state"
             "预设表存在却没读到任何 id：{}",
             preset_file.display()
         );
+    }
+
+    /// 组件模板里的 `@REPO_DIR@` 必须被替换成绝对仓库路径。
+    ///
+    /// 2026-11-20 现场：模板写的是相对片段，渲染出的配置落在
+    /// `state/supervisor/`（不在仓库里），于是 snowluma 的 compose 被解析成
+    /// `state/supervisor/deploy/...` —— 文件不存在，容器起不来。
+    #[test]
+    fn repo_dir_placeholder_becomes_an_absolute_path() {
+        let args: Vec<String> = Vec::new();
+        let inputs = RenderInputs {
+            repo_dir: "/srv/acb-repo",
+            presets: &["snowluma_container".to_string()],
+            program: "/bin/acb-bridge",
+            args: &args,
+            health_url: None,
+            health_token_file: None,
+            state_dir: Path::new("/tmp/state"),
+            generation: None,
+        };
+        let text = render_text(&inputs, None);
+        assert!(
+            text.contains("file = \"/srv/acb-repo/deploy/components/snowluma/"),
+            "compose 路径必须是绝对路径：\n{text}"
+        );
+        assert!(
+            text.contains("env_file = \"/srv/acb-repo/deploy/components/snowluma/"),
+            "env_file 必须是绝对路径：\n{text}"
+        );
+        assert!(!text.contains("@REPO_DIR@"), "占位符必须被替换干净");
     }
 }
