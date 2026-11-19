@@ -1365,6 +1365,19 @@ fn command_for(entry: &ResolvedComponent) -> Result<(String, Vec<String>), Strin
             .skip(1)
             .cloned()
             .collect::<Vec<_>>();
+        // `--env-file` 必须显式传：`podman-compose` 只读 **compose 同目录**的 `.env`
+        // 这个文件名。compose 文件在 `deploy/` 而 env 真值叫 `snowluma.env`，
+        // 不传就静默退回默认端口（3000/3001），把 ACB 切断——不再靠
+        // `deploy/.env` 软链接这种隐式兼容。
+        if let Some(env_file) = entry
+            .process
+            .env_file
+            .as_deref()
+            .filter(|path| !path.is_empty())
+        {
+            args.push("--env-file".to_string());
+            args.push(env_file.to_string());
+        }
         args.push("-f".to_string());
         args.push(file.to_string());
         args.push("up".to_string());
@@ -1556,6 +1569,74 @@ port = 1
             .into_iter()
             .find(|entry| entry.name == "snow")
             .expect("有 snow")
+    }
+
+    fn compose_entry_with_env(recreate: bool) -> ResolvedComponent {
+        let presets = crate::component::PresetRegistry::from_toml(
+            r#"
+[[preset]]
+id = "test_container"
+component = "snow"
+type = "oneshot"
+source = "container"
+script = "/bin/true"
+"#,
+        )
+        .expect("presets");
+        let text = format!(
+            r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "snow"
+enabled = true
+type = "oneshot"
+preset = "test_container"
+file = "/tmp/x.yml"
+compose_bin = ["podman-compose"]
+compose_recreate = {recreate}
+[component.process]
+env_file = "/tmp/snow.env"
+[component.readiness]
+kind = "tcp"
+port = 1
+"#
+        );
+        let (_file, table) =
+            crate::component::parse_config_file(&text, &presets).expect("配置合法");
+        table
+            .components
+            .into_iter()
+            .find(|entry| entry.name == "snow")
+            .expect("有 snow")
+    }
+
+    /// 配了 `env_file` 就必须显式传给 compose。
+    ///
+    /// `podman-compose` 只读 **compose 同目录**的 `.env` 这个名字。compose 文件
+    /// 在 `deploy/`、真值叫 `snowluma.env`，不显式传就会**静默退回默认端口**
+    /// （3000/3001）把 ACB 切断。以前靠 `deploy/.env` 软链接兜着，那种隐式兼容
+    /// 已废弃。
+    #[test]
+    fn compose_passes_env_file_explicitly() {
+        let (program, args) = command_for(&compose_entry_with_env(false)).expect("能拼");
+        assert_eq!(program, "podman-compose");
+        let joined = args.join(" ");
+        assert!(
+            joined.contains("--env-file /tmp/snow.env"),
+            "要显式传 env 文件，实际：{args:?}"
+        );
+    }
+
+    /// 没配 `env_file` 时不加这个参数（别凭空造路径）。
+    #[test]
+    fn compose_omits_env_file_when_unset() {
+        let (_program, args) = command_for(&compose_entry(false)).expect("能拼");
+        assert!(
+            !args.iter().any(|arg| arg == "--env-file"),
+            "没配就不该传，实际：{args:?}"
+        );
     }
 
     /// 打开 `compose_recreate` 时，`up -d` 后面必须带 `--force-recreate`。

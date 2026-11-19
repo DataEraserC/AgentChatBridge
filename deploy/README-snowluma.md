@@ -11,13 +11,15 @@ SnowLuma 是外部组件，安装与托管仍属用户职责（见 `docs/guide/d
 | `snowluma-compose.multi.yml` | 是 | 多账号形态（开关默认空，行为等同单账号） |
 | `snowluma.env.example` | 是 | env 模板，只有占位符 |
 | `snowluma.env` | **否** | env 真值，含 `VNC_PASSWD`，权限 600 |
-| `.env` | **否** | 软链接 → `snowluma.env`，见下方「为什么需要它」 |
+| `.env` | — | **已废弃**（2026-11-19 删除）：改用显式 `--env-file`，见下方 |
 | `snowluma.sh` | 是 | 手动操作唯一入口 |
 | `verify-snowluma-compose.sh` | 是 | 守卫 |
 | `snowluma-compose.yml` | 是 | 已废弃，仅历史参照 |
 
-`~/Documents/SnowLuma/` 下的 `docker-compose.single.yml` / `docker-compose.multi.yml` / `.env`
-都是指向本目录的软链接，两处同一份内容，不会漂移。
+`~/Documents/SnowLuma/` 下的软链接（`docker-compose.single.yml` /
+`docker-compose.multi.yml` / `.env`）**已删除**（2026-11-19）。本目录是唯一入口，
+不再维护跨目录的兼容层——那种兼容会在换目录或换文件名时静默失效，代价是端口
+退回默认值、切断 ACB。
 
 ## 命令
 

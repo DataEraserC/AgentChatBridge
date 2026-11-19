@@ -177,16 +177,28 @@ if not bad:
 sys.exit(1 if bad else 0)
 PY
   [ $? -ne 0 ] && failed=1
-  # 自启只拼 -f、不带 --env-file，故 deploy/.env 必须存在且指向真值
-  if [ -e "$HERE/.env" ] && [ "$(readlink -f "$HERE/.env")" = "$(readlink -f "$HERE/snowluma.env")" ]; then
-    ok "deploy/.env → snowluma.env（自启不带 --env-file 也能读到真值）"
+  # 自启显式传 --env-file（管理内核读组件的 process.env_file）。
+  # 旧办法是 deploy/.env 软链接让 podman-compose 自己找到——已废弃：
+  # 隐式兼容会在换目录/换文件名时静默失效，退回默认端口切断 ACB。
+  if grep -q "env_file" "$SUP" 2>/dev/null; then
+    ok "组件配置里有 process.env_file（自启会显式传 --env-file）"
   else
-    bad "deploy/.env 缺失或未指向 snowluma.env（自启会退回默认端口切断 ACB）"
+    bad "组件配置缺 process.env_file（自启不会传 --env-file，会退回默认端口切断 ACB）"
   fi
-  if git -C "$HERE/.." check-ignore -q deploy/.env 2>/dev/null; then
-    ok "deploy/.env 已被忽略"
-  else
-    bad "deploy/.env 未被 .gitignore 忽略"
+  # 显式传能不能真的解析出正确端口：这才是「读得到真值」的证据。
+  if env_file=$(grep -oE 'env_file[[:space:]]*=[[:space:]]*"[^"]+"' "$SUP" 2>/dev/null \
+      | head -1 | sed -E 's/.*"([^"]+)".*/\1/'); then
+    if [[ ! -f $env_file ]]; then
+      bad "process.env_file 指向的文件不存在：${env_file:-<空>}"
+    elif command -v podman-compose >/dev/null 2>&1; then
+      compose_file=$(grep -oE '^file[[:space:]]*=[[:space:]]*"[^"]+"' "$SUP" 2>/dev/null \
+        | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+      if [[ -f $compose_file ]] && podman-compose --env-file "$env_file" -f "$compose_file" config 2>/dev/null | grep -q '53001:3001'; then
+        ok "显式 --env-file 解析出 53001:3001"
+      else
+        bad "显式 --env-file 未能解析出 53001:3001（端口会错）"
+      fi
+    fi
   fi
 else
   ok "未找到活 supervisor 配置（本机未部署，跳过）"
