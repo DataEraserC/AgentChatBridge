@@ -37,8 +37,14 @@
           m = if mp < 10 then mp + 3 else mp - 9;
           year = if m <= 2 then y + 1 else y;
           pad = n: if n < 10 then "0" + toString n else toString n;
+          # 时分：同样按 UTC（与上面的日期换算同一时区，避免跨日错位）。
+          hours = (stamp - days * 86400) / 3600;
+          minutes = (stamp - days * 86400 - hours * 3600) / 60;
         in
-        if stamp == 0 then "unknown" else "${toString year}${pad m}${pad d}";
+        if stamp == 0 then
+          "unknown"
+        else
+          "${toString year}${pad m}${pad d}-${pad hours}${pad minutes}";
       buildVersion = "${version}+${builtins.toString buildRev}.${buildDate}";
 
       # 整个 workspace 的 Rust 构建：产出全部二进制。它本身不再是部署产物，
