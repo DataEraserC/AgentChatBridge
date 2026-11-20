@@ -89,6 +89,7 @@ ${ELEMENTS_DOC}
 
 ${ASYNC_DOC}`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         elements: ELEMENTS_SCHEMA,
@@ -111,6 +112,7 @@ to 的写法是 连接:段/段，例如 qq:group/158296748、qq:private/32362244
 
 ${ASYNC_DOC}`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         to: { type: "string", description: "目标房间，形如 qq:group/12345" },
@@ -143,6 +145,7 @@ plugin_config:get，plugin_config:set，plugin_action:run，或 platform_call:<o
 config:* / policy:* / plugin_*:* 是连接级票据：target 写连接名（如 qq），改的是数据库里的配置，不是文件。
 批量最多 8 条；任一条校验失败整批拒绝。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         items: {
@@ -186,6 +189,7 @@ config:* / policy:* / plugin_*:* 是连接级票据：target 写连接名（如 
 - batch_id：查整批汇总，逐条列出状态。
 跨会话的 id / batch_id 一律拒绝；不能按 id 枚举别人的动作。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         id: { type: "string", description: "单张票据 id，形如 tk-..." },
@@ -206,6 +210,7 @@ scope=surface 可加 view：visible（默认，本轮可见集）/ all（全集�
 遇到 forbidden / room_not_subscribed / destructive_requires_ticket 先查这里，别盲目重试。
 「有什么」仍用 platform_call（不给 op）、plugin_tools、describe_plugins。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         scope: {
@@ -243,6 +248,10 @@ scope=surface 可加 view：visible（默认，本轮可见集）/ all（全集�
 不确认就一直算未读，下一轮还会再投一次（投递里会写「第 N 次投递」）。
 确认是幂等的：重复确认已经确认过的编号不算错，会回 already。轮次结束后 60 秒内也还能补确认。`,
     schema: {
+      // 显式声明方言。手写 JSON Schema 时容易漏这个字段，而下游（dsh 用 ajv）
+      // 拿不到 `$schema` 就无法确定该按哪版规范处理（2026-11-20：模型反馈
+      // 工具 schema「不可用」，只能靠猜参数形态，把数组写成 JSON 字符串）。
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         ids: {
@@ -264,6 +273,7 @@ scope=surface 可加 view：visible（默认，本轮可见集）/ all（全集�
 引用对不上时把 quote_ref 加进 columns：它把引用里的平台编号翻成本房间的 #编号。
 这一轮读到的编号可以直接用 ack_messages 确认（包括本轮没投递的）。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         room: ROOM_SCHEMA,
@@ -282,6 +292,7 @@ ${COLUMNS_DOC}
 返回里每条记录会带一个 columns 字段，用 true/false 标明这一列这次取了没有——
 false 是「这次没查」，不是「这条没这个值」，要的话把它加进 columns 再查一次。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         room: ROOM_SCHEMA,
@@ -304,6 +315,7 @@ false 是「这次没查」，不是「这条没这个值」，要的话把它�
 等待不会卡住其他会话；但同一连接同一时刻只能处理一个工具调用，所以只在确实需要
 等后续内容时用。只能等当前轮次房间；要看别的房间用 get_history / fetch_records。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         room: ROOM_SCHEMA,
@@ -318,7 +330,12 @@ false 是「这次没查」，不是「这条没这个值」，要的话把它�
     name: "list_rooms",
     description:
       "你当前会话订阅了哪些房间、各自未读多少。每条还带连接（connection）、平台（platform）、适配器 kind 和方法数（method_count），多平台会话能一眼看出哪个房间属于哪个平台。想发消息前先看能发到哪。同一实例上别的会话订阅的房间不在这里，也发不过去。",
-    schema: { type: "object", properties: {}, additionalProperties: false },
+    schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
   },
   {
     name: "notes",
@@ -328,6 +345,7 @@ list 不传 kind 是返回全部；set / del 不传 kind 才默认 term。
 list 返回 total / returned / has_more / next_offset；超过 4 KiB 会只给索引（省略 value），
 用 key 精确查回一条，或按 kind / offset 缩小范围。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         op: {
@@ -359,6 +377,7 @@ list 返回 total / returned / has_more / next_offset；超过 4 KiB 会只给�
     description: `查平台事件（进群、退群、拍一拍之类），消息之外的那些动静。
 返回里有 total / returned / has_more / next_offset，多了就按 next_offset 翻。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         room: ROOM_SCHEMA,
@@ -395,6 +414,7 @@ not_implemented、forbidden。
 ${ASYNC_DOC}
 执行（给了 op）时 async 必填；只列目录时不要给 async。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         async: ASYNC_SCHEMA,
@@ -526,6 +546,7 @@ turn_error / clock / receive / platform_adapter / send）。
 external_call / nondeterministic），不是强制保证。
 health 只表示 manager 子树的粗粒度状态。这是只读工具，不能改配置。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         scope: {
@@ -546,6 +567,7 @@ health 只表示 manager 子树的粗粒度状态。这是只读工具，不能�
 返回 namespace / installed / pendingReload / lastError / details（modules、errors、health）。
 namespace 默认 dyn。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         namespace: { type: "string", description: "扩展目录 namespace，默认 dyn" },
@@ -559,6 +581,7 @@ namespace 默认 dyn。`,
 只允许 .toml，路径锁在 ACB_DYNAMIC_DIR 内；拒绝绝对路径、..、符号链接和超 64 KiB 的文件。
 path 例如 echo/manifest.toml。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         path: { type: "string", description: "相对扩展目录的路径，例如 echo/manifest.toml" },
@@ -575,6 +598,7 @@ path 例如 echo/manifest.toml。`,
 写完不会自动生效：调用 extensions_reload，扫描与替换发生在下一个轮次边界；
 坏模块不会替换线上快照。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         path: { type: "string", description: "相对扩展目录的路径，例如 echo/manifest.toml" },
@@ -591,6 +615,7 @@ path 例如 echo/manifest.toml。`,
 只入队，真正扫描与快照替换发生在下一个轮次边界；有在途轮次时保持 pending。
 任一模块校验失败时不替换线上快照，错误通过 extensions_list 的 lastError/errors 可见。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         namespace: { type: "string", description: "扩展目录 namespace，默认 dyn" },
@@ -623,6 +648,7 @@ platform_call:方法名）：执行前就落库，成功补 platform_id，超时
 如果收到 sender 为 acb.task、tags 含 task.* 的合成事件，表示某个后台任务已经收工；
 用它事件文本里的任务 id 调 tasks op=get 取详情。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         op: {
@@ -668,6 +694,7 @@ platform_call:方法名）：执行前就落库，成功补 platform_id，超时
 也别为了写反馈而耽误正事：一处写一句就够，写完接着干活。
 同一条重复提不会新建，只会把次数加上去。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         text: {
@@ -705,6 +732,7 @@ op=get 按 id 查一条，含完整正文、备注和回复记录。
 回复只会出现在这里和被唤醒的那一轮里；不查就不知道维护方回了什么。
 只能查当前会话写过的反馈。回复用 feedback_reply。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         op: {
@@ -730,6 +758,7 @@ op=get 按 id 查一条，含完整正文、备注和回复记录。
     description: `回复一条反馈。原会话或管理员可以写。
 回复会入库，并作为合成事件通知反馈的原会话；回复一条 open 状态的反馈会把它推进到 acked。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         id: { type: "integer", description: "要回复的反馈编号" },
@@ -744,6 +773,7 @@ op=get 按 id 查一条，含完整正文、备注和回复记录。
     description: `列出插件提供的工具（只有 name + 一句话说明）。给 name 时返回该工具的完整
 JSON Schema。插件工具不在默认工具表里，先用它发现，再用 plugin_tool_call 调用。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         name: { type: "string", description: "要看完整 schema 的插件工具名" },
@@ -759,6 +789,7 @@ JSON Schema。插件工具不在默认工具表里，先用它发现，再用 pl
 交给插件。必须声明 scope：插件没有 core 的 MethodSpec.scope，core 会按声明的房间或
 连接做与 platform_call 相同的权限检查。插件工具只能拿到当前会话/房间/来源/是否在轮内。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         tool: { type: "string", description: "plugin_tools 返回的工具名" },
@@ -797,6 +828,7 @@ JSON Schema。插件工具不在默认工具表里，先用它发现，再用 pl
     description: `读记忆仓库里的一个文件。memory 是记忆 id（投递里的 memories 字段列了
 本会话能碰哪些），path 是 worktree 内的相对路径。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         memory: { type: "string", description: "记忆 id" },
@@ -811,6 +843,7 @@ JSON Schema。插件工具不在默认工具表里，先用它发现，再用 pl
     description: `写记忆仓库里的一个文件（覆盖）。memory 是记忆 id，path 是相对路径，
 content 是内容。父目录不存在会自动建。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         memory: { type: "string", description: "记忆 id" },
@@ -826,6 +859,7 @@ content 是内容。父目录不存在会自动建。`,
     description: `列记忆仓库里某个目录下的条目。memory 是记忆 id，path 默认仓库根。
 返回里有 total / has_more / next_offset：目录很大时按 next_offset 翻页，不会只给你看半截。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         memory: { type: "string", description: "记忆 id" },
@@ -842,6 +876,7 @@ content 是内容。父目录不存在会自动建。`,
     description: `在记忆仓库里搜文本（grep）。返回命中行「文件:行号:内容」。
 返回里有 total / has_more / next_offset——命中很多时先看总数，再决定要不要翻。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         memory: { type: "string", description: "记忆 id" },
@@ -860,6 +895,7 @@ content 是内容。父目录不存在会自动建。`,
 status 看工作区改动；log 看提交记录；diff 看相对最近提交的改动；blame 查逐行作者；
 add 暂存改动（path 留空=全部）；commit 提交已暂存内容（要 message）；push 推到 origin；branch 列本地分支。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         op: {
@@ -885,6 +921,7 @@ add 暂存改动（path 留空=全部）；commit 提交已暂存内容（要 me
 core 会按 config_read / config_write 判定，没有显式授予就拒绝（管理员也不例外），
 每次判定都写审计。value 必须是这一条对象的 TOML 原文，形如 [[sessions]] 开头的一段。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         action: { type: "string", enum: ["get", "list", "set", "delete"] },
@@ -904,6 +941,7 @@ core 会按 config_read / config_write 判定，没有显式授予就拒绝（�
     description: `读或整份替换授权策略。set 需要 policy_write；没有显式授予一律拒绝。
 改策略等于改所有人的权限，先把现状 get 出来，再整份交回。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         action: { type: "string", enum: ["get", "set"] },
@@ -918,6 +956,7 @@ core 会按 config_read / config_write 判定，没有显式授予就拒绝（�
     description: `读写插件配置。值按插件 manifest 校验（类型/枚举/范围/密钥形态）；
 只写提交的键。get 返回 schema、生效值与缺失的必填项。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         action: { type: "string", enum: ["get", "set"] },
@@ -932,6 +971,7 @@ core 会按 config_read / config_write 判定，没有显式授予就拒绝（�
     name: "plugin_action",
     description: `执行插件 manifest 里声明的动作。需要 plugin_admin；动作失败会原样返回原因。`,
     schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       properties: {
         plugin: { type: "string" },
