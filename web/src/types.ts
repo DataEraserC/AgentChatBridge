@@ -14,6 +14,25 @@
  * `busy_sessions` 是**会话 id 数组**，不是计数；`staged` / `pending_reload`
  * 在当前实现里不出现，所以不声明——声明没人读的字段会误导下一个人。
  */
+/** 面板自身的构建身份（`GET /api/meta`）。一次构建内恒定，不随轮次变化。 */
+export interface MetaView {
+  /** 构建版本，形如 `0.1.0+2032ddb`。 */
+  version: string;
+  /**
+   * 提交时间（UTC）。非 nix 构建没有这个变量，为 null——不编造。
+   * `parsed = false` 时只有 `raw` 可信。
+   */
+  commit_time:
+    | {
+        raw: string;
+        parsed: boolean;
+        date?: string;
+        time?: string;
+        timezone?: string;
+      }
+    | null;
+}
+
 export interface StatusView {
   connections: number;
   sessions: number;

@@ -6,6 +6,7 @@
  */
 export const queryKeys = {
   status: ["status"] as const,
+  meta: ["meta"] as const,
   dependencies: ["dependencies"] as const,
   sessions: ["sessions"] as const,
   feedback: ["feedback"] as const,

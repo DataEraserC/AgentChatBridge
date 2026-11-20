@@ -1058,6 +1058,7 @@
   "console.ui.status.staged": "A new configuration is staged; it takes effect on the next message or turn.",
   "console.ui.status.reloadTip": "Configuration hot-reloads at turn boundaries (ADR-0009): after saving on the Config tab it takes effect on the next message or turn.",
   "console.ui.status.buildVersion": "Build version",
+  "console.ui.status.commitTime": "Commit time",
   "console.ui.memory.stuck": "Memory has not synced for a long time: {key}",
   "console.ui.memory.detail": "{skips} consecutive skips; last result {last}",
   "bridge.console.memory_status_unavailable": "Cannot read the memory steward status file",

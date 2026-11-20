@@ -45,7 +45,10 @@
           "unknown"
         else
           "${toString year}${pad m}${pad d}-${pad hours}${pad minutes}";
-      buildVersion = "${version}+${builtins.toString buildRev}.${buildDate}";
+      # 版本号只带提交哈希：它要短、要稳定、要能一眼和人说的对上。
+      # 提交时间单独走 `ACB_COMMIT_TIME`，由 `/api/meta` 暴露成结构化字段——
+      # 拼进版本串里只会让版本号变长且难比对（2026-11-20 用户裁定）。
+      buildVersion = "${version}+${builtins.toString buildRev}";
 
       # 整个 workspace 的 Rust 构建：产出全部二进制。它本身不再是部署产物，
       # 只作为 acbl / payload 两个分发包的取材来源。
@@ -115,7 +118,8 @@
           $out/deploy/components/drivers/start-drivers.sh
         install -m644 ${./deploy/ops/acb-contract.json} $out/acb-contract.json
         # 构建身份随 payload 走：桥在 /api/status 里回这个值，控制台头部显示。
-        wrapProgram $out/bin/acb-bridge --set ACB_BUILD_VERSION ${buildVersion}
+        wrapProgram $out/bin/acb-bridge --set ACB_BUILD_VERSION ${buildVersion} \
+          --set ACB_COMMIT_TIME ${buildDate}
       '';
     in
     {

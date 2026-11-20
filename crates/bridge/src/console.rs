@@ -183,6 +183,31 @@ impl Drop for SessionSecretMint {
     }
 }
 
+/// 把 `ACB_COMMIT_TIME`（`<YYYYMMDD>-<HHMM>`，UTC）拆成结构化字段。
+///
+/// 拆开是给前端用的：要显示「2026-11-20 07:19」不必自己切字符串。格式对不上时
+/// 原样回 `raw` 并置 `parsed = false`，不猜也不丢——运维至少还能看到真实值。
+fn commit_time_fields(raw: &str) -> serde_json::Value {
+    let Some((date, time)) = raw.split_once('-') else {
+        return json!({ "raw": raw, "parsed": false });
+    };
+    if date.len() != 8
+        || time.len() != 4
+        || !date.chars().all(|c| c.is_ascii_digit())
+        || !time.chars().all(|c| c.is_ascii_digit())
+    {
+        return json!({ "raw": raw, "parsed": false });
+    }
+    json!({
+        "raw": raw,
+        "parsed": true,
+        // 只拆分，不换算时区：这个串本来就是 UTC（flake 侧用 `self.lastModified`）。
+        "date": format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8]),
+        "time": format!("{}:{}", &time[0..2], &time[2..4]),
+        "timezone": "UTC",
+    })
+}
+
 /// 补丁后凭空消失的对象：没被显式 `delete`，却不在新集合里。
 ///
 /// 返回第一条，够用——发现问题就整单拒绝，不需要列全。
@@ -641,6 +666,7 @@ impl<S: Store + Send + 'static> Console<S> {
                 (200, self.deps.snapshot(since).to_string())
             }
             ("GET", "/api/status") => (200, self.status()),
+            ("GET", "/api/meta") => (200, self.meta()),
             ("GET", "/api/connections") => (200, self.connections_view()),
             ("GET", "/api/adapters") => {
                 let bridge = lock(&self.bridge);
@@ -970,6 +996,29 @@ impl<S: Store + Send + 'static> Console<S> {
                 acb_kernel::config::TurnErrorAction::Log => json!("log"),
                 acb_kernel::config::TurnErrorAction::Send { room } => json!(format!("send:{room}")),
             }).collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
+    /// 面板自身的构建身份：版本与提交时间。
+    ///
+    /// 单独成接口而不是塞进 `/api/status`：那是**运行时状态**（连接数、忙碌会话、
+    /// 水位），会随每轮变化；这里是**构建元数据**，一次构建内恒定。混在一起会让
+    /// 「版本」看起来像随时会变的运行时数据。
+    ///
+    /// 版本号只带提交哈希；提交时间放在这里当独立字段，不拼进版本串——拼进去
+    /// 只会让版本号变长、难和人说的对上（2026-11-20 用户裁定）。
+    fn meta(&self) -> String {
+        let version = std::env::var("ACB_BUILD_VERSION").unwrap_or_else(|_| "dev".to_owned());
+        // `ACB_COMMIT_TIME` 的格式是 `<YYYYMMDD>-<HHMM>`（UTC），由 flake 按 git
+        // 提交时间注入；非 nix 构建没有它，给 null 而不是编一个假时间。
+        let commit_time = std::env::var("ACB_COMMIT_TIME")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| commit_time_fields(&value));
+        json!({
+            "version": version,
+            "commit_time": commit_time,
         })
         .to_string()
     }
@@ -3037,6 +3086,24 @@ fn persist_console_config(config_dir: &str, text: &str) -> std::io::Result<Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ACB_COMMIT_TIME` 拆成前端能直接用的形状；格式不对时保留原值。
+    #[test]
+    fn commit_time_is_split_and_never_invented() {
+        let parsed = commit_time_fields("20261120-0719");
+        assert_eq!(parsed["parsed"], true);
+        assert_eq!(parsed["date"], "2026-11-20");
+        assert_eq!(parsed["time"], "07:19");
+        assert_eq!(parsed["timezone"], "UTC");
+        assert_eq!(parsed["raw"], "20261120-0719");
+
+        // 认不出的形态：保留 raw，标记未解析，不编造日期。
+        for broken in ["", "2026-11-20", "202611200719", "abcdefgh-ijkl"] {
+            let value = commit_time_fields(broken);
+            assert_eq!(value["parsed"], false, "应判为未解析：{broken}");
+            assert_eq!(value["raw"], broken, "原值要留着：{broken}");
+        }
+    }
 
     /// 房间缓存**只存枚举结果**，不存 `seen`。
     ///

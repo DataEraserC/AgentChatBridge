@@ -11,7 +11,7 @@ import { useQuery } from "@tanstack/vue-query";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { queryKeys } from "../queryKeys";
-import type { DependenciesView, DependencyEntry, StatusView } from "../types";
+import type { DependenciesView, DependencyEntry, MetaView, StatusView } from "../types";
 import PageCard from "../components/PageCard.vue";
 import QueryState from "../components/QueryState.vue";
 import { icons } from "../icons";
@@ -24,11 +24,35 @@ const status = useQuery({
   refetchInterval: 15_000,
 });
 
+// 构建身份单独查：它一次构建内恒定，不需要跟着 status 每 15 秒刷新。
+const meta = useQuery({
+  queryKey: queryKeys.meta,
+  queryFn: () => api.get<MetaView>("/api/meta"),
+  staleTime: Infinity,
+});
+
 const deps = useQuery({
   queryKey: queryKeys.dependencies,
   queryFn: () => api.get<DependenciesView>("/api/dependencies"),
   refetchInterval: 15_000,
 });
+
+/**
+ * 提交时间的展示串。
+ *
+ * 后端给的是 `{raw, parsed, date?, time?, timezone?}`：解析成功显示
+ * `2026-11-20 07:19 UTC`，否则回落到原始串——**不猜**。没有这项（非 nix 构建）
+ * 显示 `-`。
+ */
+function formatCommitTime(
+  value: { raw: string; parsed: boolean; date?: string; time?: string; timezone?: string } | null,
+): string {
+  if (!value) return "-";
+  if (value.parsed && value.date && value.time) {
+    return `${value.date} ${value.time} ${value.timezone ?? ""}`.trim();
+  }
+  return value.raw || "-";
+}
 
 /** 指标卡：值统一转成字符串，Vuetify 的卡片只负责排版。 */
 const stats = computed(() => {
@@ -42,9 +66,12 @@ const stats = computed(() => {
     { key: "console.ui.status.busySessions", value: String(data.busy_sessions.length) },
     { key: "console.ui.status.queuedTurns", value: String(data.queued_turns) },
     { key: "console.ui.status.configVersion", value: String(data.config_version) },
-    // 构建身份（`<版本>+<提交>.<提交日期>`）：分辨「这台桥跑的是哪次构建」。
-    // 放在最后一行：它是最不常看、但排障时最需要的一条。
-    { key: "console.ui.status.buildVersion", value: String(data.version ?? "-") },
+    // 构建身份来自 /api/meta：版本号只带提交哈希，提交时间单独一格。
+    { key: "console.ui.status.buildVersion", value: String(meta.data.value?.version ?? "-") },
+    {
+      key: "console.ui.status.commitTime",
+      value: formatCommitTime(meta.data.value?.commit_time ?? null),
+    },
   ];
 });
 
