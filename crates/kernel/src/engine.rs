@@ -10963,12 +10963,25 @@ impl<S: Store> Bridge<S> {
                 already.push(id);
                 continue;
             }
-            if !delivered.contains(&id) && !read.contains(&id) {
+            // 除了「本轮投过/读过」，也接受「**历史上投过**」的编号。
+            //
+            // 模型会记着旧编号：某条记录上一轮投给它、它没来得及确认，下一轮被
+            // 投递计划跳过，于是 ack 报 `not_delivered` —— 水位永远推不动，那条
+            // 记录被反复投到 86 次（2026-11-20 现场：dsh-wm 的 #743/#744/#746）。
+            //
+            // 历史投递是**可查的事实**（`deliveries` 表记着次数），不是模型的
+            // 猜测；承认它即可，拒绝只会制造死循环。没投过也没读过的编号仍然拒绝。
+            let historically_delivered = self
+                .store
+                .delivery_count(&cursor, id)
+                .map(|count| count > 0)
+                .unwrap_or(false);
+            if !delivered.contains(&id) && !read.contains(&id) && !historically_delivered {
                 return Err(ToolError::new(
                     ErrorCode::BadRequest,
                     format!(
-                        "[not_delivered] #{id} was neither delivered to you nor read this turn, so it \
-                         cannot be acknowledged. Delivered this turn: {delivered}; read: {read}. \
+                        "[not_delivered] #{id} was never delivered to this session, so it cannot be \
+                         acknowledged. Delivered this turn: {delivered}; read: {read}. \
                          Ids already acknowledged need no further acknowledgement (just skip them).",
                         delivered = delivery_range(delivered),
                         read = if read.is_empty() {

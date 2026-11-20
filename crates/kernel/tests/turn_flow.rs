@@ -1850,6 +1850,43 @@ fn ack_messages_refuses_ids_that_were_not_delivered() {
     );
 }
 
+/// 上一轮投过、这一轮没投的编号仍然可以确认。
+///
+/// 2026-11-20 现场：`dsh-wm` 的 #743/#744/#746 被投递 86 次，模型每轮都想确认，
+/// 但投递计划这一轮没选它们，`ack` 于是报 `not_delivered` —— 水位卡在 #742，
+/// 那三条被无限重投。
+///
+/// 「历史投递」是可查的事实（`deliveries` 表），承认它即可；拒绝只会制造死循环。
+#[test]
+fn ack_accepts_records_delivered_in_an_earlier_turn() {
+    // 每轮只投 1 条正文：第二轮投最新的 #3，#2 就不在本轮投递集合里了。
+    let (mut bridge, _sends) = bridge_with_limit(1);
+
+    // 第一轮：limit=1 只投最新的 #2。确认 #2 —— 但水位推不动（#1 还没确认），
+    // 这正是现场的样子：水位卡在旧位置，后面那些投过的编号堆着。
+    bridge
+        .ingest(message("qq:group/123", "10001", "第一句", true))
+        .expect("能记下来");
+    bridge
+        .ingest(message("qq:group/123", "10001", "第二句", true))
+        .expect("能记下来");
+    let first = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+    // 不确认 —— 现场的 #743/#744/#746 就是因为 ack 被拒、才一直没确认。
+    bridge.end_turn(&first, None).expect("收工");
+
+    // 第二轮：再进一条，limit=1 只投最新的 #3。#1/#2 都不在本轮集合里。
+    bridge
+        .ingest(message("qq:group/123", "10001", "第三句", true))
+        .expect("能记下来");
+    let second = bridge.poll_turn().expect("能开轮").expect("有活").ticket;
+
+    // 关键断言：#2 第一轮投过（模型看到过），本轮没投 —— 仍然可以确认。
+    // 没有这条修复时这里报 not_delivered，水位永远推不动（现场 86 次重投）。
+    bridge
+        .tool_call(&second, &sessions(), "ack_messages", json!({"ids": [2]}))
+        .expect("上一轮投过的编号也能确认");
+}
+
 /// 本轮读到但没投递的内容也能确认：补读要能把水位推着走。
 #[test]
 fn ack_accepts_records_read_this_turn_but_not_delivered() {
