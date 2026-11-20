@@ -387,6 +387,45 @@ test("旧会话的目录失效：首次 prompt 失败后自动新建并重试，
   assert.equal(host.prompts.at(-1).sessionID, host.created[1].id, "重试要用新会话")
 })
 
+test("模型侧失败不换会话：下一轮继续用同一条 opencode 会话", async (t) => {
+  const { bridge, host } = await boot(t)
+
+  await openTurn(bridge, host)
+  host.finishTurn()
+  await bridge.next()
+
+  // 模型侧的失败（Azure 资源不匹配、鉴权、限流、400）与「会话还活着吗」无关。
+  // 2026-11-20 现场：这类失败之后每次投递都换新会话，上下文全丢。
+  host.promptFailures.set(
+    host.created[0].id,
+    new Error(
+      "The requested item was created under a different Azure OpenAI resource. " +
+        "Use the same resource that created the item to access it.",
+    ),
+  )
+
+  // 这一轮的 prompt 会抛错，所以不能用 openTurn（它要求「提问并进入等待」）。
+  // 等桥收到这一轮的 turn_end（带 failure）就说明失败轮次收尾了。
+  await bridge.send({ frame: "turn_start", delivery: delivery({ ticket: "main-2" }) })
+  const ended = await bridge.next()
+  assert.equal(ended.frame, "turn_end", "失败也要正常收尾")
+  assert.ok(ended.error, "这一轮应带上失败原因")
+  // 失败轮次不该产生新会话。
+  assert.equal(host.created.length, 1, "模型失败不该新建会话")
+
+  // 失败之后的下一次投递仍然落在同一条会话上。
+  await openTurn(bridge, host, delivery({ ticket: "main-3" }))
+  host.finishTurn()
+  await bridge.next()
+
+  assert.equal(host.created.length, 1, "仍然只有最初那一条会话")
+  assert.equal(
+    host.prompts.at(-1).sessionID,
+    host.created[0].id,
+    "后续投递复用同一条会话",
+  )
+})
+
 test("会话记录的目录不存在就直接新建，不浪费一次失败", async (t) => {
   const { bridge, host } = await boot(t)
 

@@ -550,8 +550,16 @@ class TurnDriver {
           seconds: ((Date.now() - started) / 1000).toFixed(1),
         }),
       )
-      // 会话可能被删了：下次重建，别一直往一个死会话里灌。
-      this.#forget(delivery.session)
+      // 只有「会话真的不可用」才忘掉映射重建。
+      //
+      // 模型侧的失败（Azure 资源不匹配、鉴权、限流、400）与**会话存活**无关：
+      // 每轮失败都 #forget 会让下一轮建一条全新的 opencode 会话，上下文全丢
+      // （2026-11-20 现场：模型报「created under a different Azure OpenAI
+      // resource」，之后每次投递都换会话）。函数注释早就写明「模型 400、桥错误
+      // 不能触发重建」，这里才补上实现。
+      if (isMissingDirectoryError(error) || !(await this.#alive(sessionID))) {
+        this.#forget(delivery.session)
+      }
       turnFailureInfo = failureInfo
     } finally {
       try {
