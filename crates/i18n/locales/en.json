@@ -1619,6 +1619,8 @@
   "adapter.qqbot.secret_decrypt_failed": "connection {id}: secret decrypt failed: {error}; row skipped",
   "adapter.qqbot.attachment_pruned": "attachment prune: removed {files} files / {bytes} bytes, {kept} bytes kept ({id})",
   "adapter.qqbot.token_rejected_retrying": "send rejected with 401; dropped cached access token and retrying once",
+  "adapter.qqbot.identity_rejected": "platform rejected the identity (InvalidSession)",
+  "adapter.qqbot.token_invalidated_retrying": "access token rejected; dropped the cache so the next reconnect fetches a fresh one ({id})",
   "adapter.onebot11.secret_key_missing": "connection {id}: encrypted token present but no ACB key; row skipped",
   "adapter.onebot11.secret_decrypt_failed": "connection {id}: token decrypt failed: {error}; row skipped",
   "adapter.onebot11.state_open_failed": "onebot connections db open failed: {error}",

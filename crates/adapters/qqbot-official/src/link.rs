@@ -88,6 +88,16 @@ pub fn supervise(
                 return;
             }
             Err(error) => {
+                // 平台拒绝的是**身份**（不是网络）：缓存的 access token 不能再用，
+                // 否则下一轮重连会拿同一个坏 token 再撞一次，进程不重启就永远好不了
+                // （2026-11-20 实测：`server invalidated the session` 循环 60 次）。
+                if matches!(error, LinkError::Token(_)) {
+                    token_manager.invalidate();
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("adapter.qqbot.token_invalidated_retrying", id = id)
+                    );
+                }
                 status.failed("connect", &error.to_string());
                 eprintln!(
                     "{}",
@@ -244,7 +254,54 @@ fn handshake(
         };
         ws.send(Message::Text(frame.to_string().into()))
             .map_err(|error| LinkError::Handshake(error.to_string()))?;
-        return Ok(heartbeat);
+
+        // 发出 Identify/Resume 之后**必须等到平台的答复**才算握手成功。
+        //
+        // 早先这里是「发完就 return Ok」：identify 被平台拒绝时，失败要等到读
+        // 循环里的 op 9 才暴露，而那时已经没人知道原因是「token 被拒」。于是
+        // 同一个坏 token 会被反复拿去重连（每 60 秒一轮），进程不重启就永远
+        // 好不了（2026-11-20 实测 attempts 涨到 60）。
+        //
+        // 现在等到 READY/RESUMED 才算成功；收到 op 9 就明确报「token 被拒」，
+        // 由外层 `invalidate` 掉缓存，下一轮用新 token。
+        loop {
+            let message = next_text(ws)?;
+            let payload: Value = match parse_frame(&message) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        acb_i18n::t!("adapter.qqbot.frame_parse_failed", error = error)
+                    );
+                    continue;
+                }
+            };
+            match payload.get("op").and_then(|value| value.as_u64()) {
+                Some(0) => {
+                    let event = payload
+                        .get("t")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    if event == "READY" || event == "RESUMED" {
+                        return Ok(heartbeat);
+                    }
+                    // 其它 dispatch 先丢掉：握手阶段还没有会话状态可用。
+                }
+                Some(9) => {
+                    // InvalidSession：token 或会话被平台拒了。
+                    return Err(LinkError::Token(
+                        acb_i18n::t!("adapter.qqbot.identity_rejected").to_owned(),
+                    ));
+                }
+                Some(7) => {
+                    return Err(LinkError::Io(
+                        acb_i18n::t!("adapter.qqbot.server_reconnect").to_owned(),
+                    ));
+                }
+                // op 10/11（Hello/HeartbeatAck）与未知 op：继续等。
+                _ => {}
+            }
+        }
     }
 }
 
