@@ -22,7 +22,6 @@ const STARTUP_GRACE_MS: i64 = 30_000;
 pub enum DependencyKind {
     Harness,
     Platform,
-    Model,
 }
 
 impl DependencyKind {
@@ -30,7 +29,6 @@ impl DependencyKind {
         match self {
             Self::Harness => "harness",
             Self::Platform => "platform",
-            Self::Model => "model",
         }
     }
 }
@@ -264,7 +262,6 @@ impl DependencyRegistry {
             .filter(|key| match key.kind {
                 DependencyKind::Harness => !harnesses.contains(key.id.as_str()),
                 DependencyKind::Platform => !platforms.contains(key.id.as_str()),
-                DependencyKind::Model => !models.contains(&key.id),
             })
             .cloned()
             .collect();
@@ -324,7 +321,7 @@ impl DependencyRegistry {
             });
         }
         // model 不在启动时预登记：没有轮次就没有观测，预先挂一堆 unknown 只会
-        // 把 /healthz 的 unknown 计数撑大。首次 model_down/model_up 再 upsert。
+        // 把 /healthz 的 unknown 计数撑大。首次 attempt/connected 再 upsert。
         // `models` 集合仍用于裁剪已经存在、但新配置不再引用的 model 条目。
     }
 
@@ -589,16 +586,6 @@ impl DependencyRegistry {
         if let Some(event) = notice {
             self.emit(event);
         }
-    }
-
-    /// harness 报告模型失败：更新模型条目。
-    pub fn model_down(&self, id: &str, class: &str, detail: &str, now: i64) {
-        self.mark_down(DependencyKind::Model, id, class, detail, now);
-    }
-
-    /// 一轮成功：模型恢复可用。
-    pub fn model_up(&self, id: &str, now: i64) {
-        self.mark_up(DependencyKind::Model, id, now);
     }
 
     /// 当前是否 down。turn 失败抑制用它判断「同一依赖故障是否已经发生过」。
@@ -1557,101 +1544,6 @@ mod tests {
     }
 
     #[test]
-    fn models_are_registered_only_after_observation() {
-        let config = Config::parse_fixture(
-            r#"
-            [[harnesses]]
-            id = "dsh"
-            name = "DSH"
-
-            [[personas]]
-            id = "p"
-            name = "P"
-            text = "x"
-
-            [[sessions]]
-            id = "main"
-            harness = "dsh"
-            persona = "p"
-            token = { secret = "t-main" }
-            model = "test/model"
-            "#,
-        )
-        .expect("配置合法");
-        let registry = DependencyRegistry::from_config(&config);
-        let snapshot = registry.snapshot(None);
-        assert!(
-            snapshot["dependencies"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|item| item["kind"] != "model"),
-            "没有轮次就没有模型观测：{snapshot}"
-        );
-        assert_eq!(registry.summary()["unknown"], 1, "只有 harness 是 unknown");
-
-        registry.model_down("test/model", "model_unavailable", "gateway refused", 100);
-        let model = entry(&registry.snapshot(None), "test/model");
-        assert_eq!(model["state"], "unknown", "单次失败只累计");
-        registry.model_down("test/model", "model_unavailable", "gateway refused", 101);
-        registry.model_down("test/model", "model_unavailable", "gateway refused", 102);
-        let snapshot = registry.snapshot(None);
-        let model = entry(&snapshot, "test/model");
-        assert_eq!(model["kind"], "model");
-        assert_eq!(model["state"], "down");
-        assert_eq!(model["lastErrorClass"], "model_unavailable");
-
-        registry.model_up("test/model", 101);
-        let snapshot = registry.snapshot(None);
-        assert_eq!(entry(&snapshot, "test/model")["state"], "up");
-    }
-
-    #[test]
-    fn retain_config_prunes_observed_model_no_longer_referenced() {
-        let config = Config::parse_fixture(
-            r#"
-            [[harnesses]]
-            id = "dsh"
-            name = "DSH"
-
-            [[personas]]
-            id = "p"
-            name = "P"
-            text = "x"
-
-            [[sessions]]
-            id = "main"
-            harness = "dsh"
-            persona = "p"
-            token = { secret = "t-main" }
-            model = "test/model"
-            "#,
-        )
-        .expect("配置合法");
-        let registry = DependencyRegistry::from_config(&config);
-        registry.model_down("test/model", "model_unavailable", "gateway refused", 100);
-
-        let next = Config::parse_fixture(
-            r#"
-            [[harnesses]]
-            id = "dsh"
-            name = "DSH"
-            "#,
-        )
-        .expect("新配置合法");
-        registry.retain_config(&next);
-        let snapshot = registry.snapshot(None);
-        assert!(
-            snapshot["dependencies"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|item| item["kind"] != "model"),
-            "配置不再引用的 model 条目要删除：{snapshot}"
-        );
-    }
-
-    #[test]
     fn ops_payload_shape_for_healthz_and_dependencies() {
         let config = Config::parse_fixture(
             r#"
@@ -1678,12 +1570,6 @@ mod tests {
                 "connect ECONNREFUSED 127.0.0.1:53001",
                 1_793_000_001_000 + offset,
             );
-            registry.model_down(
-                "new-api/1AgentRouter/gpt-5.6-sol",
-                "model_unavailable",
-                "connect ECONNREFUSED 127.0.0.1:3080",
-                1_793_000_002_000 + offset,
-            );
         }
 
         let healthz_dependencies = registry.summary();
@@ -1691,10 +1577,10 @@ mod tests {
         println!("HEALTHZ dependencies = {healthz_dependencies}");
         println!("API /api/dependencies = {dependencies}");
 
+        // 只有 harness(dsh) 与 platform(qq) 两类进依赖表；模型不再计入。
         assert_eq!(healthz_dependencies["status"], "degraded");
-        assert_eq!(healthz_dependencies["items"].as_array().unwrap().len(), 3);
-        assert_eq!(dependencies["dependencies"].as_array().unwrap().len(), 3);
-        assert_eq!(dependencies["transitions"].as_array().unwrap().len(), 3);
+        assert_eq!(healthz_dependencies["items"].as_array().unwrap().len(), 2);
+        assert_eq!(dependencies["dependencies"].as_array().unwrap().len(), 2);
     }
 
     #[test]

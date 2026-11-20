@@ -16,7 +16,30 @@
       buildRev = if self ? shortRev then self.shortRev
         else if self ? dirtyShortRev then self.dirtyShortRev
         else self.lastModifiedDate or "unknown";
-      buildVersion = "${version}+${builtins.toString buildRev}";
+      # 提交日期（YYYYMMDD）：跟随 git 提交，**不是构建时间**，所以同一个 commit
+      # 永远得到同一个版本号，不破坏可复现性。
+      #
+      # 只用纯 Nix 算术：`self.lastModified` 是提交时间戳（脏树时退化成当天）。
+      # 不走 `runCommand`/IFD——那会拖慢每次求值，而这里只想要一个日期串。
+      buildDate =
+        let
+          stamp = self.lastModified or 0;
+          days = stamp / 86400;
+          # 民用历换算（Howard Hinnant 的 days_from_civil 逆运算）。
+          z = days + 719468;
+          era = z / 146097;
+          doe = z - era * 146097;
+          yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+          y = yoe + era * 400;
+          doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+          mp = (5 * doy + 2) / 153;
+          d = doy - (153 * mp + 2) / 5 + 1;
+          m = if mp < 10 then mp + 3 else mp - 9;
+          year = if m <= 2 then y + 1 else y;
+          pad = n: if n < 10 then "0" + toString n else toString n;
+        in
+        if stamp == 0 then "unknown" else "${toString year}${pad m}${pad d}";
+      buildVersion = "${version}+${builtins.toString buildRev}.${buildDate}";
 
       # 整个 workspace 的 Rust 构建：产出全部二进制。它本身不再是部署产物，
       # 只作为 acbl / payload 两个分发包的取材来源。

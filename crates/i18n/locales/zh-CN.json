@@ -1057,6 +1057,7 @@
   "console.ui.status.configVersion": "配置版本",
   "console.ui.status.staged": "有一份暂存的新配置，下一次收消息/开轮时自动生效。",
   "console.ui.status.reloadTip": "配置按轮次边界热重载（ADR-0009）：在「配置」页编辑保存后，下一次收消息/开轮自动生效。",
+  "console.ui.status.buildVersion": "构建版本",
   "console.ui.memory.stuck": "该记忆长期未同步：{key}",
   "console.ui.memory.detail": "连续跳过 {skips} 次，最近结果 {last}",
   "bridge.console.memory_status_unavailable": "无法读取记忆管家状态文件",

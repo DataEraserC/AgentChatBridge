@@ -42,6 +42,9 @@ const stats = computed(() => {
     { key: "console.ui.status.busySessions", value: String(data.busy_sessions.length) },
     { key: "console.ui.status.queuedTurns", value: String(data.queued_turns) },
     { key: "console.ui.status.configVersion", value: String(data.config_version) },
+    // 构建身份（`<版本>+<提交>.<提交日期>`）：分辨「这台桥跑的是哪次构建」。
+    // 放在最后一行：它是最不常看、但排障时最需要的一条。
+    { key: "console.ui.status.buildVersion", value: String(data.version ?? "-") },
   ];
 });
 

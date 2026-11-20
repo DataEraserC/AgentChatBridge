@@ -902,9 +902,12 @@ fn component_id_for(config: &Config, session: &str, failure: &TurnFailure) -> Op
 }
 
 /// 结构化 component 对应的依赖类别。`harness` 是对 `backend` 的兼容别名。
+///
+/// `model` 故意返回 `None`：模型不进依赖表（它没有「连接」，见
+/// `note_turn_failure` 的说明）。代价是「模型连续失败」不再按依赖 down 抑制
+/// in-band 通知——但去重仍由 `turn_failures` 那条独立路径兜着，不会刷屏。
 fn component_kind_for(component: &str) -> Option<DependencyKind> {
     match component {
-        "model" => Some(DependencyKind::Model),
         "backend" | "harness" => Some(DependencyKind::Harness),
         "platform" => Some(DependencyKind::Platform),
         _ => None,
@@ -5483,9 +5486,12 @@ impl<S: Store> Bridge<S> {
         };
         match failure.component.as_str() {
             "model" => {
-                self.deps.model_down(&id, &failure.class, detail, now);
-                // 惩罚与依赖表各记各的：依赖表是面板状态，惩罚是「这一轮链里跳过谁」。
-                // 阈值和窗口来自各自的策略，混用会让一次抖动整条链被跳过。
+                // 不写依赖表：模型没有「连接」这个概念，它的状态是**每次调用**的结果。
+                // 把「上一轮 turn 是否成功」当成「模型是否可用」会误报——turn 失败
+                // 也可能源于工具报错、上下文超长，一次限流也不等于模型不可用
+                // （2026-11-20 用户裁定：依赖健康只放真正有连接的依赖）。
+                //
+                // 但失败惩罚要留：它回答的是「这一轮的链里该跳过谁」，与面板无关。
                 self.note_model_failure(Some(session), &id, &failure.class, now);
             }
             "backend" => self
@@ -5497,9 +5503,8 @@ impl<S: Store> Bridge<S> {
 
     /// 一轮成功：把会话的模型与 harness 标记为可用（并对齐 lastOkAt）。
     fn note_turn_success(&self, config: &Config, session: &str, now: i64) {
-        if let Some(model) = model_id_for(config, session) {
-            self.deps.model_up(&model, now);
-        }
+        // 模型不写依赖表（见 `note_turn_failure` 的理由）；失败惩罚在成功时由
+        // `note_model_failure` 的反向路径自己清，这里不再重复。
         if let Some(session) = config.session(session) {
             self.deps.harness_turn_ok(&session.harness, now);
         }

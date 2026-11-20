@@ -3023,11 +3023,16 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
         .expect("能收工");
     bridge.flush_notices();
 
+    // 模型不进依赖表（2026-11-20 裁定）：它没有「连接」，状态是每次调用的结果。
     let snapshot = deps.snapshot(None);
-    let model = dep_entry(&snapshot, "test/model");
-    assert_eq!(model["kind"], "model");
-    assert_eq!(model["state"], "unknown", "单次失败只累计");
-    assert_eq!(model["lastErrorClass"], "model_unavailable");
+    assert!(
+        snapshot["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] != "model"),
+        "模型不该出现在依赖表里：{snapshot}"
+    );
 
     // 同一 component/id/class，文本不同：按结构化分类去重，不再发。
     for text in ["第二次", "第三次"] {
@@ -3040,16 +3045,14 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
             .expect("能收工");
         bridge.flush_notices();
     }
-    let snapshot = deps.snapshot(None);
-    let model = dep_entry(&snapshot, "test/model");
-    assert_eq!(model["state"], "down", "同一 class 第 3 次才 down");
     assert_eq!(
         sends.lock().expect("没被毒死").len(),
         1,
         "结构化分类相同就只发首条"
     );
 
-    // 已经 down 之后再失败：走 component_down 抑制，不再刷 in-band。
+    // 模型不进依赖表，所以这里始终走 duplicate 去重路径（不会出现 component_down）。
+    // 依赖 down 的那条抑制路径仍由 harness/platform 的失败覆盖。
     bridge
         .ingest(message("qq:group/123", "10001", "第四次", true))
         .expect("能记下来");
@@ -3067,7 +3070,7 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
                 component,
                 class,
                 ..
-            } if reason == "component_down"
+            } if reason == "duplicate"
                 && component.as_deref() == Some("model")
                 && class.as_deref() == Some("model_unavailable")
         )),
@@ -3081,11 +3084,6 @@ fn structured_turn_failure_updates_model_and_dedupes_by_class() {
         .expect("能记下来");
     let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
     bridge.end_turn(&delivery.ticket, None).expect("成功收工");
-
-    let snapshot = deps.snapshot(None);
-    let model = dep_entry(&snapshot, "test/model");
-    assert_eq!(model["state"], "up");
-    assert!(model["lastError"].is_null());
 }
 
 /// 连接断掉的轮次不是成功：不能把依赖表刷回 up，也不能清掉失败去重历史。
@@ -3122,9 +3120,14 @@ fn abandoned_turn_does_not_count_as_success() {
             .end_turn_with_failure(&delivery.ticket, Some("模型网关拒绝连接"), Some(&failure))
             .expect("能收工");
     }
-    assert_eq!(
-        dep_entry(&deps.snapshot(None), "test/model")["state"],
-        "down"
+    // 模型不进依赖表（2026-11-20 裁定）：依赖健康只放真正有连接的依赖。
+    assert!(
+        deps.snapshot(None)["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] != "model"),
+        "模型不该出现在依赖表里"
     );
 
     // 第二轮没有 turn_end，连接断掉：只作废，不算成功。
@@ -3134,10 +3137,13 @@ fn abandoned_turn_does_not_count_as_success() {
     let delivery = bridge.poll_turn_for(&group()).expect("能取").expect("有活");
     bridge.abandon_turn(&delivery.ticket).expect("能作废");
 
-    assert_eq!(
-        dep_entry(&deps.snapshot(None), "test/model")["state"],
-        "down",
-        "abandon 不能把模型刷回 up"
+    assert!(
+        deps.snapshot(None)["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] != "model"),
+        "abandon 之后也不该冒出一个 model 条目"
     );
     assert!(
         notice_events
