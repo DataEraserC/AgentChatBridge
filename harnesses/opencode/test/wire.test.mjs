@@ -765,14 +765,37 @@ test("send_message_to 不再有 device 身份参数（跨会话发送已砍）",
   )
 })
 
-test("确认的编号必须是整数，空的不算", () => {
+test("确认的编号必须是整数数组，空的不算", () => {
   assert.deepEqual(normalizeToolArgs("ack_messages", { ids: [1, 2] }), {
     ids: [1, 2],
   })
-  assert.throws(() => normalizeToolArgs("ack_messages", { ids: [] }), /requires ids/)
+  assert.throws(
+    () => normalizeToolArgs("ack_messages", { ids: [] }),
+    /empty "ids" array/,
+  )
   assert.throws(
     () => normalizeToolArgs("ack_messages", { ids: ["1"] }),
     /must be integers/,
+  )
+})
+
+// 2026-11-20 现场：模型第二次 ack 把数组写成了 JSON 字符串 `"[744]"`，旧实现用
+// `Array.isArray` 判定 → ids 变空 → 报「requires ids」，把真实原因藏了 92 次重投。
+//
+// 修法不是「宽松地猜意图」（那会让错参数伪装成正常），而是**拒绝并回显实际收到
+// 的东西**，模型才知道要改成数组。
+test("确认的编号不是数组时拒绝，并回显实际收到的东西", () => {
+  assert.throws(
+    () => normalizeToolArgs("ack_messages", { ids: "[744]" }),
+    /expects "ids" to be an array of record numbers.*"\[744\]"/s,
+  )
+  assert.throws(
+    () => normalizeToolArgs("ack_messages", { ids: 744 }),
+    /expects "ids" to be an array of record numbers.*744 \(number\)/s,
+  )
+  assert.throws(
+    () => normalizeToolArgs("ack_messages", { ids: undefined }),
+    /expects "ids" to be an array of record numbers/,
   )
 })
 

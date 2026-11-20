@@ -870,9 +870,26 @@ export function normalizeToolArgs(tool, args = {}) {
       return withExecMode({ elements: elementsOf(given), to: given.to }, given)
     }
     case "ack_messages": {
-      const ids = Array.isArray(given.ids) ? given.ids : []
+      // 只接受真正的数组。**不**把字符串 `"[744]"` 或标量 `744` 偷偷转过来：
+      // 那是违反工具 schema 的输入，替模型猜意图会让「参数传错」伪装成「正常」，
+      // 下次换个形态又炸（2026-11-20：同一轮第一次传数组成功，第二次传字符串
+      // 失败，报出来的却是「你没给 ids」，把真实原因藏了 92 次重投）。
+      //
+      // 做法：拒绝，并且**把实际收到的东西原样回给模型**——它才知道要改什么。
+      if (!Array.isArray(given.ids)) {
+        throw new BridgeError(
+          "bad_request",
+          `ack_messages expects "ids" to be an array of record numbers, e.g. {"ids":[744]}; ` +
+            `got ${JSON.stringify(given.ids)} (${typeof given.ids}). ` +
+            `Pass the array itself, not its JSON text.`,
+        )
+      }
+      const ids = given.ids
       if (ids.length === 0) {
-        throw new BridgeError("bad_request", "ack_messages requires ids: the #ids of the delivered records")
+        throw new BridgeError(
+          "bad_request",
+          'ack_messages received an empty "ids" array; pass the record numbers you want to acknowledge, e.g. {"ids":[744]}',
+        )
       }
       const bad = ids.find((id) => !Number.isInteger(id))
       if (bad !== undefined) {
