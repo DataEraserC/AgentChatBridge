@@ -247,9 +247,34 @@ impl ComponentManager {
             };
             let previous = ComponentState::load(state_dir, name)?;
             let previous = previous.filter(|state| state.config_sha256 == config_sha256);
-            let failed_before = previous
+            // 换代判定：每次 launcher 启动都会生成新的 instance_id，所以
+            // 上一条 state 的 id 与本次不同就说明这是一个新的 launcher 实例
+            // （nixos-rebuild / systemctl restart acb-launcher 都会换代）。
+            //
+            // 上一代 failed 终态不应跨实例继承：撞名（unit was already loaded）
+            // 之类的换代竞态在新实例里往往已经消失，若继续沿用 Failed，
+            // `tick_one` 会直接 return，组件再也不会被拉起——实测 rebuild 后
+            // dsh 驱动因此从未连桥。相当于换代时自动做一次 `acbctl component
+            // reset`，但只针对 failed 终态：同实例内的失败仍是终态，
+            // max_attempts 策略依然有效。
+            let generation_switched = previous
+                .as_ref()
+                .and_then(|state| state.instance_id.as_deref())
+                .zip(instance_id)
+                .is_some_and(|(before, current)| before != current);
+            let failed_in_previous = previous
                 .as_ref()
                 .is_some_and(|state| state.phase == Phase::Failed.as_str());
+            // 仅「换代 + 上一代 failed」才重试：同实例内的失败保持终态，
+            // 让 max_attempts 策略仍然有效；healthy 组件换代照常继承计数。
+            let retry_after_generation_switch = generation_switched && failed_in_previous;
+            if retry_after_generation_switch {
+                eprintln!(
+                    "acb-component: clearing inherited failed state for {} on launcher generation switch",
+                    entry.name
+                );
+            }
+            let failed_before = failed_in_previous && !generation_switched;
             let healthy_before = previous
                 .as_ref()
                 .is_some_and(|state| state.phase == Phase::Healthy.as_str());
@@ -293,10 +318,20 @@ impl ComponentManager {
                 phase,
                 child: None,
                 stop_requested: false,
-                attempts: previous.as_ref().map_or(0, |state| state.attempts),
-                consecutive_failures: previous
-                    .as_ref()
-                    .map_or(0, |state| state.consecutive_failures),
+                // 换代清掉的失败终态，其计数也必须一起清零：否则新实例刚
+                // 起一次就撞上旧的 max_attempts，立刻又进 Failed。
+                attempts: if retry_after_generation_switch {
+                    0
+                } else {
+                    previous.as_ref().map_or(0, |state| state.attempts)
+                },
+                consecutive_failures: if retry_after_generation_switch {
+                    0
+                } else {
+                    previous
+                        .as_ref()
+                        .map_or(0, |state| state.consecutive_failures)
+                },
                 restarts: previous.as_ref().map_or(0, |state| state.restarts),
                 probe_failures: 0,
                 probe_successes: 0,
@@ -304,12 +339,24 @@ impl ComponentManager {
                 next_start_at_ms: now,
                 started_at_ms: None,
                 last_exit: None,
-                last_error: previous.as_ref().and_then(|state| state.last_error.clone()),
-                last_result: previous
-                    .as_ref()
-                    .and_then(|state| state.last_result.clone()),
+                last_error: if retry_after_generation_switch {
+                    None
+                } else {
+                    previous.as_ref().and_then(|state| state.last_error.clone())
+                },
+                last_result: if retry_after_generation_switch {
+                    None
+                } else {
+                    previous
+                        .as_ref()
+                        .and_then(|state| state.last_result.clone())
+                },
                 ready_at_ms: previous.as_ref().and_then(|state| state.ready_at_ms),
-                failed_at_ms: previous.as_ref().and_then(|state| state.failed_at_ms),
+                failed_at_ms: if retry_after_generation_switch {
+                    None
+                } else {
+                    previous.as_ref().and_then(|state| state.failed_at_ms)
+                },
                 last_run_at_ms: previous.as_ref().and_then(|state| state.last_run_at_ms),
                 // launcher 重启后沿用「上一轮已就绪」的代次 1，避免把恢复当成一次新就绪。
                 ready_generation: u64::from(healthy_before),

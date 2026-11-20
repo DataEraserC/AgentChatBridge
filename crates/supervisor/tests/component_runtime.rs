@@ -64,6 +64,10 @@ fn state_dir(dir: &Path) -> PathBuf {
 }
 
 fn manager(dir: &Path, text: &str) -> ComponentManager {
+    manager_with_instance(dir, text, "inst-test")
+}
+
+fn manager_with_instance(dir: &Path, text: &str, instance_id: &str) -> ComponentManager {
     // 所有测试都从 `manager()` 进来，在这里统一钉住「回退路径」，
     // 免得 16 个测试各写一遍。
     use_child_process_path();
@@ -77,7 +81,7 @@ fn manager(dir: &Path, text: &str) -> ComponentManager {
         &state_dir(dir),
         &table,
         "test-sha",
-        Some("inst-test"),
+        Some(instance_id),
         now_ms(),
     )
     .expect("create manager")
@@ -404,6 +408,158 @@ backoff_cap_secs = 0
     assert_eq!(lines(&counter), 2, "failed 是终态，之后不再拉起");
     manager.stop_all(now_ms());
     assert_eq!(manager.phase("alpha"), Some(Phase::Failed));
+}
+
+#[test]
+fn generation_switch_retries_inherited_failed_component() {
+    // 换代（新 launcher instance）时，上一代遗留的 failed 终态必须被清掉，
+    // 否则撞名之类的换代竞态消失后组件仍永远不重试（rebuild 后 dsh 从未连桥）。
+    let dir = temp_dir("gen-switch-failed");
+    let counter = dir.0.join("runs");
+    let script = script(
+        &dir.0,
+        "ok.sh",
+        &format!("echo run >> '{}'\nexit 0", counter.display()),
+    );
+    let config = format!(
+        r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "alpha"
+enabled = true
+command = ["{}"]
+[component.readiness]
+kind = "tcp"
+port = 1
+interval_secs = 5
+failures_threshold = 10
+startup_grace_secs = 0
+[component.restart]
+policy = "on-failure"
+max_attempts = 2
+backoff_secs = [0]
+backoff_cap_secs = 0
+"#,
+        script.display()
+    );
+
+    // 手工写一份上一代遗留的 failed 终态（config_sha 必须与 manager 用的相同）。
+    let inherited = ComponentState {
+        schema: 1,
+        name: "alpha".to_owned(),
+        phase: "failed".to_owned(),
+        restart_policy: "on-failure".to_owned(),
+        enabled: true,
+        attempts: 5,
+        consecutive_failures: 5,
+        restarts: 4,
+        pid: None,
+        instance_id: Some("old-launcher-instance".to_owned()),
+        config_sha256: "test-sha".to_owned(),
+        last_error: Some("Unit acb-component-alpha.service was already loaded".to_owned()),
+        ready_at_ms: None,
+        failed_at_ms: Some(1234),
+        log_path: None,
+        last_run_at_ms: Some(1200),
+        last_result: Some("failed: start failed".to_owned()),
+        probe_url: None,
+        updated_at_ms: 1234,
+    };
+    acb_supervisor::component_state::save(&state_dir(&dir.0), &inherited).expect("save state");
+
+    let mut manager = manager_with_instance(&dir.0, &config, "new-launcher-instance");
+    assert_ne!(
+        manager.phase("alpha"),
+        Some(Phase::Failed),
+        "换代后不应继承 failed 终态"
+    );
+    // 关键断言：组件被重新拉起（而不是被继承的终态挡住）。simple 组件
+    // exit 0 会进 StoppedEarly（不是 Healthy），这里只等它离开 Starting。
+    wait_for(&mut manager, Duration::from_secs(3), |manager| {
+        lines(&counter) >= 1
+    });
+    assert_ne!(
+        manager.phase("alpha"),
+        Some(Phase::Failed),
+        "重新拉起后不应又因旧 attempts 撞上 max_attempts 进 Failed"
+    );
+    let state = read_state(&dir.0, "alpha");
+    assert!(
+        state.attempts < 5,
+        "换代重试应把旧 attempts=5 清零后重新计数（现为 {}）",
+        state.attempts
+    );
+    assert_eq!(state.failed_at_ms, None, "换代重试应清掉 failed_at_ms");
+    assert_eq!(state.last_error, None, "换代重试应清掉 last_error");
+    manager.stop_all(now_ms());
+}
+
+#[test]
+fn same_instance_keeps_terminal_failed() {
+    // 对照组：同一 launcher 实例重建 manager 时，failed 仍是终态——
+    // 否则 max_attempts 策略形同虚设。
+    let dir = temp_dir("same-inst-failed");
+    let counter = dir.0.join("runs");
+    let script = script(
+        &dir.0,
+        "ok.sh",
+        &format!("echo run >> '{}'\nexit 0", counter.display()),
+    );
+    let config = format!(
+        r#"
+[supervisor]
+program = "/bin/true"
+
+[[component]]
+name = "alpha"
+enabled = true
+command = ["{}"]
+[component.readiness]
+kind = "tcp"
+port = 1
+interval_secs = 5
+failures_threshold = 10
+startup_grace_secs = 0
+[component.restart]
+policy = "on-failure"
+max_attempts = 2
+backoff_secs = [0]
+backoff_cap_secs = 0
+"#,
+        script.display()
+    );
+    let inherited = ComponentState {
+        schema: 1,
+        name: "alpha".to_owned(),
+        phase: "failed".to_owned(),
+        restart_policy: "on-failure".to_owned(),
+        enabled: true,
+        attempts: 2,
+        consecutive_failures: 2,
+        restarts: 1,
+        pid: None,
+        instance_id: Some("same-instance".to_owned()),
+        config_sha256: "test-sha".to_owned(),
+        last_error: Some("genuine failure".to_owned()),
+        ready_at_ms: None,
+        failed_at_ms: Some(1234),
+        log_path: None,
+        last_run_at_ms: Some(1200),
+        last_result: Some("failed".to_owned()),
+        probe_url: None,
+        updated_at_ms: 1234,
+    };
+    acb_supervisor::component_state::save(&state_dir(&dir.0), &inherited).expect("save state");
+
+    let mut manager = manager_with_instance(&dir.0, &config, "same-instance");
+    assert_eq!(manager.phase("alpha"), Some(Phase::Failed));
+    for _ in 0..5 {
+        manager.tick(now_ms());
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(lines(&counter), 0, "同实例 failed 终态不应重新拉起");
 }
 
 #[test]

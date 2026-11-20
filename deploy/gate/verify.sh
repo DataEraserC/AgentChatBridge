@@ -31,7 +31,7 @@ cd "$repo_root" || exit 2
 artifact_dir="${ACB_VERIFY_ARTIFACTS:-$repo_root/target/verify}"
 mkdir -p "$artifact_dir"
 
-baseline_file="deploy/verify-baseline.txt"
+baseline_file="$repo_root/deploy/gate/verify-baseline.txt"
 
 # node 候选：先显式指定的，再 PATH，再 NixOS 的系统 profile。
 # managed Node 22 在某些沙箱里 undici 的 WASM 起不来（Cannot allocate Wasm

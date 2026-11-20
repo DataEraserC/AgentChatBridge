@@ -3,7 +3,7 @@
 给任何进入这个仓库的 agent（人也是 agent 的一种）读的。**只写会改变行为的规则**；
 细则不在这里，在这里的只有「违反就会出事」的条目。
 
-行数上限 200，由 `deploy/verify.sh` 的 guards 看守。写不下就搬到 `docs/`，不要抬上限。
+行数上限 200，由 `deploy/gate/verify.sh` 的 guards 看守。写不下就搬到 `docs/`，不要抬上限。
 
 ---
 
@@ -33,8 +33,8 @@ Rust workspace 在 `crates/`，JS 适配器在 `harnesses/`，运维脚本在 `d
 「完成」只有一种定义：**别人能重跑的命令说它过了**。
 
 ```bash
-deploy/verify.sh          # 全部门禁：fmt / cargo test / harness 测试 / 仓库约束
-deploy/verify.sh --quick  # 提交前秒级自检
+deploy/gate/verify.sh          # 全部门禁：fmt / cargo test / harness 测试 / 仓库约束
+deploy/gate/verify.sh --quick  # 提交前秒级自检
 ```
 
 - 门禁红 → 不许提交。说「测试过了」但没贴命令与输出，视为未验证。

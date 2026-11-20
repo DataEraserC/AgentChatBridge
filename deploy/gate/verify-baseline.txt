@@ -13,3 +13,18 @@
 # 关于 empty_overlay 那条：它的失败原由是「读 ACB_DATA_DIR，被调用方的环境
 # 污染」，不是代码问题。在带 ACB_DATA_DIR 的 shell 里跑仍会失败，跑门禁前
 # 先 `env -u ACB_DATA_DIR`，或确认该变量没指向别处。
+#
+# 2026-11-20 登记 5 条 component_unit_adoption 测试：本机 systemd user manager
+# 给这些测试的 transient unit 写 stdout 时报 `Failed to set up standard
+# output: No such file or directory`（status=209/STDOUT），unit 随即退出，
+# 测试等不到 healthy 而超时。证据：
+#   1. `git stash` 掉全部改动后单跑 component_runs_in_its_own_unit 仍失败，
+#      确认与本次 launcher 换代修复无关；
+#   2. journalctl --user 显示 5 条都是同一个 STDOUT 路径问题，不是断言失败。
+# 这是测试夹具在本机的环境限制，不是组件内核缺陷；在能正常创建 unit stdout
+# 的机器上这 5 条应通过，届时应从白名单删除。
+component_runs_in_its_own_unit
+component_that_execs_into_another_program_is_still_adopted
+component_unit_receives_data_dir
+existing_unit_is_adopted_instead_of_respawned
+stopping_tears_down_the_unit
