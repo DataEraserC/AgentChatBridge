@@ -68,41 +68,46 @@ pub struct Spec<'a> {
     pub log_path: &'a Path,
 }
 
-/// 用 `systemd-run` 起一个独立 unit，立即返回。返回 unit 名。
+/// `systemd-run` 的报错是否属于「同名 unit 还占着」这种可自愈竞态。
 ///
-/// `--collect`：unit 退出后自动清理，避免 `systemctl` 里堆一堆 failed unit。
-/// `--quiet`：不把 "Running as unit: ..." 打到我们的日志里（我们自己会记）。
-pub fn start(spec: &Spec<'_>) -> Result<String, String> {
-    let unit = unit_name(spec.name);
+/// 两种来源：
+/// 1. `stop` 到 `--collect` 真正卸载 unit 之间有个窗口，重启路径撞到自己
+///    （既有注释描述的场景）；
+/// 2. launcher 换代瞬间 user bus 短暂不可用（`Connection refused`），下面的
+///    `stop`/`reset-failed` 被静默跳过，bus 恢复后残留的 unit 还在——实测
+///    rebuild 后 drivers/acp 连续 5 次撞这个再进 failed 终态。
+fn is_name_collision(error: &str) -> bool {
+    error.contains("was already loaded") || error.contains("has a fragment file")
+}
 
-    // 同名 unit 还挂着就先停掉再起。
-    //
-    // 不加这一步会失败在 `Unit ... was already loaded`：组件的重启路径
-    // （崩溃后 `Restarting` → 再 spawn）必然撞到自己；`--collect` 只在
-    // unit 退出后清理，停止到清理之间有个窗口。
-    // 三处调用都必须有上限。`Command::status()` / `output()` 是阻塞的：
-    // `systemd-run` 卡住（bus 忙、unit 带着挂起的 job）时整个 `start` 停在这里，
-    // 而 launcher 的主循环也就此停转——systemd 的 `WatchdogSec=2min` 到点直接
-    // 给 launcher 发 SIGABRT（2026-11-19 02:32 实测，栈顶是
-    // `component_unit::start` → `Command::status` → `wait4`）。
-    //
-    // 超时按「这一步没成功」处理：宁可让组件重启失败一次，也别让整个 launcher
-    // 被 watchdog 打死（那样所有组件都会失去归属）。
+/// 清掉同名 unit 的残留：`stop` + `reset-failed`。刻意静默——unit 不存在、
+/// bus 短暂不可用都会返回错误，而 caller 会在 `systemd-run` 那一步拿到明确
+/// 结果（成功或撞名），这里不需要额外日志。
+fn clear_stale_unit(unit: &str) {
     let _ = run_with_deadline(
         Command::new("systemctl")
-            .args(["--user", "stop", &unit])
+            .args(["--user", "stop", unit])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
         Duration::from_secs(10),
     );
     let _ = run_with_deadline(
         Command::new("systemctl")
-            .args(["--user", "reset-failed", &unit])
+            .args(["--user", "reset-failed", unit])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
         Duration::from_secs(10),
     );
-    let log = spec.log_path.display().to_string();
+}
+
+/// 一次完整启动尝试：清残留 → `systemd-run`。`Err` 表示这次没起来。
+fn start_once(spec: &Spec<'_>, unit: &str, log: &str) -> Result<(), String> {
+    // 三处 systemctl/systemd-run 调用都必须有 deadline。`Command::status()` /
+    // `output()` 是阻塞的：bus 忙、unit 带着挂起 job 时整个 `start` 会停在这里，
+    // launcher 主循环随之停转，systemd `WatchdogSec=2min` 到点直接 SIGABRT
+    // （2026-11-19 02:32 实测，栈顶 start → Command::status → wait4）。
+    // 超时按「这一步没成功」处理：宁可组件重启失败一次，也别让 launcher 被打死。
+    clear_stale_unit(unit);
 
     let mut command = Command::new("systemd-run");
     command
@@ -142,7 +147,33 @@ pub fn start(spec: &Spec<'_>) -> Result<String, String> {
             stderr.trim().replace('\n', "; ")
         ));
     }
-    Ok(unit)
+    Ok(())
+}
+
+/// 用 `systemd-run` 起一个独立 unit，立即返回。返回 unit 名。
+///
+/// `--collect`：unit 退出后自动清理，避免 `systemctl` 里堆一堆 failed unit。
+/// `--quiet`：不把 "Running as unit: ..." 打到我们的日志里（我们自己会记）。
+///
+/// 撞名自愈：换代时 user bus 可能短暂不可用，首次 `stop`/`reset-failed` 被
+/// 跳过，bus 恢复后同名 unit 还在。这类竞态不该耗掉外层的 `max_attempts`，
+/// 否则 rebuild 后组件直接进 failed 终态再也不被拉起（实测 drivers/acp）。
+pub fn start(spec: &Spec<'_>) -> Result<String, String> {
+    let unit = unit_name(spec.name);
+    let log = spec.log_path.display().to_string();
+
+    let result = match start_once(spec, &unit, &log) {
+        Err(error) if is_name_collision(&error) => {
+            eprintln!("acb-component: {unit} name collision; forcing cleanup and retrying once");
+            // `--collect` 从 stop 到真正卸载 unit 有窗口，留一点时间再重试；
+            // start_once 内部会再 stop/reset 一次。只重试一次：持续撞名是真
+            // 故障，交给外层的 fail_or_backoff 处理。
+            std::thread::sleep(Duration::from_millis(200));
+            start_once(spec, &unit, &log)
+        }
+        other => other,
+    };
+    result.map(|_| unit)
 }
 
 /// 等 unit 拿到 MainPID（启动是异步的：`systemd-run` 返回时进程可能还没 exec）。
@@ -392,5 +423,29 @@ mod tests {
         let outcome = run_with_deadline(&mut Command::new("true"), Duration::from_secs(10));
         let output = outcome.expect("能跑完");
         assert!(output.status.success());
+    }
+
+    /// 撞名识别必须覆盖日志里出现的两种真实错误文本。
+    #[test]
+    fn is_name_collision_matches_real_systemd_errors() {
+        assert!(is_name_collision(
+            "systemd-run acb-component-drivers.service failed: Failed to start transient service unit: Unit acb-component-drivers.service was already loaded or has a fragment file."
+        ));
+        assert!(is_name_collision(
+            "systemd-run acb-component-acp.service failed: Unit acb-component-acp.service has a fragment file."
+        ));
+    }
+
+    /// bus 不可用、超时等真实故障不能被当成撞名自愈掉——那是要交给外层
+    /// fail_or_backoff 的，误判会掩盖真正的启动问题。
+    #[test]
+    fn is_name_collision_rejects_non_collision_errors() {
+        assert!(!is_name_collision(
+            "systemd-run acb-component-dsh.service failed: Failed to connect to user scope bus via local transport: Connection refused"
+        ));
+        assert!(!is_name_collision(
+            "systemd-run acb-component-dsh.service: 超过 30 秒未返回"
+        ));
+        assert!(!is_name_collision("program not found"));
     }
 }
