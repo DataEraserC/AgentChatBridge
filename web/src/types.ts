@@ -16,21 +16,15 @@
  */
 /** 面板自身的构建身份（`GET /api/meta`）。一次构建内恒定，不随轮次变化。 */
 export interface MetaView {
-  /** 构建版本，形如 `0.1.0+2032ddb`。 */
+  /** 构建版本，形如 `0.1.0+e1fcefb`。 */
   version: string;
   /**
-   * 提交时间（UTC）。非 nix 构建没有这个变量，为 null——不编造。
-   * `parsed = false` 时只有 `raw` 可信。
+   * 提交时间的 Unix 秒（UTC 语义）。非 nix 构建为 null——不编造。
+   * 展示交给前端：时区是浏览器的事，后端换算只会猜错。
    */
-  commit_time:
-    | {
-        raw: string;
-        parsed: boolean;
-        date?: string;
-        time?: string;
-        timezone?: string;
-      }
-    | null;
+  committed_at: number | null;
+  /** 换算失败时留的原串（`20261120-0730`），给前端兜底显示。 */
+  commit_time_raw: string | null;
 }
 
 export interface StatusView {

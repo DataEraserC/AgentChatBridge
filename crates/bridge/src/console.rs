@@ -183,29 +183,41 @@ impl Drop for SessionSecretMint {
     }
 }
 
-/// 把 `ACB_COMMIT_TIME`（`<YYYYMMDD>-<HHMM>`，UTC）拆成结构化字段。
+/// 把 `ACB_COMMIT_TIME`（`<YYYYMMDD>-<HHMM>`，UTC）换成 Unix 秒。
 ///
-/// 拆开是给前端用的：要显示「2026-11-20 07:19」不必自己切字符串。格式对不上时
-/// 原样回 `raw` 并置 `parsed = false`，不猜也不丢——运维至少还能看到真实值。
-fn commit_time_fields(raw: &str) -> serde_json::Value {
-    let Some((date, time)) = raw.split_once('-') else {
-        return json!({ "raw": raw, "parsed": false });
-    };
+/// 接口给**机器可读的时间戳**，展示交给前端：时区是浏览器的事，后端换算只会
+/// 猜错。这也是唯一不会因为读者所在时区而变的表示。
+///
+/// 不引日期库：项目到目前只用整数时间戳，为这一处加 `chrono` 不划算。换算用
+/// Howard Hinnant 的 `days_from_civil`，与 flake 里生成该串的算法互逆。
+///
+/// 认不出的形态返回 `None`——不猜，让调用方给 null。
+fn commit_time_unix(raw: &str) -> Option<i64> {
+    let (date, time) = raw.split_once('-')?;
     if date.len() != 8
         || time.len() != 4
         || !date.chars().all(|c| c.is_ascii_digit())
         || !time.chars().all(|c| c.is_ascii_digit())
     {
-        return json!({ "raw": raw, "parsed": false });
+        return None;
     }
-    json!({
-        "raw": raw,
-        "parsed": true,
-        // 只拆分，不换算时区：这个串本来就是 UTC（flake 侧用 `self.lastModified`）。
-        "date": format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8]),
-        "time": format!("{}:{}", &time[0..2], &time[2..4]),
-        "timezone": "UTC",
-    })
+    let year: i64 = date[0..4].parse().ok()?;
+    let month: i64 = date[4..6].parse().ok()?;
+    let day: i64 = date[6..8].parse().ok()?;
+    let hour: i64 = time[0..2].parse().ok()?;
+    let minute: i64 = time[2..4].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    // 民用历 → 天序号（Howard Hinnant, days_from_civil）。
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60)
 }
 
 /// 补丁后凭空消失的对象：没被显式 `delete`，却不在新集合里。
@@ -1010,15 +1022,18 @@ impl<S: Store + Send + 'static> Console<S> {
     /// 只会让版本号变长、难和人说的对上（2026-11-20 用户裁定）。
     fn meta(&self) -> String {
         let version = std::env::var("ACB_BUILD_VERSION").unwrap_or_else(|_| "dev".to_owned());
-        // `ACB_COMMIT_TIME` 的格式是 `<YYYYMMDD>-<HHMM>`（UTC），由 flake 按 git
-        // 提交时间注入；非 nix 构建没有它，给 null 而不是编一个假时间。
-        let commit_time = std::env::var("ACB_COMMIT_TIME")
+        // `ACB_COMMIT_TIME` 由 flake 按 git 提交时间注入，格式 `<YYYYMMDD>-<HHMM>`（UTC）。
+        // 接口只给 Unix 秒和原串：格式化、时区都是浏览器的事。
+        // 非 nix 构建没有这个变量，`committed_at` 给 null 而不是编一个假时间。
+        let raw = std::env::var("ACB_COMMIT_TIME")
             .ok()
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| commit_time_fields(&value));
+            .filter(|value| !value.trim().is_empty());
         json!({
             "version": version,
-            "commit_time": commit_time,
+            // Unix 秒（UTC 语义）。前端用 `toLocaleString()` 按读者时区显示。
+            "committed_at": raw.as_deref().and_then(commit_time_unix),
+            // 原串留着：换算失败时前端至少能显示它，运维也能核对。
+            "commit_time_raw": raw,
         })
         .to_string()
     }
@@ -3087,21 +3102,24 @@ fn persist_console_config(config_dir: &str, text: &str) -> std::io::Result<Optio
 mod tests {
     use super::*;
 
-    /// `ACB_COMMIT_TIME` 拆成前端能直接用的形状；格式不对时保留原值。
+    /// `ACB_COMMIT_TIME` 换成 Unix 秒；格式不对时给 None，不猜。
     #[test]
-    fn commit_time_is_split_and_never_invented() {
-        let parsed = commit_time_fields("20261120-0719");
-        assert_eq!(parsed["parsed"], true);
-        assert_eq!(parsed["date"], "2026-11-20");
-        assert_eq!(parsed["time"], "07:19");
-        assert_eq!(parsed["timezone"], "UTC");
-        assert_eq!(parsed["raw"], "20261120-0719");
+    fn commit_time_becomes_a_unix_timestamp() {
+        // 2026-11-20 07:19 UTC = 1795159140（用 python 核对过）
+        assert_eq!(commit_time_unix("20261120-0719"), Some(1_795_159_140));
+        // 纪元与已知点，确认算术没跑偏。
+        assert_eq!(commit_time_unix("19700101-0000"), Some(0));
+        assert_eq!(commit_time_unix("20260101-0000"), Some(1_767_225_600));
 
-        // 认不出的形态：保留 raw，标记未解析，不编造日期。
-        for broken in ["", "2026-11-20", "202611200719", "abcdefgh-ijkl"] {
-            let value = commit_time_fields(broken);
-            assert_eq!(value["parsed"], false, "应判为未解析：{broken}");
-            assert_eq!(value["raw"], broken, "原值要留着：{broken}");
+        // 认不出的形态：None，不编造。
+        for broken in [
+            "",
+            "2026-11-20",
+            "202611200719",
+            "abcdefgh-ijkl",
+            "20261320-0000",
+        ] {
+            assert_eq!(commit_time_unix(broken), None, "应拒绝：{broken}");
         }
     }
 

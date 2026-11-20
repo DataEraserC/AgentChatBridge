@@ -38,20 +38,27 @@ const deps = useQuery({
 });
 
 /**
- * 提交时间的展示串。
+ * 提交时间的展示串，**按浏览器所在时区**显示。
  *
- * 后端给的是 `{raw, parsed, date?, time?, timezone?}`：解析成功显示
- * `2026-11-20 07:19 UTC`，否则回落到原始串——**不猜**。没有这项（非 nix 构建）
- * 显示 `-`。
+ * 后端只给 Unix 秒（`committed_at`）和原串，格式化是这里的事：时区属于读者，
+ * 后端换算只会猜错。`Intl` 自己认识时区和夏令时，不手算偏移；末尾带本机时区名，
+ * 免得读者以为是 UTC。
+ *
+ * 换算不出就回落到原串——**不猜**。没有这项（非 nix 构建）显示 `-`。
  */
-function formatCommitTime(
-  value: { raw: string; parsed: boolean; date?: string; time?: string; timezone?: string } | null,
-): string {
-  if (!value) return "-";
-  if (value.parsed && value.date && value.time) {
-    return `${value.date} ${value.time} ${value.timezone ?? ""}`.trim();
+function formatCommitTime(meta: MetaView | undefined): string {
+  if (!meta) return "-";
+  if (meta.committed_at != null) {
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZoneName: "short",
+    }).format(new Date(meta.committed_at * 1000));
   }
-  return value.raw || "-";
+  return meta.commit_time_raw || "-";
 }
 
 /** 指标卡：值统一转成字符串，Vuetify 的卡片只负责排版。 */
@@ -70,7 +77,7 @@ const stats = computed(() => {
     { key: "console.ui.status.buildVersion", value: String(meta.data.value?.version ?? "-") },
     {
       key: "console.ui.status.commitTime",
-      value: formatCommitTime(meta.data.value?.commit_time ?? null),
+      value: formatCommitTime(meta.data.value),
     },
   ];
 });
