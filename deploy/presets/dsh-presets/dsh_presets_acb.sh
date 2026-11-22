@@ -96,6 +96,11 @@ MANIFEST=$PROFILE_DIR/package.json
 
 NODE_MODULES=$PROFILE_DIR/node_modules
 BUNDLE_PREFIX=acb-presets-live-
+# 人格插件是独立、名字固定的包：patch 按包名引用，npm 解析一定找得到
+# （相对路径依赖 loader 的 baseUrl，那是 dsh 内部细节，不该赌）。
+PERSONA_PKG=acb-dsh-persona
+# 人格文本目录：dsh harness 每次投递前覆写 <这里>/<会话>.txt，插件同步读它。
+PERSONA_DIR=${ACB_PERSONA_DIR:-$ACB_DATA/state/persona}
 
 # ---- 默认值检查（只读诊断，绝不改写） --------------------------------------
 # 两件事分开看：
@@ -220,9 +225,53 @@ done <<< "$SESSIONS_OUT"
 
 # 生成 bundle 的 patch 层。与 nix 静态 bundle 的 preset-row.yml.tmpl 等价：
 # 一个 agent preset + 指向本地 MCP 端口的 client + compaction group。
+# 人格插件包：名字固定（patch 里按包名引用），内容是仓库里唯一那份源码。
+# 与 bundle 分开安装——bundle 名带内容摘要、变一次换一次名，而 patch 里的引用
+# 必须稳定。
+# 返回 0 = 刚装/有更新，1 = 已是最新，2 = 源码缺席（降级，不引用插件）
+install_persona_pkg() {
+  local dir=$NODE_MODULES/$PERSONA_PKG
+  local src=$HERE/persona.mjs
+  # 源码缺席时降级：没插件只是人格不进 system prompt（harness 仍会在投递里
+  # 带人格卡）。装不上插件不该让整个会话列表都装不了。
+  [[ -f $src ]] || return 2
+  if [[ -f $dir/persona.mjs ]] && cmp -s "$src" "$dir/persona.mjs"; then
+    return 1
+  fi
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  cp "$src" "$dir/persona.mjs"
+  cat > "$dir/package.json" <<JSON
+{
+  "name": "$PERSONA_PKG",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./persona.mjs",
+  "exports": { ".": "./persona.mjs" }
+}
+JSON
+  chmod 644 "$dir/package.json" "$dir/persona.mjs"
+  chmod 755 "$dir"
+  return 0
+}
+
+persona_changed=0
+persona_state=2
+case $(install_persona_pkg; echo $?) in
+  0) persona_state=0; persona_changed=1 ;;
+  1) persona_state=0 ;;
+esac
+
 rows_file=$tmp_dir/rows.yml
 : > "$rows_file"
 while IFS=$'\t' read -r preset sid port; do
+  # 人格插件片段：只有包真的装上了才引用。引用不存在的包会让 dsh 整个 preset
+  # 解析失败——那比「人格不进 system prompt」严重得多。
+  persona_yaml=""
+  if [[ $persona_state -eq 0 ]]; then
+    persona_yaml=$(printf '          - id: persona-%s\n            name: %s\n            config:\n              file: %s\n' \
+      "$preset" "$PERSONA_PKG" "$PERSONA_DIR/$sid.txt")
+  fi
   cat >> "$rows_file" <<YAML
     - id: preset-$preset
       name: '@deepseek-ai/dsh-agent-preset'
@@ -235,6 +284,7 @@ while IFS=$'\t' read -r preset sid port; do
               transport: streamable-http
               serverName: acb
               url: http://127.0.0.1:$port/mcp
+$persona_yaml
           # dsh 的 host plane 禁用了 compaction-basic / command-compact /
           # tool-result-pruner，这三个插件只能由 agent preset 挂载；缺这组时
           # ACB 会话既没有 /compact 命令，也不会自动压缩。
@@ -319,9 +369,12 @@ digest=$("$NODE" -e '
   const fs = require("fs");
   const crypto = require("crypto");
   const hash = crypto.createHash("sha256");
-  hash.update(fs.readFileSync(process.argv[1]));
+  // 只吃存在的文件：人格插件缺席时（测试环境、部分安装布局）仍要能装 bundle。
+  for (const path of process.argv.slice(1)) {
+    if (fs.existsSync(path)) hash.update(fs.readFileSync(path));
+  }
   process.stdout.write(hash.digest("hex").slice(0, 16));
-' "$patch_file") || fail "计算 bundle 摘要失败"
+' "$patch_file" "$HERE/persona.mjs") || fail "计算 bundle 摘要失败"
 NAME="$BUNDLE_PREFIX$digest"
 PKG_DIR=$NODE_MODULES/$NAME
 

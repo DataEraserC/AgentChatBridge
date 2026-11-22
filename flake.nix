@@ -104,6 +104,10 @@
         # 不需要任何环境变量。脚本按安装布局（$HERE/../../../.. = prefix）
         # 找同包的 bin/acbctl，不依赖仓库相对路径。
         cp -r ${./deploy/presets}/. $out/share/acb/presets/
+        # dsh 人格插件：源码只有一份（harnesses/dsh/plugin/），这里复制到
+        # presets 树里跟着安装——dsh-presets 生成 patch 时要按这个位置引用它。
+        mkdir -p $out/share/acb/presets/dsh-presets
+        cp ${./harnesses/dsh/plugin/persona.mjs} $out/share/acb/presets/dsh-presets/persona.mjs
         chmod -R u+w $out/share/acb/presets
         patchShebangs $out/share/acb/presets
         find $out/share/acb/presets -name '*.sh' -exec chmod 755 {} +

@@ -30,6 +30,8 @@
 //   ACB_CWD       会话工作目录：先按它 workspace/create 拿 id，再把会话挂进去（Workspaces 分组）
 //   ACB_WORKSPACE_TITLE  新建 workspace 时给它起的显示标题（默认「ACB」）
 
+import { mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import {
   BridgeLink,
   BridgeError,
@@ -467,6 +469,12 @@ class TurnDriver {
     let failureInfo = null
     try {
       let sessionId = await this.#session(delivery.session, link)
+      // 人格写进 system prompt 的文件，由 dsh 里的 acb-persona 插件读。
+      //
+      // 判定归投递者（本适配器）：dsh 有 system prompt 的插件机制，人格就该落在
+      // system 层，而不是拼进用户消息。桥只负责把 persona 数据送来，怎么投递由
+      // 各 harness 自己决定（`engine.rs` 的人格卡注释）。
+      this.#writePersona(delivery)
       // 投递溢出/补上下文是框架自己知道的事：这一轮临时把回看工具加进工具面。
       this.onDemand = overflowTools(delivery)
       await this.#refreshSurface(link, delivery.session)
@@ -608,10 +616,42 @@ class TurnDriver {
   }
 
   /**
+   * 把这个人格写进 dsh 插件读的文件。
+   *
+   * 为什么走文件而不是投递字段：dsh 的 `PromptSection.text` 只能同步求值，插件
+   * 在装配 system prompt 时没法回头问桥。同步读一个本地文件合规，也让「persona
+   * 改了下一轮就生效」成立——不需要重新生成 patch 或重载 dsh。
+   *
+   * 写失败只记日志：人格少一段不该把整轮弄挂。
+   */
+  #writePersona(delivery) {
+    // 目录优先用专门变量；没有就从数据根推导——那个变量所有组件都继承，不必
+    // 为一个新目录再加一条环境配置。
+    const dataDir = process.env.ACB_DATA_DIR
+    const dir = process.env.ACB_PERSONA_DIR || (dataDir ? join(dataDir, "state", "persona") : "")
+    if (!dir) return
+    const text = typeof delivery.persona?.text === "string" ? delivery.persona.text.trim() : ""
+    // 内容没变就不碰磁盘：每轮都写会让 inotify 白跑，也掩盖真正的变更。
+    const last = this.personaFiles?.get(delivery.session)
+    if (last === text) return
+    try {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, `${delivery.session}.txt`), text ? `${text}\n` : "", "utf8")
+      this.personaFiles ??= new Map()
+      this.personaFiles.set(delivery.session, text)
+    } catch (error) {
+      this.log("warn", t("dsh.persona_file_failed", { session: delivery.session, error: error?.message ?? error }))
+    }
+  }
+
+  /**
    * 本轮 prompt 文本：投递正文 + 首轮/变更时的人格卡。
    *
    * 人格只在签名变化时注入，重复注入会白烧 token。会话重建后调用方会先清掉签名，
    * 这里就会把人格重新带上。
+   *
+   * dsh 侧的人格**也**进了 system prompt（`acb-persona` 插件）。两处都留是故意的：
+   * system 段管长期语气，这里的卡片是随投递走的兜底（插件没装好时人格不至于丢）。
    */
   #composePrompt(delivery) {
     let text = renderTurn(delivery, { tools: this.toolDefs().map((tool) => tool.name) })

@@ -182,6 +182,7 @@
   "dsh.model_fallback_invalid": "跳过无效的后备模型 {value}：{error}",
   "dsh.model_probe_failed": "模型接口超时后探活 dsh 也失败：{error}",
   "dsh.model_fallback_continue": "[系统] 上一个模型的轮次失败（{reason}），已切换到 {model}。请继续完成刚才那一轮的任务。",
+  "dsh.persona_file_failed": "写人格文件失败（{error}），本轮人格可能不生效：{session}",
   "acp.agent_authenticated": "ACP agent 已用 {method} 完成认证",
   "acp.agent_config_invalid": "ACP agent 声明不合法：{error}",
   "acp.agent_exited": "ACP agent 退出了（code {code}，signal {signal}）{stderr}",

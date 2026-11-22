@@ -182,6 +182,7 @@
   "dsh.model_fallback_invalid": "ignoring bad fallback model {value}: {error}",
   "dsh.model_probe_failed": "model endpoint timed out and dsh liveness probe failed too: {error}",
   "dsh.model_fallback_continue": "[system] the previous model's turn failed ({reason}); switched to {model}. Continue the task from that turn.",
+  "dsh.persona_file_failed": "failed to write the persona file ({error}); this turn may run without the persona: {session}",
   "acp.agent_authenticated": "ACP agent authenticated with {method}",
   "acp.agent_config_invalid": "invalid ACP agent declaration: {error}",
   "acp.agent_exited": "ACP agent exited (code {code}, signal {signal}){stderr}",
