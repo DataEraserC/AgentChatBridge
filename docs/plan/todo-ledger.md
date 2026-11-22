@@ -23,6 +23,11 @@
    反向仍然成立：不许照 2000 行设计稿全量实现，先做闭环，再做深。
 3. **改判要留痕**：判定为 `drop` 或改方向的，必须写「原方案 → 新方案 → 理由」，
    并且给一条可反驳的条件（什么情况下该翻回来）。
+4. **引用用锚点，不用行号。** 行号随代码漂移，锚点不会。写 `engine.rs` 的
+   `apply_route_action`，不写 `engine.rs:3828`；实在需要位置就写「约 3828」并
+   说明是快照。2026-11-23 复审时抽查 8 条带行号的活跃条目，**4 条彻底失效**
+   （指向无关代码或越界）、1 条路径错（`endpoint.rs` 已从 bridge 移到 kernel）
+   ——失效的行号比没有更坏，它让人以为查证过了。
 
 ---
 
@@ -40,24 +45,24 @@
 
 | id | 位置 | 问题 | 判定 | 状态 |
 |---|---|---|---|---|
-| B1 | `engine.rs:3120` | 审批执行 + 确认文本在 `ingest` 持锁栈内同步发送，最长按住全桥 45s | 照做：改投 `route_action`，锁外执行；回执延迟几十毫秒可接受 | next |
+| B1 | `engine.rs` 的 `ingest_inner` → `apply_route_action`（约 3828） | 审批执行 + 确认文本在 `ingest` 持锁栈内同步发送，最长按住全桥 45s | 照做：改投 `route_action`，锁外执行；回执延迟几十毫秒可接受 | next |
 | B2 | `engine.rs:8612` | `record_and_ack` 的 ack 循环用 `?`，第 k 个订阅者失败 → 后续永不 ack + 把 Err 返给模型（模型重发） | 照做：逐个 ack、失败记日志继续 | done |
 | B3 | `route_worker.rs:143` | 插件 handler panic 杀死唯一 route worker，之后所有路由静默停 | 照做：`catch_unwind` + `finish_task(failed)` | done |
 | B4 | `main.rs:549` | 排空只看 `active_turns`/`running_tasks`/`busy`，不看 `queued_turns`/`queued_tasks`/`pending_route_actions` | 照做：字段 `drain_snapshot` 里已有，判据补上即可 | done |
 | B5 | `main.rs`/`endpoint.rs` | 启动不补未读，崩溃后未读永远不投 | 照做，但要先确认「补投不会重复」——水位已 ack 的不重投 | next |
-| B6 | `engine.rs:7965` | 桥侧无轮次看门狗，harness 卡死则该会话永久被占 | **改判**：见 §5 | hold |
+| B6 | `engine.rs` 的轮次看门狗（缺） | 桥侧无轮次看门狗，harness 卡死则该会话永久被占 | **改判**：见 §5 | hold |
 
 ## 3. 批次 B'：P1（高峰期咬人，7 条）
 
 | id | 位置 | 问题 | 判定 | 状态 |
 |---|---|---|---|---|
 | C1 | `route_worker.rs:57` | 路由队列满 → 动作被拒但任务留 `Pending`，`tasks op=wait` 永远等 | 照做：`enqueue` 把被拒任务交回调用方落 `failed`；队列断掉时整批交回，不 `break` | done |
-| C2 | `task.rs:117` | 孙进程继承 stdout → `read_to_string` 永久卡死 | 照做：独立 reader + deadline + kill 进程组 | next |
+| C2 | `task.rs` 的 `child.stdout.take()` 处 | 孙进程继承 stdout → `read_to_string` 永久卡死 | 照做：独立 reader + deadline + kill 进程组 | next |
 | C3 | `engine.rs:1430/3510` | 尝试记录崩溃后永远 `running`，`drain_snapshot` 还把它算作在跑 | 照做：启动时把遗留 `pending/running` 置 `unknown`（不是 `failed`，消息可能已发出） | done |
-| C4 | `engine.rs:4144/3814` | `notify_turn_error` 入队即 `sent += 1`，失败不回滚 + 指纹已记 → 同类失败被抑制 | 照做：发送成功才记指纹 | next |
-| C5 | `endpoint.rs:931` | `write_frame` 阻塞写无超时 | 照做：设写超时 | next |
-| C6 | `endpoint.rs:373/278/284/336` | `abandon_turn`/`delete_session_map`/`upsert_session_map` 用 `let _ =` 吞错 | 照做：至少记日志，关键路径返错 | next |
-| C7 | `engine.rs:96/11345` | `PROMPT_TIMEOUT=50ms` 静默丢上下文；每次 `thread::spawn` 不 join | 拆两条：超时改可配置+记日志（先做）；线程池化（后做） | next |
+| C4 | `engine.rs` 的 `notify_turn_error`（约 5516） | `notify_turn_error` 入队即 `sent += 1`，失败不回滚 + 指纹已记 → 同类失败被抑制 | 照做：发送成功才记指纹 | next |
+| C5 | `kernel/src/endpoint.rs` 的 `write_frame` | `write_frame` 阻塞写无超时 | 照做：设写超时 | next |
+| C6 | `kernel/src/endpoint.rs` 的 `abandon_turn` 分支 | `abandon_turn`/`delete_session_map`/`upsert_session_map` 用 `let _ =` 吞错 | 照做：至少记日志，关键路径返错 | next |
+| C7 | `engine.rs` 的 `PROMPT_TIMEOUT` | `PROMPT_TIMEOUT=50ms` 静默丢上下文；每次 `thread::spawn` 不 join | 拆两条：超时改可配置+记日志（先做）；线程池化（后做） | next |
 | C8 | `engine.rs:2916` | 审批命令写错（群内缺 nonce）或地点不对（不在 `approval_route` 里）一律 `return Ok(None)`：没订阅的房间彻底静默，订阅了的房间把 `/approve tk-…` 当普通消息喂给 agent | 照做：识别到命令就必回话（用法 / 拒绝原因 / 该去哪批）；`bt-` 整批不需要 nonce；审批消息里直接给可复制命令 | done |
 | C9 | 进程输出 | 桥与 launcher 的 stdout/stderr **不进 journal**（`_PID=61715/61716` 均 0 条），所有 `eprintln!` 诊断（队列拒绝、审批拒绝、投递失败）实际不可见 | **已完成**（2026-11-09 核实）：launcher 把两者重定向到 `~/.local/state/acb/bridge.log`（34MB，`supervisor audit` / `turn_end received` 都在里面）。非 systemd 形态仍要自己重定向，记在 `docs/guide/operations.md` | done |
 | C10 | `harnesses/dsh/src/driver.mjs` | dsh 重启后有一段 `agentAvailable=false` 的窗口（实测 30s～2.5min），此时 `session/selectModel` 会阻塞到 driver 的 15s 超时，**整轮 turn 直接 failed**；用户视角就是「dsh 挂了」（2026-11-09 12:15–12:19 连挂 4 轮） | 照做：轮前等 `agentAvailable` 就绪（带上限，别无限等）；`selectModel` 仍失败就降级为「沿用会话当前模型」继续本轮并 warn，不让整轮死 | next |
@@ -523,7 +528,7 @@ launcher 退出 75，systemd 自动重启卡在 `activating (auto-restart)`，�
 
 | id | 原待办 | 判定 | 说明 | 验收 | 状态 |
 |---|---|---|---|---|---|
-| R1 | harness 中立：`Session.driver_port` 是 dsh 专属字段（`config.rs:891`） | 先定方案 | 两种走法：改名成通用「驱动端口」并由 adapter 解释；或移进 adapter 的 per-session extras。前者改动小但要改 `acbctl sessions` 输出契约，后者干净但要动库 schema | kernel 非测试代码不再出现 dsh 专名；drivers preset 仍能拿到端口 | next |
+| R1 | harness 中立：`Session.driver_port` 是 dsh 专属字段（`config.rs` 的 `Session` 定义） | 先定方案 | 两种走法：改名成通用「驱动端口」并由 adapter 解释；或移进 adapter 的 per-session extras。前者改动小但要改 `acbctl sessions` 输出契约，后者干净但要动库 schema | kernel 非测试代码不再出现 dsh 专名；drivers preset 仍能拿到端口 | next |
 | R2 | 平台中立：`deps.rs` 里的 SnowLuma compat floor 与 `snowlumaMin` key | 照做 | 改成 adapter 自报的通用 `implementation.compat` 映射，核心只存键值，不解释语义 | `grep -n snowluma crates/kernel/src` 只剩测试；依赖面板字段不丢 | next |
 | R3 | 第三方 loader：loader 全部在 `main.rs` 编译期安装 | 先定方案 | 最小闭环：配置声明一个 loader（动态库或子进程协议），由 core 在启动时发现并注册；先选一种载体，别一次做全 | 仓库外编译的 fixture loader 不改 bridge 源码即可加载并列出插件 | next |
 | R4 | 自迭代闭环：升级链有，但缺「构建」与失败诊断 | 照做 | 不把编译塞进桥；补两件事：LKG 未提升时的失败给可操作诊断；加 seed→好 payload→坏 payload→自动回退的 e2e | `deploy/verify.sh` 跑回退 e2e 通过；日志能区分「没 LKG」与「回退失败」 | next |
@@ -917,9 +922,39 @@ at_mention → 保存 → 私聊即应答。
 - 用户指正：bridge.log 里 `qq:private/323622442` 的反复 access 审计是 **snowluma（qq 连接）的正常私聊流量**（onebot 世界房间串用 QQ 号是对的），放行 basis 是内置规则 `base-system-admin-private`，与 qqbot 订阅无关——上一轮的误读收回（核实：config_objects 九个会话的 payload 都不含该串）。
 - exit 75 ×2（04:13 / 04:29）= 我当轮两次换代（57b5c18 / c23bcee）的**设计内机制**：launcher「停旧 → 提交指针 → 退出 75 → systemd 重拉进新代」（launcher/src/main.rs:475）。不是崩溃。注：unit 的 stdout/stderr 是 `append` 重定向（落 state/acb/bridge.log），journal 里看不到 launcher 原文。
 
+## 30. 插件生态：树外可开发（2026-11-23，用户裁定「四种载体都是一等公民」）
 
+目标：**任何一处有差异化需求的地方都能隔离成插件、维护在树外**，不改 ACB 本体。
+判定矩阵见 [plugin-forms.md](../design/plugin-forms.md)。
 
+这条与 §5 D3/D5、§6 F5 是**同一条脉络**：F5 的 L1 已完成（7 张 `plugin_*` 表、
+`examples/plugin-demo` 全流程），L2 与本文各条是它的续。不另起炉灶。
 
+| id | 目标 | 现状 | 判定 | 状态 |
+|---|---|---|---|---|
+| PX1 | 能力矩阵可查 | 四种载体 × 17 扩展点 × 数据/配置/发布逐项列清，未实现的显式标「未实现」 | 照做（已完成） | [plugin-forms.md](../design/plugin-forms.md) | done |
+| PX2 | `acb-adapter-api` 可发布 | 无 `publish` 配置，树外只能 git 依赖或抄源码——**「树外可开发」最硬的门槛** | 照做：独立语义化版本。**验收 = 仓库外新建一个 crate，只依赖发布的 `acb-adapter-api` 就能编译出可加载的 `.so`** | next |
+| PX3 | `ExtensionPoint::Policy` | `Policy` trait 早有（注释写着「也可以是后续的插件实现」），但扩展点枚举里**没有 `Policy`**——权限只能用内置 RBAC | 照做。**验收 = 写一个不做任何硬编码规则、只转发到外部 HTTP 的权限插件，不改 kernel 就换掉判定** | next |
+| PX4 | Lua 补齐 9 个扩展点 | 只有 8/17：缺 `ToolAccess` `Observer` `Tool` `Task` `Prompt` `PlatformAdapter` `Ticket` `Manager` `Loader` | 照做，按需优先（先 `Tool` `Task` `Prompt`，其余看有没有真实需求） | hold |
+| PX5 | 配置 schema 升级到 JSON Schema 子集（**默认路径**） | 现在插件给 `SchemaField[]`，前端翻译成 JSON Schema；嵌套对象、联合类型、条件显示都表达不了 | 照做：插件直接给 JSON Schema 子集，控制台不再中间翻译。**这是默认做法**——改配置就够，不该逼插件写前端 | next |
+| PX6 | 插件自带前端产物（**例外路径**） | 特殊 UI 只能改控制台。用户 2026-11-23 裁定 B：两条都要 | 照做。**核心工作量在静态路由，不在渲染**：ACB 的 web 产物是构建期嵌入二进制的（`console_web/app.js`），要支持运行时插件目录得给静态服务加一条路由 + 鉴权 + 随换代分发。先读 `client-resources.zh.md`（dsh 怎么把包产物挂到 `/plugins/<pkg>/assets/*`）再定形状 | next |
+| PX7 | L2 插件自带存储 | 只有表字段，没实现；D3/D5 已写验收（200 行示例插件建自己的表） | **先答「插件升版改列谁负责迁移」再动手。** 这个问题没答案就实现，等于留一个只在升级时爆的隐患 | hold |
+| PX9 | 插件热加载（HMR） | 改插件后必须重启桥才生效；`acbctl component` 与 `plugin reload/unload` 接口存在，但**插件本体的代码/配置热更新没有闭环** | 照做。**验收 = 改一个插件的配置或代码，不重启桥，下一轮就用新的**。要分清两件事：配置热更新（可做，已有轮次边界重载的先例）与代码热更新（`dlopen` 的库卸载安全边界要单独定，`adapters/dynamic` 有 `UNLOAD_SAFE` 策略可参考） | next |
+| PX10 | 插件管理页（含启停） | 控制台已有插件表 + JSONForms 配置表单 + 资源/动作面板；**启停在 `acbctl plugin enable/disable` 有，页面上没有** | 照做：页面上给出启用/停用、健康状态、加载失败原因（degraded 的实际错误），以及操作后的生效范围（立即 / 下一轮 / 需重启）。**验收 = 在页面上停用一个插件，它的工具立刻从 agent 工具面消失** | next |
+| PX8 | WASM 接入内核 | `crates/wasm-host` 是孤立 crate，**没有任何地方引用**，内核不认它 | 照做，但排最后：前三步没做完时，第四种载体没有验证场景 | hold |
 
+### PX7 的前置问题（必须先回答）
 
+插件声明数据形状后，宿主建表。那么：
 
+1. 插件 v2 想给表加一列，谁执行 `ALTER TABLE`？
+2. 迁移失败怎么回滚？
+3. 插件 A 与插件 B 的表会不会撞名？
+
+三个问题各有做法（宿主代管 / 插件自带迁移 / 声明式 diff），但**选哪个决定了 ABI 形状**，
+所以不能边写边定。详见 [plugin-forms.md](../design/plugin-forms.md) §5.3。
+
+### 与 D3/D5 的关系
+
+D3/D5 的 L2 验收标准（「200 行示例插件、全程不改 `crates/kernel` 业务代码」）继续有效，
+是 PX7 的验收。PX2/PX3 是它的前置——没有可发布的接口和可挂的扩展点，那个示例写不出来。
