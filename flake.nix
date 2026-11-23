@@ -58,8 +58,13 @@
           src = ./.;
 
           # libgit2 通过 git2 crate 的 vendored 实现编译，需要这些系统依赖。
+          # nixpkgs 26.11 的 cargo-setup-hook 强制 LIBGIT2_NO_VENDOR=1，而系统
+          # libgit2 已升到 1.9.7、超出 git2 0.19 的 <1.9.0 约束 —— 显式恢复
+          # vendored 编译，并补上 vendored libgit2 1.8 的 cmake 构建依赖。
+          env.LIBGIT2_NO_VENDOR = "0";
           nativeBuildInputs = with pkgs; [
             pkg-config
+            cmake
           ];
           # memory-steward 的测试直接 spawn `git` CLI（git init 等），沙箱里
           # 没有就不会出现在 PATH；这是 checkPhase 的依赖，不进运行时闭包。
