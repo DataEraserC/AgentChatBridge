@@ -58,10 +58,12 @@
           src = ./.;
 
           # libgit2 通过 git2 crate 的 vendored 实现编译，需要这些系统依赖。
-          # nixpkgs 26.11 的 cargo-setup-hook 强制 LIBGIT2_NO_VENDOR=1，而系统
-          # libgit2 已升到 1.9.7、超出 git2 0.19 的 <1.9.0 约束 —— 显式恢复
-          # vendored 编译，并补上 vendored libgit2 1.8 的 cmake 构建依赖。
-          env.LIBGIT2_NO_VENDOR = "0";
+          # nixpkgs 26.11 的 cargo-setup-hook 无条件强制各 -sys crate 走系统库
+          # 探测（LIBGIT2_NO_VENDOR=1 直接覆盖派生 env），而系统 libgit2 1.9.7
+          # 超出 git2 0.19 的 <1.9.0 约束。本包设计就是 vendored 编译 —— 整体
+          # 关闭该钩子，回到「探测失败即 vendored」的默认行为；vendored
+          # libgit2 1.8 需要 cmake。
+          dontCargoUseSystemLibs = true;
           nativeBuildInputs = with pkgs; [
             pkg-config
             cmake
