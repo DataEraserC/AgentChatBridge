@@ -194,9 +194,15 @@ fn message(
     // 字符，每条记录都塞一遍就是拿签名串喂上下文（反馈 #12）。占位只说
     // 「有什么东西、正在下载」；下载完成后由 `patch_element` 换成
     // `state_dir/attachments/...` 下的本地路径。
-    let mut elements = vec![Element::Text {
-        text: content.clone(),
-    }];
+    // 正文为空就不建这个文本段。纯媒体消息（只有视频/图片、没打字）的
+    // `content` 就是空串，压一个 `Text { text: "" }` 进去只会让每条这样的记录
+    // 多占一个空元素——投递渲染成空白行，`fetch_records` 里也要多看一条。
+    let mut elements = Vec::new();
+    if !content.trim().is_empty() {
+        elements.push(Element::Text {
+            text: content.clone(),
+        });
+    }
     let mut attachments = Vec::new();
     if let Some(list) = payload.get("attachments").and_then(Value::as_array) {
         for item in list {
@@ -453,6 +459,30 @@ mod tests {
         assert_eq!(draft.room.to_string(), "qqbot-official:group/GROUP_OPENID");
         assert_eq!(draft.sender.id, "member-openid");
         assert!(draft.at_self, "群消息标 at_self");
+    }
+
+    /// 纯媒体消息（正文为空）不该造出一个空的文本段。
+    ///
+    /// 平台对「只发了一个视频」的消息给 `content = ""`。原实现无条件压
+    /// `Text { text: "" }`，于是每条这样的记录都多一个空元素：投递渲染成空白行，
+    /// `fetch_records` 里也要多看一条。
+    #[test]
+    fn empty_content_creates_no_text_element() {
+        let parsed = parse_c2c(json!({
+            "author": {"id": "a", "user_openid": "O"},
+            "content": "",
+            "id": "msg-empty",
+            "attachments": [{"content_type": "video", "filename": "v.mp4", "url": "https://cdn/v"}]
+        }))
+        .expect("能解析");
+        let Parsed::Record(draft) = parsed else {
+            panic!("只有视频、没有可下载附件时走普通 Record");
+        };
+        assert_eq!(draft.elements.len(), 1, "只剩那个视频元素");
+        assert!(
+            matches!(&draft.elements[0], Element::Video { .. }),
+            "第一个元素就是视频，没有空文本垫在前面"
+        );
     }
 
     #[test]

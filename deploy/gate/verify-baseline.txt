@@ -23,8 +23,7 @@
 #   2. journalctl --user 显示 5 条都是同一个 STDOUT 路径问题，不是断言失败。
 # 这是测试夹具在本机的环境限制，不是组件内核缺陷；在能正常创建 unit stdout
 # 的机器上这 5 条应通过，届时应从白名单删除。
-component_runs_in_its_own_unit
-component_that_execs_into_another_program_is_still_adopted
-component_unit_receives_data_dir
-existing_unit_is_adopted_instead_of_respawned
-stopping_tears_down_the_unit
+
+# 2026-11-24 清空：此前 5 条 component_* / existing_unit_* / stopping_tears_down_*
+# 已被门禁自己标成「不复现」——它们守的是 supervisor 的 unit 生命周期，那批逻辑
+# 在后续重构里换过实现。逐条跑过对应用例确认全绿后再删的。
