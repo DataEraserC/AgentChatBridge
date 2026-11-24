@@ -203,22 +203,38 @@ fn message(
             let content_type = text_of(item.get("content_type")).unwrap_or_default();
             let filename = text_of(item.get("filename")).unwrap_or_default();
             let url = text_of(item.get("url")).unwrap_or_default();
-            // 没有 URL 的附件（平台只给了元信息）没法下载，只留一句占位。
             let index = elements.len();
-            elements.push(Element::Text {
-                text: acb_adapter_attachment::placeholder(&content_type, &filename),
-            });
-            if url.is_empty() || msg_id.is_empty() {
-                continue;
+            // 图片自动下载（agent 的视觉工具要本地路径）；其余类型只留元素。
+            // QQ 的 `content_type` 常见是裸类型（`"image"` / `"video"`），
+            // 偶尔带子类型（`image/png`）：两种都要认。
+            let auto = content_type == "image" || content_type.starts_with("image/");
+            if auto {
+                elements.push(Element::Text {
+                    text: acb_adapter_attachment::placeholder(&content_type, &filename),
+                });
+                if url.is_empty() || msg_id.is_empty() {
+                    continue;
+                }
+                attachments.push(acb_adapter_attachment::PendingAttachment {
+                    room: room.to_string(),
+                    platform_id: msg_id.clone(),
+                    index,
+                    url,
+                    filename,
+                    content_type,
+                });
+            } else {
+                // 视频/音频/文件：**不下载**，元素里保留原始 URL。
+                //
+                // 省 token 靠渲染层（`acb-wire.mjs` 只输出 `[视频]`），不靠这里
+                // 删数据：URL 完整留在记录里，agent 要用时用 `fetch_records` 的
+                // `elements` 列自取。下载大文件既慢又占盘，而大多数轮次根本不看它。
+                elements.push(acb_adapter_attachment::deferred_element(
+                    &url,
+                    &filename,
+                    &content_type,
+                ));
             }
-            attachments.push(acb_adapter_attachment::PendingAttachment {
-                room: room.to_string(),
-                platform_id: msg_id.clone(),
-                index,
-                url,
-                filename,
-                content_type,
-            });
         }
     }
     let draft = RecordDraft::message(
@@ -452,28 +468,33 @@ mod tests {
         }))
         .expect("带附件应能解析");
         let Parsed::WithAttachments { draft, attachments } = parsed else {
-            panic!("带附件时应返回 WithAttachments");
+            panic!("有图片可下载时应返回 WithAttachments");
         };
 
-        // 正文只有用户说的话；附件各自是一个占位元素。
+        // 正文只有用户说的话；附件各自是一个元素。
         assert!(matches!(&draft.elements[0], Element::Text { text } if text == "看看这个"));
-        assert_eq!(draft.elements.len(), 3, "正文 + 两个附件占位");
+        assert_eq!(draft.elements.len(), 3, "正文 + 两个附件元素");
 
-        // **占位里不能有 URL**：签名串一个字符都不该进记录（反馈 #12）。
+        // 图片：占位（下载中），URL 进待下载列表，下载完由 patch 换成路径。
+        assert!(matches!(&draft.elements[2], Element::Text { .. }));
+        assert_eq!(attachments.len(), 1, "只有图片自动下载");
+        assert_eq!(attachments[0].index, 2);
+        assert_eq!(attachments[0].platform_id, "msg-9");
+        assert_eq!(attachments[0].content_type, "image");
+
+        // 视频：**不下载**，元素保留原始 URL。渲染层不摊它（省 token），
+        // 但 agent 事后用 `fetch_records` 的 elements 列能取回来。
+        match &draft.elements[1] {
+            Element::Video { url } => assert!(url.contains("rkey=sig"), "URL 要留着：{url}"),
+            other => panic!("视频应是 Video 元素，实际：{other:?}"),
+        }
+
+        // 但**投递文本**里不能出现签名串。
         let all = acb_proto::element::flatten_text(&draft.elements);
-        assert!(all.contains("video") && all.contains("demo.mp4"), "{all}");
         assert!(
             !all.contains("rkey") && !all.contains("https://"),
-            "占位不能带 CDN 地址，实际：{all}"
+            "占位文案不能带 CDN 地址，实际：{all}"
         );
-
-        // 待下载列表记下了 URL 与元素下标，下载完成后按它改那条记录。
-        assert_eq!(attachments.len(), 2);
-        assert_eq!(attachments[0].index, 1, "第一个附件在正文之后");
-        assert_eq!(attachments[1].index, 2);
-        assert_eq!(attachments[0].platform_id, "msg-9");
-        assert!(attachments[0].url.contains("rkey=sig"));
-        assert!(attachments[1].content_type == "image");
     }
 
     /// 没有 URL 的附件无法下载：只留占位，不产生待下载项（不该白起线程）。

@@ -558,7 +558,10 @@ test("内容元素都摊得开，平台内容原样摊给模型", () => {
     },
   ])
   assert.match(text, /看图/)
-  assert.match(text, /\[图片 https:\/\/x\/1\.png\]/)
+  // 未下载的图片（http 地址）只报类型，不摊 URL——预签名地址单条 300~400 字符，
+  // 每轮投递都塞就是拿签名串喂上下文。URL 仍在记录里，agent 用 fetch_records 取。
+  assert.match(text, /\[图片\]/)
+  assert.doesNotMatch(text, /x\/1\.png/)
   assert.match(text, /@10001/)
   assert.match(text, /@全体成员/)
   assert.match(text, /\[引用（内容不可取：桥没有解析这条引用）\]/)
@@ -763,6 +766,29 @@ test("send_message_to 不再有 device 身份参数（跨会话发送已砍）",
     }),
     { elements: [{ type: "text", text: "喂" }], to: "qq:group/1" },
   )
+})
+
+test("媒体段只报类型，不把预签名 URL 摊进正文", () => {
+  // 平台 CDN 地址带 rkey 预签名，单条 300~400 字符（约 77 token）。每轮投递都
+  // 塞一遍就是拿签名串喂上下文——2026-11-24 用户实测后裁定只投占位。
+  const signed = "https://multimedia.nt.qq.com.cn/download?appid=1415&rkey=CAQS"
+  const text = renderElements([
+    { type: "video", url: signed },
+    { type: "audio", url: signed },
+    { type: "file", name: "报告.pdf", url: signed },
+  ])
+  assert.match(text, /\[视频\]/)
+  assert.match(text, /\[语音\]/)
+  // 文件名是发送者起的，保留（它不含签名）。
+  assert.match(text, /\[文件 报告\.pdf\]/)
+  assert.doesNotMatch(text, /rkey=/, "签名串不能出现在投递内容里")
+})
+
+test("已下载的本地路径照常显示（图片要能被视觉工具找到）", () => {
+  const text = renderElements([
+    { type: "image", url: "/home/u/.local/share/acb/state/attachments/qq/g1/0-a.jpg" },
+  ])
+  assert.match(text, /\[图片 \/home\/u\//)
 })
 
 test("确认的编号必须是整数数组，空的不算", () => {

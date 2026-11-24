@@ -89,6 +89,33 @@ pub fn ready_element(local: &Path, alt: &str, content_type: &str) -> Element {
     }
 }
 
+/// 未下载的媒体元素：保留原始 URL，等 agent 需要时自取。
+///
+/// 与 [`ready_element`] 的区别是「本地路径 vs 平台 URL」。投递时渲染层只输出
+/// `[视频]` 这样的占位，不摊 URL（预签名地址单条 300~400 字符，每轮塞进上下文
+/// 就是拿签名串喂模型）；但 URL 必须留在记录里，否则 agent 事后就找不回来了。
+pub fn deferred_element(url: &str, filename: &str, content_type: &str) -> Element {
+    // QQ 的 `content_type` 常是裸类型（`"video"` / `"voice"`），也见过带子类型的
+    // （`video/mp4`）：两种都认。
+    if content_type == "video" || content_type.starts_with("video/") {
+        Element::Video {
+            url: url.to_owned(),
+        }
+    } else if content_type == "voice"
+        || content_type == "audio"
+        || content_type.starts_with("audio/")
+    {
+        Element::Audio {
+            url: url.to_owned(),
+        }
+    } else {
+        Element::File {
+            url: url.to_owned(),
+            name: filename.to_owned(),
+        }
+    }
+}
+
 /// 占位元素的文案。**不带 URL**——签名串一个字符都不进记录。
 pub fn placeholder(content_type: &str, filename: &str) -> String {
     let kind = if content_type.is_empty() {
@@ -445,6 +472,29 @@ const PRUNE_INTERVAL_SECS: u64 = 3600;
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// 未下载的媒体按 MIME 分派到正确的元素类型，且**保留 URL**。
+    ///
+    /// URL 必须留着：渲染层不摊它（省 token），但 agent 事后用 `fetch_records`
+    /// 的 `elements` 列能把它取回来。删掉就真的丢了。
+    #[test]
+    fn deferred_media_keeps_the_url_and_picks_the_right_variant() {
+        let url = "https://multimedia.nt.qq.com.cn/download?rkey=CAQS";
+        assert!(matches!(
+            deferred_element(url, "a.mp4", "video/mp4"),
+            Element::Video { url: ref kept } if kept == url
+        ));
+        assert!(matches!(
+            deferred_element(url, "a.amr", "audio/amr"),
+            Element::Audio { url: ref kept } if kept == url
+        ));
+        assert!(matches!(
+            deferred_element(url, "报告.pdf", "application/pdf"),
+            Element::File { url: ref kept, name } if kept == url && name == "报告.pdf"
+        ));
+    }
+
     use super::*;
 
     /// 占位文案不带 URL：签名串一个字符都不该进记录。

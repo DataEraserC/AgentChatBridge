@@ -713,6 +713,18 @@ function formatTime(at, now) {
  * `quoteRef` 是桥给的「这条引用的是本房间哪条」：平台只给引用对象自己的编号，
  * 模型手上是本房间的 #编号，两者对不上就只能猜。桥算好了就并排显示。
  */
+/**
+ * 是不是本地路径（已下载的附件）。
+ *
+ * 只看是不是 http(s)：平台给的媒体地址一律走网络，而适配器下载后写进元素的是
+ * 文件系统路径。不用 `path.isAbsolute` —— Windows 盘符与跨平台前缀都要照顾，
+ * 而这里只需要「要不要显示」这一个判断。
+ */
+function isLocalPath(url) {
+  if (typeof url !== "string" || url === "") return false
+  return !/^https?:\/\//i.test(url)
+}
+
 export function renderElements(elements, { quoteRef } = {}) {
   const parts = []
   for (const element of elements) {
@@ -728,18 +740,34 @@ export function renderElements(elements, { quoteRef } = {}) {
         parts.push(renderQuote(ref))
         break
       }
-      case "image":
-        parts.push(`[图片 ${element.url ?? ""}]`.trim())
+      // 媒体段只报「有什么」，**不把 URL 摊进正文**。
+      //
+      // 平台 CDN 地址带 `rkey` 预签名，单条 300~400 字符（约 77 token）；每轮
+      // 投递都塞一遍就是拿签名串喂上下文（2026-11-24 用户实测后裁定）。URL 仍
+      // 完整留在记录里——`fetch_records` 的 `elements` 列原样返回，agent 需要时
+      // 自己查。
+      //
+      // 图片通常是已下载的本地路径（适配器后台下完再 `patch_element` 换掉），
+      // 那种路径很短、agent 的视觉工具也认，所以照常显示。
+      case "image": {
+        const url = element.url ?? ""
+        parts.push(isLocalPath(url) ? `[图片 ${url}]` : "[图片]")
         break
+      }
       case "audio":
-        parts.push(`[语音 ${element.url ?? ""}]`.trim())
+        parts.push("[语音]")
         break
       case "video":
-        parts.push(`[视频 ${element.url ?? ""}]`.trim())
+        parts.push("[视频]")
         break
-      case "file":
-        parts.push(`[文件 ${element.name ?? ""} ${element.url ?? ""}]`.trim())
+      case "file": {
+        const name = element.name ?? ""
+        const url = element.url ?? ""
+        // 文件名是发送者起的，不是平台签发的；本地路径同理。
+        const tail = name || (isLocalPath(url) ? url : "")
+        parts.push(tail ? `[文件 ${tail}]` : "[文件]")
         break
+      }
       case "face":
         parts.push(`[表情 ${element.id ?? "?"}]`)
         break
