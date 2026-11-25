@@ -124,6 +124,12 @@ fn start_once(spec: &Spec<'_>, unit: &str, log: &str) -> Result<(), String> {
         // 「组件自己收尾」的语义——脚本的 trap 能被执行到（实测 control-group
         // 会把 TERM 直接发给组里所有进程，trap 计数对不上）。
         .arg("--property=KillMode=mixed")
+        // 显式短上限：组件是常驻脚本，正常停止几百毫秒。不写这一行就用 user
+        // manager 的默认 90 秒——脚本一旦在 TERM 后没退出（历史 bug：cleanup
+        // 里没有 exit，主循环把驱动重新拉起），整机重启会多等 90 秒，日志是
+        // `State 'stop-sigterm' timed out. Killing.`（2026-11-25 实测）。
+        // 坏组件最多拖 10 秒，正常组件不受影响。
+        .arg("--property=TimeoutStopSec=10s")
         // 组件是长期进程；默认 Type=simple 就够，显式写出来免得被未来的默认值改掉。
         .arg("--property=Type=simple");
 
