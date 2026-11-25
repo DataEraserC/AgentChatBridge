@@ -114,14 +114,40 @@ export ACB_CWD ACB_WORKSPACE_TITLE
 
 declare -A pids fingerprints backoff next_try
 
+# 停机：先 TERM 全部驱动，有界等待，再 KILL 剩下的，最后**必须 exit**。
+#
+# `exit` 不是礼节：这个函数是 INT/TERM/EXIT 的 trap。清掉 trap 后如果直接返回，
+# bash 会回到主循环继续 `reconcile`——刚被停掉的驱动被重新拉起，unit 永远不退出，
+# systemd 只能等满 TimeoutStopSec（默认 90 秒）再 SIGKILL。2026-11-25 实测：
+# 关机因此多花约 80 秒，日志是
+# `acb-component-drivers.service: State 'stop-sigterm' timed out. Killing.`。
 cleanup() {
   trap - INT TERM EXIT
+  local sid pid deadline
   for sid in "${!pids[@]}"; do
     pid=${pids[$sid]}
     [[ -n $pid ]] || continue
     kill "$pid" 2>/dev/null || true
   done
+  # 有界等待：驱动收到 TERM 通常立刻退出；没有上限就会重现上面那个 90 秒。
+  deadline=$((SECONDS + 3))
+  while (( SECONDS < deadline )); do
+    local alive=0
+    for sid in "${!pids[@]}"; do
+      pid=${pids[$sid]}
+      [[ -n $pid ]] || continue
+      kill -0 "$pid" 2>/dev/null && alive=1
+    done
+    (( alive )) || break
+    sleep 0.1
+  done
+  for sid in "${!pids[@]}"; do
+    pid=${pids[$sid]}
+    [[ -n $pid ]] || continue
+    kill -9 "$pid" 2>/dev/null || true
+  done
   wait 2>/dev/null || true
+  exit 0
 }
 trap cleanup INT TERM EXIT
 
